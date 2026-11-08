@@ -212,17 +212,16 @@ def record_round(state_manager: Any, phase: str, round_policy: RoundPolicy,
     state = getattr(state_manager, "state", None)
     if not isinstance(state, dict):
         return sp.baseline_id_of(baseline)
+    # Through the manager's scope mutators, which journal the record they
+    # write for its merging save().
     if round_policy.new_round:
-        sp.record_review_round(state, phase, round_policy.policy, round_policy.source, baseline)
+        state_manager.record_scope_round(
+            phase, round_policy.policy, round_policy.source, baseline)
     elif baseline:
-        sp.update_round_baseline(state, phase, baseline)
+        state_manager.attach_scope_baseline(phase, baseline)
     elif sp.round_record(state, phase) is None:
         # A legacy round without a baseline still gets its (expand) record.
-        state.setdefault(sp.STATE_KEY, {})[sp.review_phase_of(phase)] = {
-            "review_policy": round_policy.policy,
-            "review_policy_source": round_policy.source,
-            "recorded_at": sp._now(),
-        }
+        state_manager.record_scope_round(phase, round_policy.policy, round_policy.source)
     try:
         state_manager.save()
     except Exception as exc:  # noqa: BLE001 - a record must not fail the phase

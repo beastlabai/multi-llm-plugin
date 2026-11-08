@@ -472,7 +472,7 @@ class FullWorkflow:
         choice = self.scope_policy_choice()
         if not getattr(self.args, "dry_run_subagents", False):
             state = self.state
-            if scope_policy_runs.record_run_start(state.state, self.MODE_NAME, choice):
+            if state.record_scope_run_start(self.MODE_NAME, choice):
                 state.save()
         if choice is None:
             return
@@ -487,7 +487,7 @@ class FullWorkflow:
     def _close_scope_policy(self) -> None:
         """The workflow finished: its recorded choice answers no later run."""
         state = self.state
-        if scope_policy_runs.close_run_choice(state.state, self.MODE_NAME):
+        if state.close_scope_run(self.MODE_NAME):
             state.save()
 
     def model_flags(self) -> List[str]:

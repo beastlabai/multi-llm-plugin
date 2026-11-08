@@ -657,13 +657,7 @@ def record_verdicts(
 
 def _persist_ingested_verdicts(state: Any, phase: str, ingest: VerdictIngest) -> None:
     """Store the raw ingested verdicts under a phase-scoped state key."""
-    key = f"human_decision_verdicts_{phase}"
-    stored = state.state.setdefault(key, {})
-    for group_id, verdict in ingest.verdicts.items():
-        stored[group_id] = dict(verdict)
-    if ingest.unresolved:
-        state.state.setdefault(f"human_decision_unresolved_{phase}", [])
-        state.state[f"human_decision_unresolved_{phase}"] = list(ingest.unresolved)
+    state.record_judge_verdicts(phase, ingest.verdicts, ingest.unresolved)
 
 
 def get_persisted_verdicts(state: Any, phase: str) -> Dict[str, Dict[str, Any]]:

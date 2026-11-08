@@ -350,6 +350,19 @@ class FakeState:
     def record_metric(self, phase, label, **kwargs):
         return metrics.record_metric_in_state(self.state, phase, label, **kwargs)
 
+    def set_metrics_left_out(self, phase, tasks):
+        metrics.set_left_out_in_state(self.state, phase, tasks)
+
+    def set_metrics_set_aside(self, phase, tasks):
+        metrics.set_set_aside_in_state(self.state, phase, tasks)
+
+    def set_metrics_total(self, phase, total):
+        progress = (self.state.get("metrics_progress") or {}).get(phase)
+        if not isinstance(progress, dict):
+            return False
+        progress["total_batches"] = total
+        return True
+
     def update_task_status(self, task_id, status, reason=None):
         self.state.setdefault("task_status", {})[task_id] = status
         if reason is not None:

@@ -361,26 +361,32 @@ def record_pre_existing_changes(state: StateManager) -> None:
 
     # Get all modified files (staged and unstaged)
     # Filter empty strings before set union for robustness
+    census_failed = False
     try:
         unstaged = set(f for f in get_modified_files() if f)
         staged = set(f for f in get_staged_files() if f)
-
         pre_existing = unstaged | staged
-
-        # Sorted, as the apply phases record theirs: `state.json` must not
-        # change with the set's per-process order (17 bundles of one
-        # container run held 17 orders of the same 5 paths).
-        state.set("pre_existing_changes", sorted(pre_existing))
-        state.save()
-
-        if pre_existing:
-            print(f"Recorded {len(pre_existing)} pre-existing changed paths")
-        else:
-            print("No pre-existing changes to record")
     except Exception as e:
+        # Only a failed census records an empty baseline. A failed save below
+        # (`StateLockTimeout` included) propagates with the baseline it was
+        # saving still set: an empty one would count the user's dirty files
+        # as implement's changes.
         print(f"Warning: Could not record pre-existing changes: {e}")
-        state.set("pre_existing_changes", [])
-        state.save()
+        pre_existing = set()
+        census_failed = True
+
+    # Sorted, as the apply phases record theirs: `state.json` must not
+    # change with the set's per-process order (17 bundles of one
+    # container run held 17 orders of the same 5 paths).
+    state.set("pre_existing_changes", sorted(pre_existing))
+    state.save()
+
+    if census_failed:
+        return
+    if pre_existing:
+        print(f"Recorded {len(pre_existing)} pre-existing changed paths")
+    else:
+        print("No pre-existing changes to record")
 
 
 def load_implementation_prompt() -> str:
@@ -2102,7 +2108,7 @@ def _native_withheld(
         for task_id, check_id in held_by.items()
     })
     left.update({task_id: metrics_mod.LEFT_REFUSED for task_id in refused})
-    metrics_mod.set_left_out_in_state(state.state, "implement", left)
+    state.set_metrics_left_out("implement", left)
     return {"held": held, "refused": refused, "not_run": not_run}
 
 
@@ -2751,12 +2757,10 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "ERROR: --human-task <id>=retry re-runs a failed code task; a "
                 f"human task is answered done or skip: {', '.join(retried_human)}.",
             )
-        recorded = dict(state.get("human_task_decisions") or {})
-        recorded.update({
+        state.record_human_task_answers({
             tid: action for tid, action in human_task_decisions.items()
             if action != "retry"  # one-shot: never carried into a later run
         })
-        state.set("human_task_decisions", recorded)
         state.save()
         for task_id, action in sorted(human_task_decisions.items()):
             print(f"[HUMAN_TASK_ANSWERED] {task_id}={action}")
@@ -2772,7 +2776,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         new_run=bool(getattr(args, "fresh", False)))
     scope_policy_value, scope_source = scope_policy_runs.effective_choice(scope_choice)
     if not (args.dry_run or getattr(args, "dry_run_subagents", False)):
-        if scope_policy_runs.record_run_start(state.state, "implement", scope_choice):
+        if state.record_scope_run_start("implement", scope_choice):
             state.save()
     if scope_source != scope_policy_runs.sp.SOURCE_EXPLICIT:
         scope_decision = scope_policy_runs.announce(
@@ -3020,9 +3024,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         # does. Replaced by every native emit.
         from utils.write_batch_scheduler import set_aside_by_plan
 
-        metrics_mod.set_set_aside_in_state(
-            state.state, "implement",
-            set_aside_by_plan(native_human_plan, human_task_ids),
+        state.set_metrics_set_aside(
+            "implement", set_aside_by_plan(native_human_plan, human_task_ids),
         )
         output_data["tasks_to_dispatch"] = _handoff_counts(output_data)["dispatch"]
         if not args.task:
@@ -3314,8 +3317,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(eta_line)
         for line in lines:
             print(line)
-        metrics_mod.set_left_out_in_state(state.state, "implement", {})
-        metrics_mod.set_set_aside_in_state(state.state, "implement", {})
+        state.set_metrics_left_out("implement", {})
+        state.set_metrics_set_aside("implement", {})
         from utils.write_batch_scheduler import persist_human_task_plan
 
         persist_human_task_plan(state, native_human_plan)

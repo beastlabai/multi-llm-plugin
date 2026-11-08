@@ -10830,15 +10830,9 @@ class WriteBatchScheduler:
         if self.kind == "implement" and not failed and run_batch_index >= total_batches:
             set_aside = _metrics.set_aside_tail(set_aside_by_plan(
                 result.human_plan, self._manual_task_ids()))
-        live = getattr(self.state, "state", None)
-        progress = (
-            (live.get("metrics_progress") or {}).get(self.phase)
-            if isinstance(live, dict) else None
-        )
-        if isinstance(progress, dict):
-            # The stored baseline follows the line it is printed beside (N1).
-            progress["total_batches"] = total_batches
         try:
+            # The stored baseline follows the line it is printed beside (N1).
+            self.state.set_metrics_total(self.phase, total_batches)
             eta_line = self.state.record_metric(
                 self.phase,
                 label,
@@ -13848,7 +13842,7 @@ class WriteBatchScheduler:
         )
         if not isinstance(progress, dict) or progress.get("total_batches") == total:
             return
-        progress["total_batches"] = total
+        self.state.set_metrics_total(self.phase, total)
         try:
             self.state.save()
         except Exception:  # noqa: BLE001 - bookkeeping must not fail a phase
@@ -13883,13 +13877,11 @@ class WriteBatchScheduler:
         total_batches = self._eta_total(result)
         try:
             self.state.start_metrics_phase(self.phase, total_batches)
-            live = getattr(self.state, "state", None)
-            if isinstance(live, dict):
-                # A native emit's left-out tasks are that leg's (fix round
-                # 22): this run closes its own lines. Its set-aside tasks
-                # too (fix round 24): this run names its own.
-                _metrics.set_left_out_in_state(live, self.phase, {})
-                _metrics.set_set_aside_in_state(live, self.phase, {})
+            # A native emit's left-out tasks are that leg's (fix round
+            # 22): this run closes its own lines. Its set-aside tasks
+            # too (fix round 24): this run names its own.
+            self.state.set_metrics_left_out(self.phase, {})
+            self.state.set_metrics_set_aside(self.phase, {})
             self._eta_started = True
             self.state.save()
         except Exception:  # noqa: BLE001 - bookkeeping must not fail a phase

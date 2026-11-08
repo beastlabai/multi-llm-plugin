@@ -1558,6 +1558,9 @@ class TestEveryKindReachesItsConsumer:
             def record_human_decision(self, **kwargs):
                 recorded.update(kwargs)
 
+            def record_judge_verdicts(self, phase, verdicts, unresolved=()):
+                pass
+
         # The judge is the runner the executor actually dispatched.
         judges = judge_labels(str(tmp_path), ingest.sources)
         assert judges == {"aaaa000000000000": "codex:gpt-5.5"}

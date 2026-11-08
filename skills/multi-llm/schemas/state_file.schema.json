@@ -125,6 +125,11 @@
       "description": "Per implement task: when a run that hands it out again (a start-over, a --task rerun) set its earlier record aside. A native --resume does not count a prior-changes line no newer than this as one the run left unrecorded",
       "additionalProperties": { "type": "string", "format": "date-time" }
     },
+    "state_resets": {
+      "type": "object",
+      "description": "Per top-level key an explicit reset cleared (--fresh's clears of processed_<phase>, human_decisions_<phase>, progress_<phase>, apply_fix_batch_checks): when; the entry \"*\" is StateManager.reset() of the whole document. StateManager.save() keeps what was reset since a writer loaded the file as the resetter left it, so that writer's stale view cannot bring the cleared records back",
+      "additionalProperties": { "type": "string", "format": "date-time" }
+    },
     "human_task_strategy": {
       "type": "string",
       "description": "Chosen strategy for handling human tasks during implementation",

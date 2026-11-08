@@ -12,6 +12,7 @@ import re
 import sys
 import tempfile
 import threading
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -75,20 +76,33 @@ def state_file_lock(state_path) -> Iterator[None]:
 
     Reentrant within a process (an inner frame does not take the file lock a
     second time: an OS lock is per open file, so it would wait on itself). A
-    state file whose directory does not exist yet has nothing to lock. A lock
-    not free within :data:`STATE_LOCK_TIMEOUT_S` raises
+    state file whose directory does not exist yet has nothing to lock. One
+    deadline, :data:`STATE_LOCK_TIMEOUT_S` from entry, bounds both waits: for
+    another thread of this process (:data:`_STATE_THREAD_LOCK`, process-wide,
+    so a thread writing another plan's state counts) and then for another
+    process (the file lock gets what is left). A lock not free by then raises
     :class:`StateLockTimeout` and the caller writes nothing: an unserialized
-    write is exactly the lost record this lock exists to prevent.
+    write is exactly the lost record this lock exists to prevent. The
+    same-thread reentry takes neither wait.
     """
-    with _STATE_THREAD_LOCK:
+    timeout_s = STATE_LOCK_TIMEOUT_S
+    deadline = time.monotonic() + max(0.0, float(timeout_s))
+    if not _STATE_THREAD_LOCK.acquire(timeout=max(0.0, float(timeout_s))):
+        raise StateLockTimeout(
+            f"another thread of this process held the state lock for "
+            f"{timeout_s:g}s while it was writing state (perhaps of another "
+            f"plan), so nothing was written to {state_path}. Run this command "
+            f"again once that write has finished."
+        )
+    try:
         folder = os.path.dirname(os.path.abspath(str(state_path)))
         key = os.path.realpath(os.path.join(folder, STATE_LOCK_FILENAME))
         if key in _HELD_STATE_LOCKS or not os.path.isdir(folder):
             yield
             return
         mutex = process_control.FileMutex(key)
-        timeout_s = STATE_LOCK_TIMEOUT_S
-        if not mutex.acquire(timeout_s=timeout_s, poll_interval_s=0.02):
+        if not mutex.acquire(timeout_s=max(0.0, deadline - time.monotonic()),
+                             poll_interval_s=0.02):
             raise StateLockTimeout(
                 f"{key} was not free within {timeout_s:g}s: another multi-llm "
                 f"command is still writing {state_path} (or the lock file "
@@ -101,6 +115,8 @@ def state_file_lock(state_path) -> Iterator[None]:
         finally:
             del _HELD_STATE_LOCKS[key]
             mutex.release()
+    finally:
+        _STATE_THREAD_LOCK.release()
 
 
 def _read_state(state_path: Path) -> dict:
@@ -244,9 +260,11 @@ def start_phase_in_state(state: dict, phase: str, total_batches: int) -> None:
 
     Split out so a holder of a live ``StateManager`` dict can record progress
     without becoming a *second* writer of ``state.json``: the two race, and the
-    ``StateManager``'s own ``save()`` — which dumps its dict wholesale and never
-    merges — always wins. Measured 2026-09-16: three independent runs finished
-    with `metrics: null` after every batch had recorded one (F4).
+    ``StateManager``'s own ``save()`` keeps both writers' appends to one phase's
+    list but makes any other edit to it the saver's
+    (docs/development/write-scheduler.md, "Merge units"). Measured 2026-09-16, before ``save()`` merged: three
+    independent runs finished with `metrics: null` after every batch had
+    recorded one (F4).
 
     Each start also stamps a fresh ``run_id``, which every entry recorded under
     it carries. It is what tells a second record of the *same* event (collapsed
@@ -1219,6 +1237,28 @@ def _collapse_duplicate(
         file=sys.stderr,
     )
     return True
+
+
+def merge_recorded_metric(entries: list, phase: str, entry: Any) -> None:
+    """Add *entry*, recorded by another writer of the same ``state.json``, to
+    *entries* (one phase's list) by :func:`record_metric_in_state`'s identity
+    rule: a second record of the event ``(run_id, label, batch_index)``
+    *entries* already holds collapses into it (:func:`_collapse_duplicate`,
+    its stderr line included), anything else is appended.
+    ``StateManager.save()``'s merge calls it, so two writers recording one
+    batch count it once."""
+    run_id = entry.get("run_id") if isinstance(entry, dict) else None
+    if isinstance(run_id, str) and run_id:
+        label, batch_index = entry.get("label"), entry.get("batch_index")
+        for index, recorded in enumerate(entries):
+            if (isinstance(recorded, dict) and recorded.get("run_id") == run_id
+                    and recorded.get("label") == label
+                    and recorded.get("batch_index") == batch_index):
+                _collapse_duplicate(
+                    entries, index, entry,
+                    _describe_event(phase, str(label), batch_index))
+                return
+    entries.append(entry)
 
 
 def record_metric_in_state(

@@ -398,8 +398,8 @@ right after the host verified a batch and before its prior-changes append, it wr
 every `expected_ids` member (the scheduler writes that too since fix round 22) (a raw
 read-modify-write of `state.json` through `state_manager`'s module-level helpers,
 never a `StateManager` over the plan the batch just edited, held under
-`metrics.state_file_lock` — `<state dir>/.state.lock`, which `util metrics record|start|finish` and
-`util finalize-tracking` hold too, so parallel same-batch records no longer drop each other's
+`metrics.state_file_lock` — `<state dir>/.state.lock`, which `util metrics record|start|finish`,
+`util finalize-tracking` and every `StateManager.save()` hold too, so parallel same-batch records no longer drop each other's
 `task_status`; a lock not free in 120 s is exit 1 with nothing written, fix round 8); the
 apply base's `--resume` (step 23) drops a group recorded there unless
 `failed`, implement's drops a `completed` task, and both native emit paths

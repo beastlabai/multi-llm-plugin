@@ -97,12 +97,94 @@ and not the phase's guarantee) + `metrics.finish` + `mark_phase_completed` +
 
 A run that dispatched every batch and produced none of those is a **failed** run.
 **`state.json` has exactly one writer per run, and it is the scheduler's
-`StateManager`** (F3/F4, 2026-09-16): `StateManager.save()` dumps its dict wholesale and
-never merges, so anything a *file-level* writer added between two saves is erased by the second one.
+`StateManager`** (F3/F4, 2026-09-16). Since STATE-7 (2026-11-08) `StateManager.save()` re-reads
+the file under `metrics.state_file_lock` and applies only what the manager changed since it last
+read or wrote it, so a record another writer (a file-level helper, a second phase of the same
+plan) made meanwhile survives. The merge builds a candidate document and leaves the manager's
+`state` alone; `state` adopts the candidate (top-level maps and lists updated in place, so a
+reference a caller holds stays live) only once the write succeeded. A failed write leaves
+`state`, the baseline and the journal as they were, and a retry merges afresh. A file still
+holding exactly the text the manager last read or wrote has nothing to merge, and is not parsed.
+The state lock is innermost: `save()` takes nothing while holding it. One deadline,
+`STATE_LOCK_TIMEOUT_S` (120 s) from entry, bounds the wait for another thread of the process
+(the thread lock is process-wide, so a thread saving another plan counts) and then for another
+process; past it `StateLockTimeout` is raised with nothing written and the changes kept in
+memory. A caller that saves a record it must not lose (the dirty-tree baseline) lets that error
+propagate rather than saving a fallback. One writer per run is still the rule; the merge is the
+backstop, not the design.
 
-Metrics therefore go through `state.record_metric`/`start_metrics_phase`/`finish_metrics_phase` —
-the in-memory twins `metrics.py` now exposes beside its CLI-facing file-level pair
-(`record_metric_in_state` and friends), with `start_metrics_phase` called once before the first
+**How a save knows its own changes.** Two sources, for every unit below:
+
+- *The journal.* Each `StateManager` mutator records the unit it wrote (the table's "Journaled
+  by" column). A journaled unit is the saver's even when its value equals what the saver
+  loaded: a retry that records the same failure with the same reason, a `--human-task` answer
+  repeated after another writer consumed it, a scope record repeated within the second its
+  timestamp keeps, a clear of `metrics_left_out` this manager never saw filled. Each is a
+  write, and what another writer recorded meanwhile does not win over it. A mutator that
+  writes nothing (`close_scope_run` on a closed record, `attach_scope_baseline` on a round that
+  has one, `finish_metrics_phase` with nothing to close) journals nothing. A save, `reload()`
+  and `record_commit_range()` (which reloads) empty the journal.
+- *The value comparison*, the fallback for code that edits `StateManager.state` directly or
+  through a raw-dict helper: a unit whose value differs from the file as the manager last read
+  or wrote it is the manager's change, and such a write that repeats the loaded value is
+  invisible to it. Every writer family whose repeated write means something has a journaled
+  mutator; the direct writers left are safe without one: the scheduler's per-task check maps
+  and `known_checks`' batch reports go with the journaled `update_task_status` of the same
+  task; a start-over's or `--task` rerun's clears of a task's check maps go with a fresh
+  `implement_task_reset_at` stamp; processed-item records (`record_batch_items_in_state`) and
+  `metrics` entries carry a full-precision timestamp; `move_check_repeats_in_state`, a
+  `--force` drop of a phase completion and `stage_scope_files_record`'s pop of
+  `review_scope_files` change what the manager just read; the commit guard an apply writes into
+  the pinned range is new, or the saved one reused as it is; `record_metric`'s
+  `named_out` note is derived from the progress entry it sits in; and the scheduler's
+  `set("tracked_files", …)` saves only a recomputed list that changed, the entries it carries
+  over unchanged being no write of their own. The file-level writers (`util batch-done`,
+  `util write-prompt`, `finalize_tracking`, `commit_apply.save_guard`, the `metrics` CLI) are
+  not managers: they re-read the file under the lock and write it back, with no stale view.
+
+**Merge units.** The merge never mixes the two writers' fields inside one record. The saver's
+changes are its own, whole, whatever the other writer did to them; every other unit is the
+file's:
+
+| Unit | Keys | Journaled by | Merged |
+|------|------|--------------|--------|
+| A task's record | its entry in `task_status`, `task_status_reasons`, the check maps (`task_check_findings`, `task_batch_check`, `task_own_text`, `task_own_check_note`, `task_batch_check_accepted`, `task_batch_check_repeats`, `task_check_trees`), `implement_task_reset_at`, `human_task_decisions`, `dependency_overrides` and `apply_fix_batch_checks`; its membership of `task_own_check_ran` | `update_task_status`, `record_dependency_override`, `record_human_task_answers` (each task it answers) | by task id, the record whole |
+| A phase's record | its entries in `phases_completed`, `phases_started`, `phases_skipped` | `mark_phase_completed`/`_started`/`_skipped`, `reopen_phase` | by phase |
+| An entry's record | one entry of `processed_<phase>`, `human_decisions_<phase>`, `human_decision_verdicts_<phase>`, `metrics_progress`, `metrics_left_out`, `metrics_set_aside`, `scope_policy` (by review phase), `scope_policy_runs` (by mode) | `mark_item_processed`, `record_human_decision`, `record_judge_verdicts` (each verdict); `start_metrics_phase`, `set_metrics_total`, `set_metrics_left_out`, `set_metrics_set_aside`, `finish_metrics_phase` (what it closed); `record_scope_round`, `attach_scope_baseline`, `record_scope_apply_policy`, `record_scope_deferrals`, `record_scope_completion`, `record_scope_run_start`, `close_scope_run` | by entry id, the entry whole: never a fragment (`{"details": {"leg": …}}` with no status, which `processed_record_counts` would read as done) |
+| The decomposition | `task_titles`, `implement_task_ids`, `implement_human_task_ids`, `implement_task_depends_on` | `record_task_titles`, `set` of one of its keys | together |
+| The plan-change record | `plan_hash`, `plan_changed` | the load's plan-change check, `clear_plan_changed_flag`, `refresh_plan_hash`, `set` of either key | together, so a hash travels with its own flag. An edit only the saver's load detected gives way to a file that records the hash it detected: whoever wrote that saw the same plan, and the flag beside it (raised or consumed) stands |
+| `metrics` | one list per phase | (value comparison) | entry by entry: `record_metric_in_state` only appends or replaces an entry in place, so an entry the saver replaced replaces the file's when the file still holds the original, and every other entry it added goes in by `record_metric_in_state`'s identity rule (`metrics.merge_recorded_metric`): a second record of one event `(phase, run_id, label, batch_index)` collapses into the file's, with its `[METRICS_DUPLICATE]` or `[METRICS_CONFLICT]` line, instead of counting one batch twice. A list of another shape is the saver's |
+| `tracked_files` | one list | `track_file` (its path) | entry by entry, by path; a list that is not one entry per path is the saver's |
+| `state_resets` | one stamp per reset key | the clears (below) | by key |
+| Every other top-level key | `pre_existing_changes`, `head_before_implement`, `commit_range`, `head_ref`, `review_scope_files`, `human_task_strategy`, `plan_preamble`, `progress_<phase>`, `human_decision_unresolved_<phase>`, the composites' records (`full_workflow`, `improve_*`), legacy and custom keys | `set`, `save_human_task_strategy`, `record_processing_progress`, `mark_review_phase_completed`, `record_judge_verdicts` (the unresolved list) | one value: when both writers changed it, the saver's |
+
+**Explicit resets are authoritative.** `clear_processed_items`, `clear_human_decisions`,
+`clear_processing_progress` and `clear_key` (the clears `--fresh` makes) stamp the key in
+`state_resets`. A key the saver reset is the saver's whole, records another writer added to it
+meanwhile included; a key another writer reset since the saver loaded is the file's, the saver's
+own writes to it included, so a stale view cannot bring the cleared records back. `reset()` does
+the same for the whole document (`state_resets: {"*": …}`): the resetter's save writes its
+document whole, and a manager loaded before the reset takes the reset document on its next save,
+its own unsaved changes dropped (they predate the reset). A task's reset is its
+`implement_task_reset_at` stamp (a start-over, a `--task` rerun): a task the file's writer reset
+is the file's unless the saver reset it too. A `--force` that drops a phase completion, and
+`reopen_phase` (which journals the phase, so a completion another writer recorded after the
+manager loaded is dropped too), are ordinary changes to that phase's record, not barriers: a
+completion another writer records after them is kept.
+
+**Upgrading.** The merge holds only between writers that all merge. A `StateManager` from before
+STATE-7 still dumps its whole dict without the lock or a re-read, and when it saves last it
+erases every record newer writers made since it loaded, `state_resets` stamps included (Codex
+reproduced an old writer erasing a new completion and the reset stamps). Old and new writers
+must not run against the same plan concurrently: during an upgrade, let the running multi-llm
+commands of a plan finish (or stop them) before starting the new version on it. State files
+themselves need no migration: an old file loads and saves, and an old writer reads a new file
+(it ignores `state_resets`).
+
+Metrics therefore go through `state.record_metric`/`start_metrics_phase`/`finish_metrics_phase`
+(and `set_metrics_total`, `set_metrics_left_out`, `set_metrics_set_aside` for the stored total
+and the closing line's tails) — the in-memory twins `metrics.py` now exposes beside its
+CLI-facing file-level pair (`record_metric_in_state` and friends), with `start_metrics_phase` called once before the first
 dispatch so `metrics_progress` and the `[ETA]` line `instructions/implement.md` step 5
 describes exist on the executor path at all (the `batch_index`/`total_batches` that
 call passes are this run's own progress and dispatchable count — `_eta_progress`: the
@@ -125,8 +207,8 @@ phase log **and** a message on the result, since `reload()` would otherwise keep
 `tracked_files` silently and `review-code` would review it (F4, 2026-09-17); that
 script's own state write is temp + `os.replace` now, as its comment always claimed — and
 the one remaining second writer, `finalize_tracking`, is followed immediately by
-`StateManager.reload()` (re-read the file, discarding anything unsaved — callers save first) so the
-closing `save()` carries its `tracked_files` instead of overwriting them.
+`StateManager.reload()` (re-read the file, discarding anything unsaved — callers save first), so
+the dict shows its `tracked_files` at once and a later in-memory change to them builds on the file's.
 
 Before this, an implement run whose log said `Tracked 1 implementation files: index.html` finalized with the two stale
 entries earlier phases had left, and three audited runs finished with no `metrics` key

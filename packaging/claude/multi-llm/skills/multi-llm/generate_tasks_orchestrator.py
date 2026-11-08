@@ -663,7 +663,7 @@ def _resolve_scope_policy(
         new_run=bool(getattr(args, "force", False)))
     policy, source = scope_policy_runs.effective_choice(choice)
     if not getattr(args, "dry_run_subagents", False):
-        if scope_policy_runs.record_run_start(state.state, MODE_NAME, choice):
+        if state.record_scope_run_start(MODE_NAME, choice):
             state.save()
     if source != scope_policy_runs.sp.SOURCE_EXPLICIT:
         scope_policy_runs.announce(

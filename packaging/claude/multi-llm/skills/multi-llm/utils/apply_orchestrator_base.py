@@ -1351,7 +1351,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 # Fix round 21: what the void run's batches reported about
                 # their own checks is no earlier batch of this run.
                 from .known_checks import APPLY_FIX_BATCH_CHECKS_KEY
-                self.state.state.pop(APPLY_FIX_BATCH_CHECKS_KEY, None)
+                self.state.clear_key(APPLY_FIX_BATCH_CHECKS_KEY)
             self.state.save()
             # Clear prior changes history for a fresh start
             prior_changes_file = Path(self.out_dir) / "prior_changes.jsonl"
@@ -2310,8 +2310,8 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         if (self.scope is None or self.scope.source != _sp.SOURCE_EXPLICIT
                 or self.state is None or self._scope_dry()):
             return
-        _sp.record_apply_policy(self.state.state, self._scope_phase_word(),
-                                self.scope.policy, _sp.SOURCE_EXPLICIT)
+        self.state.record_scope_apply_policy(self._scope_phase_word(),
+                                             self.scope.policy, _sp.SOURCE_EXPLICIT)
         self.state.save()
 
     def _scope_detect_change(self) -> None:
@@ -2481,7 +2481,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             return
         word = self._scope_phase_word()
         if self.scope.preserve:
-            _scope.persist_deferrals(self.state.state, word, self.scope_deferred)
+            self.state.record_scope_deferrals(word, self.scope_deferred)
             self.state.save()
             return
         if self.scope.recorded_deferrals:
@@ -2489,7 +2489,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 str(entry.get("group_id")) for entry in self.scope.recorded_deferrals
                 if entry.get("group_id")
             ]
-            _scope.persist_deferrals(self.state.state, word, [])
+            self.state.record_scope_deferrals(word, [])
             self.state.save()
             print(
                 f"[scope-policy] {word}: {len(self._scope_released)} item(s) an "
@@ -2584,8 +2584,8 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         if state is None:
             return []
         blockers = self._scope_blockers(state)
-        _scope.record_completion(
-            state.state, self._scope_phase_word(), self._scope_effective(state), blockers)
+        state.record_scope_completion(
+            self._scope_phase_word(), self._scope_effective(state), blockers)
         return blockers
 
     def _scope_report_blockers(self, blockers: Sequence[Dict[str, Any]]) -> None:
@@ -2653,7 +2653,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         word = self._scope_phase_word()
         blockers: List[Dict[str, Any]] = []
         if not self._scope_dry() and self.state is not None:
-            _scope.persist_deferrals(self.state.state, word, self.scope_deferred)
+            self.state.record_scope_deferrals(word, self.scope_deferred)
             self.state.mark_phase_completed(word)
             blockers = self._scope_close(self.state)
             if self.edits_the_plan and getattr(self.args, "resume", False):
