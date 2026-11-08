@@ -1959,7 +1959,7 @@ def _unconfirmed_stop_message(
 #: stopped: with no ``cleanup`` at all, the only record a run's entry goes
 #: past (:func:`unconfirmed_cleanup`). An allowlist, like
 #: :data:`CONFIRMED_STOPS`.
-CONFIRMED_CLEANUP_STATES = frozenset({"complete"})
+CONFIRMED_CLEANUP_STATES = frozenset({CLEANUP_COMPLETE})
 
 
 #: :func:`unconfirmed_cleanup`'s verdicts on one ``cleanup`` value.
