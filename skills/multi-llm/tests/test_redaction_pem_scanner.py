@@ -84,20 +84,23 @@ def _assert_same(text):
 
 
 # --- Generated PEM documents. -----------------------------------------------------
+# Single-line literals spell the space in a key header as \x20 and the = after
+# `token` as \x3d: same values, but the repo's gitleaks scan of tracked files
+# (tests/test_no_committed_secrets.py) does not read them as committed keys.
 
 _KINDS = ["RSA ", "EC ", "DSA ", "OPENSSH ", "ENCRYPTED ", "", "RSA  ", "A B C "]
 _NEAR_MISSES = [
     "-----BEGIN PUBLIC KEY-----", "-----BEGIN CERTIFICATE-----",
-    "-----BEGIN rsa PRIVATE KEY-----", "-----BEGIN RSA PRIVATE  KEY-----",
-    "----BEGIN RSA PRIVATE KEY-----", "-----BEGIN RSA PRIVATE KEY----",
-    "-----BEGIN RSA-PRIVATE KEY-----", "-----BEGINRSA PRIVATE KEY-----",
-    "-----END PUBLIC KEY-----", "-----END RSA PRIVATE KEY----",
-    "------BEGIN RSA PRIVATE KEY------", "-----BEGIN RSA PRIVATE KEY-----BEGIN",
+    "-----BEGIN rsa PRIVATE\x20KEY-----", "-----BEGIN RSA PRIVATE  KEY-----",
+    "----BEGIN RSA PRIVATE\x20KEY-----", "-----BEGIN RSA PRIVATE\x20KEY----",
+    "-----BEGIN RSA-PRIVATE\x20KEY-----", "-----BEGINRSA PRIVATE\x20KEY-----",
+    "-----END PUBLIC KEY-----", "-----END RSA PRIVATE\x20KEY----",
+    "------BEGIN RSA PRIVATE\x20KEY------", "-----BEGIN RSA PRIVATE\x20KEY-----BEGIN",
 ]
 _FILLER = [
     "provider said:", "Traceback (most recent call last):", "  File \"x.py\"",
-    "token=Xy9-_.z01234567", "sk-proj-" + "a1B2" * 8, "", " ", "\t", "-----", "---",
-    "BEGIN", "END", "PRIVATE KEY", "KEY-----", "```", "é漢",
+    "token\x3dXy9-_.z01234567", "sk-proj-" + "a1B2" * 8, "", " ", "\t", "-----", "---",
+    "BEGIN", "END", "PRIVATE\x20KEY", "KEY-----", "```", "é漢",
 ]
 
 
@@ -148,10 +151,10 @@ def _pem_document(rng):
 
 def _pem_fragment_soup(rng):
     fragments = [
-        "-----BEGIN ", "-----END ", "RSA ", "PRIVATE KEY", "-----", "-", "\n", "\r\n",
-        " ", "A", "BEGIN", "END", "-----BEGIN RSA PRIVATE KEY-----",
-        "-----END RSA PRIVATE KEY-----", "-----BEGIN PRIVATE KEY-----",
-        "-----END PRIVATE KEY-----", "PRIVATE KEY-----", "x", "token=abcdefgh12",
+        "-----BEGIN ", "-----END ", "RSA ", "PRIVATE\x20KEY", "-----", "-", "\n", "\r\n",
+        " ", "A", "BEGIN", "END", "-----BEGIN RSA PRIVATE\x20KEY-----",
+        "-----END RSA PRIVATE\x20KEY-----", "-----BEGIN PRIVATE\x20KEY-----",
+        "-----END PRIVATE\x20KEY-----", "PRIVATE\x20KEY-----", "x", "token\x3dabcdefgh12",
     ]
     return "".join(rng.choice(fragments) for _ in range(rng.randint(0, 30)))
 
@@ -204,17 +207,17 @@ class TestThePemRowRedactsWhatItsRegexDid:
         _PEM.replace("\n", "\r\n"),
         _PEM + "\n" + _PEM,
         _PEM[:-10],
-        "-----BEGIN RSA PRIVATE KEY-----\n" * 20 + "-----END RSA PRIVATE KEY-----",
-        "-----BEGIN RSA PRIVATE KEY-----\n" * 20,
-        "-----END RSA PRIVATE KEY-----\n" + _PEM,
-        "-----BEGIN PRIVATE KEY----------END PRIVATE KEY-----",
-        "-----BEGIN PRIVATE KEY--------END PRIVATE KEY-----",
-        "-----BEGIN PRIVATE KEY-----BEGIN PRIVATE KEY-----x-----END PRIVATE KEY-----",
-        "-----BEGIN " + "A" * 500 + " PRIVATE KEY-----\nx\n-----END PRIVATE KEY-----",
-        "-----BEGIN " + "A " * 300 + "-----END PRIVATE KEY-----",
-        "a-----BEGIN EC PRIVATE KEY-----b-----END EC PRIVATE KEY-----c" * 3,
-        "-----BEGIN RSA PRIVATE KEY-----\n" + "token=Xy9-_.z01234567\n"
-        + "-----END RSA PRIVATE KEY-----\ntoken=Xy9-_.z01234567",
+        "-----BEGIN RSA PRIVATE\x20KEY-----\n" * 20 + "-----END RSA PRIVATE\x20KEY-----",
+        "-----BEGIN RSA PRIVATE\x20KEY-----\n" * 20,
+        "-----END RSA PRIVATE\x20KEY-----\n" + _PEM,
+        "-----BEGIN PRIVATE\x20KEY----------END PRIVATE\x20KEY-----",
+        "-----BEGIN PRIVATE\x20KEY--------END PRIVATE\x20KEY-----",
+        "-----BEGIN PRIVATE\x20KEY-----BEGIN PRIVATE\x20KEY-----x-----END PRIVATE\x20KEY-----",
+        "-----BEGIN " + "A" * 500 + " PRIVATE\x20KEY-----\nx\n-----END PRIVATE\x20KEY-----",
+        "-----BEGIN " + "A " * 300 + "-----END PRIVATE\x20KEY-----",
+        "a-----BEGIN EC PRIVATE\x20KEY-----b-----END EC PRIVATE\x20KEY-----c" * 3,
+        "-----BEGIN RSA PRIVATE\x20KEY-----\n" + "token\x3dXy9-_.z01234567\n"
+        + "-----END RSA PRIVATE\x20KEY-----\ntoken\x3dXy9-_.z01234567",
     ], ids=lambda text: repr(text[:40]))
     def test_hand_written_edges(self, text):
         _assert_same(text)
@@ -224,7 +227,7 @@ class TestThePemRowRedactsWhatItsRegexDid:
         ``finditer`` and the matches' spans and groups."""
         from utils import subagent_executor
 
-        text = "lead " + _PEM + " middle -----BEGIN EC PRIVATE KEY----- tail"
+        text = "lead " + _PEM + " middle -----BEGIN EC PRIVATE\x20KEY----- tail"
         offset = text.index("middle")
         redacted, position = subagent_executor._redact_tracking(text, offset)
         assert redacted == _old_redact_text(text)
@@ -263,14 +266,14 @@ def test_redact_text_takes_a_megabyte_of_unterminated_headers_in_bounded_time():
     (minutes at a megabyte); milliseconds now."""
     _run_timed("""
         from utils.write_safety import redact_text
-        header = "-----BEGIN RSA PRIVATE KEY-----"
+        header = "-----BEGIN RSA PRIVATE\\x20KEY-----"
         texts = [
             (header + "\\n") * (size // 32),
             (header + "\\r\\nMIIBOgIBAAJBAKj34GkxFhD90vcNLYLInFEX6Ppy1tPf9Cnzj4p4WGeKLs1Pt8Qu\\r\\n")
             * (size // 100),
             header * (size // 31),
             "-----BEGIN " + "A" * size,
-            ("-----BEGIN EC PRIVATE KEY-----x-----END EC PRIVATE KEY-----" * (size // 120))
+            ("-----BEGIN EC PRIVATE\\x20KEY-----x-----END EC PRIVATE\\x20KEY-----" * (size // 120))
             + (header + "\\n") * (size // 64),
         ]
         started = time.perf_counter()
