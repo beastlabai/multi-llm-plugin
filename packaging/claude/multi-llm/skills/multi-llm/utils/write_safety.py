@@ -66,16 +66,10 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-try:  # pragma: no cover - import shim mirrors the rest of utils/
-    from .git_utils import pin_repo_root
-    from .process_control import FileMutex
-    from .provider_registry import get_write_paths
-    from .subagent_tasks import declared_file_set
-except ImportError:  # pragma: no cover - direct-script import shim
-    from utils.git_utils import pin_repo_root
-    from utils.process_control import FileMutex
-    from utils.provider_registry import get_write_paths
-    from utils.subagent_tasks import declared_file_set
+from .git_utils import pin_repo_root
+from .process_control import FileMutex
+from .provider_registry import get_write_paths
+from .subagent_tasks import declared_file_set
 
 
 __all__ = [
@@ -420,10 +414,7 @@ def repo_root_for_report(anchor: Optional[str]) -> str:
         print(f"WARNING: {exc.message}", file=sys.stderr)
     start = Path(anchor).resolve() if anchor else Path.cwd().resolve()
     probe_dir = str(start if start.is_dir() else start.parent)
-    try:
-        from .git_utils import find_git_entry_root
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.git_utils import find_git_entry_root  # type: ignore[no-redef]
+    from .git_utils import find_git_entry_root
     return find_git_entry_root(probe_dir) or str(Path(probe_dir).resolve())
 
 
@@ -2053,6 +2044,7 @@ class AuditLog:
 
     def completion_for(
         self, task_id: str, *, expected_ids: Optional[Sequence[str]] = None,
+        records: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> Optional[Dict[str, Any]]:
         """The last ``completed`` record for this batch, if any.
 
@@ -2062,12 +2054,14 @@ class AuditLog:
         items at all (written before the key existed). A record under the id
         that names *other* items is another batch's — an apply id is
         positional — and is never returned. Without ``expected_ids`` the id
-        alone decides, as before.
+        alone decides, as before. *records* is :meth:`records` as the caller
+        just read it, for one decision that reads the log more than once;
+        omitted, the log is read now.
         """
         wanted = sorted(str(i) for i in expected_ids) if expected_ids else None
         by_items = None
         by_id = None
-        for record in self.records():
+        for record in (self.records() if records is None else records):
             if record.get("event") != "completed":
                 continue
             recorded = record.get("expected_ids")

@@ -126,142 +126,73 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-try:
-    from . import known_checks as _known_checks
-    from . import prior_changes as _prior_changes
-    from .metrics import (
-        _read_state, _write_state, mark_failed_in_progress,
-        restore_to_progress_in_state, state_file_lock,
-        withdraw_from_progress_in_state,
-    )
-    from .state_manager import (
-        PROCESSED_LEG_NATIVE,
-        TASK_RESET_AT_KEY,
-        _parse_completion_time,
-        record_batch_items_in_state,
-        set_task_batch_check_accepted_in_state,
-        set_task_batch_check_in_state,
-        set_task_batch_check_repeats_in_state,
-        set_task_own_check_note_in_state,
-        set_task_own_check_ran_in_state,
-        set_task_own_text_in_state,
-        set_task_check_findings_in_state,
-        set_task_check_tree_in_state,
-        update_task_status_in_state,
-    )
-    from .git_utils import pin_repo_root
-    from .stream_bootstrap import bootstrap_streams
-    from .subagent_executor import (
-        CHECK_NOTE_MAX_CHARS, DECLINED_SECTION_HEADING, SKIPPED_SECTION_HEADING,
-        check_findings_from, declined_reason,
-    )
-    from .write_safety import file_sha256
-    from .text_clip import clip, with_closing_mark
-    from .subagent_tasks import APPLY_WRITE_KINDS, PHASE_BY_WRITE_KIND, snapshot_file_set
-    from .write_phase_bridge import WRITE_TASK_FILENAME
-    from .write_batch_scheduler import (
-        BATCH_CHECK_MARKER,
-        batch_fixes_for,
-        commit_group_files,
-        commit_guard_of,
-        commit_head7,
-        load_commit_apply,
-        load_orchestrator_batches,
-        check_findings_line,
-        HALF_APPLIED_PREFIX,
-        accepted_findings_for,
-        accepted_findings_with_words_added,
-        batch_check_accepted_line,
-        batch_check_line,
-        batch_check_repeated_line,
-        move_check_repeats_in_state,
-        repeated_findings_for,
-        BLOCKED_BY_CHECK_PREFIX,
-        CODE_WRITE_KINDS,
-        blocked_by_check_reason,
-        decomposition_graph,
-        is_check_task,
-        rerunnable_checks,
-        split_accepted_findings,
-        split_repeated_findings,
-        task_own_text,
-        transitive_dependents,
-        upstream_held_check,
-        words_added_to,
-    )
-    from .write_prompt import (
-        WritePromptError, changed_since_bound, check_tree_fingerprint,
-        completion_stamp, discard_check_tree, load_write_task,
-        record_completion_stamp,
-    )
-except ImportError:  # pragma: no cover - direct script invocation
-    from utils import known_checks as _known_checks  # type: ignore
-    from utils import prior_changes as _prior_changes  # type: ignore
-    from utils.metrics import (  # type: ignore
-        _read_state, _write_state, mark_failed_in_progress,
-        restore_to_progress_in_state, state_file_lock,
-        withdraw_from_progress_in_state,
-    )
-    from utils.state_manager import (  # type: ignore
-        PROCESSED_LEG_NATIVE,
-        TASK_RESET_AT_KEY,
-        _parse_completion_time,
-        record_batch_items_in_state,
-        set_task_batch_check_accepted_in_state,
-        set_task_batch_check_in_state,
-        set_task_batch_check_repeats_in_state,
-        set_task_own_check_note_in_state,
-        set_task_own_check_ran_in_state,
-        set_task_own_text_in_state,
-        set_task_check_findings_in_state,
-        set_task_check_tree_in_state,
-        update_task_status_in_state,
-    )
-    from utils.git_utils import pin_repo_root  # type: ignore
-    from utils.stream_bootstrap import bootstrap_streams  # type: ignore
-    from utils.subagent_executor import (  # type: ignore
-        CHECK_NOTE_MAX_CHARS, DECLINED_SECTION_HEADING, SKIPPED_SECTION_HEADING,
-        check_findings_from, declined_reason,
-    )
-    from utils.write_safety import file_sha256  # type: ignore
-    from utils.text_clip import clip, with_closing_mark  # type: ignore
-    from utils.subagent_tasks import APPLY_WRITE_KINDS, PHASE_BY_WRITE_KIND, snapshot_file_set  # type: ignore
-    from utils.write_phase_bridge import WRITE_TASK_FILENAME  # type: ignore
-    from utils.write_batch_scheduler import (  # type: ignore
-        BATCH_CHECK_MARKER,
-        batch_fixes_for,
-        commit_group_files,
-        commit_guard_of,
-        commit_head7,
-        load_commit_apply,
-        load_orchestrator_batches,
-        check_findings_line,
-        HALF_APPLIED_PREFIX,
-        accepted_findings_for,
-        accepted_findings_with_words_added,
-        batch_check_accepted_line,
-        batch_check_line,
-        batch_check_repeated_line,
-        move_check_repeats_in_state,
-        repeated_findings_for,
-        BLOCKED_BY_CHECK_PREFIX,
-        CODE_WRITE_KINDS,
-        blocked_by_check_reason,
-        decomposition_graph,
-        is_check_task,
-        rerunnable_checks,
-        split_accepted_findings,
-        split_repeated_findings,
-        task_own_text,
-        transitive_dependents,
-        upstream_held_check,
-        words_added_to,
-    )
-    from utils.write_prompt import (  # type: ignore
-        WritePromptError, changed_since_bound, check_tree_fingerprint,
-        completion_stamp, discard_check_tree, load_write_task,
-        record_completion_stamp,
-    )
+from . import known_checks as _known_checks
+from . import prior_changes as _prior_changes
+from .metrics import (
+    _read_state, _write_state, mark_failed_in_progress,
+    restore_to_progress_in_state, state_file_lock,
+    withdraw_from_progress_in_state,
+)
+from .state_manager import (
+    PROCESSED_LEG_NATIVE,
+    TASK_RESET_AT_KEY,
+    _parse_completion_time,
+    record_batch_items_in_state,
+    set_task_batch_check_accepted_in_state,
+    set_task_batch_check_in_state,
+    set_task_batch_check_repeats_in_state,
+    set_task_own_check_note_in_state,
+    set_task_own_check_ran_in_state,
+    set_task_own_text_in_state,
+    set_task_check_findings_in_state,
+    set_task_check_tree_in_state,
+    update_task_status_in_state,
+)
+from .git_utils import pin_repo_root
+from .stream_bootstrap import bootstrap_streams
+from .subagent_executor import (
+    CHECK_NOTE_MAX_CHARS, DECLINED_SECTION_HEADING, SKIPPED_SECTION_HEADING,
+    check_findings_from, declined_reason,
+)
+from .write_safety import file_sha256
+from .text_clip import clip, with_closing_mark
+from .subagent_tasks import APPLY_WRITE_KINDS, PHASE_BY_WRITE_KIND, snapshot_file_set
+from .write_phase_bridge import WRITE_TASK_FILENAME
+from .write_batch_scheduler import (
+    BATCH_CHECK_MARKER,
+    batch_fixes_for,
+    commit_group_files,
+    commit_guard_of,
+    commit_head7,
+    load_commit_apply,
+    load_orchestrator_batches,
+    check_findings_line,
+    HALF_APPLIED_PREFIX,
+    accepted_findings_for,
+    accepted_findings_with_words_added,
+    batch_check_accepted_line,
+    batch_check_line,
+    batch_check_repeated_line,
+    move_check_repeats_in_state,
+    repeated_findings_for,
+    BLOCKED_BY_CHECK_PREFIX,
+    CODE_WRITE_KINDS,
+    blocked_by_check_reason,
+    decomposition_graph,
+    is_check_task,
+    rerunnable_checks,
+    split_accepted_findings,
+    split_repeated_findings,
+    task_own_text,
+    transitive_dependents,
+    upstream_held_check,
+    words_added_to,
+)
+from .write_prompt import (
+    WritePromptError, changed_since_bound, check_tree_fingerprint,
+    completion_stamp, discard_check_tree, load_write_task,
+    record_completion_stamp,
+)
 
 
 __all__ = [
@@ -583,12 +514,7 @@ def _tracked_after_batch(
     phases edit are never tracked. Never fatal: the batch record is this
     command's job.
     """
-    try:
-        from .write_batch_scheduler import CODE_WRITE_KINDS, load_finalize_tracking
-    except ImportError:  # pragma: no cover - direct script invocation
-        from utils.write_batch_scheduler import (  # type: ignore
-            CODE_WRITE_KINDS, load_finalize_tracking,
-        )
+    from .write_batch_scheduler import CODE_WRITE_KINDS, load_finalize_tracking
     if kind not in CODE_WRITE_KINDS:
         return None
     finalize_tracking = load_finalize_tracking()

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import implement_orchestrator as implement
+from tests.scheduler_support import make_scheduler
 from tests.test_implement_stop_account import (
     _dispatched_titles, _implement, make_repo,
 )
@@ -18,7 +19,6 @@ from utils.state_manager import (
     set_task_check_findings_in_state, set_task_check_tree_in_state,
 )
 from utils.subagent_tasks import implement_output_name
-from utils.write_batch_scheduler import WriteBatchScheduler
 from utils.write_prompt import (
     WritePromptError, changed_since_bound, check_tree_fingerprint,
     record_check_tree,
@@ -174,10 +174,10 @@ class TestColocatedCodeIsInTheCheckTree:
         return path
 
     def _executor_tree(self, repo):
-        scheduler = WriteBatchScheduler.__new__(WriteBatchScheduler)
-        scheduler.repo_root = str(repo.root)
-        scheduler.phase_dir = str(repo.phase_dir)
-        scheduler.output_dir = str(repo.phase_dir.parent)
+        scheduler = make_scheduler(
+            repo.phase_dir.parent, kind="implement", phase_dir=repo.phase_dir,
+            repo_root=repo.root,
+        )
         return scheduler._tree_fingerprint()
 
     def test_both_legs_see_colocated_source_but_ignore_workflow_bookkeeping(self, repo):

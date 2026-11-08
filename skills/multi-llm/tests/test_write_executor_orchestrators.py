@@ -2020,8 +2020,8 @@ class TestTheNativeImplementEmitMaterializesTheWriteTaskFile:
 
     def test_write_tasks_json_matches_the_executor_s_rendering(self, repo, capsys):
         from utils import write_prompt
-        from utils.write_batch_scheduler import WriteBatchScheduler
         from utils.output_handler import get_output_dir
+        from tests.scheduler_support import make_scheduler
 
         _seed_generate_tasks(repo)
         assert implement_orchestrator.main(["--plan-file", str(repo.plan), "--yes"]) == 0
@@ -2031,10 +2031,10 @@ class TestTheNativeImplementEmitMaterializesTheWriteTaskFile:
         assert document["kind"] == "implement"
         assert [t["task_id"] for t in document["batches"]] == ["T001", "T002", "T003"]
 
-        scheduler = WriteBatchScheduler.__new__(WriteBatchScheduler)
-        scheduler.kind = "implement"
-        scheduler.output_dir = str(get_output_dir(repo.plan))
-        scheduler.phase = "implement"
+        scheduler = make_scheduler(
+            get_output_dir(repo.plan), kind="implement", phase="implement",
+            phase_dir=phase_dir, plan_file=repo.plan,
+        )
         for task in document["batches"]:
             text, _task, _info = write_prompt.render_write_prompt(phase_dir, task["task_id"])
             assert text == scheduler._with_result_contract(

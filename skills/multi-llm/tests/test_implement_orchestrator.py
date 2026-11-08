@@ -619,7 +619,7 @@ class TestBuildTaskPromptAcceptanceCriteria:
         assert result.index(ACCEPTANCE_CRITERIA_FRAMING) < result.index("- [ ] ")
         assert "do not attempt the browser or manual steps yourself" in result
 
-    def test_the_dispatched_prompt_forbids_signals_and_background_processes(self):
+    def test_the_dispatched_prompt_forbids_signals_and_background_processes(self, tmp_path):
         """The other half of F2: the shipped `## Constraints` block said
         nothing about killing processes, so nothing told the subagent that
         `killall` reaches the orchestrator that dispatched it.
@@ -632,13 +632,12 @@ class TestBuildTaskPromptAcceptanceCriteria:
         raw template — so the assertion moves with it.
         """
         from implement_orchestrator import build_task_prompt
-        from utils.write_batch_scheduler import WriteBatchScheduler
+        from tests.scheduler_support import make_scheduler
 
         task = Task(id="T001", title="Test Task", description="Test description")
         prompt = build_task_prompt(task)
 
-        scheduler = WriteBatchScheduler.__new__(WriteBatchScheduler)
-        scheduler.kind = "implement"
+        scheduler = make_scheduler(tmp_path, kind="implement")
         dispatched = scheduler._with_result_contract({"expected_ids": ["T001"]}, prompt)
 
         for forbidden in ("`kill`", "`pkill`", "`killall`"):

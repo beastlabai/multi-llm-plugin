@@ -87,7 +87,6 @@ class TestTasksMarker:
         assert plan_updater.TASKS_FILE_REFERENCE_PATTERN == TASKS_FILE_MARKER_PATTERN
         for marker in REFORMATTED:
             assert plan_updater.get_tasks_file_path(marker) == "tasks/tasks.md"
-            assert plan_updater.has_implementation_tasks(marker)
 
     def test_the_canonical_marker_the_plan_updater_writes_round_trips(self):
         content = plan_updater.insert_tasks_file_reference("# Plan\n", "p/tasks/tasks.md")

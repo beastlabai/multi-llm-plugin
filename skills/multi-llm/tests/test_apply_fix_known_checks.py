@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 
 from tests import test_write_executor
+from tests.scheduler_support import make_scheduler
 from tests.test_write_executor import FakeState
 from utils import known_checks
 from utils import write_prompt
@@ -36,7 +37,6 @@ from utils.subagent_tasks import (
 )
 from utils.write_batch_scheduler import (
     BATCH_CHECK_MARKER,
-    WriteBatchScheduler,
     dispatched_prompt_path,
     unverified_line,
     with_result_contract,
@@ -392,13 +392,10 @@ class TestTheTwoLegsBindTheSameSection:
 
         native, _task, _info = write_prompt.render_write_prompt(
             phase_dir, "apply-fix-batch-1")
-        scheduler = WriteBatchScheduler.__new__(WriteBatchScheduler)
-        scheduler.kind = "apply_code_fixes"
-        scheduler.output_dir = str(out)
-        scheduler.phase = "apply-code-fixes"
-        scheduler.state = state
-        scheduler.tasks = tasks
-        scheduler.plan_file = str(plan)
+        scheduler = make_scheduler(
+            out, kind="apply_code_fixes", phase="apply-code-fixes",
+            phase_dir=phase_dir, state=state, tasks=tasks, plan_file=plan,
+        )
         executor = scheduler._with_result_contract(
             tasks[1], scheduler.dispatched_prompt(tasks[1]))
         assert native == executor

@@ -1311,6 +1311,48 @@ class TestVerificationOnlyImplementTask:
         assert "## Check result (required for this task)" in prompt
         assert '"check": {"passed": false, "findings"' in prompt
 
+    def test_a_refusal_after_a_check_points_its_findings_at_the_partial_summary(
+        self, env,
+    ):
+        """A runner refused before a later batch ends the run like every other
+        stop: the partial summary is written first, so the `Check findings:`
+        line names it, as a stop on a failed batch does."""
+        import utils.write_batch_scheduler as wbs
+
+        env.edits([], result=self._check_reply())
+        later = env.apply_task(
+            1, kind="implement", task_id="T010", expected_ids=["T010"],
+            output_name="implement_batch_T010.json",
+            declared_files=[str(env.root / "src" / "a.py")],
+        )
+        preflight = wbs.preflight_runner
+
+        def refused_once_the_check_ran(spec, **kwargs):
+            if (env.phase_dir / "implement_batch_T009.json").exists():
+                raise executor.RunnerRejected(
+                    "The runner cannot serve this batch.",
+                    key="driver.subagent_runner", spec=spec,
+                    reason_code="missing_profile",
+                )
+            return preflight(spec, **kwargs)
+
+        env.monkeypatch.setattr(wbs, "preflight_runner", refused_once_the_check_ran)
+        summary = env.out_dir / "implement" / "implementation_summary.md"
+        result = env.scheduler(
+            [self._task(env), later], kind="implement",
+            state=FakeState(env.tmp_path / "state.json"), summary_file=str(summary),
+        ).run()
+
+        assert result.exit_code == 3, result.messages
+        assert result.stopped_at_batch == 1
+        assert result.summary_file == str(summary)
+        findings = [m for m in result.messages if m.startswith("Check findings: T009 ")]
+        assert len(findings) == 1, result.messages
+        assert f"; they are listed in {summary}. Review-code" in findings[0]
+        partial = f"Partial implementation summary: {summary}"
+        assert result.messages[-1] == partial
+        assert result.messages.index(findings[0]) < result.messages.index(partial)
+
     def test_a_check_that_says_it_could_not_run_stops(self, env):
         """Fix round 11 (review T4) made a check that could not run a failed
         task that stops the run, never findings the run goes on past; fix
@@ -5359,12 +5401,11 @@ class TestTheContractCarriesTheProcessSafetyRule:
     """
 
     def test_every_write_kind_is_told_never_to_kill(self, tmp_path):
-        from utils.write_batch_scheduler import WriteBatchScheduler
+        from tests.scheduler_support import make_scheduler
 
         for kind in ("apply_suggestions", "apply_task_suggestions",
                      "apply_code_fixes", "implement"):
-            scheduler = WriteBatchScheduler.__new__(WriteBatchScheduler)
-            scheduler.kind = kind
+            scheduler = make_scheduler(tmp_path, kind=kind)
             text = scheduler._with_result_contract(
                 {"expected_ids": ["X1"]}, "do the thing"
             )

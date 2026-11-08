@@ -49,244 +49,123 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Collection, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, Union
 
-try:  # pragma: no cover - import shim mirrors the rest of utils/
-    from . import git_utils as _git_utils
-    from . import known_checks as _known_checks
-    from . import landlock_dispatch as _landlock
-    from . import metrics as _metrics
-    from . import prompt_files as _prompt_files
-    from . import prior_changes as _prior_changes
-    from . import process_control as _process_control
-    from . import subagent_executor as _executor
-    from .text_clip import (
-        clip, join_clauses, plain_line, with_closing_mark, without_closing_mark,
-    )
-    from .providers.base import (
-        SANDBOX_RUNG_PLUGIN_LANDLOCK,
-        host_write_posture_consent,
-        WRITE_SCOPE_PLAN_FILE,
-        WRITE_SCOPE_REPO_WIDE,
-        SANDBOX_RUNG_PLUGIN_LANDLOCK,
-        WRITE_SCOPE_TASKS,
-        WRITE_SCOPES_ON_RUNG,
-        JailRequest,
-    )
-    from .provider_registry import (
-        get_max_concurrent_write_subagents,
-        get_provider_max_concurrent,
-        get_verify_command,
-        get_verify_settings,
-        load_config_snapshot,
-        parse_model_spec,
-    )
-    from .subagent_executor import (
-        OUTPUT_NAME_PATTERN_BY_KIND,
-        STATUS_BATCH_FAILED,
-        STATUS_OK,
-        STATUS_PARTIAL,
-        STATUS_POLICY_VIOLATION,
-        STATUS_REJECTED,
-        STATUS_SCHEMA_INVALID,
-        STATUS_UNPARSEABLE,
-        WRITE_APPLIED,
-        WRITE_CLEAN_FAILURE,
-        WRITE_NO_OP,
-        WRITE_PARTIAL,
-        WRITE_POLICY_VIOLATION,
-        WRITE_SCHEMA_REJECTED,
-        BatchReport,
-        ExecutorError,
-        ResultRejected,
-        RunnerRejected,
-        TaskOutcome,
-        _atomic_write_json,
-        _host_ceiling,
-        _host_env_guards,
-        dispatch_task,
-        persist_result,
-        preflight_runner,
-        profile_for_kind,
-        resolve_output_target,
-        resolve_task_runner,
-        row_outcome_label,
-        batch_check_could_not_run,
-        batch_check_findings,
-        batch_check_note,
-        batch_check_words,
-        CHECK_FINDING_MAX_CHARS,
-        check_findings_from,
-        check_record,
-        declined_items,
-        declined_record,
-        read_check_reply,
-        row_batch_check_accepted,
-        row_batch_check_findings,
-        row_batch_check_note,
-        row_batch_check_repeats,
-        row_check_findings,
-        row_declined,
-        validate_result,
-    )
-    from .subagent_tasks import (
-        PHASE_BY_WRITE_KIND,
-        PRIOR_CHANGES_TOKEN,
-        APPLY_WRITE_KINDS,
-        SHARED_ARTIFACT_WRITE_KINDS,
-        WRITE_KINDS,
-        declared_file_set,
-        snapshot_file_set,
-        write_output_name,
-    )
-    from .state_manager import (
-        IMPLEMENT_TASK_GRAPH_KEY,
-        PROCESSED_LEG_EXECUTOR,
-        manual_task_gates,
-        record_batch_items_in_state,
-        set_task_check_findings_in_state,
-    )
-    from .subagent_prompts import build_nothing_changed_resend_prompt
-    from .write_phase_bridge import WRITE_TASK_FILENAME
-    from .write_safety import (
-        CONTEXT_PLAN_RULE,
-        PRE_BATCH_DIRNAME,
-        policy_allow_clause,
-        policy_outside_note,
-        policy_skip_clause,
-        DRY_RUN_FILENAME,
-        MAX_SNAPSHOT_BYTES,
-        AuditLog,
-        PolicyViolation,
-        contain_under_root,
-        TaskSnapshot,
-        WritePolicy,
-        WriteSafetyError,
-        admit_disjoint_groups,
-        file_sha256,
-        overlapping_pairs,
-        relative_to_root,
-        resolve_repo_root,
-        claim_external_safety_dir,
-        safety_dir,
-    )
-except ImportError:  # pragma: no cover - direct-script import shim
-    from utils.text_clip import (  # type: ignore
-        clip, join_clauses, plain_line, with_closing_mark, without_closing_mark,
-    )
-    from utils import git_utils as _git_utils
-    from utils import known_checks as _known_checks
-    from utils import landlock_dispatch as _landlock
-    from utils import metrics as _metrics
-    from utils import prompt_files as _prompt_files
-    from utils import prior_changes as _prior_changes
-    from utils import process_control as _process_control
-    from utils import subagent_executor as _executor
-    from utils.providers.base import (
-        SANDBOX_RUNG_PLUGIN_LANDLOCK,
-        host_write_posture_consent,
-        WRITE_SCOPE_PLAN_FILE,
-        WRITE_SCOPE_REPO_WIDE,
-        SANDBOX_RUNG_PLUGIN_LANDLOCK,
-        WRITE_SCOPE_TASKS,
-        WRITE_SCOPES_ON_RUNG,
-        JailRequest,
-    )
-    from utils.provider_registry import (
-        get_max_concurrent_write_subagents,
-        get_provider_max_concurrent,
-        get_verify_command,
-        get_verify_settings,
-        load_config_snapshot,
-        parse_model_spec,
-    )
-    from utils.subagent_executor import (
-        OUTPUT_NAME_PATTERN_BY_KIND,
-        STATUS_BATCH_FAILED,
-        STATUS_OK,
-        STATUS_PARTIAL,
-        STATUS_POLICY_VIOLATION,
-        STATUS_REJECTED,
-        STATUS_SCHEMA_INVALID,
-        STATUS_UNPARSEABLE,
-        WRITE_APPLIED,
-        WRITE_CLEAN_FAILURE,
-        WRITE_NO_OP,
-        WRITE_PARTIAL,
-        WRITE_POLICY_VIOLATION,
-        WRITE_SCHEMA_REJECTED,
-        BatchReport,
-        ExecutorError,
-        ResultRejected,
-        RunnerRejected,
-        TaskOutcome,
-        _atomic_write_json,
-        _host_ceiling,
-        _host_env_guards,
-        dispatch_task,
-        persist_result,
-        preflight_runner,
-        profile_for_kind,
-        resolve_output_target,
-        resolve_task_runner,
-        row_outcome_label,
-        batch_check_could_not_run,
-        batch_check_findings,
-        batch_check_note,
-        batch_check_words,
-        CHECK_FINDING_MAX_CHARS,
-        check_findings_from,
-        check_record,
-        declined_items,
-        declined_record,
-        read_check_reply,
-        row_batch_check_accepted,
-        row_batch_check_findings,
-        row_batch_check_note,
-        row_batch_check_repeats,
-        row_check_findings,
-        row_declined,
-        validate_result,
-    )
-    from utils.subagent_tasks import (
-        PHASE_BY_WRITE_KIND,
-        PRIOR_CHANGES_TOKEN,
-        APPLY_WRITE_KINDS,
-        SHARED_ARTIFACT_WRITE_KINDS,
-        WRITE_KINDS,
-        declared_file_set,
-        snapshot_file_set,
-        write_output_name,
-    )
-    from utils.state_manager import (  # type: ignore
-        IMPLEMENT_TASK_GRAPH_KEY,
-        PROCESSED_LEG_EXECUTOR,
-        manual_task_gates,
-        record_batch_items_in_state,
-        set_task_check_findings_in_state,
-    )
-    from utils.subagent_prompts import build_nothing_changed_resend_prompt  # type: ignore
-    from utils.write_phase_bridge import WRITE_TASK_FILENAME
-    from utils.write_safety import (
-        CONTEXT_PLAN_RULE,
-        PRE_BATCH_DIRNAME,
-        policy_allow_clause,
-        policy_outside_note,
-        policy_skip_clause,
-        DRY_RUN_FILENAME,
-        MAX_SNAPSHOT_BYTES,
-        AuditLog,
-        PolicyViolation,
-        contain_under_root,
-        TaskSnapshot,
-        WritePolicy,
-        WriteSafetyError,
-        admit_disjoint_groups,
-        file_sha256,
-        overlapping_pairs,
-        relative_to_root,
-        resolve_repo_root,
-        claim_external_safety_dir,
-        safety_dir,
-    )
+from . import git_utils as _git_utils
+from . import known_checks as _known_checks
+from . import landlock_dispatch as _landlock
+from . import metrics as _metrics
+from . import prompt_files as _prompt_files
+from . import prior_changes as _prior_changes
+from . import process_control as _process_control
+from . import subagent_executor as _executor
+from .text_clip import (
+    clip, join_clauses, plain_line, with_closing_mark, without_closing_mark,
+)
+from .providers.base import (
+    SANDBOX_RUNG_PLUGIN_LANDLOCK,
+    host_write_posture_consent,
+    WRITE_SCOPE_PLAN_FILE,
+    WRITE_SCOPE_REPO_WIDE,
+    WRITE_SCOPE_TASKS,
+    WRITE_SCOPES_ON_RUNG,
+    JailRequest,
+)
+from .provider_registry import (
+    get_max_concurrent_write_subagents,
+    get_provider_max_concurrent,
+    get_verify_command,
+    get_verify_settings,
+    load_config_snapshot,
+    parse_model_spec,
+)
+from .subagent_executor import (
+    OUTPUT_NAME_PATTERN_BY_KIND,
+    STATUS_BATCH_FAILED,
+    STATUS_OK,
+    STATUS_PARTIAL,
+    STATUS_POLICY_VIOLATION,
+    STATUS_REJECTED,
+    STATUS_SCHEMA_INVALID,
+    STATUS_UNPARSEABLE,
+    WRITE_APPLIED,
+    WRITE_CLEAN_FAILURE,
+    WRITE_NO_OP,
+    WRITE_PARTIAL,
+    WRITE_POLICY_VIOLATION,
+    WRITE_SCHEMA_REJECTED,
+    BatchReport,
+    ExecutorError,
+    ResultRejected,
+    RunnerRejected,
+    TaskOutcome,
+    _atomic_write_json,
+    _host_ceiling,
+    _host_env_guards,
+    dispatch_task,
+    persist_result,
+    preflight_runner,
+    profile_for_kind,
+    resolve_output_target,
+    resolve_task_runner,
+    row_outcome_label,
+    batch_check_could_not_run,
+    batch_check_findings,
+    batch_check_note,
+    batch_check_words,
+    CHECK_FINDING_MAX_CHARS,
+    check_findings_from,
+    check_record,
+    declined_items,
+    declined_record,
+    read_check_reply,
+    row_batch_check_accepted,
+    row_batch_check_findings,
+    row_batch_check_note,
+    row_batch_check_repeats,
+    row_check_findings,
+    row_declined,
+    validate_result,
+)
+from .subagent_tasks import (
+    PHASE_BY_WRITE_KIND,
+    PRIOR_CHANGES_TOKEN,
+    APPLY_WRITE_KINDS,
+    SHARED_ARTIFACT_WRITE_KINDS,
+    WRITE_KINDS,
+    declared_file_set,
+    snapshot_file_set,
+    write_output_name,
+)
+from .state_manager import (
+    IMPLEMENT_TASK_GRAPH_KEY,
+    PROCESSED_LEG_EXECUTOR,
+    manual_task_gates,
+    record_batch_items_in_state,
+    set_task_check_findings_in_state,
+)
+from .subagent_prompts import build_nothing_changed_resend_prompt
+from .write_phase_bridge import WRITE_TASK_FILENAME
+from .write_safety import (
+    CONTEXT_PLAN_RULE,
+    PRE_BATCH_DIRNAME,
+    policy_allow_clause,
+    policy_outside_note,
+    policy_skip_clause,
+    DRY_RUN_FILENAME,
+    MAX_SNAPSHOT_BYTES,
+    AuditLog,
+    PolicyViolation,
+    contain_under_root,
+    TaskSnapshot,
+    WritePolicy,
+    WriteSafetyError,
+    admit_disjoint_groups,
+    file_sha256,
+    overlapping_pairs,
+    relative_to_root,
+    resolve_repo_root,
+    claim_external_safety_dir,
+    safety_dir,
+)
 
 
 __all__ = [
@@ -410,7 +289,8 @@ WRITE_FINGERPRINT_FILENAME = ".write_task_inputs.json"
 SWEEP_PRUNED_DIR_NAMES = (".git", ".hg", ".svn")
 
 #: Above this many regular files the sweep is abandoned rather than run: it
-#: walks the tree twice per dispatch, and a control that silently doubles a
+#: walks the tree twice per dispatch (three times when a reply says
+#: ``applied`` and no declared file moved), and a control that silently doubles a
 #: phase's wall clock is a control that gets switched off. The degradation is
 #: announced once per run, never silent.
 SWEEP_MAX_FILES = 60000
@@ -480,10 +360,7 @@ def commit_guard_of(state: Any, kind: Optional[str] = None) -> Optional[Dict[str
         "commit_range" in state or "head_ref" in state
     ):
         return None
-    try:
-        from .commit_range import pinned_record
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.commit_range import pinned_record  # type: ignore
+    from .commit_range import pinned_record
     record = pinned_record(state)
     guard = record.get("guard") if isinstance(record, Mapping) else None
     return guard if isinstance(guard, dict) and guard else None
@@ -491,10 +368,7 @@ def commit_guard_of(state: Any, kind: Optional[str] = None) -> Optional[Dict[str
 
 def load_commit_apply() -> Any:
     """``utils.commit_apply``, imported only once a guard exists."""
-    try:
-        from . import commit_apply
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils import commit_apply  # type: ignore
+    from . import commit_apply
     return commit_apply
 
 
@@ -532,10 +406,7 @@ def batch_fixes_for(
     from another run is never read as this one's)."""
     if not batches:
         return None
-    try:
-        from .code_fix_batcher import fix_member_ids
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.code_fix_batcher import fix_member_ids  # type: ignore
+    from .code_fix_batcher import fix_member_ids
     expected = [str(item) for item in task.get("expected_ids") or []]
     index = task.get("batch_index")
     ordered = list(batches)
@@ -577,10 +448,7 @@ def commit_group_files(
             declared.append(name)
     named: Dict[str, List[str]] = {}
     if fixes:
-        try:
-            from .code_fix_batcher import fix_member_ids
-        except ImportError:  # pragma: no cover - direct-script import shim
-            from utils.code_fix_batcher import fix_member_ids  # type: ignore
+        from .code_fix_batcher import fix_member_ids
         for member_id, fix in zip(fix_member_ids([dict(f) for f in fixes]), fixes):
             listed = fix.get("files")
             if not isinstance(listed, (list, tuple)):
@@ -975,10 +843,7 @@ def fit_stop_headline(
     Under *last_resort* the head is cut, and when even the bare remedy, the
     answers and the tests line do not fit, everything before *tail* is.
     """
-    try:
-        from .cli_common import ERROR_MAX_CHARS, plain_line
-    except ImportError:  # pragma: no cover - direct script invocation
-        from utils.cli_common import ERROR_MAX_CHARS, plain_line  # type: ignore
+    from .cli_common import ERROR_MAX_CHARS, plain_line
     limit = ERROR_MAX_CHARS if budget is None else int(budget)
     head = plain_line(head)
     quote = plain_line(reported) if reported else ""
@@ -1643,10 +1508,7 @@ def unlanded_on_record(phase_dir: str, state: Any) -> List[str]:
     (``subagent_tasks.implement_output_name``) carries that verdict. A
     check task (``verification_only``) is never one. Read-only, never fatal.
     """
-    try:
-        from .subagent_tasks import implement_output_name
-    except ImportError:  # pragma: no cover - direct script runs
-        from utils.subagent_tasks import implement_output_name  # type: ignore
+    from .subagent_tasks import implement_output_name
     try:
         statuses = dict(state.get("task_status") or {})
     except Exception:  # noqa: BLE001 - a read for the resume
@@ -2302,16 +2164,10 @@ def move_check_repeats_in_state(
     own text both legs keep beside its failing own check
     (``task_own_text``); one with none on record (recorded before round 29)
     is left as it is, never judged from its title alone."""
-    try:
-        from .state_manager import (
-            TASK_OWN_TEXT_KEY,
-            set_task_batch_check_in_state, set_task_batch_check_repeats_in_state,
-        )
-    except ImportError:  # pragma: no cover - direct script runs
-        from utils.state_manager import (  # type: ignore
-            TASK_OWN_TEXT_KEY,
-            set_task_batch_check_in_state, set_task_batch_check_repeats_in_state,
-        )
+    from .state_manager import (
+        TASK_OWN_TEXT_KEY,
+        set_task_batch_check_in_state, set_task_batch_check_repeats_in_state,
+    )
     recorded = state.get("task_batch_check")
     if not isinstance(recorded, dict) or not recorded:
         return {}
@@ -2790,10 +2646,7 @@ def compose_resume_why(
     # reads back from the run's folder (`next_phase.recorded_why`), cut at a
     # word, so the tool routes and status carry the why the native block
     # prints instead of falling back on a large stop.
-    try:
-        from .next_phase import MAX_RECORDED_WHY_CHARS
-    except ImportError:  # pragma: no cover - direct script runs
-        from utils.next_phase import MAX_RECORDED_WHY_CHARS  # type: ignore
+    from .next_phase import MAX_RECORDED_WHY_CHARS
     return clip(f"runs the {unit} that can run; " + "; ".join(parts),
                 MAX_RECORDED_WHY_CHARS - len(tail)) + tail
 
@@ -2909,10 +2762,7 @@ def compose_stop_answers(
     # Fix round 23: each why within the length the tool routes read back
     # from the run's folder (`next_phase.stop_answers_on_record`), cut at a
     # word, so a large stop's answers are not dropped on the way.
-    try:
-        from .next_phase import MAX_RECORDED_WHY_CHARS
-    except ImportError:  # pragma: no cover - direct script runs
-        from utils.next_phase import MAX_RECORDED_WHY_CHARS  # type: ignore
+    from .next_phase import MAX_RECORDED_WHY_CHARS
     rest = "; the rest runs"
     answers: List[Dict[str, Any]] = []
     if len(clauses) > 1:
@@ -3063,10 +2913,7 @@ def executor_check_stamp(
     (``implement_orchestrator._executor_check_stamp``) and the native why
     (:func:`check_kept_on_resume`).
     """
-    try:
-        from .subagent_tasks import implement_output_name
-    except ImportError:  # pragma: no cover - direct script runs
-        from utils.subagent_tasks import implement_output_name  # type: ignore
+    from .subagent_tasks import implement_output_name
     if not isinstance(findings, list) or not findings:
         return None
     path = Path(phase_dir) / implement_output_name(check_id)
@@ -3094,10 +2941,7 @@ def check_kept_on_resume(
     stamp on record, else, with *phase_dir*, the executor's verdict stamp
     (:func:`executor_check_stamp`). With neither, the check runs again, and
     the resume's why says so (fix round 23)."""
-    try:
-        from .state_manager import TASK_CHECK_TREES_KEY
-    except ImportError:  # pragma: no cover - direct script runs
-        from utils.state_manager import TASK_CHECK_TREES_KEY  # type: ignore
+    from .state_manager import TASK_CHECK_TREES_KEY
     try:
         stamps = state.get(TASK_CHECK_TREES_KEY)
         findings = (state.get("task_check_findings") or {})
@@ -3362,22 +3206,13 @@ def implement_checks_ran(
     ``repeated the findings of T002 in T001``."""
     if not hasattr(state, "get"):
         return None
-    try:
-        from .state_manager import (
-            TASK_BATCH_CHECK_ACCEPTED_KEY,
-            TASK_BATCH_CHECK_KEY,
-            TASK_BATCH_CHECK_REPEATS_KEY,
-            TASK_CHECK_FINDINGS_KEY,
-            TASK_OWN_CHECK_RAN_KEY,
-        )
-    except ImportError:  # pragma: no cover - direct script invocation
-        from utils.state_manager import (  # type: ignore
-            TASK_BATCH_CHECK_ACCEPTED_KEY,
-            TASK_BATCH_CHECK_KEY,
-            TASK_BATCH_CHECK_REPEATS_KEY,
-            TASK_CHECK_FINDINGS_KEY,
-            TASK_OWN_CHECK_RAN_KEY,
-        )
+    from .state_manager import (
+        TASK_BATCH_CHECK_ACCEPTED_KEY,
+        TASK_BATCH_CHECK_KEY,
+        TASK_BATCH_CHECK_REPEATS_KEY,
+        TASK_CHECK_FINDINGS_KEY,
+        TASK_OWN_CHECK_RAN_KEY,
+    )
 
     def mapping(key: str) -> Dict[str, Any]:
         value = state.get(key)
@@ -3482,10 +3317,7 @@ def native_stop_unverified_line(plan_path: Union[str, Path]) -> Optional[str]:
     """
     try:
         plan = Path(plan_path).resolve()
-        try:
-            from .output_handler import output_dir_path
-        except ImportError:  # pragma: no cover - direct script invocation
-            from utils.output_handler import output_dir_path  # type: ignore
+        from .output_handler import output_dir_path
         state = json.loads((output_dir_path(plan) / "state.json").read_text(encoding="utf-8"))
         if not isinstance(state, dict):
             return None
@@ -3533,10 +3365,7 @@ def native_apply_fixes_unverified_line(plan_path: Union[str, Path]) -> Optional[
     """
     try:
         plan = Path(plan_path).resolve()
-        try:
-            from .output_handler import output_dir_path
-        except ImportError:  # pragma: no cover - direct script invocation
-            from utils.output_handler import output_dir_path  # type: ignore
+        from .output_handler import output_dir_path
         out = output_dir_path(plan)
         if get_verify_command(anchor=str(plan)):
             return None
@@ -3571,12 +3400,8 @@ def _check_task_ids_of_plan(plan: Path) -> set:
     (check tasks), parsed as implement parses it; empty when it cannot be read,
     which counts every completed task as code — the conservative reading."""
     try:
-        try:
-            from .task_decomposer import TaskDecomposer
-            from .tasks_file import read_task_list
-        except ImportError:  # pragma: no cover - direct script invocation
-            from utils.task_decomposer import TaskDecomposer  # type: ignore
-            from utils.tasks_file import read_task_list  # type: ignore
+        from .task_decomposer import TaskDecomposer
+        from .tasks_file import read_task_list
         tasks = TaskDecomposer().parse_plan(read_task_list(plan).text)
     except Exception:  # noqa: BLE001 - conservative: no check known
         return set()
@@ -3612,26 +3437,9 @@ def verification_line(result: Any) -> str:
 
 
 def _redacted_text(text: str) -> str:
-    """``write_safety.redact_text``, through the module's usual import shim."""
-    try:
-        from .write_safety import redact_text
-    except ImportError:  # pragma: no cover
-        from utils.write_safety import redact_text
+    """``write_safety.redact_text``, imported on first use."""
+    from .write_safety import redact_text
     return redact_text(text)
-
-
-def _under_any(path: str, roots: Sequence[str]) -> bool:
-    """Whether ``path`` is one of ``roots`` or sits beneath one of them.
-
-    Separator-aware rather than a bare ``startswith``, which would also swallow
-    a sibling whose name merely shares a prefix (``plans-old/`` under
-    ``plans/``).
-    """
-    candidate = os.path.abspath(path)
-    for root in roots:
-        if candidate == root or candidate.startswith(root + os.sep):
-            return True
-    return False
 
 
 def resolve_human_task_plan(
@@ -4343,10 +4151,7 @@ def dispatched_prompt_path(
 
 def _scope_apply():
     """:mod:`utils.scope_apply`, imported on first use (a light module)."""
-    try:
-        from . import scope_apply
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils import scope_apply  # type: ignore
+    from . import scope_apply
     return scope_apply
 
 
@@ -4697,6 +4502,13 @@ def dispatch_line(
             if waiting else ""
         )
     )
+
+
+#: The label of the summary-path line an ending of a run prints
+#: (:meth:`WriteBatchScheduler._end_run`): a stop's summary is partial, a
+#: manual gate's covers the run.
+PARTIAL_SUMMARY_LINE = "Partial implementation summary"
+FULL_SUMMARY_LINE = "Implementation summary"
 
 
 class WriteBatchScheduler:
@@ -5075,6 +4887,18 @@ class WriteBatchScheduler:
         #: Each one's rule (``write_safety.PolicyHit``), which its way forward
         #: is worded from (fix round 21: a deny hit names the deny rule).
         self._refused_policy_hits: Dict[str, List[Any]] = {}
+        #: ``task id -> the known check commands its prompt listed``
+        #: (:meth:`_known_checks_section`), which its reply's ``listed`` is
+        #: read against, and what that reading gave (``_listed_outcomes``).
+        self._told_checks: Dict[str, List[str]] = {}
+        self._listed_outcomes: Dict[str, Any] = {}
+        #: ``task id -> its outcomes so far`` (:meth:`_remember_outcome`).
+        self._recorded_outcomes: Dict[str, List[TaskOutcome]] = {}
+        #: The ``(task id, leftover entry)`` pairs already warned about
+        #: (:meth:`_warn_prompt_keep`).
+        self._prompt_keep_warnings: Set[Tuple[str, Optional[str]]] = set()
+        #: Whether this run stamped implement's start (:meth:`_mark_implement_started`).
+        self._implement_started_marked = False
 
     # -- the write grant (plan step 3, 2026-09-30) ----------------------
 
@@ -5582,11 +5406,10 @@ class WriteBatchScheduler:
         state as it is at dispatch, as ``util write-prompt`` reads it.
         """
         accepted: List[Tuple[str, str, List[str]]] = []
-        state = getattr(self, "state", None)
+        state = self.state
         if self.kind == "implement" and state is not None:
             accepted = accepted_upstream_checks(
-                getattr(self, "tasks", None) or [], str(task.get("task_id") or ""),
-                state,
+                self.tasks, str(task.get("task_id") or ""), state,
             )
         return bind_prior_changes(
             task, output_dir=self.output_dir, phase=self.phase,
@@ -5602,7 +5425,7 @@ class WriteBatchScheduler:
         if self.scope_policy is not None:
             policy, baseline = self.scope_policy, self.scope_baseline_id
         else:
-            state = getattr(getattr(self, "state", None), "state", None)
+            state = getattr(self.state, "state", None)
             if not isinstance(state, dict):
                 state = _state_on_disk(self.output_dir)
             policy, baseline = scope.effective_from_state(
@@ -5621,10 +5444,9 @@ class WriteBatchScheduler:
         (:func:`known_checks.known_check_commands`), read now from the state
         this run holds (else the plan dir's ``state.json``), as ``util
         write-prompt`` reads them on the native leg. Never run here."""
-        state = getattr(self, "state", None)
         return _known_checks.known_check_commands(
-            self.output_dir, plan_file=getattr(self, "plan_file", None),
-            repo_root=getattr(self, "repo_root", None), state=state,
+            self.output_dir, plan_file=self.plan_file,
+            repo_root=self.repo_root, state=self.state,
         )
 
     def _known_checks_report(
@@ -5637,11 +5459,11 @@ class WriteBatchScheduler:
         if self.kind != "apply_code_fixes":
             return None
         try:
-            state = getattr(self, "state", None)
+            state = self.state
             if state is None:
                 state = _known_checks.read_state(self.output_dir)
             return _known_checks.checks_report(
-                self._known_checks(), state, getattr(self, "tasks", None) or [],
+                self._known_checks(), state, self.tasks,
                 **({} if max_chars is None else {"max_chars": max_chars}),
             )
         except Exception:  # noqa: BLE001 - advisory
@@ -5667,19 +5489,17 @@ class WriteBatchScheduler:
         check tasks read off this run's tasks and the plan's task list (a
         resume's batches leave out the tasks an earlier run finished)."""
         try:
-            holder = getattr(self, "state", None)
-            state = getattr(holder, "state", None) if holder is not None else None
+            state = getattr(self.state, "state", None)
             if not isinstance(state, dict):
                 state = _known_checks.read_state(self.output_dir)
             checks = {
                 str(task.get("task_id") or "")
-                for task in (getattr(self, "tasks", None) or [])
+                for task in self.tasks
                 if isinstance(task, dict) and not declared_file_set(task)
                 and task.get("executor_role") != "human" and not task.get("is_human")
             }
-            plan_file = getattr(self, "plan_file", None)
-            if plan_file:
-                checks |= _check_task_ids_of_plan(Path(plan_file))
+            if self.plan_file:
+                checks |= _check_task_ids_of_plan(Path(self.plan_file))
             return implement_checks_ran(state, checks)
         except Exception:  # noqa: BLE001 - advisory: the line still stands
             return None
@@ -5695,17 +5515,14 @@ class WriteBatchScheduler:
         task_id = str(task.get("task_id") or "")
         try:
             checks = self._known_checks()
-            state = getattr(self, "state", None)
+            state = self.state
             earlier = _known_checks.earlier_batch_check_failures(
                 state if state is not None else _known_checks.read_state(self.output_dir),
-                getattr(self, "tasks", None) or [], task_id,
+                self.tasks, task_id,
             )
         except Exception:  # noqa: BLE001 - advisory: the batch is still dispatched
             checks, earlier = [], []
-        told = getattr(self, "_told_checks", None)
-        if told is None:
-            told = self._told_checks = {}
-        told[task_id] = [command for command, _where in checks]
+        self._told_checks[task_id] = [command for command, _where in checks]
         return _known_checks.known_checks_section(checks, earlier)
 
     def _pinned_phase_dir(self) -> "_prompt_files.PhasePin":
@@ -5713,9 +5530,8 @@ class WriteBatchScheduler:
         ``realpath`` inside the repository root and its identity, taken once
         — at construction, or on the first prompt kept when the phase dir did
         not exist yet. Raises ``OSError`` naming why it cannot be pinned."""
-        lock = getattr(self, "_prompt_pin_lock", None) or threading.Lock()
-        with lock:
-            pin = getattr(self, "_prompt_pin", None)
+        with self._prompt_pin_lock:
+            pin = self._prompt_pin
             if pin is None:
                 pin = _prompt_files.pin_phase_dir(self.phase_dir, self.repo_root)
                 self._prompt_pin = pin
@@ -5806,12 +5622,9 @@ class WriteBatchScheduler:
         """Log ``line`` once per task (and per leftover ``entry`` it names):
         a retried dispatch that meets the same problem says nothing new,
         another task always does."""
-        warned = getattr(self, "_prompt_keep_warnings", None)
-        if warned is None:
-            warned = self._prompt_keep_warnings = set()
-        if (task_id, entry) in warned:
+        if (task_id, entry) in self._prompt_keep_warnings:
             return
-        warned.add((task_id, entry))
+        self._prompt_keep_warnings.add((task_id, entry))
         self.log(line)
 
     # -- the loop -------------------------------------------------------
@@ -6199,12 +6012,12 @@ class WriteBatchScheduler:
             # human" condition, and dispatching around it would run code tasks
             # against unmet preconditions.
             result.exit_code = EXIT_NEEDS_HUMAN
-            # Fix round 16: a stop says nothing ran the tests too.
-            result.messages.extend(self._note_unverified_on_stop(result))
-            result.messages.extend(self._pending_human_message(result.human_plan))
-            result.report_path = self._write_report(result)
-            self._mirror_status(result)
-            return result
+            # Fix round 16: a stop says nothing ran the tests too. No
+            # `[ETA]` baseline exists yet, so there is nothing to close.
+            return self._end_run(
+                result, lambda: self._pending_human_message(result.human_plan),
+                close_eta=False, check_lines=False,
+            )
 
         # What this run will dispatch, counted as the loop below decides it
         # (fix round 18, run 7 #3): the orchestrator's line counted every
@@ -6273,28 +6086,16 @@ class WriteBatchScheduler:
                 result.stopped_at_batch = batch_index
                 result.exit_code = int(exc.exit_code or EXIT_NEEDS_HUMAN)
                 self._record_stop(result, batch_index, [], refusal=exc.message)
-                self._eta_close(result)
-                result.messages.extend(
-                    self._check_findings_lines(result, stopped=True)
+                # The partial summary only when an earlier batch really
+                # applied something: it is that run's account (D3n), and an
+                # empty one for a refusal on the first dispatch would claim a
+                # run that never started.
+                self._end_run(
+                    result,
+                    lambda: self._refusal_message(exc, batch_index, result),
+                    stopped=True,
+                    summary=PARTIAL_SUMMARY_LINE if result.outcomes else None,
                 )
-                # Fix round 15: and the batches whose own check failed.
-                result.messages.extend(self._batch_check_lines(result))
-                # Fix round 16: and that nothing ran the repository's tests.
-                result.messages.extend(self._note_unverified_on_stop(result))
-                result.messages.extend(
-                    self._refusal_message(exc, batch_index, result)
-                )
-                if self.summary_file and result.outcomes:
-                    # Only when an earlier batch really applied something: the
-                    # partial summary is that run's account (D3n), and an empty
-                    # one for a refusal on the first dispatch would claim a run
-                    # that never started.
-                    result.summary_file = self._write_summary(result)
-                    result.messages.append(
-                        f"Partial implementation summary: {result.summary_file}"
-                    )
-                result.report_path = self._write_report(result)
-                self._mirror_status(result)
                 self._record_refusal(exc, batch_index)
                 return result
             result.outcomes.extend(outcomes)
@@ -6307,7 +6108,7 @@ class WriteBatchScheduler:
             self._mirror_status(result)
             # plans/review-commits.md §2.7: a batch the commit re-check
             # stopped was never dispatched and the loop goes on past it.
-            stale = getattr(self, "_commit_stale", None) or {}
+            stale = self._commit_stale
             stopping = [o for o in outcomes if o.task_id not in stale]
             if any(o.stops_the_loop for o in stopping) or any(
                 not o.ok for o in stopping
@@ -6317,43 +6118,17 @@ class WriteBatchScheduler:
                 self._record_stop(
                     result, batch_index, [o for o in stopping if not o.ok],
                 )
-                # Fix round 20: a stop short of the total says so on the
-                # `[ETA]` lines, rather than leaving "~0m 37s remaining"; fix
-                # round 21: every stop closes them, one at N/N too.
-                self._eta_close(result)
-                stop_lines = self._stop_message(batch_index, outcomes, result)
-                # Fix round 16 (run 6, stop 01): set before the summary is
-                # written, so its Verification line says it too.
-                unverified_lines = self._note_unverified_on_stop(result)
                 # The partial summary is the cancellation's own record (D3n,
                 # instructions/implement.md): `_finalize` never runs on this
-                # path, so without this write the `## Cancelled` section would be
+                # path, so without it the `## Cancelled` section would be
                 # unreachable and `--resume` would have no account of what the
                 # stopped run applied. The phase is still NOT completed and the
-                # plan-side reference is still NOT inserted — only the summary is
-                # written.
-                if self.summary_file:
-                    result.summary_file = self._write_summary(result)
-                # A stop is a way the run ends too, so a check that reported
-                # problems is named on its `[CHECK_FINDINGS]` line here as at
-                # the end of a run (fix round 14: the stop fixture's first run
-                # stopped on T005 and its log named T002's findings only in
-                # the stop's own wording).
-                result.messages.extend(
-                    self._check_findings_lines(result, stopped=True)
+                # plan-side reference is still NOT inserted.
+                return self._end_run(
+                    result,
+                    lambda: self._stop_message(batch_index, outcomes, result),
+                    stopped=True, summary=PARTIAL_SUMMARY_LINE,
                 )
-                # Fix round 15 (review of round 14): the batches whose own
-                # check failed are named on a stop too, not only at the end.
-                result.messages.extend(self._batch_check_lines(result))
-                result.messages.extend(unverified_lines)
-                result.messages.extend(stop_lines)
-                if result.summary_file:
-                    result.messages.append(
-                        f"Partial implementation summary: {result.summary_file}"
-                    )
-                result.report_path = self._write_report(result)
-                self._mirror_status(result)
-                return result
 
         # 4. The tasks a check with findings kept from running: the phase is
         # not complete while they are unrun, so it ends needing a human, the
@@ -6362,24 +6137,10 @@ class WriteBatchScheduler:
         if result.blocked_by_check:
             result.exit_code = EXIT_NEEDS_HUMAN
             self._record_check_block(result)
-            # Fix round 21 (review of round 20, #1): this ending closes the
-            # `[ETA]` lines too, naming what the checks held; a check that
-            # held the last tasks left "batch 3/5 … remaining" standing.
-            self._eta_close(result)
-            unverified_lines = self._note_unverified_on_stop(result)
-            if self.summary_file:
-                result.summary_file = self._write_summary(result)
-            result.messages.extend(self._check_findings_lines(result))
-            result.messages.extend(self._batch_check_lines(result))
-            result.messages.extend(unverified_lines)
-            result.messages.extend(self._check_block_message(result))
-            if result.summary_file:
-                result.messages.append(
-                    f"Partial implementation summary: {result.summary_file}"
-                )
-            result.report_path = self._write_report(result)
-            self._mirror_status(result)
-            return result
+            return self._end_run(
+                result, lambda: self._check_block_message(result),
+                summary=PARTIAL_SUMMARY_LINE,
+            )
 
         # 4b. Fix round 28 (live run 12, Codex racing 06): a run that
         # dispatched nothing because every code task left waits on a manual
@@ -6390,10 +6151,56 @@ class WriteBatchScheduler:
             return self._stop_on_manual_gate(result, gates)
 
         # 5. Finalization is part of the contract, not the caller's courtesy.
+        # It closes the `[ETA]` lines ("phase complete"), runs the
+        # verification and writes the summary itself.
         if self.finalize:
             self._finalize(result)
-        result.messages.extend(self._check_findings_lines(result))
-        result.messages.extend(self._batch_check_lines(result))
+        return self._end_run(result, close_eta=False, unverified=False)
+
+    def _end_run(
+        self,
+        result: SchedulerResult,
+        ending: Optional[Callable[[], List[str]]] = None,
+        *,
+        close_eta: bool = True,
+        eta_why: str = "",
+        unverified: bool = True,
+        check_lines: bool = True,
+        stopped: bool = False,
+        summary: Optional[str] = None,
+    ) -> SchedulerResult:
+        """End :meth:`_run` with a report, in the one order every ending keeps.
+
+        1. The ``[ETA]`` lines close (*close_eta*, with *eta_why*): every
+           ending short of completion says so, rather than leaving
+           "~0m 37s remaining" standing.
+        2. The "nothing ran the tests" note (*unverified*,
+           :meth:`_note_unverified_on_stop`) is set before the summary is
+           written, so the summary's Verification line and the stop's
+           headline say it too.
+        3. The summary, when the ending names one: *summary* is the label of
+           its line, and only a plan with a summary file gets one.
+        4. The messages, in order: the ``[CHECK_FINDINGS]`` and batch-check
+           lines (*check_lines*, *stopped*; read after the summary, which
+           they point at), the note, the ending's own lines (*ending*), the
+           summary's path.
+        5. The report and the status mirror.
+
+        A dry run never reaches here: its record is ``subagent_dry_run.json``.
+        """
+        if close_eta:
+            self._eta_close(result, why=eta_why)
+        unverified_lines = self._note_unverified_on_stop(result) if unverified else []
+        if summary and self.summary_file:
+            result.summary_file = self._write_summary(result)
+        if check_lines:
+            result.messages.extend(self._check_findings_lines(result, stopped=stopped))
+            result.messages.extend(self._batch_check_lines(result))
+        result.messages.extend(unverified_lines)
+        if ending is not None:
+            result.messages.extend(ending())
+        if summary and result.summary_file:
+            result.messages.append(f"{summary}: {result.summary_file}")
         result.report_path = self._write_report(result)
         self._mirror_status(result)
         return result
@@ -6839,7 +6646,7 @@ class WriteBatchScheduler:
                         for task in group
                     ]
                     outcomes.extend(future.result() for future in futures)
-            stale = getattr(self, "_commit_stale", None) or {}
+            stale = self._commit_stale
             if any(
                 (o.stops_the_loop or not o.ok) and o.task_id not in stale
                 for o in outcomes
@@ -6872,16 +6679,12 @@ class WriteBatchScheduler:
             elif rerun is False:
                 kept_findings = True
         if evidence is not None:
-            output_path, recorded_id = evidence
+            output_path, _recorded_id, recorded = evidence
             self.log(f"[write-subagents] {task_id} already complete — skipping")
             data = json.loads(Path(output_path).read_text(encoding="utf-8"))
             verdict = data.get("verdict")
             if not isinstance(verdict, dict):
                 verdict = {}
-            recorded = self.audit.completion_for(
-                recorded_id,
-                expected_ids=[str(i) for i in (task.get("expected_ids") or [])],
-            ) or {}
             outcome = TaskOutcome(
                 task_id=task_id, kind=self.kind, runner=self.invoker,
                 status=STATUS_OK, profile=profile, skipped=True,
@@ -6990,17 +6793,12 @@ class WriteBatchScheduler:
         # metadata.
         scope_refusal = self._scope_refusal(task)
         if scope_refusal is not None:
-            return self._refuse_before_dispatch(task, TaskOutcome(
-                task_id=task_id, kind=self.kind, runner=self.invoker,
-                status=STATUS_REJECTED, profile=profile, reason=scope_refusal,
-            ), batch_index, result)
+            return self._refused(task, scope_refusal, batch_index, result)
         try:
             prompt = self._with_result_contract(task, self.dispatched_prompt(task))
         except ResultRejected as exc:
-            return self._refuse_before_dispatch(task, TaskOutcome(
-                task_id=task_id, kind=self.kind, runner=self.invoker,
-                status=exc.status, profile=profile, reason=exc.message,
-            ), batch_index, result)
+            return self._refused(
+                task, exc.message, batch_index, result, status=exc.status)
         self._retire_foreign_result(task)
 
         # plans/review-commits.md §2.7, "Every batch is re-checked immediately
@@ -7031,30 +6829,23 @@ class WriteBatchScheduler:
         except PolicyViolation as exc:
             self._refused_policy_paths[task_id] = list(exc.paths)
             self._refused_policy_hits[task_id] = list(exc.hits)
-            return self._refuse_before_dispatch(task, TaskOutcome(
-                task_id=task_id, kind=self.kind, runner=self.invoker,
-                status=STATUS_REJECTED, profile=profile, reason=exc.message,
+            return self._refused(
+                task, exc.message, batch_index, result,
                 write_outcome=WRITE_POLICY_VIOLATION,
-            ), batch_index, result)
+            )
         # Plan step 3 (2026-09-30), beside the D3l check and before the
         # snapshot for the same reason: under `plan-file`/`tasks` the declared
         # set must be exactly the phase's write target, on every rung, or the
         # batch is refused with nothing snapshotted and nothing spawned.
         mismatch = self._grant_mismatch(task)
         if mismatch is not None:
-            return self._refuse_before_dispatch(task, TaskOutcome(
-                task_id=task_id, kind=self.kind, runner=self.invoker,
-                status=STATUS_REJECTED, profile=profile, reason=mismatch,
-            ), batch_index, result)
+            return self._refused(task, mismatch, batch_index, result)
 
         try:
             self._decide_rollback_storage(task, profile)
             snapshot = self._snapshot(task)
         except WriteSafetyError as exc:
-            return self._refuse_before_dispatch(task, TaskOutcome(
-                task_id=task_id, kind=self.kind, runner=self.invoker,
-                status=STATUS_REJECTED, profile=profile, reason=exc.message,
-            ), batch_index, result)
+            return self._refused(task, exc.message, batch_index, result)
         # The replaced-target check's "before": taken at THIS dispatch's
         # pre-batch snapshot (reused or fresh), so the identity compared after
         # the child is always the one this spawn saw (§8.3 item 14).
@@ -7075,10 +6866,7 @@ class WriteBatchScheduler:
             # refusal, with nothing spawned (W1, adversarial review 2026-10-02).
             self._target_identity_before.pop(task_id, None)
             self._commit_watch_before.pop(task_id, None)
-            return self._refuse_before_dispatch(task, TaskOutcome(
-                task_id=task_id, kind=self.kind, runner=self.invoker,
-                status=STATUS_REJECTED, profile=profile, reason=exc.message,
-            ), batch_index, result)
+            return self._refused(task, exc.message, batch_index, result)
         started = time.time()
         self._git_meta_before[task_id] = self._git_metadata_fingerprint()
         try:
@@ -7205,7 +6993,7 @@ class WriteBatchScheduler:
         leaves the right one standing), and the mirror's other rows are the
         earlier run's, untouched: this run dispatched nothing.
         """
-        refused = dict(getattr(self, "_refused_skips", {}) or {})
+        refused = dict(self._refused_skips)
         earlier = self._mirror_snapshot()
         before = earlier.get("stop") if isinstance(earlier.get("stop"), dict) else {}
         refused_flags = {f"{task_id}=skip" for task_id in refused}
@@ -7236,10 +7024,7 @@ class WriteBatchScheduler:
             # No earlier run left a mirror to patch: this run's own.
             self._mirror_status(result)
             return
-        try:
-            from . import status_file as _status_file
-        except ImportError:  # pragma: no cover
-            from utils import status_file as _status_file
+        from . import status_file as _status_file
         try:
             # The phase-level `state` stays the earlier run's: this run
             # changed nothing a status reader would count.
@@ -7413,6 +7198,19 @@ class WriteBatchScheduler:
         )
         return outcome
 
+    def _refused(
+        self, task: Dict[str, Any], reason: str, batch_index: int,
+        result: SchedulerResult, *, status: str = STATUS_REJECTED,
+        write_outcome: Optional[str] = None,
+    ) -> TaskOutcome:
+        """:meth:`_refuse_before_dispatch` for a refusal worded *reason*:
+        the outcome no runner produced, in this phase's kind and profile."""
+        return self._refuse_before_dispatch(task, TaskOutcome(
+            task_id=str(task.get("task_id", "")), kind=self.kind,
+            runner=self.invoker, status=status, profile=profile_for_kind(self.kind),
+            reason=reason, write_outcome=write_outcome,
+        ), batch_index, result)
+
     def _refuse_before_dispatch(
         self, task: Dict[str, Any], outcome: TaskOutcome, batch_index: int,
         result: SchedulerResult,
@@ -7441,10 +7239,7 @@ class WriteBatchScheduler:
     def _commit_guard(self) -> Optional[Dict[str, Any]]:
         """The live apply guard of the state this run holds, or ``None`` (no
         pinned record with a guard, or not an apply-code-fixes phase)."""
-        return commit_guard_of(
-            getattr(getattr(self, "state", None), "state", None),
-            getattr(self, "kind", None),
-        )
+        return commit_guard_of(getattr(self.state, "state", None), self.kind)
 
     def _commit_protect(self, guard: Optional[Mapping[str, Any]]) -> None:
         """Add the guard's protected set to :attr:`policy` as its exact-path
@@ -7548,7 +7343,7 @@ class WriteBatchScheduler:
         """``{group id: [fix files]}`` for *task* (:func:`commit_group_files`
         over its batch's fixes in this phase's ``orchestrator_output.json``,
         which the apply phase writes before the scheduler runs)."""
-        if getattr(self, "_commit_batches", None) is None:
+        if self._commit_batches is None:
             self._commit_batches = load_orchestrator_batches(self.phase_dir) or []
         return commit_group_files(
             task, repo_root=self.repo_root,
@@ -7560,7 +7355,7 @@ class WriteBatchScheduler:
         (``commit_apply.save_guard``). The guard is also this run's live
         dict, so the state's next ``save()`` writes the same decision; a
         failed save is named and the run goes on with it in memory."""
-        path = getattr(getattr(self, "state", None), "state_file", None)
+        path = getattr(self.state, "state_file", None)
         if not path:
             return
         try:
@@ -7790,10 +7585,7 @@ class WriteBatchScheduler:
 
     def _tree_fingerprint(self) -> Optional[str]:
         """Fingerprint source files, including code beside workflow artifacts."""
-        try:
-            from .check_tree import check_tree_exclusions
-        except ImportError:  # pragma: no cover - direct script invocation
-            from utils.check_tree import check_tree_exclusions
+        from .check_tree import check_tree_exclusions
 
         excluded = check_tree_exclusions(
             Path(self.phase_dir), self.repo_root, output_dir=self.output_dir,
@@ -8038,10 +7830,7 @@ class WriteBatchScheduler:
         :meth:`_mirror_status` call (or the next dispatch's own call here)
         corrects it.
         """
-        try:
-            from . import status_file as _status_file
-        except ImportError:  # pragma: no cover
-            from utils import status_file as _status_file
+        from . import status_file as _status_file
         try:
             existing = _status_file.read_status(self.phase_dir)
             mirror = dict(
@@ -8088,10 +7877,7 @@ class WriteBatchScheduler:
         # Its heartbeat and redirected stdout continue while this write batch
         # runs, including during report-only re-asks. Exempt just those runtime
         # files, not the composite's whole tree or unrelated phase artifacts.
-        try:
-            from . import detach, status_file
-        except ImportError:  # pragma: no cover - direct-script import shim
-            from utils import detach, status_file
+        from . import detach, status_file
 
         active = detach.active_run()
         if active is not None:
@@ -8107,21 +7893,30 @@ class WriteBatchScheduler:
 
         ``None`` means *not usable* — the tree is over :data:`SWEEP_MAX_FILES` —
         and a ``None`` on either side of the comparison makes the sweep a no-op
-        rather than a guess. ``os.path.relpath`` rather than ``relative_to_root``
-        on purpose: the walk starts at the pinned root, so the relative path is
-        exact by construction and a per-file ``Path.resolve()`` would put a
-        syscall on every entry of a tree this size.
+        rather than a guess. The walk starts at the pinned root (``realpath``'d)
+        and follows no link, so every entry's path is that root, a separator and
+        its relative path, already normalized: the relative path is sliced off,
+        and an entry is excluded when it is an excluded path or lies beneath
+        one, separator-aware (a bare ``startswith`` would also swallow a
+        sibling whose name only shares the prefix, ``plans-old/`` beside
+        ``plans/``). A per-file ``Path.resolve()`` (``relative_to_root``) would
+        put syscalls on every entry of a tree this size.
         """
         excluded = self._sweep_exclusions()
+        excluded_paths = frozenset(excluded)
+        excluded_trees = tuple(path + os.sep for path in excluded)
+        root = self.repo_root
+        prefix = len(root if root.endswith(os.sep) else root + os.sep)
         census: Dict[str, Tuple[int, int]] = {}
-        stack = [self.repo_root]
+        stack = [root]
         while stack:
             try:
                 entries = list(os.scandir(stack.pop()))
             except OSError:
                 continue
             for entry in entries:
-                if _under_any(entry.path, excluded):
+                path = entry.path
+                if path in excluded_paths or path.startswith(excluded_trees):
                     continue
                 try:
                     if entry.is_dir(follow_symlinks=False):
@@ -8133,8 +7928,7 @@ class WriteBatchScheduler:
                     info = entry.stat(follow_symlinks=False)
                 except OSError:
                     continue
-                relative = os.path.relpath(entry.path, self.repo_root)
-                census[relative.replace(os.sep, "/")] = (
+                census[path[prefix:].replace(os.sep, "/")] = (
                     info.st_size, info.st_mtime_ns
                 )
                 if len(census) > SWEEP_MAX_FILES:
@@ -8242,7 +8036,10 @@ class WriteBatchScheduler:
         # `driver.write_paths` alone (`exact=False`): the commit review's
         # protected files (plans/review-commits.md §2.7) are ordinary code,
         # and their retained bytes are what the post-run check restores them
-        # from when a batch writes one.
+        # from when a batch writes one. Resolved for each file, as the
+        # store's location is read for each copy (`_blob_path`): a link or a
+        # phase path swapped mid-pass is refused at the next file, never
+        # trusted from an earlier look (docs/development/write-safety.md).
         if self.policy.violation(absolute, exact=False) is not None:
             return None
         digest = file_sha256(absolute)
@@ -8793,10 +8590,7 @@ class WriteBatchScheduler:
             self._keep_dispatched_prompt(task_id, attempt, sent, prompt)
             data = self.respond(task, sent)  # type: ignore[misc]
             if isinstance(data, str):
-                try:
-                    from .json_extractor import extract_json_from_text
-                except ImportError:  # pragma: no cover
-                    from utils.json_extractor import extract_json_from_text
+                from .json_extractor import extract_json_from_text
                 extracted = extract_json_from_text(data, prefer_arrays=False)
                 if not extracted.get("success"):
                     outcome.status = STATUS_SCHEMA_INVALID
@@ -8844,10 +8638,7 @@ class WriteBatchScheduler:
         creates nothing: no scratch directory, no context, no allow-list
         resolution (F1 "Task-specific paths stay out of shared state").
         """
-        try:
-            from .provider_registry import get_provider
-        except ImportError:  # pragma: no cover
-            from utils.provider_registry import get_provider
+        from .provider_registry import get_provider
         provider_name, model = parse_model_spec(runner, anchor=self.anchor)
         provider = get_provider(provider_name)
         if provider is None:
@@ -9044,10 +8835,7 @@ class WriteBatchScheduler:
                 # accepted, and none whose failure is its own job.
                 own, matched = split_accepted_findings(
                     outcome.batch_check,
-                    accepted_findings_for(
-                        getattr(self, "tasks", None) or [], task,
-                        getattr(self, "state", None),
-                    ),
+                    accepted_findings_for(self.tasks, task, self.state),
                 )
                 if matched:
                     outcome.batch_check_accepted = matched
@@ -9058,12 +8846,9 @@ class WriteBatchScheduler:
             # lists as failed is a failing check on every surface.
             listed = _known_checks.listed_check_outcomes(
                 _known_checks.reply_listed(result),
-                (getattr(self, "_told_checks", None) or {}).get(outcome.task_id) or (),
+                self._told_checks.get(outcome.task_id) or (),
             )
-            outcomes = getattr(self, "_listed_outcomes", None)
-            if outcomes is None:
-                outcomes = self._listed_outcomes = {}
-            outcomes[outcome.task_id] = listed
+            self._listed_outcomes[outcome.task_id] = listed
             outcome.batch_check = _known_checks.with_listed_failures(
                 outcome.batch_check, listed,
             )
@@ -9642,6 +9427,10 @@ class WriteBatchScheduler:
             before = self._target_identity_before.get(task_id)
             if before is not None and self._identity_of(self._identity_path()) != before:
                 return None
+        if snapshot.changed():
+            # A declared file moved: applied, whatever else moved beside it.
+            # Decided before the census walk below, which could only agree.
+            return None
         moved = self._moved_since_dispatch(task_id, snapshot)
         outside: List[str] = []
         if moved and self.kind in SHARED_ARTIFACT_WRITE_KINDS:
@@ -9649,8 +9438,6 @@ class WriteBatchScheduler:
             # is the whole contract, so a stray write beside an unchanged
             # plan does not make it applied, and the plan's own bytes cannot
             # be applied twice by a re-send. Told which files moved instead.
-            if snapshot.changed():
-                return None
             outside = list(moved)
             context["moved_outside"] = outside
         elif moved:
@@ -9759,9 +9546,7 @@ class WriteBatchScheduler:
         findings = batch_check_findings(result)
         if not findings:
             return None
-        accepted = accepted_findings_for(
-            getattr(self, "tasks", None) or [], task, getattr(self, "state", None),
-        )
+        accepted = accepted_findings_for(self.tasks, task, self.state)
         if not accepted:
             return None
         own, _matched = split_accepted_findings(findings, accepted)
@@ -10229,10 +10014,7 @@ class WriteBatchScheduler:
         """Keep *outcome* by task id for :meth:`_move_repeats_of`, which may
         run before the outcome's batch joins ``result.outcomes`` (a check
         and a code task in one batch). Caller holds the effects lock."""
-        recorded = getattr(self, "_recorded_outcomes", None)
-        if recorded is None:
-            recorded = self._recorded_outcomes = {}
-        recorded.setdefault(outcome.task_id, []).append(outcome)
+        self._recorded_outcomes.setdefault(outcome.task_id, []).append(outcome)
 
     def _split_check_repeats(self, task: Dict[str, Any], outcome: TaskOutcome) -> None:
         """Move out of a finished code task's own failing check what is the
@@ -10242,9 +10024,7 @@ class WriteBatchScheduler:
         code task recording second). Caller holds the effects lock."""
         if not outcome.ok or outcome.verification_only or not outcome.batch_check:
             return
-        repeats = repeated_findings_for(
-            getattr(self, "tasks", None) or [], task, self.state,
-        )
+        repeats = repeated_findings_for(self.tasks, task, self.state)
         if not repeats:
             return
         own, matched = split_repeated_findings(outcome.batch_check, repeats)
@@ -10262,14 +10042,9 @@ class WriteBatchScheduler:
         :func:`move_check_repeats_in_state` moved in ``state.json`` is moved
         on the code task's outcome, its earlier run's row in *result* and its
         verdict stamp too, with one log line. Caller holds the effects lock."""
-        try:
-            from .subagent_tasks import implement_output_name
-        except ImportError:  # pragma: no cover - direct script runs
-            from utils.subagent_tasks import implement_output_name  # type: ignore
-        moved = move_check_repeats_in_state(
-            self.state.state, getattr(self, "tasks", None) or [], check_id,
-        )
-        seen = getattr(self, "_recorded_outcomes", None) or {}
+        from .subagent_tasks import implement_output_name
+        moved = move_check_repeats_in_state(self.state.state, self.tasks, check_id)
+        seen = self._recorded_outcomes
         for task_id, (own, merged) in moved.items():
             path: Optional[str] = None
             for outcome in [*result.outcomes, *seen.get(task_id, [])]:
@@ -10614,24 +10389,14 @@ class WriteBatchScheduler:
                         self._move_repeats_of(task_id, outcome.check_findings, result)
                     # A code task's own failing check, beside (never among)
                     # them, as `util batch-done` records it (fix round 15).
-                    try:
-                        from .state_manager import (
-                            set_task_batch_check_accepted_in_state,
-                            set_task_batch_check_in_state,
-                            set_task_batch_check_repeats_in_state,
-                            set_task_own_check_note_in_state,
-                            set_task_own_check_ran_in_state,
-                            set_task_own_text_in_state,
-                        )
-                    except ImportError:  # pragma: no cover - direct script runs
-                        from utils.state_manager import (  # type: ignore
-                            set_task_batch_check_accepted_in_state,
-                            set_task_batch_check_in_state,
-                            set_task_batch_check_repeats_in_state,
-                            set_task_own_check_note_in_state,
-                            set_task_own_check_ran_in_state,
-                            set_task_own_text_in_state,
-                        )
+                    from .state_manager import (
+                        set_task_batch_check_accepted_in_state,
+                        set_task_batch_check_in_state,
+                        set_task_batch_check_repeats_in_state,
+                        set_task_own_check_note_in_state,
+                        set_task_own_check_ran_in_state,
+                        set_task_own_text_in_state,
+                    )
                     set_task_batch_check_in_state(
                         self.state.state, task_id,
                         outcome.batch_check if outcome.ok else None,
@@ -10679,7 +10444,7 @@ class WriteBatchScheduler:
                         grouped_sha256=_known_checks.review_stamp(task),
                         findings=outcome.batch_check if outcome.ok else None,
                         listed=(
-                            (getattr(self, "_listed_outcomes", None) or {}).get(task_id)
+                            self._listed_outcomes.get(task_id)
                             if outcome.ok else None
                         ),
                         note=outcome.batch_check_note if outcome.ok else None,
@@ -10744,7 +10509,7 @@ class WriteBatchScheduler:
                 # Plan step 3: a failed batch whose write outcome reads
                 # "clean-failure" says which failure it was.
                 verdict = f"{verdict} ({outcome.status})"
-            stale_line = (getattr(self, "_commit_stale", None) or {}).get(task_id)
+            stale_line = self._commit_stale.get(task_id)
             if stale_line is not None and not dispatched:
                 # plans/review-commits.md §2.7: the pre-dispatch re-check's
                 # `[COMMIT_FIXES_STALE]` line is this batch's line.
@@ -11122,10 +10887,7 @@ class WriteBatchScheduler:
         """
         prompt = str(task.get("prompt") or "")
         if self._commit_guard() is not None:
-            try:
-                from .code_fix_batcher import without_protected_clause
-            except ImportError:  # pragma: no cover - direct-script import shim
-                from utils.code_fix_batcher import without_protected_clause  # type: ignore
+            from .code_fix_batcher import without_protected_clause
             prompt = without_protected_clause(prompt)
         payload = json.dumps(
             {
@@ -11301,27 +11063,48 @@ class WriteBatchScheduler:
 
     def _done_evidence(
         self, task: Dict[str, Any]
-    ) -> Optional[Tuple[str, str]]:
-        """The result file and the id it was produced under, when the task is done.
+    ) -> Optional[Tuple[str, str, Dict[str, Any]]]:
+        """The result file, the id it was produced under and the audit log's
+        completion record for its items (``{}`` when there is none), when the
+        task is done.
 
         The task's own positional result first; for an apply kind, a sibling
         result naming the same items next (:meth:`_sibling_results`), judged
         by the same clauses with the id and batch index it ran as — the
         audit, the verdict and the inputs binding are read for THAT batch,
         never for whatever this run put under the renumbered id.
+
+        The audit log is read at most once per call, when a result file
+        first needs it, and never kept for another task: it is resume
+        evidence, and a sibling of a disjoint group may be writing it.
         """
         task_id = str(task.get("task_id", ""))
+        expected = [str(item) for item in (task.get("expected_ids") or [])]
+        read: List[List[Dict[str, Any]]] = []
+
+        def audit_records() -> List[Dict[str, Any]]:
+            if not read:
+                read.append(self.audit.records())
+            return read[0]
+
+        def completion(recorded_id: str) -> Dict[str, Any]:
+            return self.audit.completion_for(
+                recorded_id, expected_ids=expected, records=audit_records(),
+            ) or {}
+
         try:
             own = resolve_output_target(task, self.phase_dir)
         except ResultRejected:
             own = None
         if own is not None and self._result_counts_as_done(
             task, own, task_id, int(task.get("batch_index", 0)), sibling=False,
+            audit_records=audit_records,
         ):
-            return str(own), task_id
+            return str(own), task_id, completion(task_id)
         for path, recorded_id, index in self._sibling_results(task):
             if self._result_counts_as_done(
                 task, path, recorded_id, index, sibling=True,
+                audit_records=audit_records,
             ):
                 self.log(
                     f"[write-subagents] {task_id}: its items already landed as "
@@ -11329,12 +11112,13 @@ class WriteBatchScheduler:
                     f"phase — the batch was renumbered by a selection change, "
                     f"not re-applied."
                 )
-                return str(path), recorded_id
+                return str(path), recorded_id, completion(recorded_id)
         return None
 
     def _result_counts_as_done(
         self, task: Dict[str, Any], target: Path, task_id: str,
         batch_index: int, *, sibling: bool,
+        audit_records: Optional[Callable[[], List[Dict[str, Any]]]] = None,
     ) -> bool:
         """Resume's definition of done (D3i), all five clauses of it.
 
@@ -11343,7 +11127,9 @@ class WriteBatchScheduler:
         the file was found by its items, in which case the clauses keyed by
         positional id alone (``state.json``'s task status, the fingerprint
         file) are read from the verdict stamp instead, since this run may
-        already have put another batch under that id.
+        already have put another batch under that id. ``audit_records``
+        returns the audit log's records as :meth:`_done_evidence` read them;
+        without it the log is read now.
 
         The result file must exist, parse and validate — **and** the task it was
         produced from must not have moved (D2g). The bridge rewrites
@@ -11434,17 +11220,20 @@ class WriteBatchScheduler:
         # before a new result replaces an older successful one). The last
         # dispatch then has no completion: neither file is evidence of success.
         # Un-audited legacy/native results retain their compatibility behavior.
+        if audit_records is None:
+            audit_records = self.audit.records
         expected = [str(item) for item in (task.get("expected_ids") or [])]
         if sibling:
             # Found by its verdict stamp, which only `_classify` writes, so
             # the crash-before-classification shape cannot apply; the audit's
             # own record for these items has to agree it succeeded.
-            recorded = self.audit.completion_for(task_id, expected_ids=expected)
+            recorded = self.audit.completion_for(
+                task_id, expected_ids=expected, records=audit_records())
             if not recorded or recorded.get("status") != STATUS_OK:
                 return False
         else:
             latest = next((
-                row for row in reversed(self.audit.records())
+                row for row in reversed(audit_records())
                 if row.get("task_id") == task_id
                 and row.get("event") in ("dispatched", "completed")
             ), None)
@@ -12527,18 +12316,14 @@ class WriteBatchScheduler:
         self._record_manual_gate(result, gates)
         gating = list(result.stop.get("manual_task_ids") or [])
         held = list(result.stop.get("held_task_ids") or [])
-        self._eta_close(result, why=(
-            f"{', '.join(gating)} left for you (manual); {len(held)} code "
-            f"task(s) wait on {'it' if len(gating) == 1 else 'them'}"
-        ))
-        if self.summary_file:
-            result.summary_file = self._write_summary(result)
-        result.messages.extend(self._manual_gate_message(result))
-        if result.summary_file:
-            result.messages.append(f"Implementation summary: {result.summary_file}")
-        result.report_path = self._write_report(result)
-        self._mirror_status(result)
-        return result
+        return self._end_run(
+            result, lambda: self._manual_gate_message(result),
+            eta_why=(
+                f"{', '.join(gating)} left for you (manual); {len(held)} code "
+                f"task(s) wait on {'it' if len(gating) == 1 else 'them'}"
+            ),
+            unverified=False, check_lines=False, summary=FULL_SUMMARY_LINE,
+        )
 
     def _record_manual_gate(
         self, result: SchedulerResult, gates: Dict[str, Any],
@@ -13067,10 +12852,7 @@ class WriteBatchScheduler:
         other pre-dispatch refusal — both terminal to ``status``, which renders
         the repair off ``reason_code``. Best-effort, like every mirror write.
         """
-        try:
-            from . import status_file as _status_file
-        except ImportError:  # pragma: no cover
-            from utils import status_file as _status_file
+        from . import status_file as _status_file
         rejected = isinstance(exc, RunnerRejected)
         try:
             with self._sweep_lock:
@@ -13093,10 +12875,7 @@ class WriteBatchScheduler:
 
     def _mirror_snapshot(self) -> Dict[str, Any]:
         """The ``write_subagents`` mirror as last written, for a patch."""
-        try:
-            from . import status_file as _status_file
-        except ImportError:  # pragma: no cover
-            from utils import status_file as _status_file
+        from . import status_file as _status_file
         try:
             existing = _status_file.read_status(self.phase_dir)
         except Exception:  # noqa: BLE001 - a missing file is an empty mirror
@@ -13454,10 +13233,7 @@ class WriteBatchScheduler:
         allowed to edit, so this command is inside the phase's own blast radius.
         `docs/configuration.md`'s safety section says so too.
         """
-        try:
-            from .providers.base import build_child_env
-        except ImportError:  # pragma: no cover - direct-script import shim
-            from utils.providers.base import build_child_env  # type: ignore
+        from .providers.base import build_child_env
         try:
             guards, passthrough = _host_env_guards()
             return build_child_env(
@@ -13639,11 +13415,11 @@ class WriteBatchScheduler:
         """
         if (
             self.kind != "implement" or self.dry_run or self.state is None
-            or getattr(self, "_implement_started_marked", False)
+            or self._implement_started_marked
         ):
             return
         with self._effects_lock:
-            if getattr(self, "_implement_started_marked", False):
+            if self._implement_started_marked:
                 return
             self._implement_started_marked = True
             try:
@@ -14601,10 +14377,7 @@ class WriteBatchScheduler:
         """``insert_implementation_summary_reference`` on the plan (D3n)."""
         if not (self.plan_file and summary_file):
             return
-        try:
-            from .plan_updater import insert_implementation_summary_reference
-        except ImportError:  # pragma: no cover
-            from utils.plan_updater import insert_implementation_summary_reference
+        from .plan_updater import insert_implementation_summary_reference
         # `/`-spelled like `get_relative_output_path`'s: a link in the plan.
         relative = self.summary_file_relative or os.path.relpath(
             summary_file, str(Path(self.plan_file).parent)
@@ -14668,10 +14441,7 @@ class WriteBatchScheduler:
         counted twice. (Named to leave ``in_flight`` — the JSON key below —
         for tasks that are the opposite: dispatched and NOT yet finished.)
         """
-        try:
-            from . import status_file as _status_file
-        except ImportError:  # pragma: no cover
-            from utils import status_file as _status_file
+        from . import status_file as _status_file
         try:
             outcomes = list(result.outcomes) + list(finished_in_batch)
             if result.finalized:
@@ -14966,10 +14736,7 @@ class WriteBatchScheduler:
         "would this batch have been refused?" answerable *before* a model is handed
         edit access.
         """
-        try:
-            from .subagent_tasks import preferred_prompt_transport, utf16_units
-        except ImportError:  # pragma: no cover
-            from utils.subagent_tasks import preferred_prompt_transport, utf16_units
+        from .subagent_tasks import preferred_prompt_transport, utf16_units
 
         entries: List[Dict[str, Any]] = []
         for batch_index, batch_tasks in ordered:
@@ -15076,10 +14843,7 @@ class WriteBatchScheduler:
 
 
 def _redacted_argv(argv: Sequence[str], prompt: str) -> List[str]:
-    try:
-        from .write_safety import redact_argv
-    except ImportError:  # pragma: no cover
-        from utils.write_safety import redact_argv
+    from .write_safety import redact_argv
     return redact_argv(argv, prompt)
 
 

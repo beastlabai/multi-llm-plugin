@@ -28,7 +28,7 @@ if str(SKILL_DIR) not in sys.path:
 from utils import prior_changes, write_prompt  # noqa: E402
 from utils.code_fix_batcher import CodeFixBatch, format_fix_batch_prompt  # noqa: E402
 from utils.subagent_tasks import PRIOR_CHANGES_TOKEN  # noqa: E402
-from utils.write_batch_scheduler import WriteBatchScheduler  # noqa: E402
+from tests.scheduler_support import make_scheduler  # noqa: E402
 from utils.write_phase_bridge import (  # noqa: E402
     WRITE_TASK_FILENAME,
     materialize_write_tasks,
@@ -98,13 +98,10 @@ class _Racing08:
         return text
 
     def executor_prompt(self, index: int) -> str:
-        scheduler = WriteBatchScheduler.__new__(WriteBatchScheduler)
-        scheduler.kind = "apply_code_fixes"
-        scheduler.output_dir = str(self.out)
-        scheduler.phase = "apply-code-fixes"
-        scheduler.state = {}
-        scheduler.tasks = self.tasks
-        scheduler.plan_file = str(self.plan)
+        scheduler = make_scheduler(
+            self.out, kind="apply_code_fixes", phase="apply-code-fixes",
+            phase_dir=self.phase_dir, state={}, tasks=self.tasks, plan_file=self.plan,
+        )
         task = self.tasks[index]
         return scheduler._with_result_contract(task, scheduler.dispatched_prompt(task))
 

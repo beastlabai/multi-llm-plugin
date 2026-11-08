@@ -71,13 +71,9 @@ from .file_discovery import (
 
 from .plan_updater import (
     PlanUpdater,
-    update_plan_status,
-    extract_task_list,
-    insert_generated_tasks,
     insert_tasks_file_reference,
     get_tasks_file_path,
     insert_implementation_summary_reference,
-    get_implementation_summary_path,
     GENERATED_TASKS_START,
     GENERATED_TASKS_END,
     TASKS_FILE_REFERENCE_PATTERN,
@@ -249,13 +245,9 @@ __all__ = [
     "discover_implementation_context",
     # plan_updater
     "PlanUpdater",
-    "update_plan_status",
-    "extract_task_list",
-    "insert_generated_tasks",
     "insert_tasks_file_reference",
     "get_tasks_file_path",
     "insert_implementation_summary_reference",
-    "get_implementation_summary_path",
     "GENERATED_TASKS_START",
     "GENERATED_TASKS_END",
     "TASKS_FILE_REFERENCE_PATTERN",

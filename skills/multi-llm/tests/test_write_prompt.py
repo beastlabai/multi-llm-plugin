@@ -27,7 +27,8 @@ from utils import prior_changes  # noqa: E402
 from utils import write_prompt  # noqa: E402
 from utils.cli_common import parse_result_line  # noqa: E402
 from utils.subagent_tasks import PRIOR_CHANGES_TOKEN  # noqa: E402
-from utils.write_batch_scheduler import RESULT_IDS_HEADING, WriteBatchScheduler  # noqa: E402
+from utils.write_batch_scheduler import RESULT_IDS_HEADING  # noqa: E402
+from tests.scheduler_support import make_scheduler  # noqa: E402
 from utils.subagent_executor import CHECK_FINDING_MAX_CHARS, check_findings_from  # noqa: E402
 from utils.write_phase_bridge import (  # noqa: E402
     WRITE_TASK_FILENAME,
@@ -119,10 +120,7 @@ def _materialize(plan, out, kind, batches, phase_subdir):
 def _executor_rendering(kind, out, phase, task):
     """What `WriteBatchScheduler` dispatches for *task*: the two seams, as its
     dispatch site composes them (`_with_result_contract(dispatched_prompt)`)."""
-    scheduler = WriteBatchScheduler.__new__(WriteBatchScheduler)
-    scheduler.kind = kind
-    scheduler.output_dir = str(out)
-    scheduler.phase = phase
+    scheduler = make_scheduler(out, kind=kind, phase=phase)
     return scheduler._with_result_contract(task, scheduler.dispatched_prompt(task))
 
 
@@ -631,12 +629,8 @@ class TestAnAcceptedCheckIsNamedOnBothLegs:
         return out, phase_dir, tasks, state
 
     def _executor(self, out, task, tasks, state):
-        scheduler = WriteBatchScheduler.__new__(WriteBatchScheduler)
-        scheduler.kind = "implement"
-        scheduler.output_dir = str(out)
-        scheduler.phase = "implement"
-        scheduler.state = state
-        scheduler.tasks = tasks
+        scheduler = make_scheduler(
+            out, kind="implement", phase="implement", state=state, tasks=tasks)
         return scheduler._with_result_contract(task, scheduler.dispatched_prompt(task))
 
     ACCEPTED = (

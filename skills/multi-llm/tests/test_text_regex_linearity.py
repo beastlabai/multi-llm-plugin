@@ -245,10 +245,6 @@ class TestTaskDecomposerReadsWhatItsRegexesRead:
         for text in _task_corpus(4):
             assert re.findall(td.TASK_SECTION_PATTERN, text, flags) == re.findall(
                 _OLD_TASK_SECTION_PATTERN, text, flags), text
-            assert plan_updater.has_implementation_tasks(text) == (
-                plan_updater.tasks_marker(text) is not None
-                or plan_updater.GENERATED_TASKS_START in text
-                or bool(re.findall(_OLD_TASK_SECTION_PATTERN, text, flags)))
 
     def test_files_and_complexity_lines(self):
         for text in _task_corpus(5):
@@ -409,7 +405,6 @@ _OLD_IMPL_SUMMARY = re.compile(plan_updater.IMPL_SUMMARY_REFERENCE_PATTERN)
 _OLD_IMPL_SECTION = re.compile(
     r'## Implementation Summary\s*\n.*?' + plan_updater.IMPL_SUMMARY_REFERENCE_PATTERN,
     re.DOTALL)
-_OLD_TASK_HEADER = r'(?:#{2,3})\s*(?:Task\s+)?([T]?\d+):?\s*(.+?)(?=\n)'
 
 
 def _old_insert_implementation_summary_reference(content, summary_file):
@@ -425,15 +420,6 @@ See [{summary_file}]({summary_file}) for the implementation summary including fi
         replacement = reference_section.strip()
         return _OLD_IMPL_SECTION.sub(lambda _m: replacement, content)
     return content.rstrip() + "\n" + reference_section
-
-
-def _old_get_implementation_summary_path(content):
-    match = _OLD_IMPL_SUMMARY.search(content)
-    return match.group(1).strip() if match else None
-
-
-def _old_task_headers(content):
-    return re.findall(_OLD_TASK_HEADER, content, re.IGNORECASE)
 
 
 _PLAN_ALPHABET = _SPACES + (
@@ -466,8 +452,6 @@ class TestPlanUpdaterReadsWhatItsRegexesRead:
             old = _OLD_IMPL_SUMMARY.search(text)
             assert plan_updater._ImplSummaryMarkers(text).search() == (
                 old and (old.start(), old.end(), old.start(1), old.end(1))), repr(text)
-            assert plan_updater.get_implementation_summary_path(text) == (
-                _old_get_implementation_summary_path(text)), repr(text)
 
     def test_the_summary_section_rewrite(self):
         for text in _plan_corpus(32):
@@ -477,12 +461,6 @@ class TestPlanUpdaterReadsWhatItsRegexesRead:
                 assert _outcome(plan_updater.insert_implementation_summary_reference,
                                 text, summary) == _outcome(
                     _old_insert_implementation_summary_reference, text, summary), repr(text)
-
-    def test_the_task_list(self):
-        for text in _plan_corpus(33) + _task_corpus(34)[:2000]:
-            assert [(task["id"], task["title"]) for task in plan_updater.extract_task_list(text)] == [
-                (f"T{raw}" if not raw.startswith("T") else raw, title.strip())
-                for raw, title in _old_task_headers(text)], repr(text)
 
 
 # =================================================================================
@@ -571,22 +549,16 @@ class TestTheReadersAreLinear:
         """Finalisation reads and rewrites the summary reference in a plan the
         edit batches may have rewritten."""
         _run_timed("""
-            from utils.plan_updater import (
-                extract_task_list, get_implementation_summary_path,
-                insert_implementation_summary_reference)
+            from utils.plan_updater import insert_implementation_summary_reference
             plans = [
                 "<!-- IMPL_SUMMARY:" + " " * size + "x",
                 "<!-- IMPL_SUMMARY:x" * (size // 19),
                 "## Implementation Summary\\n<!-- IMPL_SUMMARY:" + " " * size + "x",
                 "<!-- IMPL_SUMMARY: a --> ## Implementation Summary" + "\\n" * size + "x",
                 "<!-- IMPL_SUMMARY: a -->" + "## Implementation Summary\\n" * (size // 26),
-                "## 1:" + " " * size + "x",
-                "## 1: x" * (size // 7),
             ]
             started = time.perf_counter()
             for plan in plans:
-                get_implementation_summary_path(plan)
                 insert_implementation_summary_reference(plan, "s.md")
-                extract_task_list(plan)
             elapsed = time.perf_counter() - started
-        """, "plan_updater's summary or task readers")
+        """, "plan_updater's summary reader")
