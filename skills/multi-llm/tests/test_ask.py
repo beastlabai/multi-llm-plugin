@@ -2136,9 +2136,8 @@ class TestEveryEndingRetiresItsSlot:
         self, plan, progress_lines
     ):
         """Four different endings in one run: an answer, a refusal the lane
-        produced, a slot that *raised* (retired by the helper as ``exception``,
-        the only place the spec behind a dropped task is still known), and a
-        model that came off disk."""
+        produced, a slot whose provider call *raised* (``source: exception``),
+        and a model that came off disk."""
         from utils import progress_tracker
         from utils.progress_tracker import LIVE_STATES
 
@@ -2175,28 +2174,15 @@ class TestEveryEndingRetiresItsSlot:
         assert (models["claude-code:fable"]["state"],
                 models["claude-code:fable"]["source"]) == ("failed", "failed")
         assert models["claude-code:fable"]["error"] == "no usable answer"
-        # The slot that raised keeps its own exception text, while the report's
-        # failed map — built from `results`, which a raised task never reaches —
-        # falls to F11's backfill. The map is the finer-grained of the two.
-        #
-        # Updated for F4 (2026-09-20): this used to assert the sentence "No
-        # answer produced (model did not complete)", which was ask's own third
-        # wording for the one cause the other two lanes name once. A slot in
-        # neither `results` nor the failure map is `DEADLINE_ERROR` here exactly
-        # as it is in `run_models_concurrent`'s sibling test
-        # (`test_a_slot_that_raises_retires_itself_and_leaves_its_sibling_alone`,
-        # tests/test_review_plan_orchestrator.py), which pins the same
-        # asymmetry: the map keeps the exception, the report's list — which has
-        # no exception in hand — names the deadline wording. That the sentence
-        # was *right* about this particular slot is a coincidence of a generic
-        # phrasing; it was equally applied to a genuine deadline loss, whose
-        # swept map entry said `DEADLINE_ERROR` in the same file.
+        # A raising provider call is that slot's own ending, recorded as the
+        # redacted exception in the map and the report alike, never as a
+        # deadline loss (docs/development/workflows.md#ask-mode).
+        exception = "Exception: RuntimeError: boom"
         assert (models["claude-code:haiku"]["state"],
                 models["claude-code:haiku"]["source"]) == ("failed", "exception")
-        assert models["claude-code:haiku"]["error"] == "boom"
-        assert read_status(d)["models_failed"]["claude-code:haiku"] == (
-            progress_tracker.DEADLINE_ERROR
-        )
+        assert models["claude-code:haiku"]["error"] == exception
+        assert read_status(d)["models_failed"]["claude-code:haiku"] == exception
+        assert progress_tracker.DEADLINE_ERROR not in read_answers(d)
 
         # Both counters, and the right way round: four finished slots, two of
         # which produced a usable answer.

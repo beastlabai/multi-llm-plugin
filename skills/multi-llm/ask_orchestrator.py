@@ -87,7 +87,7 @@ from utils.provider_registry import (
 # ``utils.llm_client`` can reach it; re-exported here for this module's callers
 # and its tests.
 from utils.json_extractor import looks_like_ndjson, sanitize_model_name  # noqa: F401
-from utils.llm_client import ERROR_PARSE_ERROR, invoke_with_provider
+from utils.llm_client import ERROR_PARSE_ERROR, armed_homes_window, invoke_with_provider
 from utils.git_utils import get_project_root
 from utils import process_control
 from utils.detach import (
@@ -118,12 +118,14 @@ from utils.review_orchestrator_base import (
     porcelain_check_applies,
     porcelain_snapshot,
     print_closing_summary,
+    raised_attempt_home_records,
     read_plan,
     report_jail_outcome,
     run_incidental_checks,
     run_models_concurrent,
     sandbox_fallback_kwargs,
     sandbox_refusal,
+    slot_exception_error,
     unexpected_writes,
     update_status,
     write_status,
@@ -882,6 +884,31 @@ def set_answer_file_aside(question_dir: str, model_spec: str, answer_path: str) 
         return False
     print(f"  {model_spec}: kept a copy of {name} in {kept_in} and removed it")
     return True
+
+
+def set_violated_answer_aside(model_spec: str, answer_path: str) -> bool:
+    """Move the answer file of a slot a write, mode or home check failed to
+    ``answer_<model>.md.violated``.
+
+    The closing scan reads the answer files, not ``ask_one``'s return, so the
+    file is moved to a name the scan never reads; it is never deleted, being
+    the operator's evidence. Returns whether the answer path no longer holds
+    the file. ``False`` (with a ``WARNING``) means the move failed and the file
+    is still there: the caller adds the spec to ``answers_left_in_place``, so
+    the scan withholds it and the slot stays failed.
+    """
+    if not os.path.exists(answer_path):
+        return True
+    target = answer_path + ".violated"
+    try:
+        os.replace(answer_path, target)
+        return True
+    except OSError as e:
+        print(f"WARNING: could not move {model_spec}'s answer file, from a slot "
+              f"that failed its checks, to {os.path.basename(target)}: {e}. It "
+              "was left in place and is not counted; move it aside by hand "
+              "before a resume, which would count it as an answer.")
+        return False
 
 
 def _copy_answer_file_aside(
@@ -2208,20 +2235,36 @@ async def _main(argv: Optional[List[str]], held: contextlib.ExitStack) -> int:
         tracker.running(model_spec, attempt=1, timeout_s=per_model_timeout)
 
         call = provider_calls[model_spec] = ProviderCall()
-        result = await asyncio.to_thread(
-            call.run,
-            invoke_with_provider,
-            prompt=prompt,
-            model_spec=model_spec,
-            timeout=per_model_timeout,
-            log_file=log_file,
-            cwd=project_root,
-            anchor=plan_path,
-            # D2.2: the adapter's reduced answer text from the FULL stdout,
-            # redacted and head-capped at 1 MiB — the only source step 2 reads.
-            want_answer_text=True,
-            **sandbox_fallback_kwargs(sandbox),
-        )
+        # Ask is single-shot (one dispatch, no retry ladder). A call that raises
+        # ends the slot as that exception, but only after the same write, mode
+        # and home checks a returned call gets: its window may have changed the
+        # tree or `$CODEX_HOME`. The jailed children it armed are compared here,
+        # as `dispatch_with_ladder` does on the review lanes (see
+        # docs/development/providers.md). Cancellation and KeyboardInterrupt
+        # are not `Exception`s and pass straight through.
+        raised: Optional[str] = None
+        armed: List[Any] = []
+        try:
+            with armed_homes_window() as armed:
+                result = await asyncio.to_thread(
+                    call.run,
+                    invoke_with_provider,
+                    prompt=prompt,
+                    model_spec=model_spec,
+                    timeout=per_model_timeout,
+                    log_file=log_file,
+                    cwd=project_root,
+                    anchor=plan_path,
+                    # D2.2: the adapter's reduced answer text from the FULL
+                    # stdout, redacted and head-capped at 1 MiB — the only
+                    # source step 2 reads.
+                    want_answer_text=True,
+                    **sandbox_fallback_kwargs(sandbox),
+                )
+        except Exception as exc:  # noqa: BLE001 - recorded as the slot's ending
+            raised = slot_exception_error(exc)
+            print(f"[{model_spec}] {raised}")
+            result = {"success": False, "error": raised}
         # Popped at once (D2.2): up to 1 MiB of answer must never ride `details`
         # into a caller that logs it. A return that ran no child carries no key,
         # which reads exactly like "" (D2.3).
@@ -2229,6 +2272,16 @@ async def _main(argv: Optional[List[str]], held: contextlib.ExitStack) -> int:
         answer_text = details.pop("answer_text", "") if isinstance(details, dict) else ""
         if not isinstance(answer_text, str):
             answer_text = ""
+        # Plan §4.3: ask is single-shot, so its one attempt's verdicts are the
+        # whole window's. A call that raised read nothing back: its `None` audit
+        # never clears a change, and its home check is the read-back above.
+        if raised is None:
+            audits = [(result.get("details") or {}).get("readonly_audit")]
+            home_checks = [(details or {}).get("home_check")]
+        else:
+            audits = [None]
+            home_checks = await raised_attempt_home_records(armed)
+        failed_source = "failed" if raised is None else "exception"
 
         # D6 override: the detective check, ahead of the answer-file policy
         # below — a bypassed slot that changed the working tree is failed by
@@ -2239,9 +2292,6 @@ async def _main(argv: Optional[List[str]], held: contextlib.ExitStack) -> int:
             ignore_prefixes = fanout_ignore_prefixes(
                 plan_path, project_root, anchor=plan_path
             )
-            # Plan §4.3: ask is single-shot, so its one attempt's verdict is
-            # the whole window's.
-            audits = [(result.get("details") or {}).get("readonly_audit")]
             tracker.record_readonly_audit(
                 model_spec, combine_audits(audits).to_dict()
             )
@@ -2267,12 +2317,10 @@ async def _main(argv: Optional[List[str]], held: contextlib.ExitStack) -> int:
                 # `collect_completed` reads the answer files, not this return,
                 # so an answer this slot wrote is set aside (never deleted: it
                 # is still the operator's evidence) under a name the scan does
-                # not read, or the failed slot would be counted as completed.
-                if os.path.exists(answer_path):
-                    try:
-                        os.replace(answer_path, answer_path + ".violated")
-                    except OSError:
-                        pass
+                # not read, or withheld from the scan when it cannot be, or
+                # the failed slot would be counted as completed.
+                if not set_violated_answer_aside(model_spec, answer_path):
+                    answers_left_in_place.add(model_spec)
                 # The same holds for an answer this slot gave on stdout
                 # (D3.2): kept as evidence, or what survives a violation would
                 # depend on which channel the model answered on. The slot still
@@ -2280,7 +2328,7 @@ async def _main(argv: Optional[List[str]], held: contextlib.ExitStack) -> int:
                 if answer_text.strip():
                     write_partial(question_dir, model_spec, answer_text)
                 return {"model": model_spec, "success": False,
-                        "error": violation, "source": "failed"}
+                        "error": violation, "source": failed_source}
 
         # The plugin's own jail (F1, 2026-09-30): its `[JAIL_DENIED]` line and
         # in-stream denial count, then the mode check and the home check's
@@ -2291,25 +2339,23 @@ async def _main(argv: Optional[List[str]], held: contextlib.ExitStack) -> int:
             sandbox, provider_name=provider_name, display_name=model_spec,
             model_spec=model_spec, project_root=project_root, plan_path=plan_path,
             mode_before=mode_before,
-            home_checks=[(details or {}).get("home_check")],
-            audits=[(details or {}).get("readonly_audit")],
+            home_checks=home_checks,
+            audits=audits,
             tracker=tracker, summary_key=question_dir,
         )
         if incidental is not None:
             write_error_log(question_dir, model_spec, incidental, result)
-            if os.path.exists(answer_path):
-                try:
-                    os.replace(answer_path, answer_path + ".violated")
-                except OSError:
-                    pass
+            if not set_violated_answer_aside(model_spec, answer_path):
+                answers_left_in_place.add(model_spec)
             if answer_text.strip():
                 write_partial(question_dir, model_spec, answer_text)
             return {"model": model_spec, "success": False,
-                    "error": incidental, "source": "failed"}
+                    "error": incidental, "source": failed_source}
 
         # Steps 1 and 2 count an answer only from a run that ended by itself at
         # exit 0 with a finished answer (D3.1): success, or the PARSE_ERROR a
-        # prose answer with no JSON in it arrives as, and no `incomplete`.
+        # prose answer with no JSON in it arrives as, and no `incomplete`. A
+        # call that raised never did, and goes to step 3.
         if answer_finished(result):
             # 1. The answer file the model was asked for. Only here: nothing
             #    shows a file from a timed-out or failed run is finished — it
@@ -2346,10 +2392,11 @@ async def _main(argv: Optional[List[str]], held: contextlib.ExitStack) -> int:
                         "source": "fallback"}
 
         # 3. Failure, with the run's own error: a timeout, a non-zero exit, an
-        #    incomplete answer, or a clean run with nothing to recover. Any text
-        #    it left is kept as partial evidence (D3.2) — its answer file when
-        #    there is one (the file takes the name, D3.3), else a non-empty
-        #    stdout answer text — and never counted.
+        #    incomplete answer, a clean run with nothing to recover, or the
+        #    call's exception. Any text it left is kept as partial evidence
+        #    (D3.2) — its answer file when there is one (the file takes the
+        #    name, D3.3), else a non-empty stdout answer text — and never
+        #    counted.
         error = result.get("error") or "No usable answer produced"
         write_error_log(question_dir, model_spec, error, result)
         if read_nonempty_answer(answer_path) is not None:
@@ -2357,7 +2404,8 @@ async def _main(argv: Optional[List[str]], held: contextlib.ExitStack) -> int:
                 answers_left_in_place.add(model_spec)
         elif answer_text.strip():
             write_partial(question_dir, model_spec, answer_text)
-        return {"model": model_spec, "success": False, "error": error, "source": "failed"}
+        return {"model": model_spec, "success": False, "error": error,
+                "source": failed_source}
 
     results = await run_models_concurrent(
         model_specs, ask_one, args.timeout, args.max_parallel,

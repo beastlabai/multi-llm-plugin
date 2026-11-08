@@ -2364,6 +2364,24 @@ def slot_ladder(
     )
 
 
+async def raised_attempt_home_records(armed: Sequence[Any]) -> List[Any]:
+    """The ``home_check`` entries of one fan-out attempt that raised.
+
+    The attempt returned no ``details["home_check"]``, so every jailed child
+    it armed (``llm_client.armed_homes_window``) is compared here against the
+    invoker's own before-snapshot; a home that cannot be compared comes back
+    ``unaudited`` and fails the slot closed in :func:`run_incidental_checks`.
+    ``[None]`` when the attempt armed no jailed child: one entry per attempt,
+    as a returned attempt contributes. Used by :func:`dispatch_with_ladder`,
+    by :func:`run_single_model`'s single dispatch and by ask's single-shot
+    slot.
+    """
+    homes = (
+        await asyncio.to_thread(raised_attempt_home_checks, armed) if armed else []
+    )
+    return homes or [None]
+
+
 @dataclass
 class LadderRun:
     """What one review fan-out slot's ladder loop leaves behind.
@@ -2500,11 +2518,7 @@ async def dispatch_with_ladder(
             # `$CODEX_HOME` outlives the jail, so its home is compared here.
             run.exception = exc
             run.audits.append(None)
-            homes = (
-                await asyncio.to_thread(raised_attempt_home_checks, armed)
-                if armed else []
-            )
-            run.home_checks.extend(homes or [None])
+            run.home_checks.extend(await raised_attempt_home_records(armed))
             break
         details = result.get("details") or {}
         run.result, run.details, run.attempt_timeout = result, details, attempt_timeout
@@ -5013,16 +5027,42 @@ async def run_single_model(
                 tracker.running(
                     model_spec, attempt=1, timeout_s=effective_timeout
                 )
-            result = await asyncio.to_thread(
-                invoke_with_provider,
-                prompt=prompt,
-                model_spec=model_spec,
-                timeout=int(effective_timeout),
-                log_file=log_file,
-                cwd=project_root,
-                anchor=plan_path,
-                **sandbox_fallback_kwargs(sandbox),
-            )
+            # Single-shot. A call that raises ends the slot as that exception,
+            # but only after the write, mode and home checks a returned call
+            # gets, as `dispatch_with_ladder` runs them for a raised attempt:
+            # nothing was read back, so its audit is `None`, and the jailed
+            # children it armed are compared here (see
+            # docs/development/providers.md). Cancellation and
+            # KeyboardInterrupt are not `Exception`s and pass straight through.
+            armed: List[Any] = []
+            try:
+                with armed_homes_window() as armed:
+                    result = await asyncio.to_thread(
+                        invoke_with_provider,
+                        prompt=prompt,
+                        model_spec=model_spec,
+                        timeout=int(effective_timeout),
+                        log_file=log_file,
+                        cwd=project_root,
+                        anchor=plan_path,
+                        **sandbox_fallback_kwargs(sandbox),
+                    )
+            except Exception as exc:  # noqa: BLE001 - recorded as the slot's ending
+                violation = await _bypass_write_check([None])
+                if violation is None:
+                    violation = await _incidental_check(
+                        await raised_attempt_home_records(armed), [None]
+                    )
+                return {
+                    "success": False, "output": None,
+                    "error": (
+                        violation if violation is not None
+                        else slot_exception_error(exc)
+                    ),
+                    "prompt": prompt, "stdout": "", "stderr": "",
+                    "duration_seconds": time.time() - start_time,
+                    "model_spec": model_spec, "source": "stdout",
+                }
             duration = time.time() - start_time
             details = result.get("details", {})
             stderr_text = details.get("stderr", "")
@@ -5099,12 +5139,13 @@ async def run_single_model(
             # `stdout` stays `""` here, and deliberately. This handler catches
             # *our* exception, not the child's — `error` names a Python failure
             # in this coroutine, and there is no losing-run excerpt that belongs
-            # beside it. Reading one would also be unsafe: `details` is assigned
-            # inside the `try`, *after* `invoke_with_provider` returns, so on the
-            # likeliest arrival here (the invocation itself raising) the name is
-            # unbound and the module-level initialiser further down has not run
-            # for this path. That would trade a recorded exception for a
-            # `NameError`, which is the one outcome worse than a missing excerpt.
+            # beside it (an invocation that raised is recorded above, after
+            # its checks). Reading one would also be unsafe: `details` is
+            # assigned inside the `try`, *after* `invoke_with_provider`
+            # returns, so on an arrival before that the name is unbound and the
+            # module-level initialiser further down has not run for this path.
+            # That would trade a recorded exception for a `NameError`, which is
+            # the one outcome worse than a missing excerpt.
             return {
                 "success": False,
                 "output": None,
@@ -5622,7 +5663,15 @@ async def run_models_concurrent(
             timeout=total_timeout
         )
 
-        for item in completed:
+        # `gather` keeps the order of `tasks`, so each item is named by its
+        # slot. A slot that raised `CancelledError` itself comes back as that
+        # object, which is no `Exception`: it is named and left out of
+        # `results` like a slot that raised, and the sweep retires it. (A
+        # cancel of this coroutine never reaches here: `gather` raises it.)
+        for spec, item in zip(model_specs, completed):
+            if isinstance(item, asyncio.CancelledError):
+                print(f"[{spec}] Task cancelled")
+                continue
             if isinstance(item, Exception):
                 print(f"Task exception: {item}")
                 continue

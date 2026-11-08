@@ -556,6 +556,22 @@ markdown output, no JSON schema / grouping / validation, output under `{plan}/as
 shares concurrency mechanics with the review modes via `run_models_concurrent` in
 `review_orchestrator_base.py`.
 
+Each ask slot is single-shot: one `invoke_with_provider` call, no retry ladder. A call that
+raises is a failed slot carrying `Exception: <type>: <message>`, redacted
+(`slot_exception_error`), with `source: exception`, never a deadline loss. It first gets the
+checks a returned call gets: the porcelain check on the uncontained rung, and the mode and home
+checks on the plugin's jail, with the raising call counted as unaudited and its home compared by
+the lane (see [providers](providers.md)). A violation found there is recorded instead, still with
+`source: exception`. Any answer file the call left is set aside as a partial, never counted.
+Cancellation (`CancelledError`, `KeyboardInterrupt`) is not caught: the fan-out's teardown retires
+the slot. `run_models_concurrent` names a slot that raised `CancelledError` itself and keeps its
+siblings' results; the slot is missing from the results like one that raised.
+
+A slot any of these checks fails has its answer file moved to `answer_<model>.md.violated`, a
+name the closing scan never reads. When that move fails the file stays where it is, as
+evidence, and the scan withholds it (`answers_left_in_place`): the slot stays failed, and its
+failure line says the file was left in place.
+
 ## Implementation artifacts and state
 
 **`implement`'s write phase closes the artifact/resolution/denominator gaps the apply
