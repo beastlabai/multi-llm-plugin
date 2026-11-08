@@ -215,9 +215,9 @@ attributes, mode and flags from the descriptor, `fstat`-ed after the read as `sh
 after copying, because restore copies them back onto the file (`_replace_with_payload`). The
 pending copy is created exclusively and never through a link, its times and mode set through
 its own descriptor (by path once closed, on Windows without `CopyFile2`): its name is predictable
-(digest, pid, thread), and `shutil.copy2` wrote through a link a runner planted there. Restore
-writes a blob's bytes and `copystat` (`_replace_with_payload`), so streams and encryption are kept
-in the store, not put back by it. Tests: `tests/test_write_sweep_sees_the_same.py`.
+(digest, pid, thread), and `shutil.copy2` wrote through a link a runner planted there. On Windows
+restore puts back the streams and attributes the store keeps too, for a file that is not read-only,
+and its encryption where it can (below). Tests: `tests/test_write_sweep_sees_the_same.py`.
 
 **On Windows the blob is `CopyFile2`'s copy, checked against the bytes read; a refused copy is
 removed, or named when it cannot be** (Codex reviews of U80, 2026-11-08). With Python 3.12+ a copy
@@ -271,6 +271,105 @@ What these checks leave open, precisely:
    can still carry into a blob is another file's streams, attributes and times, never its main bytes.
 4. Between the copy and its check, only a writer of the store folder can replace the pending copy,
    and such a writer could read the copy anyway.
+
+**On Windows a restore puts a payload that is not read-only back as `CopyFile2`'s copy, checked and
+swapped in through one handle held on it alone** (Codex review 2 of U80 and reviews of U82,
+2026-11-08). A snapshot's payloads are `shutil.copy2` copies of the files (an adopted write's payload
+a `copy2` of its blob), so on Windows with Python 3.12+ they keep NTFS alternate data streams,
+attributes and EFS encryption. Restore wrote a payload's bytes and `copystat`, so a rolled-back file
+lost its streams and its hidden or system attribute, and a file encrypted on its own, in a folder
+that is not, came back as plaintext. There `_replace_with_payload` now restores through
+`_restored_by_copy_file2` and `_publish_held`:
+
+1. The payload is opened and held, so it can be neither deleted nor renamed meanwhile. A read-only
+   payload takes the plain restore instead, exactly as before: `CopyFile2` would copy the attribute,
+   and Windows opens a read-only file for writing to nobody, so its copy could not be held as in
+   step 3, and reopening it to clear the attribute would give up the exclusion.
+2. The payload's own name must be that regular file (`lstat` against `fstat`), and the bytes read
+   through the descriptor must hash to the manifest's digest (`restore_path`, the commit write
+   policy's restore, has no digest: the copy is checked against the bytes read). `CopyFile2` copies
+   it to the temp name beside the file with `COPY_FILE_FAIL_IF_EXISTS` and `COPY_FILE_COPY_SYMLINK`,
+   so any name already there, a link included, fails the copy and is left as it is, never removed
+   or followed, as the plain restore's exclusive creation refuses it. A failed copy that left
+   nothing there takes the plain restore; one that left something skips the file and names it.
+3. The copy is bound once: opened by path as itself (`FILE_FLAG_OPEN_REPARSE_POINT`) to read, write,
+   delete and set attributes, shared for reading alone (`_HeldCopyCalls.bind`). A handle already
+   open on it to write or delete refuses the bind (a sharing violation): the file is skipped and the
+   copy named. While the handle is held nobody can open the copy to write, rename or delete it.
+4. Through that handle alone, wrapped as a C runtime descriptor: the copy must be a regular file with
+   one name and no reparse point (`os.fstat`, which is `GetFileInformationByHandle`); it is flushed
+   (`os.fsync`, `FlushFileBuffers`); the payload's name must still be the file held; the copy, read
+   back after the flush, must hash to the digest; it takes the payload's attributes (those
+   `FileBasicInfo` sets) and its access and write times, as `copystat` gave them
+   (`SetFileInformationByHandle`); and it is renamed over the file's own entry, replacing it, while
+   still held (`FileRenameInfo`: atomic and never through a link, as `os.replace`). Then the handle
+   closes.
+5. Any failure after the bind skips the file and deletes the copy through the handle
+   (`FileDispositionInfo`): the name bound, never a link's target or another name of the file. The
+   snapshot is kept. Nothing on this path changes, removes or renames the temp name by path, because
+   between two calls a name can be swapped for a link to another file: a hard link to a file outside
+   the repository put there before the bind is refused before anything changes, by its link count
+   (the link alone is then deleted) or, when that file is read-only, by Windows itself (the link is
+   left and named).
+
+The refusal rules are unchanged (a file changed since the run needs `--force`, a payload that no
+longer hashes to its manifest is never written), and every folder above the file is still revalidated
+without following a link, where on Windows a directory junction, or any reparse point naming another
+path, now counts as a link: `lstat` reports a junction as a directory, so a junction planted above the
+file used to lead the restore, and the delete leg, outside the repository (other reparse points, a
+OneDrive placeholder for one, hold the file itself and are not refused). Linux and macOS restore as
+before. Windows before 3.12, a read-only payload, and a Windows where these calls cannot be loaded
+write the file as before (the plain copy), but every Windows restore refuses a junction above it: the
+refusal is in the revalidation.
+
+What a Windows restore with `CopyFile2` keeps, for a file that is not read-only: the payload's bytes,
+checked; its alternate data streams; its attributes (hidden, system, ...); its times; and the
+payload's EFS encryption, though not unconditionally. `COPY_FILE_ALLOW_DECRYPTED_DESTINATION`
+(`copy2`'s flag, also passed when the snapshot was taken) lets `CopyFile2` write a plaintext copy
+where the destination cannot be encrypted (a volume or share without EFS) instead of failing, and a
+payload that was itself written as plaintext (the snapshot's `copy2` under the same flag) has no
+encryption to give. In each case the file comes back as base's restore wrote every file: plaintext
+unless its folder encrypts new files. A read-only file comes back as base restored it: its bytes,
+times and read-only attribute, without its streams, other attributes or encryption. What it leaves
+open:
+
+1. The folders above the file are revalidated by path and then reached by path by the copy, the bind
+   and the rename: a junction planted at one in between redirects them, as it redirected the plain
+   restore (Windows has no descriptor walk).
+2. A junction above the payload redirected for `CopyFile2`'s reopen alone and put back for the
+   identity check: the bytes check fails such a copy; only another file's streams, attributes and
+   times can come back with the payload's own bytes (the store's item 3).
+3. Sharing does not exclude a handle opened only to read or set attributes, so while the copy is held
+   another process can still change its attributes or give it another name (a hard link), and a
+   writable mapping of the copy made before the bind (its handle closed since) can still write it.
+   Each needs a writer of the file's own folder, which could write the file itself once it is back.
+4. The file put back is encrypted when its payload is. A payload made in an encrypted folder (a phase
+   folder inside one) is encrypted whatever its file was, so a file that was not comes back encrypted
+   when it lies outside that folder; the manifest records no attributes to tell.
+5. Where the plain copy restores (Linux, macOS, Windows before 3.12, a read-only payload on Windows),
+   the payload is hashed against the manifest by path and then read again by path to be copied, so a
+   writer of the snapshot folder in between could put other bytes back. Unchanged; the `CopyFile2`
+   restore reads it once.
+
+**The store's discard removes it whole, or names what it cannot.** `_discard_rollback_store` used
+`shutil.rmtree(..., ignore_errors=True)`, and Windows will not delete a read-only file, which a blob
+is when its file was (`CopyFile2` keeps the attribute), so there the store outlived the run, silently.
+`write_safety.remove_tree` removes each entry itself, never what a link there leads to
+(`shutil.rmtree`), and returns what is left; the run logs a WARNING naming it (a folder left only
+because something in it is left is not named again). A refused removal is never tried again, on any
+platform (Codex reviews of U82, 2026-11-08): a retry by path follows whatever link or junction is at
+the entry's folder by then (`rmtree` on Linux and macOS removes through each folder's descriptor,
+where a link swapped in leads nowhere), and holding every folder against that on Windows took Win32
+steps that cannot be verified off Windows. What is left stays in the store and costs disk space only,
+as the warning says: a blob becomes a rollback point only once its bytes hash to its name
+(`TaskSnapshot.adopt`), as a killed run's leftover store does. Base ignored the refusal; the discard
+now names it. What it leaves open: on Windows `rmtree` walks by path, so a junction put at a store
+folder's name once listed redirects `rmtree`'s own removal, as it redirected base's (a read-only file
+there is refused and named, never cleared). Tests: `tests/test_write_sweep_sees_the_same.py` (the
+restore and discard tests at its end; the held copy's sequence, the hard link swapped in before the
+bind, the writer holding the copy, the copy changed before the bind and the calls that never name the
+copy run emulated everywhere and natively on Windows; the streams, EFS, junction, read-only blob and
+held-copy sharing cases run on Windows CI, the EFS one skipping where EFS is unavailable).
 
 ## Backups
 

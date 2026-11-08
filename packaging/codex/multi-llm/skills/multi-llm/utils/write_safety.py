@@ -105,6 +105,7 @@ __all__ = [
     "CopyNotContained",
     "read_capped",
     "write_copy",
+    "remove_tree",
     "redact_argv",
     "redact_text",
 ]
@@ -2014,7 +2015,10 @@ class TaskSnapshot:
                     )
                     continue
                 try:
-                    _replace_with_payload(source, target)
+                    _replace_with_payload(source, target, sha256=entry.sha256)
+                except CopyNotContained as left:
+                    report[relative] = _skipped_leaving(left)
+                    continue
                 except OSError as exc:
                     report[relative] = f"skipped: {exc}"
                     continue
@@ -2078,6 +2082,8 @@ def restore_path(root: str, relative: str, source: Optional[str]) -> str:
                 raise
         else:
             _replace_with_payload(Path(source), target)
+    except CopyNotContained as left:
+        return _skipped_leaving(left)
     except OSError as exc:
         return f"skipped: {exc}"
     return "restored"
@@ -2085,6 +2091,13 @@ def restore_path(root: str, relative: str, source: Optional[str]) -> str:
 
 def _short(digest: Optional[str]) -> str:
     return (digest or "absent")[:12]
+
+
+def _skipped_leaving(left: CopyNotContained) -> str:
+    """A restore's ``skipped`` state when its refused copy is left behind, or
+    may have gone through a link: named for the user to check, as the
+    rollback store's pass names a copy of its own it could not remove."""
+    return f"skipped: {left}; check what is left there and delete it by hand"
 
 
 def _is_symlink(path: Path) -> bool:
@@ -2119,7 +2132,9 @@ def _revalidated_target(
             which returns ``None`` for a missing parent: nothing left to delete.
 
     Raises:
-        PathEscape: any component is a symlink, or the path is not a plain
+        PathEscape: any component is a symlink, or on Windows a directory
+            junction or another reparse point naming another path (``lstat``
+            reports a junction as a directory), or the path is not a plain
             repo-relative one.
     """
     if not root:
@@ -2161,6 +2176,12 @@ def _revalidated_target(
                 f"{current} is a symlink now, so rolling {relative} back through "
                 f"it would leave the pinned repo root {resolved_root}"
             )
+        if _names_another_path(info):
+            raise PathEscape(
+                f"{current} is a directory junction or another link now, so "
+                f"rolling {relative} back through it would leave the pinned repo "
+                f"root {resolved_root}"
+            )
         if not stat.S_ISDIR(info.st_mode):
             raise PathEscape(
                 f"{current} is not a directory, so {relative} cannot be restored "
@@ -2169,7 +2190,8 @@ def _revalidated_target(
     return current / parts[-1]
 
 
-def _replace_with_payload(source: Path, target: Path) -> None:
+def _replace_with_payload(source: Path, target: Path, *,
+                          sha256: Optional[str] = None) -> None:
     """Write ``source``'s bytes as a new file and ``os.replace`` it over ``target``.
 
     Never ``shutil.copy2`` onto the destination: it opens the destination for
@@ -2178,8 +2200,21 @@ def _replace_with_payload(source: Path, target: Path) -> None:
     swaps the directory entry itself — atomic, and no-follow — and the temp file is
     created ``O_EXCL`` in the same revalidated directory, so it cannot land on an
     existing symlink and the rename cannot cross a filesystem.
+
+    On Windows with ``CopyFile2`` (Python 3.12+) a payload that is not read-only
+    goes back as ``CopyFile2``'s copy instead, checked and swapped in through one
+    handle that excludes every other writer (:func:`_restored_by_copy_file2`), so
+    the file keeps the payload's alternate data streams, attributes and EFS
+    encryption, which the snapshot's ``shutil.copy2`` kept; that copy must hash
+    to ``sha256``, the manifest's digest, when it is given. A read-only payload,
+    and every case that function hands back, is restored below, as on the other
+    platforms, where ``sha256`` is unused: the caller checked the payload
+    against it.
     """
     tmp = target.with_name(f".{target.name}.restore.{os.getpid()}.tmp")
+    if _COPY_FILE2 is not None and _restored_by_copy_file2(
+            str(source), str(tmp), str(target), sha256):
+        return
     handle = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(handle, "wb") as stream:
@@ -2196,6 +2231,274 @@ def _replace_with_payload(source: Path, target: Path) -> None:
         except OSError:
             pass
         raise
+
+
+def _restored_by_copy_file2(source: str, tmp: str, target: str,
+                            sha256: Optional[str]) -> bool:
+    """:func:`_replace_with_payload` through ``CopyFile2`` (Windows on Python
+    3.12+): ``True`` once *target* is restored, ``False`` when nothing was done
+    and the plain copy restores instead (docs/development/write-safety.md,
+    restore on Windows). Raises ``OSError`` when nothing was put back, and
+    :class:`CopyNotContained` when something may be left at *tmp*.
+
+    The payload *source* is opened and held, so Windows will neither delete
+    nor rename it meanwhile. ``False`` when it is read-only (``CopyFile2``
+    copies the attribute, and Windows opens a read-only file for writing to
+    nobody, so the copy could not be held as :func:`_publish_held` holds it)
+    or when the calls that hold it cannot be loaded. Otherwise its own name
+    must be that regular file (``lstat`` against ``fstat``) and the bytes read
+    through the descriptor must hash to *sha256* when it is given.
+    ``CopyFile2`` then copies it by path to *tmp* with
+    ``COPY_FILE_FAIL_IF_EXISTS`` and ``COPY_FILE_COPY_SYMLINK``: any name
+    already there, a link included, fails the copy and is left as it is. A
+    failed copy that left nothing at *tmp* returns ``False``; one that left
+    something raises. The copy is checked and put back by
+    :func:`_publish_held`."""
+    calls = _held_copy_calls()
+    if calls is None:
+        return False
+    payload = os.open(source, _READ_FLAGS)
+    try:
+        read = os.fstat(payload)
+        if not stat.S_IMODE(read.st_mode) & stat.S_IWRITE:
+            return False
+        if not (stat.S_ISREG(read.st_mode) and _names_file(source, read)):
+            raise OSError(f"{source} is no longer the snapshot's payload file")
+        digest = _descriptor_sha256(payload)
+        if sha256 is not None and digest != sha256:
+            raise OSError(
+                f"the snapshot payload no longer matches the manifest (recorded "
+                f"{_short(sha256)}, payload {_short(digest)}); nothing written")
+        try:
+            _COPY_FILE2(source, tmp, _COPY_FILE2_FLAGS)
+        except OSError as failure:
+            if not os.path.lexists(tmp):
+                return False
+            raise CopyNotContained(
+                tmp, f"CopyFile2 could not copy {source} to {tmp} ({failure}), "
+                     f"and what is at {tmp} was left as it is") from failure
+        _publish_held(calls, source, tmp, target, payload, digest, read)
+        return True
+    finally:
+        os.close(payload)
+
+
+def _publish_held(calls: Any, source: str, tmp: str, target: str, payload: int,
+                  digest: str, read: os.stat_result) -> None:
+    """Check *tmp*, ``CopyFile2``'s copy of *source* (open as *payload*,
+    ``fstat`` *read*), and swap it in for *target*'s own entry, all through one
+    handle on it that excludes every other writer (Windows;
+    docs/development/write-safety.md, restore on Windows).
+
+    *tmp* is bound once, by path, as itself (never through a reparse point
+    there), to read, write, delete and set attributes, shared for reading
+    alone: a handle already open on it to write or delete refuses the bind,
+    and while it is held nobody can open it to write, rename or delete it.
+    Then, through that handle alone: the copy must be a regular file with one
+    name and no reparse point (``os.fstat``, ``GetFileInformationByHandle``);
+    it is flushed (``FlushFileBuffers``); *source* must still name the file
+    *payload* reads; the copy, read back after the flush, must hash to
+    *digest*; it takes *read*'s attributes and times, as ``copystat`` gives
+    them; and it is renamed over *target*, replacing that entry, before the
+    handle closes. Any failure deletes it through the handle (the name bound:
+    never a link's target or another name of its file) and raises
+    ``OSError``; a copy that cannot be bound, or deleted, raises
+    :class:`CopyNotContained` naming it. Nothing here changes, removes or
+    renames *tmp* by its path: between two calls a name can be swapped for a
+    link to another file, a hard link to one outside the repository
+    included."""
+    try:
+        held = calls.bind(tmp)
+    except OSError as exc:
+        raise CopyNotContained(
+            tmp, f"{tmp}, the copy just made, could not be held for its checks "
+                 f"({exc}), so nothing was put back") from exc
+    try:
+        info = os.fstat(held)
+        if not _plain_new_file(info):
+            raise CopyNotContained(tmp, _not_the_copy(tmp, info))
+        os.fsync(held)
+        if not _names_file(source, os.fstat(payload)):
+            raise OSError(f"{source} changed while it was copied to {tmp}")
+        if _descriptor_sha256(held) != digest:
+            raise OSError(f"{tmp} does not hold the bytes of {source}")
+        calls.set_basic(held, _settable_attributes(read), read.st_atime_ns,
+                        read.st_mtime_ns)
+        calls.rename(held, target)
+    except BaseException as failure:
+        try:
+            calls.dispose(held)
+        except OSError as exc:
+            if isinstance(failure, Exception):
+                raise CopyNotContained(
+                    tmp, f"{tmp} could not be removed ({exc})") from failure
+        raise
+    finally:
+        os.close(held)
+
+
+#: The attributes ``FileBasicInfo`` sets (``FILE_ATTRIBUTE_VALID_SET_FLAGS``,
+#: ntifs.h: read-only, hidden, system, archive, normal, temporary, offline, not
+#: content indexed); encryption and compression stay as ``CopyFile2`` made them.
+_SETTABLE_ATTRIBUTES = 0x31A7
+#: What sets "no attribute" (``0`` there leaves them as they are).
+_FILE_ATTRIBUTE_NORMAL = 0x80
+
+
+def _settable_attributes(info: os.stat_result) -> int:
+    """The attributes of *info* (an ``fstat``) that ``FileBasicInfo`` sets."""
+    return (getattr(info, "st_file_attributes", 0) & _SETTABLE_ATTRIBUTES
+            or _FILE_ATTRIBUTE_NORMAL)
+
+
+class _HeldCopyCalls:  # pragma: no cover - Windows
+    """The Windows calls :func:`_publish_held` makes on its one handle.
+    ``_winapi.CreateFile`` binds it, wrapped as a C runtime descriptor, so
+    ``os.fstat`` (``GetFileInformationByHandle``), ``os.fsync``
+    (``FlushFileBuffers``), ``os.read`` and ``os.close`` go through it; and
+    ``SetFileInformationByHandle`` sets its attributes and times, renames it
+    and deletes it."""
+
+    #: GENERIC_READ | GENERIC_WRITE | DELETE | FILE_WRITE_ATTRIBUTES.
+    _ACCESS = 0x80000000 | 0x40000000 | 0x00010000 | 0x0100
+    _FILE_SHARE_READ, _OPEN_EXISTING = 0x1, 3
+    _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+    #: ``FILE_INFO_BY_HANDLE_CLASS``.
+    _BASIC, _RENAME, _DISPOSITION = 0, 3, 4
+    #: 1970-01-01 as a ``FILETIME`` (100 ns since 1601).
+    _EPOCH = 116444736000000000
+
+    def __init__(self) -> None:
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        set_info = ctypes.WinDLL("kernel32", use_last_error=True).SetFileInformationByHandle
+        set_info.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+        set_info.restype = wintypes.BOOL
+
+        class Basic(ctypes.Structure):  # FILE_BASIC_INFO
+            _fields_ = [("CreationTime", ctypes.c_int64), ("LastAccessTime", ctypes.c_int64),
+                        ("LastWriteTime", ctypes.c_int64), ("ChangeTime", ctypes.c_int64),
+                        ("FileAttributes", wintypes.DWORD)]
+
+        class Rename(ctypes.Structure):  # FILE_RENAME_INFO; the name runs on past it
+            _fields_ = [("ReplaceIfExists", wintypes.DWORD), ("RootDirectory", wintypes.HANDLE),
+                        ("FileNameLength", wintypes.DWORD), ("FileName", wintypes.WCHAR * 1)]
+
+        self._ctypes, self._msvcrt, self._set_info = ctypes, msvcrt, set_info
+        self._basic_info, self._rename_info = Basic, Rename
+        self._disposition_info = wintypes.BOOLEAN  # FILE_DISPOSITION_INFO's one field
+
+    def bind(self, path: str) -> int:
+        """*path* itself, opened to read, write, delete and set attributes,
+        shared for reading alone; a C runtime descriptor."""
+        handle = _winapi.CreateFile(
+            path, self._ACCESS, self._FILE_SHARE_READ, _winapi.NULL,
+            self._OPEN_EXISTING, self._FILE_FLAG_OPEN_REPARSE_POINT, _winapi.NULL)
+        try:
+            return self._msvcrt.open_osfhandle(handle, os.O_NOINHERIT)
+        except BaseException:
+            _winapi.CloseHandle(handle)
+            raise
+
+    def set_basic(self, held: int, attributes: int, atime_ns: int, mtime_ns: int) -> None:
+        """Set *attributes* and the access and write times; creation and
+        change times are left as they are."""
+        self._set(held, self._BASIC, self._basic_info(
+            0, atime_ns // 100 + self._EPOCH, mtime_ns // 100 + self._EPOCH, 0, attributes))
+
+    def rename(self, held: int, target: str) -> None:
+        """Rename the file over *target* (a full path), replacing that entry."""
+        ctypes = self._ctypes
+        name = os.path.abspath(target).encode("utf-16-le")
+        buffer = ctypes.create_string_buffer(ctypes.sizeof(self._rename_info) + len(name))
+        info = self._rename_info.from_buffer(buffer)
+        info.ReplaceIfExists, info.FileNameLength = 1, len(name)
+        ctypes.memmove(ctypes.addressof(buffer) + self._rename_info.FileName.offset,
+                       name, len(name))
+        self._set(held, self._RENAME, buffer)
+
+    def dispose(self, held: int) -> None:
+        """Delete the name the file was bound by, once the handle closes."""
+        self._set(held, self._DISPOSITION, self._disposition_info(True))
+
+    def _set(self, held: int, kind: int, info: Any) -> None:
+        ctypes = self._ctypes
+        if not self._set_info(self._msvcrt.get_osfhandle(held), kind,
+                              ctypes.byref(info), ctypes.sizeof(info)):
+            raise ctypes.WinError(ctypes.get_last_error())
+
+
+_HELD_COPY_CALLS: List[Any] = []
+
+
+def _held_copy_calls() -> Optional[Any]:
+    """:class:`_HeldCopyCalls`, loaded once; ``None`` where they cannot be,
+    and a restore then copies as on the other platforms."""
+    if not _HELD_COPY_CALLS:
+        try:
+            _HELD_COPY_CALLS.append(_HeldCopyCalls())
+        except Exception:  # noqa: BLE001 - the plain copy restores instead
+            _HELD_COPY_CALLS.append(None)
+    return _HELD_COPY_CALLS[0]
+
+
+def _descriptor_sha256(handle: int) -> str:
+    """The sha256 of every byte the descriptor *handle* reads from the start."""
+    os.lseek(handle, 0, os.SEEK_SET)
+    digest = hashlib.sha256()
+    while True:
+        chunk = os.read(handle, 1024 * 1024)
+        if not chunk:
+            return digest.hexdigest()
+        digest.update(chunk)
+
+
+#: ``IsReparseTagNameSurrogate`` (WinNT.h): a reparse point naming another
+#: path, as a symlink and a directory junction do.
+_REPARSE_TAG_NAME_SURROGATE = 0x20000000
+
+
+def _names_another_path(info: os.stat_result) -> bool:
+    """Whether a name's own entry (*info*, its ``lstat``) is a reparse point
+    naming another path (Windows): a directory junction, which ``lstat``
+    reports as a directory, or a symlink. Other reparse points (a OneDrive
+    placeholder, say) hold the file itself, and ``lstat`` resolves them."""
+    return bool(getattr(info, "st_reparse_tag", 0) & _REPARSE_TAG_NAME_SURROGATE)
+
+
+def remove_tree(path: str) -> List[str]:
+    """Remove the folder *path* and everything in it, each entry itself, never
+    what a link there leads to (``shutil.rmtree``); what is left, each with
+    why, or nothing when *path* is gone or was never there.
+
+    An entry whose removal is refused is named and never tried again, on any
+    platform: a retry by path follows whatever link or junction is at its
+    folder's name by then, where ``rmtree`` on Linux and macOS removes through
+    the folder's descriptor. On Windows that leaves a read-only file, which
+    Windows will not delete (``CopyFile2`` keeps the attribute in a blob). A
+    folder left only because something in it is left is not named again."""
+    left: List[str] = []
+    folders: List[str] = []
+
+    def failed(function: Any, name: str, error: BaseException) -> None:
+        if isinstance(error, FileNotFoundError):
+            return
+        if function in (os.unlink, os.remove):
+            left.append(f"{name} could not be removed ({error})")
+            return
+        if function is os.rmdir and getattr(error, "errno", None) == errno.ENOTEMPTY:
+            folders.append(f"{name} ({error})")
+            return
+        left.append(f"{name} ({error})")
+
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=failed)
+    else:  # pragma: no cover - Python before 3.12
+        shutil.rmtree(path, onerror=lambda function, name, info: failed(
+            function, name, info[1]))
+    return left or folders
 
 
 def _safe_component(text: str) -> str:

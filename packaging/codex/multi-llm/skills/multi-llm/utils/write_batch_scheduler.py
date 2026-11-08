@@ -37,7 +37,6 @@ import json
 import os
 import posixpath
 import re
-import shutil
 import stat
 import subprocess
 import tempfile
@@ -5844,10 +5843,32 @@ class WriteBatchScheduler:
         )
 
     def _discard_rollback_store(self) -> None:
-        """Drop the sweep's staging bytes and the index that describes them."""
-        shutil.rmtree(
-            os.path.join(self.safety_dir, ROLLBACK_STORE_DIRNAME), ignore_errors=True
-        )
+        """Drop the sweep's staging bytes and the index that describes them.
+
+        Each entry is removed itself, never what a link there leads to
+        (``write_safety.remove_tree``). One whose removal is refused (on
+        Windows a read-only blob: ``CopyFile2`` keeps the attribute) is never
+        tried again and stays in the store, which costs disk space alone: a
+        blob becomes a rollback point only once its bytes hash to its name
+        (``TaskSnapshot.adopt``), as a killed run's leftover store does. What
+        is left is named in a warning, never left silently
+        (docs/development/write-safety.md, the store's discard).
+        """
+        from .write_safety import remove_tree
+
+        store = os.path.join(self.safety_dir, ROLLBACK_STORE_DIRNAME)
+        left = remove_tree(store)
+        if left:
+            shown = "; ".join(left[:5])
+            more = f"; … {len(left) - 5} more" if len(left) > 5 else ""
+            self.log(
+                f"[write-subagents] WARNING: the rollback store {store} could not "
+                f"be removed whole: {shown}{more}. It was not tried again; left "
+                f"there it costs disk space only. It holds the retention pass's "
+                f"copies of files under {self.repo_root}, or a copy it refused, "
+                f"which can hold another file's bytes: check it and delete it by "
+                f"hand."
+            )
         with self._sweep_lock:
             self._retained.clear()
             self._retained_bytes = 0

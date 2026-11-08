@@ -17,7 +17,12 @@ tree that exercises every rule they decide on and asserts the exact answer:
 * the retention pass reads each file once, through the descriptor the policy
   was asked about, on both ways a file is opened (by descriptor walk, by path
   as on Windows): a link swapped in mid-pass is never followed and a blob
-  always holds the bytes its name is the digest of.
+  always holds the bytes its name is the digest of;
+* a restore puts a payload that is not read-only back as ``CopyFile2``'s
+  copy on Windows (emulated elsewhere), checked and swapped in through one
+  handle held on it alone, keeping its streams, attributes and encryption
+  and refusing a copy of anything else; and the store's discard names what
+  it cannot remove, never trying it again.
 
 No model runs; the scheduler is the real one over a real git repository.
 """
@@ -30,7 +35,9 @@ import os
 import pathlib
 import shutil
 import stat
+import subprocess
 import threading
+import types
 from pathlib import Path
 
 import pytest
@@ -921,3 +928,1156 @@ def test_a_path_spelled_with_dots_or_a_trailing_separator_is_never_opened(
         absolute = spelled if os.path.isabs(spelled) else os.path.join(str(env.root), spelled)
         assert policy.violation(absolute, exact=False) is None, spelled
         assert policy.open_permitted(spelled) is None, spelled
+
+
+# ---------------------------------------------------------------------------
+# Restore and the store's discard (docs/development/write-safety.md, restore
+# on Windows): a payload that is not read-only goes back as ``CopyFile2``'s
+# copy, checked and swapped in through one handle held on it alone, and the
+# store is removed whole, or what is left is named.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(params=["plain copy", "CopyFile2"])
+def restoring(request, monkeypatch):
+    """Each way a restore writes the file it puts back: the payload's bytes
+    and ``copystat`` (Linux, macOS, Windows before 3.12, a read-only payload
+    anywhere), or ``CopyFile2``'s copy held through one handle (Windows on
+    Python 3.12+, emulated elsewhere)."""
+    if request.param == "plain copy":
+        monkeypatch.setattr(write_safety, "_COPY_FILE2", None, raising=False)
+    else:
+        _restoring_by_copy_file2(monkeypatch)
+    return request.param
+
+
+def _winerror(code: int, message: str, path) -> PermissionError:
+    error = PermissionError(errno.EACCES, message, os.fspath(path))
+    error.winerror = code
+    return error
+
+
+class _HeldCopy:
+    """The Windows calls a ``CopyFile2`` restore makes on the one handle it
+    holds on its copy (``write_safety._HeldCopyCalls``), over POSIX.
+
+    ``bind`` opens the name itself: a link as the link, never followed (as
+    ``FILE_FLAG_OPEN_REPARSE_POINT`` does); a read-only file is refused, as
+    Windows opens one for writing to nobody, and so is a file in *writers*,
+    one another writer holds open (a sharing violation). Windows keeps the
+    bound name on the file while it is held (no delete sharing), so
+    ``rename`` and ``dispose`` act on that name, checked to still be the
+    file bound. *calls* records each call with the name it reached."""
+
+    def __init__(self) -> None:
+        self.writers: set = set()
+        self.bound: dict = {}
+        self.calls: list = []
+        # Taken now: a test that records calls naming the copy patches `os`.
+        self._lstat, self._fstat = os.lstat, os.fstat
+        self._unlink, self._replace = os.unlink, os.replace
+        self._utime, self._fchmod = os.utime, getattr(os, "fchmod", None)
+
+    def bind(self, path):
+        named = self._lstat(path)
+        if stat.S_ISLNK(named.st_mode):
+            if hasattr(os, "O_PATH"):
+                held = os.open(path, os.O_PATH | os.O_NOFOLLOW)
+            elif hasattr(os, "O_SYMLINK"):  # pragma: no cover - macOS
+                held = os.open(path, os.O_SYMLINK)
+            else:  # pragma: no cover
+                pytest.skip("this platform cannot open a link itself")
+        elif (named.st_dev, named.st_ino) in self.writers:
+            raise _winerror(32, "it is being used by another process", path)
+        elif not named.st_mode & stat.S_IWUSR:
+            raise _winerror(5, "access is denied", path)
+        else:
+            held = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+        self.bound[held] = os.fspath(path)
+        self.calls.append(("bind", os.fspath(path)))
+        return held
+
+    def _name_of(self, held) -> str:
+        path = self.bound[held]
+        named, opened = self._lstat(path), self._fstat(held)
+        assert (named.st_dev, named.st_ino) == (opened.st_dev, opened.st_ino), (
+            "Windows keeps the bound name on the file while it is held")
+        return path
+
+    def set_basic(self, held, attributes, atime_ns, mtime_ns):
+        self.calls.append(("set_basic", self._name_of(held)))
+        self._utime(held, ns=(atime_ns, mtime_ns))
+        if attributes & stat.FILE_ATTRIBUTE_READONLY:
+            self._fchmod(held, stat.S_IMODE(self._fstat(held).st_mode) & ~0o222)
+
+    def rename(self, held, target):
+        path = self._name_of(held)
+        self.calls.append(("rename", path))
+        self._replace(path, target)
+        self.bound[held] = os.fspath(target)
+
+    def dispose(self, held):
+        path = self._name_of(held)
+        self.calls.append(("dispose", path))
+        self._unlink(path)
+
+
+def _restoring_by_copy_file2(monkeypatch):
+    """``CopyFile2`` and the calls on the handle a restore holds on its copy:
+    Windows' own on Windows on Python 3.12+, emulated elsewhere. Returns the
+    handle calls."""
+    if getattr(write_safety, "_COPY_FILE2", None) is None:
+        monkeypatch.setattr(write_safety, "_COPY_FILE2", _copy_file2_off_windows,
+                            raising=False)
+    if os.name == "nt":
+        calls = write_safety._held_copy_calls()
+        assert calls is not None, "the handle calls load on Windows"
+        return calls
+    calls = _HeldCopy()
+    monkeypatch.setattr(write_safety, "_held_copy_calls", lambda: calls, raising=False)
+    return calls
+
+
+def _before_bind(monkeypatch, calls, then) -> list:
+    """Run *then* (the copy's name) once, just before the restore binds its
+    copy; the returned list holds that name once it ran."""
+    bind = calls.bind
+    ran: list = []
+
+    def binding(path):
+        if not ran:
+            ran.append(path)
+            then(path)
+        return bind(path)
+
+    monkeypatch.setattr(calls, "bind", binding)
+    return ran
+
+
+def _snapshot_of(env, *relatives):
+    """A snapshot of *relatives* (default ``src/a.py``), and the payload path
+    of the first."""
+    relatives = relatives or ("src/a.py",)
+    snapshot = write_safety.TaskSnapshot.take(
+        phase_dir=str(env.phase_dir), task_id="T-R",
+        files=[str(env.root / relative) for relative in relatives], root=str(env.root),
+    )
+    entry = snapshot.entry_for(relatives[0])
+    payload = Path(snapshot.directory) / write_safety.PAYLOAD_DIRNAME / (entry.payload or "")
+    return snapshot, payload
+
+
+def _restore_tmp(target: Path) -> Path:
+    return target.with_name(f".{target.name}.restore.{os.getpid()}.tmp")
+
+
+def test_a_restore_puts_back_the_payloads_bytes_and_times(env, monkeypatch, restoring):
+    """Either way the file put back holds the payload's bytes and its
+    modification time, and no temp file is left beside it; where
+    ``CopyFile2`` copies, it copied the payload, and the copy was bound,
+    given the payload's attributes and times, and renamed over the file,
+    each through the handle."""
+    target = env.root / "src" / "a.py"
+    os.utime(target, ns=(1_600_000_000_000_000_000, 1_650_000_000_987_654_300))
+    original = target.read_bytes()
+    snapshot, payload = _snapshot_of(env)
+    copies: list = []
+    copy = getattr(write_safety, "_COPY_FILE2", None)
+    if copy is not None:
+        def recording(source, destination, flags):
+            copies.append(source)
+            return copy(source, destination, flags)
+
+        monkeypatch.setattr(write_safety, "_COPY_FILE2", recording)
+    target.write_bytes(b"a = 2\n")
+
+    assert snapshot.restore(["src/a.py"]) == {"src/a.py": "restored"}
+
+    assert target.read_bytes() == original
+    assert target.stat().st_mtime_ns == 1_650_000_000_987_654_300
+    assert not os.path.lexists(_restore_tmp(target))
+    assert [os.path.normcase(source) for source in copies] == (
+        [os.path.normcase(str(payload))] if restoring == "CopyFile2" else [])
+    calls = write_safety._held_copy_calls() if restoring == "CopyFile2" else None
+    if isinstance(calls, _HeldCopy):
+        assert [name for name, _path in calls.calls] == ["bind", "set_basic", "rename"]
+
+
+def test_the_refusal_rules_hold_either_way(env, restoring):
+    """A file changed after the run is refused without ``--force`` and put
+    back with it, and a file the batch created is deleted."""
+    target = env.root / "src" / "a.py"
+    original = target.read_bytes()
+    snapshot, _payload = _snapshot_of(env, "src/a.py", "src/new.py")
+    target.write_bytes(b"a = 2\n")
+    (env.root / "src" / "new.py").write_text("new = 1\n", encoding="utf-8")
+    recorded = {"src/a.py": write_safety.file_sha256(str(target))}
+    target.write_bytes(b"a = 3, by hand\n")
+
+    refused = snapshot.restore(["src/a.py"], expected=recorded)
+    assert refused["src/a.py"].startswith("skipped: changed after the run")
+    assert target.read_bytes() == b"a = 3, by hand\n"
+
+    forced = snapshot.restore(expected=recorded, force=True)
+    assert forced == {"src/a.py": "restored", "src/new.py": "deleted"}
+    assert target.read_bytes() == original
+    assert not (env.root / "src" / "new.py").exists()
+
+
+def test_a_symlink_now_at_the_path_is_replaced_as_the_link_itself(env, restoring):
+    """The file put back replaces the link's own entry (``os.replace``, or
+    the held copy's rename), never written through it: the link's target
+    keeps its bytes."""
+    target = env.root / "src" / "a.py"
+    original = target.read_bytes()
+    snapshot, _payload = _snapshot_of(env)
+    victim = env.tmp_path / "victim.txt"
+    victim.write_bytes(b"not the restore's to write\n")
+    target.unlink()
+    target.symlink_to(victim)
+
+    assert snapshot.restore(force=True) == {"src/a.py": "restored"}
+
+    assert not target.is_symlink() and target.read_bytes() == original
+    assert victim.read_bytes() == b"not the restore's to write\n"
+
+
+def test_a_read_only_file_comes_back_read_only(env, restoring):
+    """The payload keeps the file's mode (on Windows its read-only
+    attribute), and so does the file put back."""
+    target = env.root / "src" / "a.py"
+    os.chmod(target, stat.S_IREAD)
+    original = target.read_bytes()
+    try:
+        snapshot, _payload = _snapshot_of(env)
+        os.chmod(target, stat.S_IREAD | stat.S_IWRITE)
+        target.write_bytes(b"a = 2\n")
+
+        assert snapshot.restore(["src/a.py"]) == {"src/a.py": "restored"}
+
+        assert target.read_bytes() == original
+        assert not stat.S_IMODE(target.stat().st_mode) & stat.S_IWRITE
+    finally:
+        os.chmod(target, stat.S_IREAD | stat.S_IWRITE)
+
+
+def test_a_read_only_payload_takes_the_plain_restore(env, monkeypatch, restoring):
+    """A read-only payload is restored as on every other platform, where
+    ``CopyFile2`` copies too: its copy would be read-only, which Windows
+    opens for writing to nobody, so it could not be held. Nothing is copied
+    by ``CopyFile2`` and nothing is bound; the plain restore's temp file is
+    flushed before it takes the payload's mode, and is read-only when it
+    replaces the file (seamed: ``os.fsync`` and ``os.replace`` record the
+    file each reaches, in order)."""
+    copies: list = []
+    bound: list = []
+    if restoring == "CopyFile2":
+        calls = write_safety._held_copy_calls()
+        copy, bind = write_safety._COPY_FILE2, calls.bind
+
+        def recording(source, destination, flags):
+            copies.append(source)
+            return copy(source, destination, flags)
+
+        def binding(path):
+            bound.append(path)
+            return bind(path)
+
+        monkeypatch.setattr(write_safety, "_COPY_FILE2", recording)
+        monkeypatch.setattr(calls, "bind", binding)
+    target = env.root / "src" / "a.py"
+    os.chmod(target, stat.S_IREAD)
+    original = target.read_bytes()
+    events: list = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def fsync(handle):
+        info = os.fstat(handle)
+        events.append(("fsync", (info.st_dev, info.st_ino)))
+        return real_fsync(handle)
+
+    def replace(source, destination, *args, **kwargs):
+        if os.path.normcase(os.fspath(destination)) == os.path.normcase(str(target)):
+            named = os.lstat(source)
+            events.append(("replace", (named.st_dev, named.st_ino),
+                           bool(stat.S_IMODE(named.st_mode) & stat.S_IWRITE)))
+        return real_replace(source, destination, *args, **kwargs)
+
+    try:
+        snapshot, _payload = _snapshot_of(env)
+        os.chmod(target, stat.S_IREAD | stat.S_IWRITE)
+        target.write_bytes(b"a = 2\n")
+        with monkeypatch.context() as patched:
+            patched.setattr(os, "fsync", fsync)
+            patched.setattr(os, "replace", replace)
+            assert snapshot.restore(["src/a.py"]) == {"src/a.py": "restored"}
+
+        assert target.read_bytes() == original
+        assert not stat.S_IMODE(target.stat().st_mode) & stat.S_IWRITE
+    finally:
+        os.chmod(target, stat.S_IREAD | stat.S_IWRITE)
+
+    assert copies == [] and bound == []
+    replaced = [event for event in events if event[0] == "replace"]
+    assert len(replaced) == 1, events
+    _, put_back, writable = replaced[0]
+    assert not writable, "the copy is read-only when it replaces the file"
+    assert ("fsync", put_back) in events[:events.index(replaced[0])], events
+
+
+def test_the_copy_is_checked_flushed_read_back_and_renamed_through_its_handle(
+    env, monkeypatch,
+):
+    """Through the one handle held on the copy, in this order: what it is
+    (``fstat``: a regular file with one name), flushed, read back after the
+    flush and hashed, its attributes and times set, renamed over the file.
+    No other descriptor reaches it (seamed: ``os.fstat``, ``os.fsync`` and
+    ``os.read`` on the held descriptor, and the handle calls, record
+    themselves)."""
+    calls = _restoring_by_copy_file2(monkeypatch)
+    target = env.root / "src" / "a.py"
+    original = target.read_bytes()
+    snapshot, _payload = _snapshot_of(env)
+    target.write_bytes(b"a = 2\n")
+    held: list = []
+    events: list = []
+    bind = calls.bind
+
+    def binding(path):
+        handle = bind(path)
+        held.append(handle)
+        return handle
+
+    def recorded(name, real):
+        def call(handle, *args, **kwargs):
+            if held and handle == held[0]:
+                events.append(name)
+            return real(handle, *args, **kwargs)
+        return call
+
+    monkeypatch.setattr(calls, "bind", binding)
+    for name in ("set_basic", "rename", "dispose"):
+        monkeypatch.setattr(calls, name, recorded(name, getattr(calls, name)))
+    with monkeypatch.context() as patched:
+        for name in ("fstat", "fsync", "read"):
+            patched.setattr(os, name, recorded(name, getattr(os, name)))
+        assert snapshot.restore(["src/a.py"]) == {"src/a.py": "restored"}
+
+    assert target.read_bytes() == original
+    once = [name for index, name in enumerate(events)
+            if not index or name != events[index - 1]]
+    assert once == ["fstat", "fsync", "read", "set_basic", "rename"], events
+
+
+def test_a_restore_copy_that_does_not_hold_the_payloads_bytes_is_refused(env, monkeypatch):
+    """``CopyFile2`` copies by path, so its copy is read back before it
+    replaces anything: a copy that does not hash to the payload's bytes is
+    deleted through its handle and the file is left as it is."""
+    _restoring_by_copy_file2(monkeypatch)
+    target = env.root / "src" / "a.py"
+    snapshot, payload = _snapshot_of(env)
+    target.write_bytes(b"a = 2\n")
+    copy_file2, fired = _copying(payload, _copy_then_change)
+    monkeypatch.setattr(write_safety, "_COPY_FILE2", copy_file2)
+
+    report = snapshot.restore(["src/a.py"])
+
+    assert fired
+    assert report["src/a.py"].startswith("skipped:")
+    assert "does not hold the bytes" in report["src/a.py"]
+    assert target.read_bytes() == b"a = 2\n"
+    assert not os.path.lexists(fired[0])
+
+
+def test_a_copy_changed_before_the_bind_is_refused(env, monkeypatch):
+    """The copy rewritten in place between ``CopyFile2`` and the bind is
+    bound (still one name, a regular file), flushed and read back through the
+    handle: its bytes no longer hash to the payload's, so nothing is put
+    back, the copy is deleted through the handle and the snapshot is kept."""
+    calls = _restoring_by_copy_file2(monkeypatch)
+    target = env.root / "src" / "a.py"
+    snapshot, payload = _snapshot_of(env)
+    target.write_bytes(b"runner change\n")
+
+    def rewrite(name):
+        with open(name, "r+b") as stream:
+            stream.write(b"not the payload's bytes\n")
+
+    ran = _before_bind(monkeypatch, calls, rewrite)
+    report = snapshot.restore()
+
+    assert ran
+    assert report["src/a.py"].startswith("skipped:")
+    assert "does not hold the bytes" in report["src/a.py"]
+    assert target.read_bytes() == b"runner change\n"
+    assert not os.path.lexists(_restore_tmp(target))
+    assert payload.exists()
+    if isinstance(calls, _HeldCopy):
+        assert [name for name, _path in calls.calls] == ["bind", "dispose"]
+
+
+@pytest.mark.parametrize("outside", ["read-only", "writable"])
+def test_a_hard_link_swapped_in_before_the_bind_is_refused_and_left_alone(
+    env, tmp_path, monkeypatch, outside,
+):
+    """The copy's name swapped for a hard link to a file outside the
+    repository before the bind: a read-only one cannot be bound (Windows
+    opens it for writing to nobody), and is named, left as it is; a
+    writable one is bound and refused for its second name, and only the
+    link at the temp name is deleted, through the handle. Either way nothing
+    is put back, and the outside file keeps its bytes, its mode and its own
+    name."""
+    calls = _restoring_by_copy_file2(monkeypatch)
+    target = env.root / "src" / "a.py"
+    snapshot, payload = _snapshot_of(env)
+    target.write_bytes(b"runner change\n")
+    victim = tmp_path / "outside.txt"
+    victim.write_bytes(b"outside the repository\n")
+    os.chmod(victim, stat.S_IREAD if outside == "read-only" else stat.S_IREAD | stat.S_IWRITE)
+    mode = stat.S_IMODE(victim.stat().st_mode)
+    unlink, link = os.unlink, os.link
+
+    def swap(name):
+        unlink(name)
+        link(victim, name)
+
+    ran = _before_bind(monkeypatch, calls, swap)
+    try:
+        report = snapshot.restore()
+        after = stat.S_IMODE(victim.stat().st_mode)
+    finally:
+        os.chmod(victim, stat.S_IREAD | stat.S_IWRITE)
+
+    assert ran
+    assert report["src/a.py"].startswith("skipped:")
+    assert target.read_bytes() == b"runner change\n"
+    assert victim.read_bytes() == b"outside the repository\n"
+    assert after == mode
+    assert payload.exists()
+    if outside == "read-only":
+        assert "could not be held for its checks" in report["src/a.py"]
+        assert os.path.samefile(_restore_tmp(target), victim)
+    else:
+        assert "was not a plain new file" in report["src/a.py"]
+        assert not os.path.lexists(_restore_tmp(target))
+        assert victim.stat().st_nlink == 1
+    assert report["src/a.py"].endswith("check what is left there and delete it by hand")
+
+
+def test_a_copy_a_writer_holds_open_is_refused(env, monkeypatch):
+    """A handle already open on the copy to write refuses the bind (a
+    sharing violation): nothing is put back and the copy is left as it is,
+    named; what the writer writes stays in the copy alone."""
+    calls = _restoring_by_copy_file2(monkeypatch)
+    target = env.root / "src" / "a.py"
+    snapshot, payload = _snapshot_of(env)
+    target.write_bytes(b"runner change\n")
+    writers: list = []
+
+    def hold(name):
+        writer = open(name, "r+b")
+        writers.append(writer)
+        if isinstance(calls, _HeldCopy):
+            info = os.fstat(writer.fileno())
+            calls.writers.add((info.st_dev, info.st_ino))
+
+    _before_bind(monkeypatch, calls, hold)
+    try:
+        report = snapshot.restore()
+        assert writers
+        writers[0].write(b"the writer's bytes\n")
+        writers[0].flush()
+    finally:
+        for writer in writers:
+            writer.close()
+
+    assert report["src/a.py"].startswith("skipped:")
+    assert "could not be held for its checks" in report["src/a.py"]
+    assert report["src/a.py"].endswith("check what is left there and delete it by hand")
+    assert target.read_bytes() == b"runner change\n"
+    assert _restore_tmp(target).read_bytes().startswith(b"the writer's bytes\n")
+    assert payload.exists()
+
+
+@_WINDOWS_COPY_FILE2
+def test_the_held_copy_cannot_be_written_renamed_or_removed_meanwhile(
+    env, tmp_path, monkeypatch,
+):
+    """Windows' own sharing rules, which the held handle relies on: while it
+    is held (here once the copy is hashed, as its attributes are about to be
+    set), nobody can open the copy to write, rename it or remove it, and
+    the file put back holds the payload's bytes."""
+    calls = _restoring_by_copy_file2(monkeypatch)
+    target = env.root / "src" / "a.py"
+    original = target.read_bytes()
+    snapshot, _payload = _snapshot_of(env)
+    target.write_bytes(b"runner change\n")
+    copy = _restore_tmp(target)
+    attempts = (
+        lambda: open(copy, "r+b").close(),
+        lambda: os.rename(copy, tmp_path / "moved"),
+        lambda: os.unlink(copy),
+    )
+    refused: list = []
+    set_basic = calls.set_basic
+
+    def try_then_set(held, *args):
+        for attempt in attempts:
+            try:
+                attempt()
+            except PermissionError:
+                refused.append("refused")
+            else:
+                refused.append("allowed")
+        return set_basic(held, *args)
+
+    monkeypatch.setattr(calls, "set_basic", try_then_set)
+
+    assert snapshot.restore(["src/a.py"]) == {"src/a.py": "restored"}
+    assert refused == ["refused"] * 3
+    assert target.read_bytes() == original
+    assert not os.path.lexists(copy)
+
+
+@pytest.mark.parametrize("case", [
+    "restored", "bytes differ", "hard link swapped in", "held by a writer",
+    "copy failed, something left",
+])
+def test_the_copy_is_never_changed_removed_or_renamed_by_its_name(
+    env, tmp_path, monkeypatch, case,
+):
+    """Every change to the copy goes through the handle held on it: no
+    ``chmod``, ``utime``, removal, truncation or rename by path names the
+    temp file, whatever the restore finds (seamed: those calls record any
+    path they are given, except inside ``CopyFile2`` itself)."""
+    calls = _restoring_by_copy_file2(monkeypatch)
+    target = env.root / "src" / "a.py"
+    snapshot, _payload = _snapshot_of(env)
+    target.write_bytes(b"runner change\n")
+    copy = os.path.normcase(str(_restore_tmp(target)))
+    victim = tmp_path / "outside.txt"
+    victim.write_bytes(b"outside the repository\n")
+    unlink, link = os.unlink, os.link
+    writers: list = []
+
+    def rewrite(name):
+        with open(name, "r+b") as stream:
+            stream.write(b"#")
+
+    def swap(name):
+        unlink(name)
+        link(victim, name)
+
+    def hold(name):
+        writers.append(open(name, "r+b"))
+        if isinstance(calls, _HeldCopy):
+            info = os.fstat(writers[0].fileno())
+            calls.writers.add((info.st_dev, info.st_ino))
+
+    if case in ("bytes differ", "hard link swapped in", "held by a writer"):
+        _before_bind(monkeypatch, calls, {
+            "bytes differ": rewrite, "hard link swapped in": swap,
+            "held by a writer": hold}[case])
+    copying: list = []
+    copy_file2 = write_safety._COPY_FILE2
+
+    def copied(source, destination, flags):
+        copying.append(True)
+        try:
+            if case == "copy failed, something left":
+                Path(destination).write_bytes(b"part of a copy")
+                raise _winerror(112, "there is not enough space on the disk", destination)
+            return copy_file2(source, destination, flags)
+        finally:
+            copying.pop()
+
+    monkeypatch.setattr(write_safety, "_COPY_FILE2", copied)
+    named: list = []
+
+    def recorder(name, real):
+        def call(*args, **kwargs):
+            for argument in args[:2]:
+                if (not copying and isinstance(argument, (str, bytes, os.PathLike))
+                        and os.path.normcase(os.fsdecode(argument)) == copy):
+                    named.append(name)
+            return real(*args, **kwargs)
+        return call
+
+    try:
+        with monkeypatch.context() as patched:
+            for module, names in (
+                (os, ("chmod", "lchmod", "utime", "unlink", "remove", "rename",
+                      "replace", "truncate", "rmdir")),
+                (shutil, ("copystat", "copymode", "copy", "copy2", "copyfile",
+                          "move", "rmtree")),
+            ):
+                for name in names:
+                    if hasattr(module, name):
+                        patched.setattr(module, name, recorder(name, getattr(module, name)))
+            report = snapshot.restore()
+    finally:
+        for writer in writers:
+            writer.close()
+
+    assert named == [], named
+    if case == "restored":
+        assert report == {"src/a.py": "restored"}
+    else:
+        assert report["src/a.py"].startswith("skipped:"), report
+        assert target.read_bytes() == b"runner change\n"
+    assert victim.read_bytes() == b"outside the repository\n"
+
+
+def test_the_held_restore_calls_nothing_that_changes_a_file_by_name():
+    """Statically, for what a ``CopyFile2`` restore runs once its payload is
+    open: no ``os`` or ``shutil`` call that changes, removes or renames a
+    file by its path, and none of the helpers that do (the store's
+    ``_discard`` and its read-only clearing, ``_copy_file2``'s clearing of
+    the name first)."""
+    import ast
+    import inspect
+    import textwrap
+
+    by_path = {"chmod", "lchmod", "utime", "unlink", "remove", "rename", "replace",
+               "truncate", "rmdir", "copystat", "copymode", "copy", "copy2",
+               "copyfile", "move", "rmtree"}
+    helpers = {"_discard", "_discard_after", "_unlink", "_clear_readonly",
+               "_copy_file2", "_copy_times_and_mode"}
+    for function in (write_safety._restored_by_copy_file2, write_safety._publish_held):
+        tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
+        found = set()
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            called = node.func
+            if (isinstance(called, ast.Attribute) and isinstance(called.value, ast.Name)
+                    and called.value.id in ("os", "shutil") and called.attr in by_path):
+                found.add(f"{called.value.id}.{called.attr}")
+            elif isinstance(called, ast.Name) and called.id in helpers:
+                found.add(called.id)
+        assert not found, (function.__name__, found)
+
+
+def test_a_payload_rewritten_after_its_check_is_never_put_back(env, monkeypatch):
+    """The payload is hashed by path against the manifest, then copied. One
+    rewritten in between is caught where ``CopyFile2`` copies: the bytes read
+    through the descriptor it holds must hash to the manifest's digest, so
+    nothing is copied. (The plain copy reads the payload by path once more,
+    unchecked: docs/development/write-safety.md, what restore leaves open.)"""
+    _restoring_by_copy_file2(monkeypatch)
+    target = env.root / "src" / "a.py"
+    snapshot, payload = _snapshot_of(env)
+    target.write_bytes(b"a = 2\n")
+    real = write_safety.file_sha256
+    fired: list = []
+
+    def then_rewrite(path):
+        digest = real(path)
+        if not fired and os.path.normcase(os.path.abspath(path)) == os.path.normcase(
+                str(payload)):
+            fired.append(True)
+            payload.write_bytes(b"planted rollback\n")
+        return digest
+
+    monkeypatch.setattr(write_safety, "file_sha256", then_rewrite)
+    report = snapshot.restore(["src/a.py"])
+
+    assert fired
+    assert report["src/a.py"].startswith("skipped:")
+    assert "no longer matches the manifest" in report["src/a.py"]
+    assert target.read_bytes() == b"a = 2\n"
+    assert not os.path.lexists(_restore_tmp(target))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows will not move a file, or a "
+                    "folder above it, while the file is held open")
+@pytest.mark.parametrize("swap", ["folder redirected for the copy alone",
+                                  "payload replaced by one with the same bytes"])
+def test_a_restore_copy_of_another_file_is_refused(env, tmp_path, monkeypatch, swap):
+    """What ``CopyFile2`` read by path is checked against the payload the
+    descriptor holds: the payload's folder redirected for the copy alone (a
+    junction's two flips) fails the bytes, the payload replaced by a file
+    with the same bytes fails the identity. Either way nothing is put back
+    and the temp file is gone."""
+    _restoring_by_copy_file2(monkeypatch)
+    target = env.root / "src" / "a.py"
+    snapshot, payload = _snapshot_of(env)
+    target.write_bytes(b"a = 2\n")
+    folder = payload.parent
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    secret = b"bytes from outside, linked in for the copy alone\n"
+    (elsewhere / payload.name).write_bytes(secret)
+
+    def copy_another(source, destination, flags, copy) -> None:
+        if swap.startswith("folder"):
+            saved = folder.with_name("files.saved")
+            folder.rename(saved)
+            folder.symlink_to(elsewhere, target_is_directory=True)
+            try:
+                copy(source, destination, flags)
+            finally:
+                folder.unlink()
+                saved.rename(folder)
+            return
+        twin = payload.with_name("twin")
+        twin.write_bytes(payload.read_bytes())
+        os.replace(twin, payload)
+        copy(source, destination, flags)
+
+    copy_file2, fired = _copying(payload, copy_another)
+    monkeypatch.setattr(write_safety, "_COPY_FILE2", copy_file2)
+    report = snapshot.restore(["src/a.py"])
+
+    assert fired
+    assert report["src/a.py"].startswith("skipped:")
+    assert target.read_bytes() == b"a = 2\n"
+    assert not os.path.lexists(fired[0])
+
+
+def test_a_link_at_the_restore_copys_name_once_copied_is_refused_and_named(
+    env, tmp_path, monkeypatch,
+):
+    """A temp name that is a link once ``CopyFile2`` copied may have taken
+    the copy elsewhere: the link is bound as itself and deleted through the
+    handle, never followed, nothing is put back, and the file's state names
+    where the copy may be, which the restore does not delete (a path someone
+    else chose is not its to)."""
+    _restoring_by_copy_file2(monkeypatch)
+    target = env.root / "src" / "a.py"
+    snapshot, payload = _snapshot_of(env)
+    target.write_bytes(b"a = 2\n")
+    followed = tmp_path / "followed.txt"
+
+    def copy_through_a_link(source, destination, flags, copy) -> None:
+        os.symlink(followed, destination)
+        followed.write_bytes(Path(source).read_bytes())
+
+    copy_file2, fired = _copying(payload, copy_through_a_link)
+    monkeypatch.setattr(write_safety, "_COPY_FILE2", copy_file2)
+    report = snapshot.restore(["src/a.py"])
+
+    assert fired
+    assert "was a link to" in report["src/a.py"] and followed.name in report["src/a.py"]
+    assert report["src/a.py"].endswith("check what is left there and delete it by hand")
+    assert target.read_bytes() == b"a = 2\n"
+    assert not os.path.lexists(fired[0])
+    assert followed.exists()
+
+
+@pytest.mark.parametrize("planted", ["to a file", "dangling"])
+def test_a_link_planted_at_the_restore_copys_name_is_never_written_through(
+    env, tmp_path, restoring, planted,
+):
+    """The temp name is predictable (the file's name and the pid). A link a
+    runner planted there is never written through nor removed: the plain
+    copy's exclusive creation refuses the name, and so does ``CopyFile2``'s
+    (``COPY_FILE_FAIL_IF_EXISTS`` with ``COPY_FILE_COPY_SYMLINK``), so the
+    file is skipped, the link's target is neither written nor, for a
+    dangling link, created, and the link stays for the user to look at."""
+    if restoring == "plain copy" and os.name == "nt":
+        pytest.skip("on Windows the plain copy serves Python before 3.12 alone, "
+                    "and what its exclusive creation does with a dangling link "
+                    "is not pinned here")
+    target = env.root / "src" / "a.py"
+    snapshot, _payload = _snapshot_of(env)
+    target.write_bytes(b"a = 2\n")
+    victim = tmp_path / "victim.txt"
+    if planted == "to a file":
+        victim.write_bytes(b"not the restore's to write\n")
+    _restore_tmp(target).symlink_to(victim)
+
+    report = snapshot.restore(["src/a.py"])
+
+    if planted == "to a file":
+        assert victim.read_bytes() == b"not the restore's to write\n"
+    else:
+        assert not os.path.lexists(victim)
+    assert report["src/a.py"].startswith("skipped:")
+    assert target.read_bytes() == b"a = 2\n"
+    assert os.path.islink(_restore_tmp(target))
+    if restoring == "CopyFile2":
+        assert report["src/a.py"].endswith(
+            "was left as it is; check what is left there and delete it by hand")
+
+
+@pytest.mark.parametrize("left", ["nothing", "part of a copy"])
+@pytest.mark.parametrize("winerror", [5, 112], ids=["access denied", "disk full"])
+def test_a_failed_restore_copy_takes_the_plain_restore_or_is_named(
+    env, monkeypatch, winerror, left,
+):
+    """A ``CopyFile2`` that fails and leaves nothing at the temp name hands
+    the file to the plain restore, which puts it back as it always did (its
+    bytes and ``copystat``'s times). One that leaves something there skips
+    the file and names it: what is there is never removed by its name, and
+    may not be the restore's."""
+    _restoring_by_copy_file2(monkeypatch)
+    target = env.root / "src" / "a.py"
+    os.utime(target, ns=(1_600_000_000_000_000_000, 1_650_000_000_987_654_300))
+    original = target.read_bytes()
+    snapshot, _payload = _snapshot_of(env)
+    target.write_bytes(b"a = 2\n")
+
+    def refuse(source, destination, flags):
+        if left != "nothing":
+            Path(destination).write_bytes(b"part of a copy")
+        raise _winerror(winerror, "refused", source)
+
+    monkeypatch.setattr(write_safety, "_COPY_FILE2", refuse)
+    report = snapshot.restore(["src/a.py"])
+
+    if left == "nothing":
+        assert report == {"src/a.py": "restored"}
+        assert target.read_bytes() == original
+        assert target.stat().st_mtime_ns == 1_650_000_000_987_654_300
+        assert not os.path.lexists(_restore_tmp(target))
+    else:
+        assert report["src/a.py"].startswith("skipped: CopyFile2 could not copy")
+        assert report["src/a.py"].endswith("check what is left there and delete it by hand")
+        assert target.read_bytes() == b"a = 2\n"
+        assert _restore_tmp(target).read_bytes() == b"part of a copy"
+
+
+def test_restore_path_checks_its_copy_as_a_snapshot_restore_does(env, tmp_path, monkeypatch):
+    """The commit write policy's restore (``restore_path``) has no digest to
+    check against; its ``CopyFile2`` copy must hold the bytes read through
+    the descriptor it holds of the copy it was handed."""
+    _restoring_by_copy_file2(monkeypatch)
+    target = env.root / "src" / "a.py"
+    kept = tmp_path / "kept-a.py"
+    kept.write_bytes(b"a = 0, as kept\n")
+
+    assert write_safety.restore_path(str(env.root), "src/a.py", str(kept)) == "restored"
+    assert target.read_bytes() == b"a = 0, as kept\n"
+
+    target.write_bytes(b"a = 2\n")
+    copy_file2, fired = _copying(kept, _copy_then_change)
+    monkeypatch.setattr(write_safety, "_COPY_FILE2", copy_file2)
+    state = write_safety.restore_path(str(env.root), "src/a.py", str(kept))
+    assert fired and state.startswith("skipped:")
+    assert target.read_bytes() == b"a = 2\n"
+    assert not os.path.lexists(fired[0])
+
+
+def test_a_folder_that_became_a_junction_is_never_restored_through(env, monkeypatch):
+    """``lstat`` reports a Windows directory junction as a directory, so a
+    folder above the file that is a junction now (a reparse point naming
+    another path) is refused like a symlink: neither the file put back nor
+    the one deleted is reached through it. Seamed: the folder's ``lstat``
+    carries a junction's reparse tag."""
+    snapshot, _payload = _snapshot_of(env, "src/a.py", "src/new.py")
+    target = env.root / "src" / "a.py"
+    target.write_bytes(b"a = 2\n")
+    (env.root / "src" / "new.py").write_text("new = 1\n", encoding="utf-8")
+    real_lstat = os.lstat
+    folder = os.path.normcase(str(env.root / "src"))
+
+    def lstat(path, *args, **kwargs):
+        info = real_lstat(path, *args, **kwargs)
+        if os.path.normcase(os.fspath(path)) != folder:
+            return info
+        return types.SimpleNamespace(
+            st_mode=info.st_mode, st_dev=info.st_dev, st_ino=info.st_ino,
+            st_reparse_tag=_IO_REPARSE_TAG_MOUNT_POINT)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(os, "lstat", lstat)
+        report = snapshot.restore()
+
+    for relative in ("src/a.py", "src/new.py"):
+        assert "is a directory junction or another link now" in report[relative], report
+    assert target.read_bytes() == b"a = 2\n"
+    assert (env.root / "src" / "new.py").exists()
+
+
+#: WinNT.h's tags (``stat`` defines them on Windows alone).
+_IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003
+_IO_REPARSE_TAG_SYMLINK = 0xA000000C
+
+
+@pytest.mark.parametrize("tag, names_another", [
+    (_IO_REPARSE_TAG_MOUNT_POINT, True),
+    (_IO_REPARSE_TAG_SYMLINK, True),
+    (0x9000001A, False),   # a OneDrive placeholder (IO_REPARSE_TAG_CLOUD_1)
+    (0x80000013, False),   # a deduplicated file (IO_REPARSE_TAG_DEDUP)
+    (0, False),
+    (None, False),
+], ids=["junction", "symlink", "cloud placeholder", "dedup", "none", "no field"])
+def test_only_a_reparse_point_naming_another_path_counts_as_a_link(tag, names_another):
+    info = types.SimpleNamespace(st_mode=stat.S_IFDIR | 0o755)
+    if tag is not None:
+        info.st_reparse_tag = tag
+    assert write_safety._names_another_path(info) is names_another
+
+
+@pytest.mark.skipif(os.name != "nt" or not hasattr(write_safety._winapi, "CreateJunction"),
+                    reason="directory junctions are Windows'")
+def test_a_real_junction_above_the_file_is_refused(env, tmp_path):
+    """A folder above the file swapped for a directory junction to a folder
+    outside the repository: the restore refuses the path, and the file
+    outside keeps its bytes."""
+    snapshot, _payload = _snapshot_of(env)
+    folder = env.root / "src"
+    outside = tmp_path / "outside-src"
+    outside.mkdir()
+    (outside / "a.py").write_bytes(b"outside the repository\n")
+    folder.rename(env.root / "src.saved")
+    write_safety._winapi.CreateJunction(str(outside), str(folder))
+
+    report = snapshot.restore(force=True)
+
+    assert "is a directory junction or another link now" in report["src/a.py"], report
+    assert (outside / "a.py").read_bytes() == b"outside the repository\n"
+
+
+def _file_attributes(path) -> int:
+    return os.stat(path).st_file_attributes
+
+
+def _system32(name: str) -> str:
+    """A Windows tool by its full path: the ``env`` fixture's PATH holds no
+    system folder."""
+    return os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", name)
+
+
+@_WINDOWS_COPY_FILE2
+def test_a_restored_file_keeps_its_alternate_data_streams_and_attributes(env):
+    """The snapshot's ``shutil.copy2`` (``CopyFile2``) keeps a file's NTFS
+    alternate data streams and attributes in its payload, and the restore's
+    ``CopyFile2`` copy puts them back on a file the runner replaced with a
+    plain one; a copy of the payload's bytes alone dropped both. (A file
+    that is not read-only: a read-only one takes the plain restore.)"""
+    target = env.root / "src" / "a.py"
+    try:
+        with open(f"{target}:multi-llm-test", "wb") as stream:
+            stream.write(b"kept in a stream\n")
+    except OSError:
+        pytest.skip("this file system has no alternate data streams")
+    subprocess.run([_system32("attrib.exe"), "+h", str(target)], check=True,
+                   capture_output=True)
+    assert _file_attributes(target) & stat.FILE_ATTRIBUTE_HIDDEN
+    original = target.read_bytes()
+    snapshot, _payload = _snapshot_of(env)
+    target.unlink()
+    target.write_bytes(b"a = 2\n")  # the runner's file: no stream, not hidden
+
+    assert snapshot.restore(["src/a.py"]) == {"src/a.py": "restored"}
+
+    assert target.read_bytes() == original
+    with open(f"{target}:multi-llm-test", "rb") as stream:
+        assert stream.read() == b"kept in a stream\n"
+    assert _file_attributes(target) & stat.FILE_ATTRIBUTE_HIDDEN
+
+
+def _encrypted(path) -> bool:
+    return bool(_file_attributes(path) & stat.FILE_ATTRIBUTE_ENCRYPTED)
+
+
+@_WINDOWS_COPY_FILE2
+def test_an_encrypted_file_comes_back_encrypted(env):
+    """A file EFS-encrypted on its own, in a folder that is not encrypted,
+    and replaced by the runner with a plaintext one comes back encrypted:
+    the payload is encrypted (``CopyFile2``) and so is the restore's copy of
+    it. Written as plain bytes, it came back as plaintext."""
+    target = env.root / "src" / "a.py"
+    try:
+        subprocess.run([_system32("cipher.exe"), "/e", "/a", str(target)],
+                       capture_output=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    if not _encrypted(target):
+        pytest.skip("EFS is not available here: cipher /e did not encrypt the file")
+    if _encrypted(target.parent):
+        pytest.skip("the folder is encrypted, so every new file in it is too")
+    original = target.read_bytes()
+    snapshot, payload = _snapshot_of(env)
+    if not _encrypted(payload):
+        pytest.skip("the snapshot's copy is not encrypted here, so there is no "
+                    "encryption to put back")
+    target.unlink()
+    target.write_bytes(b"a = 2\n")
+    if _encrypted(target):
+        pytest.skip("every new file is encrypted here")
+
+    assert snapshot.restore(["src/a.py"]) == {"src/a.py": "restored"}
+
+    assert target.read_bytes() == original
+    assert _encrypted(target)
+
+
+def _store(scheduler) -> Path:
+    return Path(scheduler.safety_dir) / wbs.ROLLBACK_STORE_DIRNAME
+
+
+def test_the_discarded_store_is_gone_whole_and_says_nothing(env, tmp_path):
+    """The store is removed whole, a link planted in it as the link itself
+    (its target keeps its bytes), and a store already gone says nothing."""
+    lines: list = []
+    scheduler = env.scheduler([env.apply_task(0)], log=lines.append)
+    assert scheduler._retain(scheduler._census())
+    victim = tmp_path / "victim.txt"
+    victim.write_bytes(b"not the discard's to remove\n")
+    (_store(scheduler) / "planted").symlink_to(victim)
+
+    scheduler._discard_rollback_store()
+    scheduler._discard_rollback_store()
+
+    assert not os.path.lexists(_store(scheduler))
+    assert victim.read_bytes() == b"not the discard's to remove\n"
+    assert not scheduler._retained and scheduler._retained_bytes == 0
+    assert not [line for line in lines if "WARNING" in line], lines
+
+
+def test_what_the_discard_cannot_remove_is_named_and_never_tried_again(env, monkeypatch):
+    """A blob whose removal is refused (on Windows, a read-only one) is
+    named in a warning, never left silently, and never tried again on any
+    platform: no attribute is cleared and its name is not unlinked a second
+    time. The folders left only because it is are not named again."""
+    lines: list = []
+    scheduler = env.scheduler([env.apply_task(0)], log=lines.append)
+    kept = scheduler._retain(scheduler._census())
+    blob = scheduler._blob_path(kept["src/a.py"])
+    tries: list = []
+    real_unlink = os.unlink
+
+    def unlink(path, *args, **kwargs):
+        if os.path.basename(os.fspath(path)) == kept["src/a.py"]:
+            tries.append(path)
+            raise PermissionError(errno.EACCES, "refused", os.fspath(path))
+        return real_unlink(path, *args, **kwargs)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(os, "unlink", unlink)
+        patched.setattr(write_safety, "_clear_readonly",
+                        lambda *args: pytest.fail("no attribute is cleared"))
+        scheduler._discard_rollback_store()
+
+    assert len(tries) == 1
+    assert os.path.lexists(blob)
+    warnings = [line for line in lines if "WARNING: the rollback store" in line]
+    assert len(warnings) == 1, lines
+    assert f"{blob} could not be removed (" in warnings[0]
+    assert warnings[0].count(" could not be removed (") == 1
+    assert "It was not tried again; left there it costs disk space only." in warnings[0]
+    assert "delete it by hand" in warnings[0]
+    assert not scheduler._retained and scheduler._retained_bytes == 0
+
+
+@pytest.mark.skipif(
+    os.name == "nt" or not shutil.rmtree.avoids_symlink_attacks
+    or (hasattr(os, "geteuid") and os.geteuid() == 0),
+    reason="shutil.rmtree's descriptor walk, and a folder that refuses a "
+           "non-root user's unlink")
+def test_a_refused_blob_is_never_tried_again_through_a_folder_swapped_for_a_link(
+    env, tmp_path, monkeypatch,
+):
+    """``shutil.rmtree`` removes each entry through its folder's descriptor,
+    so once it opened ``rollback_store/ab/`` a link swapped in at that name
+    leads nowhere. A refused removal is named, never tried again by path:
+    the path would follow the link and remove the file of the same name
+    outside the store. (The blob's removal is refused by its folder's mode,
+    and the folder is swapped once ``rmtree`` holds it.)"""
+    lines: list = []
+    scheduler = env.scheduler([env.apply_task(0)], log=lines.append)
+    kept = scheduler._retain(scheduler._census())
+    blob = Path(scheduler._blob_path(kept["src/a.py"]))
+    folder, saved = blob.parent, blob.parent.with_name(blob.parent.name + ".saved")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / blob.name
+    victim.write_bytes(b"not the discard's to remove\n")
+    real_unlink = os.unlink
+    swapped: list = []
+
+    def unlink(path, *args, **kwargs):
+        if not swapped and os.path.basename(os.fspath(path)) == blob.name:
+            assert kwargs.get("dir_fd") is not None, "rmtree's descriptor walk"
+            swapped.append(True)
+            folder.rename(saved)
+            folder.symlink_to(outside, target_is_directory=True)
+        return real_unlink(path, *args, **kwargs)
+
+    os.chmod(folder, stat.S_IREAD | stat.S_IEXEC)
+    try:
+        with monkeypatch.context() as patched:
+            patched.setattr(os, "unlink", unlink)
+            scheduler._discard_rollback_store()
+    finally:
+        os.chmod(saved if saved.exists() else folder, stat.S_IRWXU)
+
+    assert swapped
+    assert victim.read_bytes() == b"not the discard's to remove\n"
+    assert (saved / blob.name).exists()
+    warnings = [line for line in lines if "WARNING: the rollback store" in line]
+    assert len(warnings) == 1 and f"{blob} could not be removed (" in warnings[0], lines
+
+
+@pytest.mark.skipif(os.name != "nt" or not hasattr(write_safety._winapi, "CreateJunction"),
+                    reason="directory junctions are Windows'")
+def test_a_store_folder_swapped_for_a_junction_clears_nothing_outside(
+    env, tmp_path, monkeypatch,
+):
+    """The blob's folder swapped for a junction to an outside folder once
+    ``rmtree`` listed it: ``rmtree``'s own removal reaches the read-only file
+    of the same name there and is refused, and nothing tries it again, so
+    its attribute and bytes stay; the blob is named."""
+    lines: list = []
+    scheduler = env.scheduler([env.apply_task(0)], log=lines.append)
+    kept = scheduler._retain(scheduler._census())
+    blob = Path(scheduler._blob_path(kept["src/a.py"]))
+    folder = blob.parent
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / blob.name
+    victim.write_bytes(b"not the discard's to remove\n")
+    os.chmod(victim, stat.S_IREAD)
+    real_unlink = os.unlink
+    swapped: list = []
+
+    def unlink(path, *args, **kwargs):
+        if not swapped and os.path.basename(os.fspath(path)) == blob.name:
+            swapped.append(True)
+            folder.rename(folder.with_name(folder.name + ".saved"))
+            write_safety._winapi.CreateJunction(str(outside), str(folder))
+        return real_unlink(path, *args, **kwargs)
+
+    try:
+        with monkeypatch.context() as patched:
+            patched.setattr(os, "unlink", unlink)
+            scheduler._discard_rollback_store()
+
+        assert swapped
+        assert victim.read_bytes() == b"not the discard's to remove\n"
+        assert _file_attributes(victim) & stat.FILE_ATTRIBUTE_READONLY
+        warnings = [line for line in lines if "WARNING: the rollback store" in line]
+        assert len(warnings) == 1 and f"{blob} could not be removed" in warnings[0], lines
+    finally:
+        os.chmod(victim, stat.S_IREAD | stat.S_IWRITE)
+
+
+@_WINDOWS_COPY_FILE2
+def test_a_read_only_blob_is_named_and_left_by_the_discard(env):
+    """``CopyFile2`` keeps a read-only file's attribute in its blob, and
+    Windows will not delete a read-only file: the discard names the blob,
+    leaves it read-only in the store (it costs disk space only) and removes
+    the rest."""
+    lines: list = []
+    target = env.root / "src" / "a.py"
+    scheduler = env.scheduler([env.apply_task(0)], log=lines.append)
+    os.chmod(target, stat.S_IREAD)
+    try:
+        kept = scheduler._retain(scheduler._census())
+        blob = scheduler._blob_path(kept["src/a.py"])
+        assert _file_attributes(blob) & stat.FILE_ATTRIBUTE_READONLY
+
+        scheduler._discard_rollback_store()
+
+        assert os.path.lexists(blob)
+        assert _file_attributes(blob) & stat.FILE_ATTRIBUTE_READONLY
+        warnings = [line for line in lines if "WARNING: the rollback store" in line]
+        assert len(warnings) == 1 and f"{blob} could not be removed (" in warnings[0], lines
+        assert "costs disk space only" in warnings[0]
+    finally:
+        os.chmod(target, stat.S_IREAD | stat.S_IWRITE)
+        for left in _store(scheduler).rglob("*"):
+            if left.is_file():
+                os.chmod(left, stat.S_IREAD | stat.S_IWRITE)
