@@ -140,6 +140,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.write_phase_bridge",
         "utils.write_prompt",
         "utils.write_safety",
+        "utils.write_verdict",
     )),
     4: ("domain", (
         "utils",  # the re-export barrel

@@ -32,7 +32,7 @@ never `notes` (only a clear pass with nothing listed is a pass;
 `{}`, `check: null` or an unreadable `passed` is a
 `CHECK_RESULT_UNKNOWN` finding, and a bare
 `"none"`/`"n/a"`/`"no problems found"`/`0` beside a
-pass is no finding — fix round 12), and `_verification_verdict` records `passed: false` or any
+pass is no finding — fix round 12), and `write_verdict.decide`'s verification-only rows record `passed: false` or any
 finding as `no-op`/`ok` labelled `check-findings`; a crash,
 or a `check` saying `could_not_run: true` (`read_check_reply`; the contract's
 word for a check that could not run, on the native leg `util batch-done --status failed --check could-not-run`), is a failed task

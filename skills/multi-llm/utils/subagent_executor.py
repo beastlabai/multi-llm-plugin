@@ -802,7 +802,7 @@ def read_check_reply(result: Any) -> CheckReply:
     Fix round 12 (a coordinator decision after racing run 3: real runners
     answer ``failed`` for a check that ran and found problems): a check
     that could not run says so with ``check.could_not_run: true``, and only
-    that, or a crash, is a check that did not run. ``_verification_verdict``
+    that, or a crash, is a check that did not run. ``write_verdict.decide``
     reads a ``failed`` reply whose ``check`` lists findings, and does not
     say it could not run, as findings.
     """

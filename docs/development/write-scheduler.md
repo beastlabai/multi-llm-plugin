@@ -7,6 +7,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 ## Contents
 
 - [Write scheduler contract](#write-scheduler-contract)
+- [The verdict table](#the-verdict-table)
 - [Retry after edits](#retry-after-edits)
 - [Declined items and partial applications](#declined-items-and-partial-applications)
 - [Dispatch counts](#dispatch-counts)
@@ -559,6 +560,58 @@ past a failed check with its independent siblings was judged unsafe to add under
 resume contract; the native leg's instructions continue with independent tasks, a documented
 difference).
 
+## The verdict table
+
+`utils/write_verdict.py` decides which D3g outcome a schema-valid write reply lands on.
+`decide(WriteFacts) -> Verdict` is pure and reads its rows in order; the first that matches decides.
+`WriteBatchScheduler._classify` gathers the facts, asks it, and applies the verdict, and every side
+effect stays there: the containment sweep is consumed exactly once, a policy violation's files are
+restored, the jail's records are kept, and one audit line closes the dispatch. `reason_for` words each
+row; `status`, `summary.md` and the stop messages print the reason, so its wording is part of the contract.
+
+| Order | Row (`VerdictRule`) | When | Outcome |
+|---|---|---|---|
+| 1 | `POLICY_VIOLATION` | the post-run `WritePolicy.check` refuses a touched path: a declared file that moved, a write the sweep saw outside the declared set (the task's own, one a sibling also saw, one with no retained bytes), or a path the commit review's guard watches | policy violation; each path restored, put back from the guard's copy, or named as having no rollback point |
+| 2 | `REPLACED_TARGET` | on the plugin-landlock rung, the target's `(st_dev, st_ino)` differs from the one recorded at this dispatch's snapshot | failed; nothing is rolled back over the file now at the path |
+| 3 | `JAIL_PARTIAL`, `JAIL_FAILED` | a failed `file_change` or a command denial on an in-scope path (partial when any file moved), or a `replacement` denial while the target is unchanged | partial application, failed |
+| 4 | `CHECK_UNOBSERVED`, `CHECK_MOVED`, `CHECK_COULD_NOT_RUN`, `CHECK_FINDINGS`, `VERIFIED` | an implement task that declares no files: the sweep could not look; any path moved; its check did not run; its check listed findings; it passed | failed, partial application, failed, no-op, no-op |
+| 5 | `PARTIAL` | declared bytes moved, and the runner crashed, claimed `failed`, left an expected id unattested, or declined every item | partial application |
+| 6 | `APPLIED_NO_OP_CLAIMED` | declared bytes moved under a `no-op` claim | applied; the reason says whether the snapshot was reused from an earlier attempt |
+| 7 | `FAILED` | no declared byte moved, and a crash, or a `failed` claim that did not decline every item | clean failure |
+| 8 | `NO_OP` | no declared byte moved, and a `no-op` claim, or every item declined with no stray write of its own | no-op |
+| 9 | `PARTIAL_OUTSIDE`, `APPLIED_OUTSIDE` | no declared byte moved, but a code batch's own stray writes did: partial when an expected id is unaccounted for or every item was declined | partial application, applied |
+| 10 | `NOT_APPLIED` | success claimed and not one byte of the change moved | clean failure, `applied_without_changes` |
+| 11 | `APPLIED` | every other case, which is reachable only on a clean exit | applied |
+
+The order is the contract. The guards (rows 1 to 4) come before every claim row because the claim is
+never the verdict: codex ends a turn whose every write the jail refused on `turn.completed` with exit 0.
+A non-zero exit never lands on APPLIED (D3k): with declared bytes moved it is row 5, without them row 7,
+and a verification-only task's crash, or a `failed` reply whose check did not run, falls through to
+row 7 as well. `changed` is the declared set, compared before the sweep adopts the dispatch's undeclared
+writes into the snapshot; `files_touched` is the rollback set, and no row reads it. A plan or
+task-list batch is judged on its declared file alone, so its stray writes never reach row 9, and a
+stray write a sibling running at the same time also saw is never a task's own.
+
+`_classify` gathers each guard's facts only while no guard before it has matched
+(`write_verdict.guard`, the rows 1 to 3 that `decide` asks first): the target's inode is read and
+the replaced-target check's "before" spent only once the policy passed; the jail's denials are read
+only once the target was not replaced, and its paths resolved only for what its row words (the
+denied paths when a jail row decides, the note's when none does); the reply's `check`, the declined
+items' wording and the declared files' names (`DECLARED_NAMES_ROWS`) only past every guard. Reading
+a later fact can fail (a jail path that does not resolve), and must never stand between a matched
+guard and what its row does: a policy violation's files are restored, and its verdict and reason
+set, before its restore is audited and before anything a later row needs is read. A guard row reads
+only its own facts and those before it, so no fact skipped after it could change the verdict.
+
+`tests/test_write_verdict_table.py` drives the real `_classify` over the guards crossed with the
+claim inputs, each guard alone crossed with every verification-only row and reply shape, and every
+list a reason prints at the lengths around its cut (an empty batch, one item, five and six paths,
+three and four findings), and compares every verdict, its reason, its side effects and the order it
+first crossed each I/O boundary with `tests/golden/write_verdict_table.json`. It also checks that
+filling in the facts a matched guard skipped never changes `decide`'s verdict, which a row moved
+ahead of a guard would. Regenerate the golden file with `MULTI_LLM_UPDATE_GOLDEN=1` only for an
+intended change, and read the diff.
+
 ## Retry after edits
 
 **A write batch is never sent twice on top of its own edits** (fix round 8): before any retry or
@@ -778,7 +831,7 @@ once one names an item; `--json`'s
 each why on the line under its command, unbracketed (`run_status.why_line`; a why ending in a
 bracket read `(T006))`), the `=done` answer's why gives a check's
 findings after `; <check> reported:` without their closing stop, and the CHECK FINDINGS reason
-joins findings with `write_batch_scheduler.findings_clause` and ends the sentence once.
+joins findings with `write_verdict.findings_clause` and ends the sentence once.
 
 `util prior-changes append` refuses an empty or blank `--id` (exit 3, nothing written,
 naming the batches of the phase's `write_tasks.json`).

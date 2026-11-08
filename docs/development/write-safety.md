@@ -41,7 +41,7 @@ pinned to 1 regardless; a task declaring no file set runs alone) checked executo
 trusted from the batcher; an `implement` task with **no declared files** is a
 verification-only task (generate-tasks emits one for a syntax gate or smoke run, 2026-10-01: the D3h
 refusal dead-ended implement at batch 12 and `--resume` hit it again): it is snapshotted
-as an empty set, the undeclared-write sweep is its whole verdict (`_verification_verdict`: nothing
+as an empty set, the undeclared-write sweep is its whole verdict (`write_verdict.decide`'s verification-only rows: nothing
 moved is `no-op`/`VERIFIED`, any path moved is a partial application
 naming the fix — declare the files under `Files to modify` and `--resume`; its
 rows, verdict stamp and mirror row add `verification_only` + `outcome_label`

@@ -44,7 +44,7 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Collection, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, Union
@@ -82,7 +82,6 @@ from .subagent_executor import (
     STATUS_BATCH_FAILED,
     STATUS_OK,
     STATUS_PARTIAL,
-    STATUS_POLICY_VIOLATION,
     STATUS_REJECTED,
     STATUS_SCHEMA_INVALID,
     STATUS_UNPARSEABLE,
@@ -168,6 +167,21 @@ from .write_safety import (
     resolve_repo_root,
     claim_external_safety_dir,
     safety_dir,
+)
+from .write_verdict import (
+    DECLARED_NAMES_ROWS,
+    JailFacts,
+    PolicyFacts,
+    PolicyRestore,
+    TargetReplaced,
+    VerdictRule,
+    WriteFacts,
+    decide,
+    findings_clause,
+    guard,
+    jail_note,
+    reason_for,
+    replaced_target_reason,
 )
 
 
@@ -605,15 +619,6 @@ def batch_check_section(
         lines.append("")
     lines.pop()
     return lines
-
-
-def findings_clause(findings: Sequence[Any]) -> str:
-    """*findings* as one clause, joined with "; ", each without its own
-    closing stop (``…found 2).; src/…`` read as two marks, fix round 28)."""
-    return "; ".join(
-        without_closing_mark(" ".join(str(item).split())) for item in findings
-        if str(item).strip()
-    )
 
 
 def quoted_findings(findings: Sequence[str], limit: int = 600) -> str:
@@ -1418,7 +1423,7 @@ def answered_done_on_record(
 def _findings_from_a_failed_claim(data: Any) -> bool:
     """Whether a result file that claims ``failed`` holds a check read as findings.
 
-    ``_verification_verdict`` reads a check's ``failed`` reply that lists
+    ``write_verdict.decide`` reads a check's ``failed`` reply that lists
     findings and does not say ``could_not_run`` as findings (``no-op``/ok,
     labelled ``check-findings``, fix round 12), and ``_stamp_verdict``
     records that verdict beside the runner's own words, which stay as the
@@ -8707,97 +8712,40 @@ class WriteBatchScheduler:
         resent: bool = False,
         resend_note: Optional[str] = None,
     ) -> None:
-        """Decide which of the four D3g outcomes this dispatch landed on.
+        """Decide which D3g outcome this dispatch landed on, and record it.
 
-        Precedence, and every branch of it matters:
+        The decision is :func:`write_verdict.decide`, a table read in order:
+        the write policy over every touched path, then the plugin-landlock
+        rung's replaced target and jail denials, then a task that declares no
+        files, then the claim rows, where the claim is never the verdict and a
+        non-zero exit never lands on APPLIED (D3k). The rows and why:
+        ``docs/development/write-scheduler.md``, "The verdict table".
 
-        * The runner **claimed** something (``status``) and the snapshot **shows**
-          something (bytes moved or not). The claim is never the verdict.
-        * ``applied`` claimed + empty diff + no other file moved → **clean
-          failure**, never ``ok`` (fix round 14, OpenCode racing run 5: T016
-          said ``applied``, named ``index.html``, changed nothing, and was
-          recorded completed, listed "done and kept" and built on). The batch
-          was sent once more first (the ladder's rule 9, *resent*; *resend_note*
-          says why it was not); this is the verdict on that last reply. Not
-          done, so the loop stops at the boundary like any failed batch, and
-          ``--resume`` dispatches it again; ``applied_without_changes`` marks it
-          for the stop's wording. When files outside the declared set moved
-          instead, the bytes decide as for any moved file: **applied** when
-          every expected id came back, a **partial application** when not.
-        * ``no-op`` claimed + empty diff → **no-op**: the claim and the verdict
-          agree, so it is recorded under its own name (``(no-op — …, verified
-          no file changes)``) and the loop continues. Labelling it a clean
-          failure told the next batch the work had failed.
-        * ``no-op`` claimed + non-empty diff (and every expected id came back,
-          so this is NOT the partial-application row below) → still
-          **applied** — that is the verdict ``util restore-batch`` needs — but
-          the claim and the bytes disagree, and `_classify` used to fall
-          straight through to the plain applied branch with no ``reason`` at
-          all (N2, 2026-09-16: T006 read `applied` beside a summary saying
-          "already implemented", self-contradicting). ``reason`` now names
-          which of two things happened: the pre-batch snapshot was **reused**
-          from an earlier dispatch of this same batch (`_snapshot_reused`), so
-          the diff is that attempt's and not this one's — or this dispatch
-          took its own fresh snapshot and the bytes still moved, which is the
-          foreign-or-undeclared-write signature the undeclared-writes sweep
-          catches OUTSIDE the declared set, just landing inside it instead;
-          that second case also warns on the log.
-        * ``failed`` claimed (or a non-zero exit) + empty diff → the batch
-          **failed cleanly**: nothing to roll back, but not ``ok`` either — the
-          loop stops at the boundary and ``--resume`` re-dispatches it. A runner
-          that says it could not do the work has not done it.
-        * bytes moved + the batch reported ``failed``, **or** only some of the
-          batch's ``expected_ids`` came back, **or** the runner exited non-zero →
-          **partial application**: stops the loop, keeps the snapshots, exits 3
-          even under ``--yes``.
-        * a touched file outside ``driver.write_paths`` → **policy violation**:
-          the batch fails, the offending files are restored from the snapshot, the
-          loop stops (D3l post-run enforcement). "Touched" is the set the sweep
-          observed, declared or not, and the sweep retained its pre-run bytes, so
-          "restored" means an undeclared write too — see
-          :meth:`_undeclared_writes`.
-
-        A prose result never reaches here at all — it already failed rung 6 as
-        ``schema_invalid``, which is the fourth outcome.
-
-        **On the plugin-landlock rung** (plan step 3, 2026-09-30; F1 "A denied
-        edit is never recorded as applied" and "Supported edits under a
-        file-only grant") two checks sit after the policy-violation branch and
-        ahead of every claim-based one, because codex ends a turn whose every
-        write the jail refused on ``turn.completed`` with exit 0 and the claim
-        alone would read it as applied:
-
-        * **a replaced target** — the target's ``(st_dev, st_ino)`` differs
-          from the one recorded at this dispatch's pre-batch snapshot. The
-          jail's rule is bound to the inode it opened, so the runner's edits
-          were refused or went to the old file. A failed batch with its own
-          reason, checked first because it explains any denials; the claim
-          never overrides it; nothing is rolled back over the file now at the
-          path (it is not the runner's, and may be the user's) and the
-          snapshot is kept for comparison; the loop stops at exit 3, even under
-          ``--yes``, and ``--resume`` re-dispatches under a fresh rule;
-        * **the jail's denials** (``jail_denials``, read off the child's
-          stream): a failed ``file_change`` on any path, or a command denial on
-          an in-scope path, is a failed batch when no bytes moved and a partial
-          application when some did — never ``ok``. Under a file-only grant a
-          ``replacement`` denial counts as in scope while the target is
-          unchanged, and never makes a partial application once the target
-          changed in place (the runner recovered). Out-of-scope denials alone
-          leave today's verdict, with their count on the batch's line and the
-          outcome. The bytes, never ``changes[]``, say what landed.
+        This method gathers the facts, asks the table and applies the verdict.
+        The guards' facts are gathered in the table's order, each only while
+        no guard before it has matched (:func:`write_verdict.guard`), so
+        reading one a later row needs (the target's inode, a jail path
+        resolved) never stands between a matched guard and what its row does.
+        Every side effect is here, around the pure call: the containment sweep
+        is consumed exactly once, a policy violation's files are restored
+        before its verdict is set and audited, the jail's records are kept,
+        and one audit line closes the dispatch.
+        *resent* says the batch was sent once more after an unchanged
+        ``applied`` (the ladder's rule 9), *resend_note* why it was not. A
+        prose result never reaches here: it already failed rung 6 as
+        ``schema_invalid``, the fourth outcome.
         """
+        task_id = outcome.task_id
         claimed = str((result or {}).get("status") or "")
         summary = str((result or {}).get("summary") or "").strip()
         notes = str((result or {}).get("notes") or "").strip()
         outcome.runner_notes = clip(notes, 600) or None
         reported_ids = [str(i) for i in ((result or {}).get("ids") or [])]
         expected_ids = [str(i) for i in (task.get("expected_ids") or [])]
-        # Fix round 18: the items the batch declined, with their reasons.
         # An apply batch's declined item is not applied and not missing; an
         # id it put in both `ids` and `declined` is neither. `implement` has
         # no decline: a reply declining its task did not do it (`failed`).
         declined = declined_items(result, expected_ids)
-        attested_ids = [i for i in reported_ids if i not in declined.conflicting]
         declined_task: Optional[str] = None
         if self.kind in APPLY_WRITE_KINDS:
             outcome.declined = dict(declined.items)
@@ -8807,39 +8755,180 @@ class WriteBatchScheduler:
             outcome.runner_notes = outcome.runner_notes or (
                 f"declined: {declined_task}"
             )
-        all_declined = bool(expected_ids) and all(
-            item in outcome.declined for item in expected_ids
-        )
+        # `changed` is the DECLARED verdict: the byte comparison taken before
+        # the sweep adopts this dispatch's undeclared writes into the snapshot.
         changed = snapshot.changed()
-        undeclared = self._undeclared_writes(outcome.task_id, snapshot)
+        undeclared = self._undeclared_writes(task_id, snapshot)
         observed = self._observed_with_undeclared(snapshot, undeclared)
         # plans/review-commits.md §2.7: under an apply guard, the protected
         # set's (and the context plan's) own post-run check, which never
-        # depends on the sweep above: a large tree abandons the census, and
-        # a full rollback store keeps no bytes. Empty without a guard.
-        watched, commit_apply, watched_guard = self._commit_watch_after(outcome.task_id)
+        # depends on the sweep above. Empty without a guard.
+        watched, commit_apply, watched_guard = self._commit_watch_after(task_id)
 
-        # F9: recorded on the outcome itself — every branch below shares this
-        # object, so both `write_batch_report.json` (`result.to_dict()`) and
-        # this run's own `subagent_batch_report.json` (`BatchReport` built from
-        # the same `result.outcomes` in `_write_report`) carry the same
-        # verification evidence that used to live only in `subagent_audit.jsonl`
-        # and the per-batch result file.
+        # F9: the verification evidence rides the outcome, which both batch
+        # reports are built from.
         outcome.expected_ids = expected_ids
         outcome.returned_ids = reported_ids
-        # Whatever branch decides it, a file-less implement task's verdict
-        # reads VERIFIED or PARTIAL on every surface (`outcome_label`).
+        # Whatever row decides it, a file-less implement task's verdict reads
+        # VERIFIED or PARTIAL on every surface (`outcome_label`).
         outcome.verification_only = self._verification_only(snapshot)
+        self._record_reply_checks(task, outcome, result)
+        outcome.sha256_before = {
+            relative: row.get("sha256_before") for relative, row in observed.items()
+        }
+        outcome.sha256_after = {
+            relative: row.get("sha256_after") for relative, row in observed.items()
+        }
+        # `files_touched` is the ROLLBACK set: the declared files plus the
+        # undeclared writes the sweep retained bytes for. `util restore-batch`
+        # reads it, so a path with no rollback point is left out and
+        # `unrestorable` carries it (`TaskOutcome.bytes_moved` reads both).
+        outcome.files_touched = list(changed) + list(undeclared.restorable)
+        outcome.unrestorable = list(undeclared.unrecoverable)
+        outcome.summary = summary or None
+        if undeclared:
+            self._log_undeclared(task_id, undeclared)
+
+        facts = WriteFacts(
+            task_id=task_id,
+            kind=self.kind,
+            claimed=claimed,
+            exit_code=exit_code,
+            changed=tuple(changed),
+            expected_ids=tuple(expected_ids),
+            reported_ids=tuple(reported_ids),
+            attested_ids=tuple(
+                i for i in reported_ids if i not in declined.conflicting
+            ),
+            declined=dict(outcome.declined),
+            declined_task=declined_task,
+            declined_problems=tuple(declined.problems),
+            undeclared=tuple(undeclared.paths),
+            undeclared_own=tuple(undeclared.own),
+            siblings=tuple(sorted(undeclared.shared)),
+            sweep_observed=undeclared.observed,
+            verification_only=outcome.verification_only,
+            summary=summary,
+            snapshot_dir=str(snapshot.directory),
+            snapshot_reused=task_id in self._snapshot_reused,
+            resent=resent,
+            resend_note=resend_note,
+            repo_root=str(self.repo_root),
+            sweep_max_files=SWEEP_MAX_FILES,
+        )
+        # The guards' facts, in the table's order, each gathered only while no
+        # guard before it has matched: reading a later one can fail (its
+        # paths are resolved), and must never stand between a matched guard
+        # and what its row does, a policy violation's restore above all.
+        violation = self._post_run_violation(changed, undeclared, watched)
+        if violation is not None:
+            facts = replace(
+                facts, policy=PolicyFacts(violation.message, tuple(violation.paths)),
+            )
+        if guard(facts) is None:
+            # This dispatch's "before", spent by every row past the policy's.
+            before = self._target_identity_before.pop(task_id, None)
+            if sandbox_rung == SANDBOX_RUNG_PLUGIN_LANDLOCK:
+                facts = replace(facts, replaced=self._target_replacement(before))
+        if guard(facts) is None:
+            denials = _as_jail_denials(jail_denials)
+            if denials is not None:
+                # Kept before any of its paths is resolved.
+                self._jail_denials[task_id] = denials.to_dict()
+                facts = replace(facts, jail=self._jail_facts(task_id, denials, facts))
+                note = jail_note(facts.jail) if guard(facts) is None else None
+                if note:
+                    self._jail_notes[task_id] = note
+        reply_check: Optional[_executor.CheckReply] = None
+        if guard(facts) is None:
+            reply_check = read_check_reply(result)
+            facts = replace(
+                facts,
+                check=(
+                    None if reply_check.findings is None
+                    else tuple(reply_check.findings)
+                ),
+                check_listed=reply_check.listed,
+                check_could_not_run=reply_check.could_not_run,
+                declined_words=self._declined_words(outcome.declined),
+                named_files=tuple(
+                    str(path) for path in ((result or {}).get("files_touched") or [])
+                    if isinstance(path, str)
+                ),
+            )
+        verdict = decide(facts)
+        if verdict.rule in DECLARED_NAMES_ROWS:
+            facts = replace(facts, declared_names=(
+                ", ".join(e.relative for e in snapshot.declared_entries())
+                or "any declared file"
+            ))
+
+        restore: Optional[PolicyRestore] = None
+        if verdict.rule is VerdictRule.POLICY_VIOLATION:
+            assert violation is not None
+            report = snapshot.restore(violation.paths)
+            # A protected path the snapshot holds no bytes for is put back
+            # from what the guard kept (§2.7); no-op without a guard.
+            report = self._commit_restore_watched(
+                task_id, report, commit_apply, watched_guard,
+            )
+            restore = PolicyRestore.from_report(report, {
+                getattr(commit_apply, name, None)
+                for name in ("RESTORED_FROM_COPY", "DELETED_ABSENT_BEFORE")
+            } - {None})
+        elif verdict.rule is VerdictRule.REPLACED_TARGET:
+            self._record_replaced_target(outcome)
+        elif verdict.rule is VerdictRule.JAIL_FAILED:
+            self._jail_failed.add(task_id)
+        if (
+            verdict.check_not_run and reply_check is not None
+            and reply_check.findings and not outcome.runner_notes
+        ):
+            # A check that did not run: what its reply listed is the stop's
+            # account of it, never findings the run goes on past.
+            outcome.runner_notes = clip("; ".join(reply_check.findings), 600)
+        # The verdict is on the outcome before anything below can fail: a
+        # restored violation is never left unclassified by its audit line.
+        outcome.status = verdict.status
+        outcome.write_outcome = verdict.write_outcome
+        if verdict.applied_without_changes:
+            outcome.applied_without_changes = True
+        if verdict.unapplied_ids:
+            outcome.unapplied_ids = list(verdict.unapplied_ids)
+        if verdict.rule is VerdictRule.CHECK_FINDINGS:
+            outcome.check_findings = list(facts.check or [])
+        elif verdict.rule is VerdictRule.VERIFIED:
+            outcome.check_findings = None if facts.check is None else list(facts.check)
+        reason = reason_for(verdict, facts, restore)
+        if reason is not None:
+            outcome.reason = reason
+        if verdict.rule is VerdictRule.POLICY_VIOLATION:
+            self.audit.restored(task_id=task_id, report=report, force=False)
+        elif verdict.rule is VerdictRule.APPLIED_NO_OP_CLAIMED and not facts.snapshot_reused:
+            self.log(
+                f"[write-subagents] warning: {task_id} claimed "
+                f"'no-op' but {', '.join(changed)} changed against a snapshot "
+                f"taken this dispatch — treating the bytes as "
+                f"authoritative."
+            )
+        self._audit_completion(outcome, runner, profile, attempt, exit_code,
+                               observed, duration)
+
+    def _record_reply_checks(
+        self, task: Dict[str, Any], outcome: TaskOutcome, result: Any,
+    ) -> None:
+        """The checks a code batch's reply says it ran on its own edits, on
+        the outcome: its findings (fix round 14), its own words about them,
+        never a finding (fix round 28), and, for apply-code-fixes, what it
+        says each known check it was told to run did (fix round 20)."""
         if self.kind in CODE_WRITE_KINDS and not outcome.verification_only:
-            # Fix round 14: the checks a code batch ran on its own edits.
             outcome.batch_check = batch_check_findings(result)
-            # Fix round 28: its own words about them, never a finding.
             outcome.batch_check_note = batch_check_note(result)
             if self.kind == "implement" and outcome.batch_check:
-                # Fix round 22: what only repeats findings the user accepted
-                # for a check is that check's, never this task's own failure.
-                # Fix round 23: only the checks this task was told were
-                # accepted, and none whose failure is its own job.
+                # What only repeats findings the user accepted for a check is
+                # that check's, never this task's own failure: only the checks
+                # this task was told were accepted, and none whose failure is
+                # its own job (fix rounds 22, 23).
                 own, matched = split_accepted_findings(
                     outcome.batch_check,
                     accepted_findings_for(self.tasks, task, self.state),
@@ -8848,9 +8937,8 @@ class WriteBatchScheduler:
                     outcome.batch_check_accepted = matched
                     outcome.batch_check = own or None
         if self.kind == "apply_code_fixes":
-            # Fix round 20: what it says each known check it was told to run
-            # did, read against the commands its prompt listed; a command it
-            # lists as failed is a failing check on every surface.
+            # Read against the commands its prompt listed; a command it lists
+            # as failed is a failing check on every surface.
             listed = _known_checks.listed_check_outcomes(
                 _known_checks.reply_listed(result),
                 self._told_checks.get(outcome.task_id) or (),
@@ -8859,45 +8947,35 @@ class WriteBatchScheduler:
             outcome.batch_check = _known_checks.with_listed_failures(
                 outcome.batch_check, listed,
             )
-        outcome.sha256_before = {
-            relative: row.get("sha256_before") for relative, row in observed.items()
-        }
-        outcome.sha256_after = {
-            relative: row.get("sha256_after") for relative, row in observed.items()
-        }
 
-        # `changed` stays the DECLARED verdict — it is what the four outcomes are
-        # decided on below. `files_touched` is the ROLLBACK set, so it also
-        # carries the undeclared writes the sweep retained bytes for; an
-        # undeclared path with no rollback point is deliberately absent, because
-        # `util restore-batch` reads this list and would report a file it cannot
-        # actually restore. Fix round 15: those paths moved all the same, and
-        # `unrestorable` carries them, so "did this batch move bytes" is
-        # answered from what was observed (`TaskOutcome.bytes_moved`), never
-        # from what can be restored.
-        outcome.files_touched = list(changed) + list(undeclared.restorable)
-        outcome.unrestorable = list(undeclared.unrecoverable)
-        outcome.summary = summary or None
-
-        # D3l post-run: recompute the touched set and enforce the policy on it.
-        # The observed set is the declared files whose bytes moved PLUS whatever
-        # else under the pinned root the sweep saw move; enforcing on `changed`
-        # alone is vacuous, because every path in it is one the identical
-        # pre-dispatch check already passed.
-        if undeclared:
-            stranded = undeclared.unrecoverable
-            self.log(
-                f"[write-subagents] {outcome.task_id}: {len(undeclared)} file(s) "
-                f"changed outside this task's declared set "
-                f"({', '.join(undeclared.paths[:5])}"
-                f"{', …' if len(undeclared) > 5 else ''}) — checking them against "
-                f"driver.write_paths."
-                + (
-                    f" {len(stranded)} of them had no retained pre-run bytes and "
-                    f"cannot be restored automatically."
-                    if stranded else ""
-                )
+    def _log_undeclared(self, task_id: str, undeclared: UndeclaredWrites) -> None:
+        stranded = undeclared.unrecoverable
+        self.log(
+            f"[write-subagents] {task_id}: {len(undeclared)} file(s) "
+            f"changed outside this task's declared set "
+            f"({', '.join(undeclared.paths[:5])}"
+            f"{', …' if len(undeclared) > 5 else ''}) — checking them against "
+            f"driver.write_paths."
+            + (
+                f" {len(stranded)} of them had no retained pre-run bytes and "
+                f"cannot be restored automatically."
+                if stranded else ""
             )
+        )
+
+    def _post_run_violation(
+        self, changed: Sequence[str], undeclared: UndeclaredWrites,
+        watched: Sequence[str],
+    ) -> Optional[PolicyViolation]:
+        """D3l post-run: the write policy over the touched set, or ``None``.
+
+        The touched set is the declared files whose bytes moved, whatever
+        else under the pinned root the sweep saw move (declared or not: the
+        sweep retained its pre-run bytes, so a restore covers an undeclared
+        write too, :meth:`_undeclared_writes`), and the watched paths the
+        sweep did not see. Enforcing on ``changed`` alone is vacuous: every
+        path in it passed the identical pre-dispatch check.
+        """
         swept = set(changed) | set(undeclared.paths)
         try:
             self.policy.check(
@@ -8906,460 +8984,8 @@ class WriteBatchScheduler:
                 when="post-run",
             )
         except PolicyViolation as exc:
-            report = snapshot.restore(exc.paths)
-            # A protected path the snapshot holds no bytes for is put back
-            # from what the guard kept (§2.7); no-op without a guard.
-            report = self._commit_restore_watched(
-                outcome.task_id, report, commit_apply, watched_guard,
-            )
-            from_guard_states = {
-                getattr(commit_apply, name, None)
-                for name in ("RESTORED_FROM_COPY", "DELETED_ABSENT_BEFORE")
-            } - {None}
-            stranded = sorted(
-                path for path, state in report.items()
-                if state.startswith("skipped:")
-            )
-            outcome.status = STATUS_POLICY_VIOLATION
-            outcome.write_outcome = WRITE_POLICY_VIOLATION
-            from_guard = sorted(
-                path for path, state in report.items() if state in from_guard_states
-            )
-            restored = sorted(
-                path for path, state in report.items()
-                if not state.startswith("skipped:") and state not in from_guard_states
-            )
-            many = len(exc.paths) != 1
-            # The message used to say two things at once: "restored from the
-            # pre-batch snapshot (x: skipped: not in this task's snapshot)" and
-            # "remain on disk exactly as the runner left them". It also named the
-            # runner as the author, which the sweep cannot know: it sees a path
-            # that moved during the task's window (2026-10-02: a coordinator's
-            # own mid-run edit of `.multi-llm/providers.yaml` failed T009). Each
-            # path is now in exactly one of the two lists below.
-            outcome.reason = (
-                f"{exc.message} "
-                f"{'These paths' if many else 'This path'} changed during this "
-                f"task's window; the executor sees that they moved, not who "
-                f"moved them, so the change may be another process's or your "
-                f"own edit and not the runner's."
-                + (
-                    f" Restored from the pre-batch snapshot: "
-                    f"{', '.join(restored)}."
-                    if restored else ""
-                )
-                + (
-                    f" Put back as {'it was' if len(from_guard) == 1 else 'they were'} "
-                    f"before the batch from what the commit review's guard kept "
-                    f"(its copy, or a deletion of a file that did not exist): "
-                    f"{', '.join(from_guard)}."
-                    if from_guard else ""
-                )
-                + (
-                    # A path the sweep could not retain bytes for (a policy-denied
-                    # one above all: its bytes are deliberately never copied into
-                    # an executor artifact) is NOT restored, and says so.
-                    f" Not restored, because no rollback point exists "
-                    f"({', '.join(stranded[:5])}"
-                    f"{', …' if len(stranded) > 5 else ''}): left on disk as "
-                    f"{'they are' if len(stranded) != 1 else 'it is'} now, so "
-                    f"inspect {'them' if len(stranded) != 1 else 'it'} by hand."
-                    if stranded else ""
-                )
-                + " The loop stops here."
-            )
-            self.audit.restored(task_id=outcome.task_id, report=report, force=False)
-            self._audit_completion(outcome, runner, profile, attempt, exit_code,
-                                   observed, duration)
-            return
-
-        # Plan step 3 (2026-09-30): the plugin-landlock rung's two verdicts,
-        # after the policy branch and ahead of every claim-based one.
-        identity_before = self._target_identity_before.pop(outcome.task_id, None)
-        on_rung = sandbox_rung == SANDBOX_RUNG_PLUGIN_LANDLOCK
-        if on_rung and self._replaced_target(
-            outcome, snapshot, identity_before, claimed
-        ):
-            self._audit_completion(outcome, runner, profile, attempt, exit_code,
-                                   observed, duration)
-            return
-        denials = _as_jail_denials(jail_denials)
-        if denials is not None and self._jail_verdict(
-            outcome, snapshot, denials, changed, undeclared, claimed,
-        ):
-            self._audit_completion(outcome, runner, profile, attempt, exit_code,
-                                   observed, duration)
-            return
-
-        reply_check = read_check_reply(result)
-        if self._verification_only(snapshot) and self._verification_verdict(
-            outcome, snapshot, undeclared, claimed, summary,
-            changed=changed, crashed_exit=exit_code,
-            check=reply_check.findings,
-            listed=reply_check.listed,
-            could_not_run=reply_check.could_not_run,
-        ):
-            self._audit_completion(outcome, runner, profile, attempt, exit_code,
-                                   observed, duration)
-            return
-
-        # `ids` is OPTIONAL in write_batch_result.schema.json, so a batch can move
-        # bytes and say nothing at all about *which* of its expected changes
-        # landed. The old `if reported_ids` guard emptied `missing_ids` in exactly
-        # that case, which made every id-less reply — including a `no-op` claim
-        # contradicted by a non-empty diff — read as a full application, and D3n's
-        # spot-check ("this batch's expected changes landed, rather than merely
-        # that bytes moved") silently never happened. An unattested batch that
-        # moved bytes is a partial application until something attests it.
-        accounted = set(attested_ids) | set(outcome.declined)
-        missing_ids = [i for i in expected_ids if i not in accounted]
-
-        # D3k inverts the exit-code rule for write tasks. On the read path a
-        # schema-valid result wins over a non-zero exit (CLIs exit non-zero on
-        # warnings while still printing the answer, and nothing is at stake but a
-        # report); here it fails closed — a non-zero exit never counts as success
-        # on its own, and a non-zero exit with a non-empty diff is a partial
-        # application, never an applied batch. The case this exists for is a
-        # runner that printed an optimistic `{"status": "applied", "ids": [all of
-        # them]}` and *then* died mid-edit: the claim is schema-valid and the ids
-        # are complete, so claim-and-diff alone read it as a full application and
-        # the loop dispatched batch N+1 on top of half-applied bytes.
-        # ``None`` is "no exit code observed" (the native invoker), not zero.
-        crashed = exit_code not in (0, None)
-
-        if changed and (crashed or claimed == "failed" or missing_ids or all_declined):
-            details = []
-            if crashed:
-                details.append(
-                    f"the runner exited {exit_code} (claiming "
-                    f"{claimed or 'no status'!r})"
-                )
-            if declined_task is not None:
-                details.append(f"the runner declined the task ({declined_task})")
-            elif claimed == "failed":
-                details.append(f"the batch reported {claimed!r}")
-            elif all_declined and not missing_ids:
-                details.append(
-                    f"the batch declined every item it held "
-                    f"({self._declined_words(outcome.declined)})"
-                )
-            elif missing_ids and not reported_ids and not outcome.declined:
-                details.append(
-                    f"it reported no `ids` at all, so nothing attests that the "
-                    f"{len(expected_ids)} expected change(s) "
-                    f"({', '.join(expected_ids[:5])}"
-                    f"{', …' if len(expected_ids) > 5 else ''}) are what landed"
-                )
-            elif missing_ids:
-                # Counted from the expected side: the reply's own `ids` may
-                # name things this batch does not hold. OpenCode racing run 4
-                # (2026-10-05): a report re-ask restated "Suggestion 1",
-                # "Suggestion 2", and the reason read "only 2 of 2 expected
-                # id(s) came back (missing: <both of them>)".
-                matched = len(expected_ids) - len(missing_ids)
-                unexpected = [i for i in reported_ids if i not in expected_ids]
-                details.append(
-                    (f"only {matched} of {len(expected_ids)}" if matched
-                     else f"none of the {len(expected_ids)}")
-                    + f" expected id(s) came back (missing: "
-                    f"{', '.join(missing_ids)})"
-                    + (
-                        f" — {len(outcome.declined)} of them declined"
-                        if outcome.declined else ""
-                    )
-                    + (
-                        f"; the reply named {len(unexpected)} id(s) this batch "
-                        f"does not hold ({', '.join(repr(i) for i in unexpected[:5])}"
-                        f"{', …' if len(unexpected) > 5 else ''})"
-                        if unexpected else ""
-                    )
-                    + (
-                        f"; its `declined` could not be read for: "
-                        f"{'; '.join(declined.problems[:5])}"
-                        if declined.problems else ""
-                    )
-                )
-                if (
-                    not crashed and claimed != "failed"
-                    and any(i in expected_ids for i in attested_ids)
-                ):
-                    # Fix round 18: a readable report that attests some items
-                    # and leaves these out of both lists — the items a
-                    # `--human-task <id>=skip` answer records as skipped.
-                    # Fix round 19: at least one item attested applied; a
-                    # report that only declined has nothing applied to keep.
-                    outcome.unapplied_ids = list(missing_ids)
-            detail = " and ".join(details)
-            outcome.status = STATUS_PARTIAL
-            outcome.write_outcome = WRITE_PARTIAL
-            outcome.reason = (
-                f"PARTIAL APPLICATION: {len(changed)} file(s) changed "
-                f"({', '.join(changed)}) but {detail}. The batch loop stops here, "
-                f"the pre-batch snapshot is kept at {snapshot.directory}, and the "
-                f"phase is NOT marked completed — an automatic revert would destroy "
-                f"the half-applied state a human needs to inspect."
-            )
-            self._audit_completion(outcome, runner, profile, attempt, exit_code,
-                                   observed, duration)
-            return
-
-        if changed and claimed == "no-op":
-            # N2: reachable only past the partial-application guard above, so
-            # every expected id came back (or none were expected) and the
-            # runner did not crash — the only thing left unexplained is a
-            # 'no-op' claim next to bytes that moved. The verdict stays
-            # APPLIED (`util restore-batch` needs exactly this outcome), but
-            # the two ways a 'no-op' claim can disagree with the bytes are
-            # different events and the reason says which one happened here.
-            outcome.write_outcome = WRITE_APPLIED
-            outcome.status = STATUS_OK
-            changed_names = ", ".join(changed)
-            if outcome.task_id in self._snapshot_reused:
-                # Fix round 16 (OpenCode racing 06b): "APPLIED (no-op
-                # claimed, bytes moved)" read as a fault in the summary row.
-                # A resume after an attempt that timed out with its edit on
-                # disk is this case: say what happened, plainly, first.
-                outcome.reason = (
-                    f"APPLIED (kept from an earlier attempt): the edits an "
-                    f"earlier attempt made to {changed_names} are kept and "
-                    f"count as applied; this run's model found them already "
-                    f"in place (it reported no change). The rollback point "
-                    f"is still the pre-batch snapshot taken before that "
-                    f"first attempt."
-                )
-            else:
-                outcome.reason = (
-                    f"APPLIED (no-op claimed, bytes moved): {changed_names} "
-                    f"differ from the snapshot taken at the start of THIS "
-                    f"dispatch — a foreign-or-undeclared-write signature, not "
-                    f"an artifact of resume. Recorded as applied because the "
-                    f"bytes are real; the 'no-op' claim should not be trusted."
-                )
-                self.log(
-                    f"[write-subagents] warning: {outcome.task_id} claimed "
-                    f"'no-op' but {changed_names} changed against a snapshot "
-                    f"taken this dispatch — treating the bytes as "
-                    f"authoritative."
-                )
-            self._audit_completion(outcome, runner, profile, attempt, exit_code,
-                                   observed, duration)
-            return
-
-        if not changed:
-            declared_names = (
-                ", ".join(e.relative for e in snapshot.declared_entries())
-                or "any declared file"
-            )
-            # The files that moved outside the declared set. For a plan or
-            # task-list batch the declared file is the whole contract (fix
-            # round 15), so none of them makes it applied: they are named,
-            # and stay restorable, but the verdict is the declared file's.
-            # A code batch is judged on its stray writes too, but not on one
-            # a task running beside it also saw move: the sweep cannot say
-            # whose that is (fix round 15).
-            outside = list(undeclared.paths)
-            own = (
-                [] if self.kind in SHARED_ARTIFACT_WRITE_KINDS
-                else list(undeclared.own)
-            )
-            siblings = sorted(undeclared.shared)
-            outside_names = ", ".join(outside[:5]) + (
-                ", …" if len(outside) > 5 else ""
-            )
-            if crashed or (claimed == "failed" and not all_declined):
-                # The runner's own verdict, and the bytes agree. Nothing to
-                # restore, but nothing done either: the loop stops here rather
-                # than dispatching the next batch on top of the gap, and the
-                # status is one `ok` never reads as. D3k: a non-zero exit never
-                # counts as success on its own. Fix round 19 (review of round
-                # 18, #3): a `failed` claim on a batch that declined every
-                # item is the declined no-op below — a resume would dispatch
-                # it to decline them again — and a failure names what the
-                # batch declined.
-                outcome.write_outcome = WRITE_CLEAN_FAILURE
-                outcome.status = STATUS_BATCH_FAILED
-                what = (
-                    f"the runner exited {exit_code} (claiming "
-                    f"{claimed or 'no status'!r})"
-                    if crashed else
-                    f"the runner declined the task ({declined_task})"
-                    if declined_task is not None else
-                    f"the batch reported {claimed!r}"
-                )
-                outcome.reason = (
-                    f"FAILED: {what} and the pre-batch snapshot comparison "
-                    f"confirms no byte changes in {declared_names}. "
-                    + (
-                        f"It declined "
-                        f"{with_closing_mark(self._declined_words(outcome.declined))} "
-                        if outcome.declined else ""
-                    )
-                    + (
-                        f"{len(outside)} file(s) outside it changed "
-                        f"({outside_names}): inspect them, restore them with "
-                        f"util restore-batch or keep them; "
-                        if outside else "Nothing to restore; "
-                    )
-                    + "the loop stops here and --resume re-dispatches this "
-                    "batch."
-                    + (f" Runner summary: {summary}" if summary else "")
-                )
-            elif claimed == "no-op" or (all_declined and not own):
-                # The claim and the verdict agree: nothing needed changing.
-                # Fix round 18: so does a batch that declined every item and
-                # changed nothing, whatever word it put in `status`.
-                outcome.write_outcome = WRITE_NO_OP
-                outcome.status = STATUS_OK
-                outcome.reason = (
-                    (
-                        f"NO-OP: the batch declined every item it held "
-                        f"({self._declined_words(outcome.declined)}) and the "
-                        f"pre-batch snapshot comparison confirms no byte "
-                        f"changes in {declared_names}. Recorded; the loop "
-                        f"continues."
-                    ) if all_declined else (
-                        f"NO-OP: the batch reported 'no-op' and the pre-batch "
-                        f"snapshot comparison confirms no byte changes in "
-                        f"{declared_names}. Recorded; the loop continues."
-                    )
-                )
-            elif own:
-                # Success claimed, none of the declared files moved, others
-                # did (the policy check above passed them). The bytes decide,
-                # as when a declared file moved beside undeclared ones: applied
-                # when every expected id came back, a partial application
-                # when not. It used to read as a clean failure at `ok` (fix
-                # round 14 gave that word one meaning: not done). A code
-                # batch only: a plan or task-list batch is judged on its
-                # declared file alone (fix round 15).
-                moved_names = ", ".join(own[:5]) + (
-                    ", …" if len(own) > 5 else ""
-                )
-                if missing_ids or all_declined:
-                    outcome.status = STATUS_PARTIAL
-                    outcome.write_outcome = WRITE_PARTIAL
-                    outcome.reason = (
-                        f"PARTIAL APPLICATION: none of the files the batch "
-                        f"declares changed ({declared_names}), while "
-                        f"{len(own)} file(s) outside them did "
-                        f"({moved_names}), and "
-                        + (
-                            f"not every expected id came back (missing: "
-                            f"{', '.join(missing_ids)})"
-                            if missing_ids else
-                            "the batch declined every item it held"
-                        )
-                        + f". The batch "
-                        f"loop stops here, the pre-batch snapshot is kept at "
-                        f"{snapshot.directory}, and the phase is NOT marked "
-                        f"completed — an automatic revert would destroy the "
-                        f"half-applied state a human needs to inspect."
-                    )
-                else:
-                    outcome.status = STATUS_OK
-                    outcome.write_outcome = WRITE_APPLIED
-                    outcome.reason = (
-                        f"APPLIED outside the declared files: none of "
-                        f"{declared_names} changed, but {len(own)} "
-                        f"other file(s) did ({moved_names}) and the reply "
-                        f"attests every expected id; the bytes decide."
-                    )
-            else:
-                # Success claimed and not one byte of the change moved, after
-                # the one re-send (rule 9): the change did not land. Never
-                # `ok` (fix round 14, OpenCode racing run 5: T016 was recorded
-                # completed, listed "done and kept", and the tasks after it
-                # built on a function that never existed).
-                named = [
-                    str(path) for path in ((result or {}).get("files_touched") or [])
-                    if isinstance(path, str)
-                ]
-                if resent:
-                    again = (
-                        " — the second time: it was sent once more, told that "
-                        + (
-                            f"its previous attempt had not changed "
-                            f"{declared_names}"
-                            if outside else
-                            "its previous attempt had changed no file"
-                        )
-                        + ", and that reply said the same"
-                    )
-                elif resend_note:
-                    again = f" ({resend_note})"
-                elif outside and siblings:
-                    again = (
-                        " (not sent again: files moved during its run, so a "
-                        "second dispatch could apply its work twice)"
-                    )
-                elif not undeclared.observed:
-                    again = (
-                        " (no re-send: the containment sweep could not see "
-                        "whether any other file changed, so the batch was not "
-                        "sent again)"
-                    )
-                else:
-                    again = ""
-                outcome.write_outcome = WRITE_CLEAN_FAILURE
-                outcome.status = STATUS_BATCH_FAILED
-                outcome.applied_without_changes = True
-                if outside and siblings:
-                    elsewhere = (
-                        f"; {len(outside)} file(s) outside them changed "
-                        f"({outside_names}), but {', '.join(siblings)}, "
-                        f"running at the same time, saw "
-                        f"{'it' if len(outside) == 1 else 'them'} change too, "
-                        f"so {'it is' if len(outside) == 1 else 'they are'} "
-                        f"not counted as this task's change"
-                    )
-                elif outside:
-                    elsewhere = (
-                        f"; {len(outside)} file(s) outside it changed "
-                        f"({outside_names}), which is not this batch's change"
-                    )
-                elif undeclared.observed:
-                    elsewhere = ", and no other file changed either"
-                else:
-                    elsewhere = ""
-                outcome.reason = (
-                    f"NOT APPLIED: the batch reported {claimed or 'no status'!r}"
-                    + (
-                        f" and named {', '.join(named[:5])}"
-                        f"{', …' if len(named) > 5 else ''} as edited"
-                        if named else ""
-                    )
-                    + f", but the pre-batch snapshot comparison found no byte "
-                    f"change in {declared_names}"
-                    + elsewhere
-                    + f"{again}. Its change did not land, so it is not recorded "
-                    f"as done: the loop stops here, "
-                    + (
-                        "the files outside it are left as they are (restore "
-                        "them with util restore-batch, or keep them), "
-                        if outside else "there is nothing to restore, "
-                    )
-                    + "and --resume dispatches it again."
-                    + (f" Runner summary: {summary}" if summary else "")
-                )
-            self._audit_completion(outcome, runner, profile, attempt, exit_code,
-                                   observed, duration)
-            return
-
-        # Reachable only on a clean exit: `crashed` with a non-empty diff is the
-        # partial branch above and `crashed` with an empty one is the clean
-        # failure, so no non-zero exit can land on APPLIED (D3k).
-        outcome.write_outcome = WRITE_APPLIED
-        outcome.status = STATUS_OK
-        if outcome.declined:
-            # Fix round 18: complete, and what it left out is said.
-            applied = len(expected_ids) - len(outcome.declined)
-            outcome.reason = (
-                f"APPLIED {applied} of {len(expected_ids)} item(s); the batch "
-                f"declined the rest, so they are not applied: "
-                f"{with_closing_mark(self._declined_words(outcome.declined))}"
-            )
-        self._audit_completion(outcome, runner, profile, attempt, exit_code,
-                               observed, duration)
+            return exc
+        return None
 
     def _declined_words(self, declined: Dict[str, str]) -> str:
         """``fix 1 (`<id>`) — <reason>; …``: an apply batch's declined items,
@@ -9570,178 +9196,6 @@ class WriteBatchScheduler:
         """Whether this dispatch declared no files at all (``implement`` only)."""
         return self.kind == "implement" and not snapshot.declared_entries()
 
-    def _verification_verdict(
-        self,
-        outcome: TaskOutcome,
-        snapshot: TaskSnapshot,
-        undeclared: UndeclaredWrites,
-        claimed: str,
-        summary: str,
-        *,
-        changed: Sequence[str],
-        crashed_exit: Optional[int],
-        check: Optional[List[str]] = None,
-        listed: bool = False,
-        could_not_run: bool = False,
-    ) -> bool:
-        """The verdict for a task that declared no files. ``True`` when decided.
-
-        D3h's guarantee is that the executor, not the runner's claim, says what
-        changed. A task with no declared files makes that guarantee *stricter*,
-        not void: it promised to change nothing, so every path the sweep saw move
-        is a write it never declared.
-
-        * the sweep could not look (``undeclared.observed`` is false: the tree
-          grew past ``SWEEP_MAX_FILES`` during the run — a pre-run census that
-          is already unusable is refused at ``_begin_sweep``): a failed batch,
-          never VERIFIED. There is no evidence either way, and "no evidence"
-          read as "nothing moved" was the one way a file-less task could edit
-          anything unobserved (adversarial review, 2026-10-02).
-        * a path moved: a partial application. The loop stops, the sweep already
-          adopted each path into this task's snapshot (so ``util restore-batch``
-          can revert it) and nothing is reverted automatically, which is what
-          every other unattested write gets. The reason says how to proceed when
-          the task is *meant* to fix what it checks: declare those files under
-          ``Files to modify`` in the tasks file and ``--resume``. ``changed`` —
-          the snapshot's own byte comparison — joins the sweep's paths here:
-          under ``--resume`` the reused snapshot still carries the entries the
-          earlier dispatch's sweep adopted, so a stray edit the earlier run
-          left on disk stays PARTIAL until it is declared or restored, instead
-          of being laundered by a second run that touched nothing (adversarial
-          review, 2026-10-02).
-        * nothing moved and the runner crashed, or its ``check`` says
-          ``could_not_run: true`` (*could_not_run*, the contract's
-          (:data:`CHECK_RESULT_CONTRACT`) word for a check that did not run —
-          a missing command, a crash, a timeout), or it claimed ``failed``
-          and listed no finding: a failed task that stops the run (the
-          ordinary clean-failure branch for a crash or a ``failed`` claim,
-          ``False``; a ``could_not_run`` beside any other claim is decided
-          here). A check that did not run says nothing about the code, so it
-          is never recorded as findings the run goes on past. The findings,
-          when the reply listed some and wrote no ``notes``, become what the
-          stop says the check reported.
-        * nothing moved, the runner claimed ``failed`` and its ``check``
-          listed findings (*listed*) without ``could_not_run``: findings, as
-          below. Fix round 12 (a coordinator decision): round 11 read every
-          ``failed`` as a check that could not run, which stopped implement
-          for every runner that answers ``failed`` for a failing check —
-          racing run 3's runners do exactly that.
-        * nothing moved and its reply's structured ``check`` (*check*,
-          :func:`subagent_executor.check_findings_from`) lists findings:
-          ``no-op``/``ok`` labelled ``check-findings``. The findings are named
-          on every surface and recorded in ``state.json`` for review-code
-          (racing re-run 4, 2026-10-05: T007's ``npx html-validate`` reported
-          two problems and the task read VERIFIED, the problems only in its
-          free-text notes). The tasks that do not depend on the check go on;
-          the ones that do are not run (:meth:`_run`).
-        * nothing moved and the runner did not fail: ``no-op``/``ok``. The
-          check ran and left the repo as it was, which is a verification
-          passing, and the loop continues. Only a ``check`` that clearly says
-          it passed, or none at all (an older reply), reads so: an empty or
-          unreadable one is :data:`subagent_executor.CHECK_RESULT_UNKNOWN`,
-          a finding.
-        """
-        if not undeclared.observed:
-            outcome.status = STATUS_BATCH_FAILED
-            outcome.write_outcome = WRITE_CLEAN_FAILURE
-            outcome.reason = (
-                f"BATCH FAILED: {outcome.task_id} declares no files (a "
-                f"verification-only task), so the post-run containment sweep "
-                f"is its whole verdict, and the sweep could not run: the tree "
-                f"under {self.repo_root} holds more than {SWEEP_MAX_FILES} "
-                f"files after the run (D3l). Whether the task changed anything "
-                f"is unknown, so it is not VERIFIED. Inspect the working tree, "
-                f"take the untracked trees (node_modules/, build output) out "
-                f"of the checkout or list the files it may change under "
-                f"`Files to modify`, and re-run with --resume."
-            )
-            return True
-        moved = sorted(set(undeclared.paths) | set(changed))
-        if moved:
-            shown = ", ".join(moved[:5]) + (", …" if len(moved) > 5 else "")
-            earlier = [path for path in moved if path not in undeclared.paths]
-            outcome.status = STATUS_PARTIAL
-            outcome.write_outcome = WRITE_PARTIAL
-            outcome.reason = (
-                f"PARTIAL APPLICATION: {outcome.task_id} declares no files (a "
-                f"verification-only task) but {len(moved)} file(s) changed "
-                f"during its run ({shown}). "
-                + (
-                    f"{len(earlier)} of them "
-                    f"({', '.join(earlier[:5])}{', …' if len(earlier) > 5 else ''}) "
-                    f"still differ from the pre-batch snapshot an earlier "
-                    f"dispatch of this task took: left on disk by that run, "
-                    f"not restored since. "
-                    if earlier and outcome.task_id in self._snapshot_reused
-                    else ""
-                )
-                + f"The loop stops here and the "
-                f"pre-batch snapshot is kept at {snapshot.directory}. If this "
-                f"task is meant to fix what it checks, list those files under "
-                f"`Files to modify` in the tasks file and re-run with --resume; "
-                f"otherwise restore them with `util restore-batch`."
-            )
-            return True
-        if crashed_exit not in (0, None):
-            return False
-        if could_not_run or (claimed == "failed" and not listed):
-            if check and not outcome.runner_notes:
-                outcome.runner_notes = clip("; ".join(check), 600)
-            if claimed == "failed":
-                return False
-            # `could_not_run` beside a `no-op`/`applied` claim: the reply
-            # says a check did not run, whatever status it picked.
-            outcome.write_outcome = WRITE_CLEAN_FAILURE
-            outcome.status = STATUS_BATCH_FAILED
-            outcome.reason = (
-                f"FAILED: {outcome.task_id}'s reply says a check could not "
-                f"run (`check.could_not_run`, beside status "
-                f"{claimed or 'none'!r}) and no file changed. A check that "
-                f"did not run says nothing about the code, so the loop stops "
-                f"here and --resume re-dispatches this batch."
-                + (f" Runner summary: {summary}" if summary else "")
-            )
-            return True
-        if check:
-            outcome.write_outcome = WRITE_NO_OP
-            outcome.status = STATUS_OK
-            outcome.check_findings = list(check)
-            # Fix round 28 (live run 12 #7, Codex accept 02): a finding that
-            # ends its own sentence read "… `src/config.json`.. No file
-            # changed" here and in summary.md's row; each keeps its words
-            # without its closing stop, and the sentence gets one stop.
-            shown = findings_clause(check[:3]) + (
-                f"; +{len(check) - 3} more" if len(check) > 3 else ""
-            )
-            outcome.reason = (
-                f"CHECK FINDINGS: {outcome.task_id}'s check ran and reported "
-                f"{len(check)} problem(s): {with_closing_mark(shown)} No file "
-                f"changed, so the loop continues; the findings are listed in the "
-                f"implementation summary and go to review-code."
-                + (
-                    " Its reply said `failed`, but it listed what the check "
-                    "found and did not say the check could not run "
-                    "(`check.could_not_run`), so it is read as findings."
-                    if claimed == "failed" else ""
-                )
-            )
-            return True
-        outcome.write_outcome = WRITE_NO_OP
-        outcome.status = STATUS_OK
-        outcome.check_findings = check
-        outcome.reason = (
-            f"VERIFIED: {outcome.task_id} declares no files and the sweep found "
-            f"no file changed during its run"
-            + (
-                " and its check reported that it passed"
-                if check is not None else
-                " (its reply reported no `check` result)"
-            )
-            + ". Recorded; the loop continues."
-            + (f" Runner summary: {summary}" if summary else "")
-        )
-        return True
-
     def _relative(self, path: str) -> str:
         """``path`` repo-relative when it lies under the root, else as given."""
         return relative_to_root(path, self.repo_root)
@@ -9763,61 +9217,41 @@ class WriteBatchScheduler:
             return resolved == base or resolved.startswith(base.rstrip(os.sep) + os.sep)
         return resolved == os.path.realpath(request.target)
 
-    def _replaced_target(
-        self,
-        outcome: TaskOutcome,
-        snapshot: TaskSnapshot,
-        before: Optional[Tuple[int, int]],
-        claimed: str,
-        *,
-        ended: Optional[str] = None,
-    ) -> bool:
-        """The replaced-target verdict (F1 "The target replaced during the
-        dispatch"). ``True`` when it decided the outcome.
+    def _target_replacement(
+        self, before: Optional[Tuple[int, int]],
+    ) -> Optional[TargetReplaced]:
+        """The replaced-target check (F1 "The target replaced during the
+        dispatch"): the watched target's identity now against *before*, the
+        one recorded at this dispatch's pre-batch snapshot. ``None`` when it
+        is the same file, or there is nothing to compare.
 
-        Detection only — the plugin never guesses which process swapped the
+        Detection only: the plugin never guesses which process swapped the
         file, and never widens the grant to the directory to ride a swap out.
-        ``ended`` is the status of a dispatch that never reached
-        ``_classify`` (no claim to override), named in the claim's place.
         """
         path = self._identity_path()
         if path is None or before is None:
-            return False
+            return None
         after = self._identity_of(path)
         if after == before:
-            return False
-        label = self._target_label()
-        shown = self._relative(path)
-        # No rollback over the new file: `files_touched` is what
-        # `util restore-batch` restores, so the target (and, under the dir
-        # rule, anything beneath it) leaves it. The pre-batch snapshot stays on
-        # disk for comparison.
+            return None
+        return TargetReplaced(
+            label=self._target_label(),
+            shown=self._relative(path),
+            before_inode=before[1],
+            after_inode=None if after is None else after[1],
+        )
+
+    def _record_replaced_target(self, outcome: TaskOutcome) -> None:
+        """A replaced target's records. No rollback over the new file:
+        ``files_touched`` is what ``util restore-batch`` restores, so the
+        target (and, under the dir rule, anything beneath it) leaves it; the
+        pre-batch snapshot stays on disk for comparison."""
         outcome.files_touched = [
             relative for relative in outcome.files_touched
             if not self._in_grant(os.path.join(self.repo_root, relative))
         ]
-        outcome.status = STATUS_BATCH_FAILED
-        outcome.write_outcome = WRITE_CLEAN_FAILURE
-        now = "is gone" if after is None else "now names a different file"
-        over = (
-            f"whatever the runner claimed ({claimed or 'no status'!r})"
-            if ended is None
-            else f"whatever the dispatch itself ended as ({ended!r})"
-        )
-        outcome.reason = (
-            f"FAILED (target replaced): {label} was replaced while the runner "
-            f"was editing it, and the jail's grant stayed on the old file, so "
-            f"the runner's edits were refused or lost — {shown} {now} "
-            f"(inode {before[1]} before the dispatch, "
-            f"{after[1] if after else 'none'} after), {over}. Nothing was "
-            f"rolled back over the file now at that path: its bytes are not the "
-            f"runner's. The pre-batch snapshot is kept at {snapshot.directory} "
-            f"for comparison. The loop stops here; --resume re-dispatches this "
-            f"batch against the file now at the path, under a fresh grant."
-        )
         self._jail_failed.add(outcome.task_id)
         self._replaced_targets.add(outcome.task_id)
-        return True
 
     def _replaced_target_unclassified(
         self, outcome: TaskOutcome, snapshot: TaskSnapshot
@@ -9832,102 +9266,67 @@ class WriteBatchScheduler:
         saved over by rename differs from that snapshot, so without this check
         the audit record, and the stop message's restore-batch command, would
         overwrite the new file, which may be the user's. F1: a replaced target
-        is never restored. The verdict is :meth:`_replaced_target`'s, with the
-        dispatch's own failure kept at the end of the reason.
+        is never restored. The verdict is the replaced-target row's
+        (:func:`write_verdict.replaced_target_reason`), naming the dispatch's
+        own ending in the claim's place, with its failure kept at the end.
         """
         task_id = outcome.task_id
         if self._dispatch_rungs.get(task_id) != SANDBOX_RUNG_PLUGIN_LANDLOCK:
             return False
-        before = self._target_identity_before.pop(task_id, None)
-        ended, detail = outcome.status, outcome.reason
-        if not self._replaced_target(outcome, snapshot, before, "", ended=ended):
+        replaced = self._target_replacement(
+            self._target_identity_before.pop(task_id, None)
+        )
+        if replaced is None:
             return False
+        ended, detail = outcome.status, outcome.reason
+        self._record_replaced_target(outcome)
+        outcome.status = STATUS_BATCH_FAILED
+        outcome.write_outcome = WRITE_CLEAN_FAILURE
+        outcome.reason = replaced_target_reason(
+            replaced, str(snapshot.directory), "", ended=ended,
+        )
         if detail:
             outcome.reason = f"{outcome.reason} The dispatch's own failure: {detail}"
         return True
 
-    def _jail_verdict(
-        self,
-        outcome: TaskOutcome,
-        snapshot: TaskSnapshot,
-        denials: Any,
-        changed: Sequence[str],
-        undeclared: UndeclaredWrites,
-        claimed: str,
-    ) -> bool:
-        """The jail-denial verdict (F1 "A denied edit is never recorded as
-        applied"). ``True`` when it decided the outcome; ``False`` leaves the
-        claim-based verdict, with any denial count noted for the batch's line.
+    def _jail_facts(
+        self, task_id: str, denials: Any, facts: WriteFacts,
+    ) -> JailFacts:
+        """The jail's denials (F1 "A denied edit is never recorded as
+        applied") as the verdict reads them, every path repo-relative.
+
+        The row's facts name no path. Each path is resolved after them, and
+        only for what *facts* with them land on: the denied paths and the
+        scope sentence when a jail row decides, the note's when none does.
         """
-        moved = list(changed) + [
-            path for path in undeclared.paths if path not in changed
-        ]
-        hard = bool(denials.failed_file_changes or denials.in_scope_paths)
         replaced = list(denials.replacement_paths)
-        self._jail_denials[outcome.task_id] = denials.to_dict()
-        if hard or (replaced and not changed):
-            paths = [self._relative(p) for p in denials.denied_paths()]
-            in_grant = [
-                self._relative(p) for p in denials.denied_paths()
-                if self._in_grant(p, outcome.task_id) or p in replaced
-            ]
-            outside = [p for p in paths if p not in in_grant]
-            denied_text = (
-                f"the plugin-landlock jail refused the runner's write to "
-                f"{', '.join(paths) or 'a path it did not name'}"
+        jail = JailFacts(
+            hard=bool(denials.failed_file_changes or denials.in_scope_paths),
+            replacements=len(replaced),
+        )
+        if guard(replace(facts, jail=jail)) is None:
+            return replace(
+                jail,
+                replacement=tuple(self._relative(p) for p in replaced),
+                out_of_scope_count=denials.out_of_scope_count,
+                out_of_scope=(
+                    tuple(self._relative(p) for p in denials.out_of_scope_paths)
+                    if denials.out_of_scope_count else ()
+                ),
             )
-            tail = self._jail_scope_sentence(in_grant, outside)
-            if hard and moved:
-                outcome.status = STATUS_PARTIAL
-                outcome.write_outcome = WRITE_PARTIAL
-                outcome.reason = (
-                    f"PARTIAL APPLICATION (jail-denied edit): {len(moved)} "
-                    f"file(s) changed ({', '.join(moved)}) but {denied_text}; "
-                    f"the bytes, not the runner's claim ({claimed or 'no status'!r}), "
-                    f"say what landed. {tail}The batch loop stops here, the "
-                    f"pre-batch snapshot is kept at {snapshot.directory}, and "
-                    f"the phase is NOT marked completed — an automatic revert "
-                    f"would destroy the half-applied state a human needs to "
-                    f"inspect."
-                )
-            else:
-                declared_names = (
-                    ", ".join(e.relative for e in snapshot.declared_entries())
-                    or "any declared file"
-                )
-                outcome.status = STATUS_BATCH_FAILED
-                outcome.write_outcome = WRITE_CLEAN_FAILURE
-                outcome.reason = (
-                    f"FAILED (jail-denied edit): {denied_text}, and the "
-                    f"pre-batch snapshot comparison confirms no byte changes in "
-                    f"{declared_names}. The runner claimed "
-                    f"{claimed or 'no status'!r}; a denied edit is never "
-                    f"recorded as applied. {tail}Nothing to restore; the loop "
-                    f"stops here and --resume re-dispatches this batch under "
-                    f"the same grant."
-                )
-                self._jail_failed.add(outcome.task_id)
-            return True
-        notes = []
-        if replaced:
-            notes.append(
-                f"{len(replaced)} replacement denial(s) the runner recovered "
-                f"from in place ({', '.join(self._relative(p) for p in replaced)})"
-            )
-        if denials.out_of_scope_count:
-            shown = ", ".join(
-                self._relative(p) for p in denials.out_of_scope_paths
-            )
-            notes.append(
-                f"{denials.out_of_scope_count} out-of-scope denial(s)"
-                + (f" ({shown})" if shown else "")
-            )
-        if notes:
-            self._jail_notes[outcome.task_id] = (
-                f"The plugin-landlock jail refused {'; '.join(notes)} — none "
-                f"of them changes the verdict."
-            )
-        return False
+        denied = denials.denied_paths()
+        paths = [self._relative(p) for p in denied]
+        in_grant = [
+            self._relative(p) for p in denied
+            if self._in_grant(p, task_id) or p in replaced
+        ]
+        return replace(
+            jail,
+            denied=tuple(paths),
+            scope_sentence=self._jail_scope_sentence(
+                in_grant, [p for p in paths if p not in in_grant],
+            ),
+        )
 
     def _jail_scope_sentence(
         self, in_grant: Sequence[str], outside: Sequence[str]
@@ -10710,7 +10109,7 @@ class WriteBatchScheduler:
             # reason does not apply to it: the byte comparison has nothing to
             # compare because the task is promised to change nothing, and the
             # undeclared-write sweep is then the whole verdict — see
-            # `_verification_only` and `_verification_verdict`. Only `implement`
+            # `_verification_only` and `write_verdict.decide`. Only `implement`
             # materializes such a task; the three apply kinds always declare
             # their one artifact, so an empty set there is still a bug.
             self.log(
