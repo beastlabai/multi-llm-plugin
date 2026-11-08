@@ -394,6 +394,80 @@ Create user model.
         assertions.assert_plan_unchanged(plan.plan_path, original_content)
 
 
+class TestReviewPlanReaggregateReopensASkipValidationCompletion:
+    """A `--reaggregate` that hands validation out, a partial round or a new
+    one, reopens a phase an earlier `--skip-validation` run completed: the
+    checkpoint and `state.json` both say validation is owed
+    (docs/development/review-results.md)."""
+
+    def _run(self, skill_runner: SkillRunner, plan, *flags: str):
+        return skill_runner.run_orchestrator(
+            "review_plan", plan.plan_path, "--models", "cursor-agent", *flags,
+            timeout=30,
+        )
+
+    def _assert_reopened(self, result, phase_dir: Path) -> None:
+        assert "Reaggregation complete!" not in result.stdout, result.stdout
+        assert result.exit_code == 0, result.stdout + result.stderr
+        status = json.loads((phase_dir / ".status.json").read_text(encoding="utf-8"))
+        assert status["state"] == "validation_pending"
+        assert status["progress"]["step"] == "validation_pending"
+        assert "review-plan" not in (
+            (result.get_state() or {}).get("phases_completed") or {}
+        )
+
+    def test_a_partial_round_reopens_the_phase(
+        self,
+        skill_runner: SkillRunner,
+        fixture_manager: FixtureManager,
+        mock_provider: MockProvider,
+    ):
+        _configure_scenario(skill_runner, mock_provider, "happy_path")
+        plan = fixture_manager.create_plan(
+            "reaggregate-partial-reopen",
+            "# Test Plan\n\n## Overview\nA simple test plan for validation.\n",
+        )
+        fanout = self._run(skill_runner, plan)
+        assert fanout.exit_code == 0, fanout.stdout + fanout.stderr
+        phase_dir = plan.output_dir / "review-plan"
+        assert (phase_dir / "validation_tasks.json").exists(), fanout.stdout
+
+        skipped = self._run(skill_runner, plan, "--reaggregate", "--skip-validation")
+        assert "Reaggregation complete!" in skipped.stdout, skipped.stdout + skipped.stderr
+        assert "review-plan" in ((skipped.get_state() or {}).get("phases_completed") or {})
+        assert (phase_dir / "validation_tasks.json").exists()
+
+        resumed = self._run(skill_runner, plan, "--reaggregate")
+
+        assert "batch files found." in resumed.stdout, resumed.stdout + resumed.stderr
+        self._assert_reopened(resumed, phase_dir)
+
+    def test_a_new_round_reopens_the_phase(
+        self,
+        skill_runner: SkillRunner,
+        fixture_manager: FixtureManager,
+        mock_provider: MockProvider,
+    ):
+        _configure_scenario(skill_runner, mock_provider, "happy_path")
+        plan = fixture_manager.create_plan(
+            "reaggregate-new-round-reopen",
+            "# Test Plan\n\n## Overview\nA simple test plan for validation.\n",
+        )
+        skipped = self._run(skill_runner, plan, "--skip-validation")
+        assert skipped.exit_code == 0, skipped.stdout + skipped.stderr
+        assert "review-plan" in ((skipped.get_state() or {}).get("phases_completed") or {})
+        phase_dir = plan.output_dir / "review-plan"
+        assert not (phase_dir / "validation_tasks.json").exists()
+
+        handed_out = self._run(skill_runner, plan, "--reaggregate")
+
+        output = handed_out.stdout + handed_out.stderr
+        assert (
+            "[VALIDATION_PENDING]" in output or "[VALIDATION_BATCHES_PENDING]" in output
+        ), output
+        self._assert_reopened(handed_out, phase_dir)
+
+
 class TestImplementOutputsTaskBatches:
     """Test that implement_orchestrator produces task batches correctly."""
 

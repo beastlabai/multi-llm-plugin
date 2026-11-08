@@ -4148,7 +4148,9 @@ def _resume_shape(view: Dict[str, Any]) -> "tuple":
     1. the run record's close-out — D4's ``{"state": "runner_rejected",
        "reason_code": …}``, written at the checkpoint's top level and mirrored
        into the view — is the refusal's classification made durable and, after
-       a refusal, the only thing on disk ⇒ shape 1;
+       a refusal, the only thing on disk ⇒ shape 1. ``claim_run`` retires the
+       whole close-out (``status_file.REFUSAL_KEYS``), so one beside a run
+       record is that run's;
     2. otherwise ``progress.subagents`` (``_mirror_status``), whose ``counts``
        split by ``FATAL_STATUSES`` ⇒ shape 1 or 2. Its freshness is the
        writer's property: ``claim_run`` drops the predecessor's ``run`` **and**
@@ -5364,7 +5366,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # `--view run` lists every phase alphabetically while `mode`/`phase` stay
     # `status`/null, so the first view's counts would read as whichever run the
     # host was watching. A composite's are its last review's, the counts its
-    # worker's line kept (D2).
+    # worker's line kept (D2). Freshness is `claim_run`'s, as for
+    # `high_priority_groups` below: it drops the predecessor's counts
+    # (`status_file.RUN_SCOPED_KEYS`), so a run that stopped short of its own
+    # report (a refused retry, a validation hand-off) relays none.
     counts = (
         next((v["validation_counts"] for v in reversed([*views, *steps])
               if v.get("validation_counts")), None)

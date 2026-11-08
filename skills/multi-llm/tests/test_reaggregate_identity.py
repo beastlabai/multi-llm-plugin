@@ -534,7 +534,9 @@ def _run_cro_reaggregate(
     dict, receives the coroutine's return value (``"exit"``) and the fake state
     (``"state"``) so a caller can assert on the phase's completion.
     ``state_record``, a dict, stands in for the fake state's ``state`` (the
-    ``state.json`` document) so a caller can read what was written to it.
+    ``state.json`` document) so a caller can read what was written to it. The
+    fake is what both modules load: the review base's
+    ``reopen_phase_for_validation`` reads ``state.json`` through its own import.
     """
     args = argparse.Namespace(
         plan_file=str(plan),
@@ -569,6 +571,8 @@ def _run_cro_reaggregate(
     with contextlib.ExitStack() as stack:
         stack.enter_context(
             patch.object(cro, "get_or_create_state", return_value=fake_state))
+        stack.enter_context(
+            patch.object(rob, "get_or_create_state", return_value=fake_state))
         stack.enter_context(
             patch.object(cro, "get_phase_dir", return_value=phase_dir))
         stack.enter_context(

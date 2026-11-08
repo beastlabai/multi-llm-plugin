@@ -166,7 +166,21 @@ _RESERVED_OBJECTS: Tuple[str, ...] = ("run", "progress")
 
 #: Top-level checkpoint keys that are one run's result, not the phase's state:
 #: :func:`claim_run` drops them with the predecessor's ``run`` and ``progress``.
-RUN_SCOPED_KEYS: Tuple[str, ...] = ("high_priority_groups",)
+#: A pinned poll relays each one as the polled run's own, and nothing else on
+#: the checkpoint (the claim keeps the top-level ``state``) tells a
+#: predecessor's copy apart (docs/development/runtime.md, "Status file schema").
+RUN_SCOPED_KEYS: Tuple[str, ...] = ("high_priority_groups", "validation_counts")
+
+#: A pre-dispatch refusal's close-out (``review_orchestrator_base.
+#: _print_executor_refusal``, the write scheduler's batch refusal): the top-level
+#: ``state`` words it writes, and the keys it writes beside them. It is one
+#: run's ending, not the phase's state, so :func:`claim_run` retires the whole
+#: of it: ``status`` renders a ``runner_rejected`` state's repair off
+#: ``reason_code`` (``run_status._resume_shape``), and a retry refused before
+#: its own first write would otherwise be told to repair the previous run's
+#: fault (docs/development/runtime.md, "Status file schema").
+REFUSAL_STATES: Tuple[str, ...] = ("runner_rejected", "executor_refused")
+REFUSAL_KEYS: Tuple[str, ...] = ("reason_code", "runner", "runner_key", "refused_batch")
 
 #: The process state machine. ``stale`` is deliberately absent: it is a *view* of
 #: a ``running`` record whose heartbeat expired, never a stored state.
@@ -418,12 +432,17 @@ def claim_run(phase_dir: str, record: Dict[str, Any]) -> None:
     # compare-and-set takes — so no writer, in this process or another, can
     # observe (or write into) the momentary run-less document between them and
     # mistake it for a dir with no owner.
-    # `high_priority_groups` goes with them: it is a review run's finding, and the
-    # top-level `state` this keeps would let a poll relay it as the new run's
+    # The run-scoped results go with them (`RUN_SCOPED_KEYS`): the top-level
+    # `state` this keeps would let a poll relay them as the new run's. So does
+    # a refusal close-out, its `state` word included (`REFUSAL_STATES`,
+    # `REFUSAL_KEYS`): kept, it is read as this run's refusal
     # (docs/development/runtime.md, "Status file schema").
     with checkpoint_lock(phase_dir):
         update_status(phase_dir, {"run": None, "progress": None})
-        remove_status_keys(phase_dir, RUN_SCOPED_KEYS)
+        retired = [*RUN_SCOPED_KEYS, *REFUSAL_KEYS]
+        if read_status(phase_dir).get("state") in REFUSAL_STATES:
+            retired.append("state")
+        remove_status_keys(phase_dir, retired)
         update_status(phase_dir, {"run": dict(record)})
 
 

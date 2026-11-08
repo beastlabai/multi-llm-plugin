@@ -8849,6 +8849,11 @@ class TestTheToolResultCarriesTheValidationCounts:
         status_file.write_status(str(phase), {
             "phase": "review-plan", "state": "complete",
         })
+        # The worker claims the dir first, then its report records the counts.
+        status_file.claim_run(str(phase), {
+            "run_id": "run-counts-js-01", "state": "done", "exit_code": 0,
+            "detached": True, "mode": "review-plan",
+        })
         groups = (
             [{"validation_status": "valid"}] * 53
             + [{"validation_status": "invalid"}]
@@ -8860,10 +8865,6 @@ class TestTheToolResultCarriesTheValidationCounts:
             "valid": 53, "invalid": 1,
             "needs_human_decision": 3, "validation_failed": 0,
         }
-        status_file.claim_run(str(phase), {
-            "run_id": "run-counts-js-01", "state": "done", "exit_code": 0,
-            "detached": True, "mode": "review-plan",
-        })
 
         ctx = cli_common.activate_result(cli_common.ResultContext())
         try:

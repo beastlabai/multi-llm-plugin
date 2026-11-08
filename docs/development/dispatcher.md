@@ -115,7 +115,11 @@ checkpoint `state` is `complete`, the one point the count is written: a detached
 `review-code --fail-on-high` held at exit 3 reads as completed to a host only with a positive
 count on the poll's line (`modes.REVIEW_GATE`). The `state` outlives the run that wrote it, so
 `claim_run` drops the count when the next run starts: a retry refused before it completes
-(an edited plan, exit 3) never relays the earlier review's count as its own.
+(an edited plan, exit 3) never relays the earlier review's count as its own. It drops
+`validation_counts` with it (`status_file.RUN_SCOPED_KEYS`), whose relay has no `state`
+condition at all: a run's counts are its own report's, so a refused retry or a validation
+hand-off relays none. `answer_origins` needs no entry there, since a detached ask's first
+write after the claim replaces the whole checkpoint.
 
 **`user_next_step`** is the workflow's next phase as the command the *user* types
 (plans/next-phase-command.md): `{"phase", "command", "optional_before": [{"phase", "command", "why"}], "complete": false}` (`optional_before` omitted when empty,

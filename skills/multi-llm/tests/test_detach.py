@@ -2771,13 +2771,13 @@ class TestStatusSurface:
             "valid": 53, "invalid": 1,
             "needs_human_decision": 3, "validation_failed": 0,
         }
-        status_file.write_status(str(phase), {
-            "phase": "review-plan", "state": "complete",
-            "validation_counts": counts,
-        })
         status_file.claim_run(str(phase), {
             "run_id": "run-counts-001", "state": "done", "exit_code": 0,
             "detached": True,
+        })
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "complete",
+            "validation_counts": counts,
         })
         assert detach.classify_run(str(phase))["validation_counts"] == counts
         ctx = cli_common.activate_result(cli_common.ResultContext())
@@ -3159,6 +3159,90 @@ class TestStatusSurface:
         assert code == 3
         assert status_file.read_status(str(phase))["state"] == "complete"
         assert "high_priority_groups" not in payload
+
+    def test_a_refused_retry_does_not_relay_the_previous_runs_validation_counts(
+        self, tmp_path, capsys
+    ):
+        """A completed review recorded its verdict counts; the retry (refused by
+        task-file validation with exit 3) wrote nothing of its own, so counts on
+        its poll would summarise a validation it never ran."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        status_file.claim_run(str(phase), {
+            "run_id": "run-counts-005", "state": "running", "detached": True,
+        })
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "complete",
+            "validation_counts": {
+                "valid": 3, "invalid": 1,
+                "needs_human_decision": 2, "validation_failed": 0,
+            },
+        })
+        assert status_file.update_run(
+            str(phase), {"state": "done", "exit_code": 0},
+            expect_run_id="run-counts-005",
+        )
+        status_file.claim_run(str(phase), {
+            "run_id": "run-counts-006", "state": "failed", "exit_code": 3,
+            "error": "needs_human (exit 3)", "detached": True,
+        })
+        ctx = cli_common.activate_result(cli_common.ResultContext())
+        try:
+            code = run_status.main([
+                "--plan-file", str(plan), "--view", "run", "--phase", "review-plan",
+            ])
+            payload = ctx.payload(code)
+        finally:
+            cli_common.deactivate_result()
+        capsys.readouterr()
+
+        assert code == 3
+        assert status_file.read_status(str(phase))["state"] == "complete"
+        assert "validation_counts" not in payload
+
+    def test_a_refused_retry_is_not_given_the_previous_runs_repair(
+        self, tmp_path, capsys
+    ):
+        """A run refused before dispatch closed out with `state:
+        runner_rejected` and `reason_code: binary_absent`; the retry is refused
+        by task-file validation (exit 3) before it writes a checkpoint state of
+        its own, so its pinned poll names no repair: the CLI fault was the
+        previous run's (docs/development/runtime.md)."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        status_file.claim_run(str(phase), {
+            "run_id": "run-refusal-001", "state": "running", "detached": True,
+            "mode": "review-plan",
+        })
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "runner_rejected",
+            "reason_code": "binary_absent", "runner": "codex:gpt-6-luna",
+            "runner_key": "driver.subagent_runner",
+        })
+        assert status_file.update_run(
+            str(phase), {"state": "failed", "exit_code": 3,
+                         "error": "needs_human (exit 3)"},
+            expect_run_id="run-refusal-001",
+        )
+        status_file.claim_run(str(phase), {
+            "run_id": "run-refusal-002", "state": "failed", "exit_code": 3,
+            "error": "needs_human (exit 3)", "detached": True,
+            "mode": "review-plan",
+        })
+
+        code = run_status.main([
+            "--plan-file", str(plan), "--view", "run", "--phase", "review-plan",
+            "--run-id", "run-refusal-002",
+        ])
+        out = capsys.readouterr().out
+
+        assert code == 3, out
+        assert "needs_human (exit 3)" in out, out
+        assert "binary_absent" not in out, out
+        assert "repair first:" not in out, out
+        assert not {"state", *status_file.REFUSAL_KEYS} & set(
+            status_file.read_status(str(phase))
+        )
 
     def test_a_terminal_run_carries_the_workflow_notice_into_view_run(
         self, tmp_path, capsys

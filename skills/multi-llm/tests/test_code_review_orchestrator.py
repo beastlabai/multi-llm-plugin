@@ -2235,10 +2235,21 @@ class TestTheValidationStretchIsNamedBeforeItIsDispatched:
         writes `state: validation_pending` before it reaches
         `dispatch_subagent_tasks`. A behavioural test covers this lane's two;
         this covers all four, so a fifth site added to either file is caught by
-        the same rule rather than by whoever remembers.
+        the same rule rather than by whoever remembers. A site may write the
+        word itself or through the base's `reopen_phase_for_validation`, which
+        writes it (and reopens a completed phase) for both lanes' reaggregate.
         """
         marker = '{"state": "validation_pending"}'
+        reopen = "reopen_phase_for_validation("
         dispatch = "dispatch_subagent_tasks,"
+        base = (SKILL_ROOT / "utils/review_orchestrator_base.py").read_text(
+            encoding="utf-8"
+        )
+        helper = base.index(f"def {reopen}")
+        assert marker in base[helper:base.index("\ndef ", helper + 1)], (
+            "`reopen_phase_for_validation` no longer writes "
+            "`state: validation_pending`, so the sites that call it do not either"
+        )
         for rel in ("code_review_orchestrator.py",
                     "utils/review_orchestrator_base.py"):
             body = (SKILL_ROOT / rel).read_text(encoding="utf-8")
@@ -2252,7 +2263,8 @@ class TestTheValidationStretchIsNamedBeforeItIsDispatched:
             )
             for start in sites:
                 nxt = body.index(dispatch, start)
-                assert marker in body[start:nxt], (
+                stretch = body[start:nxt]
+                assert marker in stretch or reopen in stretch, (
                     f"{rel} dispatches a validation batch (offset {nxt}) without "
                     "having written `state: validation_pending` since it "
                     f"materialized the document (offset {start}). The stretch "

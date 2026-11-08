@@ -53,12 +53,20 @@ count and holds the gate too; a `--skip-validation` reaggregate counts the group
 as the base report does. Its `--reaggregate` resolves a validation round the way the base
 lane does: stale prompt sidecars are rebound and persisted, a whole round of
 `validation_batch_<n>.json` is merged, a partial one is dispatched under `--exec-subagents`
-or answered `Only n/m batch files found.` with the phase left open. A partial round first
-reopens the phase as a fresh hand-off leaves it: `state: validation_pending` (and the
-progress step on the hand-off), and a completion an earlier `--reaggregate --skip-validation`
-recorded in `state.json` is dropped, as `--force` drops it. The merge reads a
-missing batch as `validation_failed`, so it is never handed a partial round, and no broad
-`except` turns a failed merge into a completed phase.
+or answered `Only n/m batch files found.` with the phase left open. The merge reads a
+missing batch as `validation_failed`, so it is never handed a partial round. On neither
+lane does a broad `except` surround the merge or the dispatch: one that raises ends the
+command with the phase open, never completed with no `validation.json`.
+
+Both lanes' `--reaggregate` reopen the phase wherever they hand a round out, a partial one
+or a newly built one, through the base's `reopen_phase_for_validation`: `state:
+validation_pending` (and the progress step on the host hand-off), and a completion an
+earlier `--skip-validation` run recorded in `state.json` is dropped, as `--force` drops it.
+Otherwise the command asks for validation while `status` and the next-step builder still
+read the phase as complete. A dispatched round records the phase complete again when it
+merges. The drop is one read-modify-write under `metrics.state_file_lock` that removes only
+that phase's entry, so a completion or `commit_range` another command records at the same
+moment is kept.
 
 **An empty review outcome reaches its apply phase as a completion** (2026-10-09). review-plan's
 fan-out with zero groups (the `else` of `run_review_orchestration`'s

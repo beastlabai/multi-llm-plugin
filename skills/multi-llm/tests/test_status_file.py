@@ -250,6 +250,56 @@ class TestDetachFieldsAreAdditive:
         assert data["state"] == "complete"
         assert data["run"]["run_id"] == "run-new"
 
+    def test_claim_drops_a_predecessor_runs_validation_counts(self, tmp_path):
+        """The verdict counts are one run's report, relayed by a pinned poll
+        whatever the `state`, so a run that stops short of its own report must
+        not find the previous run's there (docs/development/runtime.md)."""
+        _checkpoint(tmp_path)
+        status_file.claim_run(str(tmp_path), _run_record("run-old", "running"))
+        status_file.update_status(str(tmp_path), {
+            "state": "complete",
+            "validation_counts": {
+                "valid": 2, "invalid": 0,
+                "needs_human_decision": 1, "validation_failed": 0,
+            },
+        })
+        assert status_file.update_run(str(tmp_path), {"state": "done", "exit_code": 0},
+                                      expect_run_id="run-old")
+        status_file.claim_run(str(tmp_path), _run_record("run-new", "starting"))
+        data = json.loads((tmp_path / ".status.json").read_text(encoding="utf-8"))
+        assert "validation_counts" not in data
+        assert data["state"] == "complete"
+
+    @pytest.mark.parametrize("word", status_file.REFUSAL_STATES)
+    def test_claim_retires_a_predecessor_runs_refusal_close_out(self, tmp_path, word):
+        """A refusal's `state` and the keys beside it are that run's ending:
+        kept, the next run's poll would render its repair as this run's
+        (docs/development/runtime.md)."""
+        _checkpoint(tmp_path)
+        status_file.claim_run(str(tmp_path), _run_record("run-old", "running"))
+        status_file.update_status(str(tmp_path), {
+            "state": word, "reason_code": "binary_absent",
+            "runner": "codex:gpt-6-luna", "runner_key": "driver.subagent_runner",
+            "refused_batch": 0,
+        })
+        assert status_file.update_run(str(tmp_path), {"state": "failed", "exit_code": 3},
+                                      expect_run_id="run-old")
+        status_file.claim_run(str(tmp_path), _run_record("run-new", "starting"))
+        data = json.loads((tmp_path / ".status.json").read_text(encoding="utf-8"))
+        assert not {"state", *status_file.REFUSAL_KEYS} & set(data), data
+        assert data["run"]["run_id"] == "run-new"
+        assert data["question"] == "Is the rollback strategy sufficient — really?"
+
+    def test_claim_keeps_a_phase_state_but_not_a_stray_reason_code(self, tmp_path):
+        """Only a refusal word is retired with its close-out; a phase state a
+        later run wrote over the refusal stays, while the refusal's
+        `reason_code` it merged past does not."""
+        _checkpoint(tmp_path, state="subagents_failed", reason_code="binary_absent")
+        status_file.claim_run(str(tmp_path), _run_record("run-new", "starting"))
+        data = json.loads((tmp_path / ".status.json").read_text(encoding="utf-8"))
+        assert data["state"] == "subagents_failed"
+        assert "reason_code" not in data
+
     def test_resolutions_are_appended_for_the_audit_trail(self, tmp_path):
         _checkpoint(tmp_path)
         status_file.claim_run(str(tmp_path), _run_record())

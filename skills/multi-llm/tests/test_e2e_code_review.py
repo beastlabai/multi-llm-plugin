@@ -1151,3 +1151,44 @@ class TestTheReaggregateEndingHoldsTheGate:
         assert "code-review" not in (
             (resumed.get_state() or {}).get("phases_completed") or {}
         )
+
+    def test_a_new_round_reopens_a_skip_validation_completion(
+        self,
+        skill_runner: SkillRunner,
+        fixture_manager: FixtureManager,
+        mock_provider: MockProvider,
+    ):
+        """A `--skip-validation` review completes with no round on disk; a
+        validating `--reaggregate` then builds one and hands it out, so the
+        phase owes validation again in `state.json` as in the checkpoint
+        (docs/development/review-results.md)."""
+        plan = _plan_with_issues(
+            skill_runner, fixture_manager, mock_provider,
+            "reaggregate-new-round", _issues(high=1),
+        )
+        skipped = skill_runner.run_orchestrator(
+            "code_review", plan.plan_path,
+            "--models", "cursor-agent", "--skip-validation", timeout=45,
+        )
+        assert skipped.exit_code == EXIT_OK, skipped.stdout + skipped.stderr
+        assert "code-review" in ((skipped.get_state() or {}).get("phases_completed") or {})
+        phase_dir = plan.output_dir / "code-review"
+        assert not (phase_dir / "validation_tasks.json").exists()
+
+        handed_out = skill_runner.run_orchestrator(
+            "code_review", plan.plan_path,
+            "--models", "cursor-agent", "--reaggregate", timeout=45,
+        )
+
+        output = handed_out.stdout + handed_out.stderr
+        assert (
+            "[VALIDATION_PENDING]" in output or "[VALIDATION_BATCHES_PENDING]" in output
+        ), output
+        assert "Reaggregation complete!" not in handed_out.stdout
+        assert handed_out.exit_code == EXIT_OK
+        status = json.loads((phase_dir / ".status.json").read_text(encoding="utf-8"))
+        assert status["state"] == "validation_pending"
+        assert status["progress"]["step"] == "validation_pending"
+        assert "code-review" not in (
+            (handed_out.get_state() or {}).get("phases_completed") or {}
+        )

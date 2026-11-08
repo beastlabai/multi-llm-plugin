@@ -527,6 +527,44 @@ def merge_validation_batches(
     return validated
 
 
+def reopen_phase_for_validation(
+    plan_path: Union[str, Path], phase_name: str, phase_dir: Union[str, Path]
+) -> None:
+    """Record a review phase as owing validation, before a round is handed out.
+
+    Both lanes' ``--reaggregate`` call this wherever they dispatch a round or
+    hand one to the host: when they build a new round and when they find one
+    unfinished. A completion an earlier run recorded (``--reaggregate
+    --skip-validation`` closes the phase over a pending round) is dropped from
+    ``phases_completed`` the way ``--force`` drops it, and the checkpoint reads
+    ``state: validation_pending``, so neither record says "complete" while the
+    command asks for more validation. The caller writes ``progress.step`` on
+    its host hand-off; a dispatched round records the phase complete again
+    when it merges (docs/development/review-results.md).
+
+    The read, the removal and the save are one critical section under
+    ``metrics.state_file_lock``, the lock every locked writer of
+    ``state.json`` takes: another phase's completion or a ``commit_range``
+    recorded meanwhile is read here and kept, not overwritten by an older
+    snapshot. The file goes back as read, less this phase's entry and plus
+    what every ``StateManager`` load and save stamps.
+    """
+    try:
+        from .metrics import state_file_lock
+        from .output_handler import output_dir_path
+    except ImportError:  # pragma: no cover - direct script runs
+        from utils.metrics import state_file_lock  # type: ignore[no-redef]
+        from utils.output_handler import output_dir_path  # type: ignore[no-redef]
+
+    plan = Path(plan_path)
+    with state_file_lock(output_dir_path(plan.resolve()) / "state.json"):
+        reopened = get_or_create_state(plan)
+        phases = reopened.state.get("phases_completed")
+        if isinstance(phases, dict) and phases.pop(phase_name, None):
+            reopened.save()
+    update_status(str(phase_dir), {"state": "validation_pending"})
+
+
 # ---------------------------------------------------------------------------
 # Scope policy: the review round (plans/scope-policy-and-report-tags.md §2-§4)
 # ---------------------------------------------------------------------------
@@ -6944,10 +6982,10 @@ async def reaggregate_from_existing_files(
     await asyncio.sleep(0)
     # Set only where THIS invocation writes a terminal `progress.step`. The
     # teardown line reads the checkpoint, so on every other ending — an exit 3
-    # refusal (changed snapshot, stale task file), "only n/m batch files", no
-    # suggestions — it would re-print the previous run's `step: complete |
-    # subagents 16/16 done` as if this process had finished (dogfood
-    # 2026-09-25). Those endings print their own reason instead.
+    # refusal (changed snapshot, stale task file), no suggestions — it would
+    # re-print the previous run's `step: complete | subagents 16/16 done` as if
+    # this process had finished (dogfood 2026-09-25). Those endings print their
+    # own reason instead.
     concluded = False
     try:
         # Collect all suggestions
@@ -7193,9 +7231,7 @@ async def reaggregate_from_existing_files(
             # resumed under the other would silently mis-spawn, and a plan edited
             # between materialization and resume leaves prompts that still validate
             # cleanly while reviewing text nobody is looking at any more. Both fail
-            # loudly here (exit 3) rather than dispatching anything. Read outside the
-            # try below, whose broad handler would otherwise downgrade the refusal to
-            # a warning.
+            # loudly here (exit 3) rather than dispatching anything.
             try:
                 batch_metadata = read_task_file(
                     validation_tasks_path,
@@ -7239,20 +7275,27 @@ async def reaggregate_from_existing_files(
                         file=sys.stderr,
                     )
                     sys.exit(3)
-            try:
-                total_batches = batch_metadata.get("total_batches", 0)
-                batches_found = 0
-                for batch in batch_metadata.get("batches", []):
-                    batch_file = os.path.join(phase_dir, f"validation_batch_{batch['batch_index']}.json")
-                    if os.path.exists(batch_file):
-                        batches_found += 1
+            total_batches = batch_metadata.get("total_batches", 0)
+            batches_found = 0
+            for batch in batch_metadata.get("batches", []):
+                batch_file = os.path.join(phase_dir, f"validation_batch_{batch['batch_index']}.json")
+                if os.path.exists(batch_file):
+                    batches_found += 1
 
-                if batches_found == total_batches and total_batches > 0:
-                    print(f"All {total_batches} batch files found, merging...")
-                    validated_groups_for_report = merge_validation_batches(
-                        phase_dir, batch_metadata, grouped, validation_path
-                    )
-                elif await asyncio.to_thread(
+            # No broad `except` around the merge or the dispatch, as on the
+            # code-review lane: one that raises is an error, never a completed
+            # phase with no verdicts (docs/development/review-results.md).
+            if batches_found == total_batches and total_batches > 0:
+                print(f"All {total_batches} batch files found, merging...")
+                validated_groups_for_report = merge_validation_batches(
+                    phase_dir, batch_metadata, grouped, validation_path
+                )
+            else:
+                # An unfinished round reopens the phase before any batch is
+                # handed out: an earlier `--reaggregate --skip-validation`
+                # may have recorded it complete.
+                reopen_phase_for_validation(plan_path, phase_name, phase_dir)
+                if await asyncio.to_thread(
                     dispatch_subagent_tasks,
                     args,
                     task_file=validation_tasks_path,
@@ -7261,25 +7304,28 @@ async def reaggregate_from_existing_files(
                     document=batch_metadata,
                     plan_path=str(plan_path),
                     label="validation",
-                    # D2 row 10: this path used to pass none, so its own failure
-                    # printed the "re-run the same command" fallback — a flag-less
-                    # hint by omission. The document's triple, live flags winning.
+                    # D2 row 10: this path used to pass none, so its own
+                    # failure printed the "re-run the same command" fallback
+                    # — a flag-less hint by omission. The document's triple,
+                    # live flags winning.
                     retry_command=resolved_reaggregate_command(batch_metadata),
                 ):
                     # D3b on the reaggregate path: a run resumed with
-                    # --exec-subagents dispatches the still-incomplete batches itself
-                    # (completed ones are skipped by their result files, D3i) rather
-                    # than telling a host to go run subagents it may not have.
+                    # --exec-subagents dispatches the still-incomplete batches
+                    # itself (completed ones are skipped by their result
+                    # files, D3i) rather than telling a host to go run
+                    # subagents it may not have.
                     validated_groups_for_report = merge_validation_batches(
                         phase_dir, batch_metadata, grouped, validation_path
                     )
                 else:
+                    # The host hand-off's progress word, as at the
+                    # materialization site below.
+                    _detach.report_progress(phase_dir, step="validation_pending")
+                    concluded = True
                     print(f"Only {batches_found}/{total_batches} batch files found.")
                     print("Wait for all validation subagents to complete before reaggregating.")
                     return
-            except Exception as e:
-                print(f"Warning: Could not process batch metadata: {e}")
-                validated_groups_for_report = None
 
         elif not args.skip_validation:
             # Host-neutral: this print runs on every host that dispatches
@@ -7327,8 +7373,9 @@ async def reaggregate_from_existing_files(
             # `phase state: grouping_complete` beside `progress: validating` for
             # the whole validation run (measured 2026-09-16) because
             # `validation_pending` — documented in utils/status_file.py since D4
-            # — was never written by anything.
-            update_status(phase_dir, {"state": "validation_pending"})
+            # — was never written by anything. A new round also reopens a phase
+            # an earlier `--skip-validation` run recorded complete.
+            reopen_phase_for_validation(plan_path, phase_name, phase_dir)
             # And the progress word, as the first run's hand-off writes it.
             # The executor mirror still describes the PREVIOUS round's
             # batches (16/16 done), and nothing of this round has been

@@ -100,6 +100,7 @@ from utils.review_orchestrator_base import (
     merge_validation_batches,
     record_high_priority_groups,
     record_validation_counts,
+    reopen_phase_for_validation,
     report_already_completed,
     report_misnamed_result,
     validation_counts,
@@ -5422,13 +5423,9 @@ async def reaggregate_from_existing_files(
             else:
                 # An unfinished round reopens the phase before any batch is
                 # handed out, the state a fresh hand-off leaves: an earlier
-                # `--reaggregate --skip-validation` recorded it complete, and
-                # neither record may say so while validation is still owed.
-                # The completion is dropped the way `--force` drops it.
-                reopened = get_or_create_state(plan_path)
-                if reopened.state.get("phases_completed", {}).pop("code-review", None):
-                    reopened.save()
-                update_status(str(phase_dir), {"state": "validation_pending"})
+                # `--reaggregate --skip-validation` may have recorded it
+                # complete.
+                reopen_phase_for_validation(plan_path, "code-review", phase_dir)
                 if await asyncio.to_thread(
                     dispatch_subagent_tasks,
                     args,
@@ -5521,8 +5518,10 @@ async def reaggregate_from_existing_files(
             # `phase state: grouping_complete` / `progress: validating`
             # disagreement the base lane fixed on 2026-09-16, and a checkpoint
             # that misreports which stretch it is in is what rule 2's
-            # instant-return test tells a polling agent to read.
-            update_status(str(phase_dir), {"state": "validation_pending"})
+            # instant-return test tells a polling agent to read. A new round
+            # also reopens a phase an earlier `--skip-validation` run recorded
+            # complete.
+            reopen_phase_for_validation(plan_path, "code-review", phase_dir)
 
             total_batches = batched_tasks["total_batches"]
             stats = batched_tasks.get("batching_stats", {})

@@ -134,8 +134,11 @@ by **every** run, foreground or detached — `detach.report_progress` falls back
 `status_file.update_progress` when no handle owns the phase dir, so the invariant is "a foreground
 `.status.json` gains a `progress` object and still no `run`
 object", not "gains no new keys". `claim_run` drops the predecessor's `run`, `progress` and
-run-scoped results (`status_file.RUN_SCOPED_KEYS`: `high_priority_groups`) and keeps the
-top-level `state`.
+run-scoped results (`status_file.RUN_SCOPED_KEYS`: `high_priority_groups`, `validation_counts`) and keeps the
+top-level `state`, except a refusal close-out's: a `runner_rejected` or `executor_refused`
+`state` goes, with the `reason_code`, `runner`, `runner_key` and `refused_batch` written beside
+it (`status_file.REFUSAL_STATES`, `REFUSAL_KEYS`), since `status` reads them as the refusal
+of the run it is polling.
 
 Its reserved keys are `{step, batch_index, batches_total, tasks_done, tasks_total, tasks_generated, failed_task_ids, models, models_done, models_succeeded, models_total, interval_s}` (`status_file.py`'s module docstring is the
 contract): `models` is the fan-out's per-model map keyed by spec,
