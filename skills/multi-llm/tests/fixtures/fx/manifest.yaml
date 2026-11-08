@@ -78,7 +78,7 @@ rows:
     stderr: exit-zero-failure.stderr.txt
     exit_code: 0
     expect:
-      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U38b (PROV-1 phase 2)"}
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       success: false
       classify_failure: null
       salvage: none
@@ -174,7 +174,7 @@ rows:
     stderr: shell-held.stderr.txt
     exit_code: 0
     expect:
-      lane_status: {lane_a: null, lane_b: runner_error, open: "U38b (PROV-1 phase 2)"}
+      lane_status: {lane_a: runner_error, lane_b: runner_error}
       success: false
       classify_failure: null
       salvage: none
@@ -187,7 +187,7 @@ rows:
     stderr: reviewer-malformed.stderr.txt
     exit_code: 0
     expect:
-      lane_status: {lane_a: null, lane_b: runner_error, open: "U38b (PROV-1 phase 2)"}
+      lane_status: {lane_a: runner_error, lane_b: runner_error}
       success: false
       classify_failure: null
       salvage: none

@@ -443,7 +443,7 @@ class TestLaneARateLimitIsBoundaryAware:
         the slot was dispatched once and the error was *not* read as a rate
         limit; 4 is the defect (one initial dispatch plus ``retry_count < 3``).
         The failure carries no ``failure_category``, so this is the error-line
-        fallback an exit-0 failure takes.
+        fallback a launch failure takes.
         """
         return self._dispatches_result({
             "success": False,
@@ -452,7 +452,7 @@ class TestLaneARateLimitIsBoundaryAware:
         })
 
     def _dispatches_from_streams(self, stdout, stderr="", exit_code=1):
-        """``_dispatches`` for a non-zero exit, through the real invocation.
+        """``_dispatches`` for a child that ran, through the real invocation.
 
         ``invoke_with_provider`` runs against a stubbed cursor-agent child that
         wrote these streams, so the ladder sees the adapter's own
@@ -548,6 +548,27 @@ class TestLaneARateLimitIsBoundaryAware:
         assert self._dispatches_from_streams(
             "", stderr="HTTP 429 Too Many Requests"
         ) == 4
+
+    def test_prose_on_an_exit_zero_stdout_is_not_a_rate_limit(self):
+        """An exit 0 that left no answer carries the adapter's verdict too, so
+        the boundary rule has to hold there: the digits are recognised as
+        nothing, and the parse failure takes one transport retry, as on the
+        executor, never the backoff."""
+        assert self._dispatches_from_streams(
+            self.PROSE_WITH_DIGITS, exit_code=0
+        ) == 2
+
+    def test_an_exit_zero_answer_quoting_a_real_429_is_not_a_rate_limit(self):
+        """The model's answer is never the vendor's verdict: cursor-agent's
+        clean envelope carries it in ``result``, and ``vendor_text`` drops it,
+        so even a well-formed ``HTTP 429 Too Many Requests`` in the review
+        costs one transport retry, not three backoffs."""
+        envelope = json.dumps({
+            "type": "result", "subtype": "success", "is_error": False,
+            "result": "Reviewed 429 files. The client retries on HTTP 429 Too "
+                      "Many Requests and stops on 401 Unauthorized.",
+        })
+        assert self._dispatches_from_streams(envelope, exit_code=0) == 2
 
 
 def _no_sleep(_delay):

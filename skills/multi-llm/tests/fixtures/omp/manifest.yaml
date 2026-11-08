@@ -256,7 +256,7 @@ rows:
       IS reachable — cut after a content frame instead — and is committed as the extra
       row `truncated-partial` below, so the hazard is still graded.
     expect:
-      lane_status: {lane_a: null, lane_b: runner_error, open: "U38b (PROV-1 phase 2)"}
+      lane_status: {lane_a: runner_error, lane_b: runner_error}
       success: false
       # MEASURED: every assistant message is an empty `stop`, so the parser reports
       # `Empty output` — and wraps omp's own give-up sentence
@@ -379,7 +379,7 @@ rows:
       count (12 here versus 20, because a 200-with-JSON was not retried by the fetch
       wrapper the way a cut stream was); at 18.8.3 both are 12.
     expect:
-      lane_status: {lane_a: null, lane_b: runner_error, open: "U38b (PROV-1 phase 2)"}
+      lane_status: {lane_a: runner_error, lane_b: runner_error}
       success: false
       # Byte-shape-identical to `truncated`, and graded the same way: the parser's
       # `Empty output` carries omp's retry-cap sentence in its parentheses. The
@@ -798,7 +798,7 @@ rows:
       refusal the adapter can produce, when `assets/omp/overlay.yml` is missing from
       a packaged install — joined the same row for the same reason.
     expect:
-      lane_status: {lane_a: spawn_failed, lane_b: runner_error}
+      lane_status: {lane_a: spawn_failed, lane_b: spawn_failed}
       success: false
       # The parser's error is `Empty output (stderr: …)`. At 18.2.2 the tool name
       # survived the 300-char cap only because `stderr_diagnosis` drops Bun's
@@ -987,7 +987,7 @@ rows:
       number of times before ending the slot with this same named error. Those
       retries are accepted over inventing a category for a shape nobody has seen.
     expect:
-      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U38b (PROV-1 phase 2)"}
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       success: false
       error_contains:
         - "unrecognized stopReason 'maxTokens'"
@@ -1015,7 +1015,7 @@ rows:
       of a message it cannot read, so a findings file written beside it is not
       read either.
     expect:
-      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U38b (PROV-1 phase 2)"}
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       success: false
       error_contains:
         - "assistant message_end without stopReason"

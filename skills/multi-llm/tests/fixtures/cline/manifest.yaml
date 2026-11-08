@@ -465,3 +465,26 @@ rows:
         - "The operation timed out."
         - '"finishReason":"error"'
       classify_failure: "timeout"
+
+  parsed-raw-wrapper:
+    stdout: parsed-raw-wrapper.stdout.txt
+    stderr: success.stderr.txt
+    exit_code: 0
+    synthesized: true
+    provenance: >-
+      The `success` capture with its answer text replaced by `{"raw": "hello"}`
+      in all five places it appears (`content_start`, `content_end`, `done`,
+      `run_result` and the stream's other copy), JSON-escaped as cline writes
+      it; every other byte is the 3.0.70 capture. It stands for a model that
+      answered with valid JSON that is not an answer.
+    notes: >-
+      The stream form of cursor-agent's row of the same name: the answer
+      parses, the file-output layer and the executor both reject the bare
+      `raw` wrapper, and both lanes retry it once as `unparseable_result`.
+    expect:
+      lane_status: {lane_a: unparseable_result, lane_b: unparseable_result}
+      salvage: none
+      success: true
+      data: {raw: "hello"}
+      raw_contains: ['"finishReason":"completed"']
+      classify_failure: null

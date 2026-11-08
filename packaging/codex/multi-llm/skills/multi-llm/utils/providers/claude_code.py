@@ -24,6 +24,7 @@ from .base import (
     StructuredSchema,
     _warn_policy_once,
     declared_env_names,
+    envelope_without_answer,
     git_env,
     reset_flag_gate_cache,  # noqa: F401 - M14: re-exported for the gate's tests
     split_reasoning_effort,
@@ -807,6 +808,14 @@ class ClaudeCodeProvider(LLMProvider):
     auth_error_patterns = LLMProvider.auth_error_patterns + (
         "failed to authenticate",
     )
+
+    #: :attr:`~.base.LLMProvider.EXIT0_CLASSIFIABLE`, reviewed: claude-code's
+    #: answer is one envelope field, ``result``. :meth:`classify_exit_zero`
+    #: reads the envelope without it, whatever its flags, and a stdout cut
+    #: inside the envelope not at all
+    #: (:func:`base.envelope_without_answer`); the status rung reads
+    #: ``api_error_status`` as before.
+    EXIT0_CLASSIFIABLE = True
 
     @property
     def name(self) -> str:
@@ -1615,6 +1624,20 @@ class ClaudeCodeProvider(LLMProvider):
         except Exception:  # noqa: BLE001 - a failed reduction returns its input
             pass
         return stdout, stderr
+
+    def classify_exit_zero(self, stdout: str, stderr: str) -> Optional[str]:
+        """:meth:`classify_failure` over the envelope without ``result``.
+
+        On an exit 0 that left no answer, ``result`` is the model's answer
+        whatever the envelope's flags say, and ``permission_denials`` quotes
+        its tool input; :func:`base.envelope_without_answer` takes both out
+        and drops a stdout cut inside the envelope. The status rung and the
+        flags this adapter reads are untouched (``EXIT0_CLASSIFIABLE``).
+        """
+        return self.classify_failure(
+            envelope_without_answer(stdout, ("result", "permission_denials")),
+            stderr, 0,
+        )
 
     def describe_failure(self, stdout: str, stderr: str) -> Optional[str]:
         """The refusing envelope's own line, tagged when it names a usage cap.

@@ -1,6 +1,7 @@
 """Base protocol for LLM CLI providers."""
 
 import inspect
+import json
 import os
 import re
 import shutil
@@ -2504,37 +2505,10 @@ def sandbox_probe_inconclusive(text: str) -> bool:
 
 LAUNCH_FAILURE_MARKERS: Tuple[Tuple[str, Tuple["Pattern[str]", ...]], ...] = (
     (CATEGORY_SANDBOX_UNAVAILABLE, SANDBOX_MARKERS),
-    (STATUS_SPAWN_FAILED, _markers(
-        r"command not found",
-        r"executable file not found",
-        r"\bbinary not found\b",
-        r"not found in \$?path\b",
-        r"is not recognized as an internal or external command",
-        r"cannot execute binary file",
-        r"\bexec format error\b",
-        # omp 18.2.2, both measured, both exit 1 at **zero requests** because
-        # the CLI validates its own argv and its config overlay before it
-        # resolves a model: a rejected `--tools` name raises `CliUsageError`,
-        # and a `--config` path that does not resolve is `error: Config overlay
-        # not found: <abs path>` in 0.13 s. Neither is a failed *spawn* in the
-        # literal sense — the binary ran — but the disposition is the one this
-        # rung exists for: a property of the install, identical for every
-        # sibling slot on that runner, and no retry can fix it. The alternative
-        # was `None`, which offers a transport retry of a run that cannot
-        # change its mind.
-        # Lowercase, like every other row here: `_markers` compiles without
-        # re.I and `classify_streams` lowercases the haystack first.
-        r"\bcliusageerror\b",
-        # omp 18.8.3's plain refusal (below, STDERR_LAUNCH_FAILURE_MARKERS) as
-        # Lane A hands it over: that lane classifies its own
-        # `"<cli> exited with code N: <describe_failure>"` sentence as stdout
-        # (`llm_client`'s `error_message`), and omp's `describe_failure` puts
-        # the stderr line first, so the refusal sits right after that prefix
-        # at the very start of the haystack — where no CLI's own stdout, and
-        # no model's answer, starts.
-        r"\A[\w.-]+ exited with code -?\d+: error: unknown tools? in --tools\b",
-        r"config overlay not found",
-    )),
+    # Read on stderr only: :data:`STDERR_LAUNCH_FAILURE_MARKERS` below. The row
+    # stays here for its place in the order (after the sandbox, before a
+    # permission denial).
+    (STATUS_SPAWN_FAILED, ()),
     (CATEGORY_PERMISSION_DENIED, _markers(
         r"permission denied",
         r"operation not permitted",
@@ -2543,18 +2517,48 @@ LAUNCH_FAILURE_MARKERS: Tuple[Tuple[str, Tuple["Pattern[str]", ...]], ...] = (
     )),
 )
 
-#: Launch-failure rows read on **stderr only**, each at the start of a line,
-#: consulted beside :data:`LAUNCH_FAILURE_MARKERS`' row of the same category.
-#: A phrase a model's answer can quote does not belong in the shared haystack:
-#: rung 1 fails the whole batch, and a failed run's stdout is often that answer
-#: (a reviewer reading this repo's own omp fixtures quotes this one). omp
+#: Launch-failure rows read on **stderr only**, consulted in the place of
+#: :data:`LAUNCH_FAILURE_MARKERS`' row of the same category. A phrase a model's
+#: answer can quote does not belong in the shared haystack: rung 1 fails the
+#: whole batch, and a failed run's stdout is often that answer (a reviewer
+#: reading this repo's own omp fixtures quotes the ``--tools`` refusal). omp
 #: 18.8.3 (measured 2026-10-08, tests/fixtures/omp/invalid-tool) refuses a bad
 #: ``--tools`` name, exit 2, with ``Error: Unknown tool in --tools: bogus.``
 #: (``Unknown tools in --tools: a, b.`` for two) opening its stderr, no Bun
-#: trace and no ``CliUsageError`` word, so ``\bcliusageerror\b`` no longer
-#: reaches it (review 24, pins #5).
+#: trace and no ``CliUsageError`` word, so that row is anchored at a line start
+#: (review 24, pins #5).
 STDERR_LAUNCH_FAILURE_MARKERS: Dict[str, Tuple["Pattern[str]", ...]] = {
+    # **Every ``spawn_failed`` marker is read here, on stderr, and nowhere
+    # else.** The verdict fails the executor's whole batch, so it must come
+    # from the launcher or the CLI's own refusal, never from a model's answer
+    # or a tool's output the CLI relays on stdout ("command not found" in a
+    # review of a plan, a shell tool's ``npx: command not found``). A shell,
+    # ``env`` and cmd.exe all write their refusal on stderr; exit 127 needs no
+    # text at all (:data:`MISSING_BINARY_EXIT_CODE`), and an adapter whose CLI
+    # refuses on stdout says so in its own ``classify_failure`` (vibe's
+    # config refusal, read at the start of stdout).
     STATUS_SPAWN_FAILED: _markers(
+        r"command not found",
+        r"executable file not found",
+        r"\bbinary not found\b",
+        r"not found in \$?path\b",
+        r"is not recognized as an internal or external command",
+        r"cannot execute binary file",
+        r"\bexec format error\b",
+        # omp 18.2.2, both measured on stderr, both exit 1 at **zero requests**
+        # because the CLI validates its own argv and its config overlay before
+        # it resolves a model: a rejected `--tools` name raises
+        # `CliUsageError`, and a `--config` path that does not resolve is
+        # `error: Config overlay not found: <abs path>` in 0.13 s. Neither is a
+        # failed *spawn* in the literal sense — the binary ran — but the
+        # disposition is the one this rung exists for: a property of the
+        # install, identical for every sibling slot on that runner, and no
+        # retry can fix it. The alternative was `None`, which offers a
+        # transport retry of a run that cannot change its mind.
+        # Lowercase, like every other row here: `_markers` compiles without
+        # re.I and `classify_streams` lowercases the haystack first.
+        r"\bcliusageerror\b",
+        r"config overlay not found",
         r"(?m)^error: unknown tools? in --tools\b",
     ),
 }
@@ -2769,8 +2773,7 @@ def classify_streams(
 
     ``auth_patterns``/``rate_limit_patterns`` default to :class:`LLMProvider`'s
     declared sets, which is what lets a caller with no adapter in hand — Lane A's
-    error-line fallback, ``validation.py`` — get the same verdict as one
-    with an adapter. Both are matched through :func:`matches_any`, never as raw
+    error-line fallback — get the same verdict as one with an adapter. Both are matched through :func:`matches_any`, never as raw
     substrings.
     """
     haystack = f"{stdout or ''}\n{stderr or ''}".lower()
@@ -2900,8 +2903,8 @@ def match_streams(
     that may not contain it (the b38de8bb run quoted a stderr line with no
     rate limit in it).
 
-    **Nothing classifies through this.** Not ``validation.py``, not Lane A's
-    error-line fallback, not any adapter's ``classify_failure`` — the
+    **Nothing classifies through this.** Not Lane A's error-line fallback,
+    not any adapter's ``classify_failure`` — the
     verdict is always :func:`classify_streams`' (through
     :meth:`LLMProvider.classify_failure`), and this is re-run afterwards for
     the quote alone. Like :func:`classify_streams` it is adapter-free: it never
@@ -2977,6 +2980,68 @@ def match_streams(
         return StreamMatch(STATUS_RUNNER_ERROR)
 
     return None
+
+
+#: Where a JSON envelope opens: a ``{`` starting a line, after any plain lines
+#: the CLI printed first.
+_ENVELOPE_OPENER = re.compile(r"(?m)^[ \t]*\{")
+
+
+def envelope_without_answer(stdout: str, answer_fields: Collection[str]) -> str:
+    """``stdout`` with its JSON envelope's answer fields taken out.
+
+    For a CLI that prints one envelope holding the model's answer in named
+    fields (claude-code's ``result``, gemini's ``response``): the envelope is
+    re-serialised without them, whatever its flags say, and any plain lines
+    around it are kept as the CLI wrote them. An envelope that opens and does
+    not close (a stdout cut inside it) is dropped whole, since the answer can
+    be anywhere in it; a stdout with no envelope at all is the CLI's own plain
+    text and is returned unchanged. Removal only. Used by the adapters'
+    :meth:`LLMProvider.classify_exit_zero`, never by :meth:`vendor_text`: a
+    non-zero exit's refusing envelope carries the vendor's sentence in the
+    same field.
+    """
+    text = stdout or ""
+    opener = _ENVELOPE_OPENER.search(text)
+    if opener is None:
+        return text
+    start = opener.end() - 1
+    try:
+        envelope, end = json.JSONDecoder().raw_decode(text, start)
+    except ValueError:
+        return text[:start]
+    kept = {key: value for key, value in envelope.items() if key not in answer_fields}
+    return text[:start] + json.dumps(kept) + text[end:]
+
+
+def exit_zero_failure_category(
+    provider: Any, stdout: Optional[str], stderr: Optional[str]
+) -> Tuple[bool, Optional[str]]:
+    """The adapter's verdict on an exit 0 that left no answer, as
+    ``(classified, category)``. **The one gate both lanes read** (the fan-out's
+    ``provider_outcome``, the executor's ``_classify_failed_run``).
+
+    ``(False, None)`` unless the adapter declares
+    :attr:`LLMProvider.EXIT0_CLASSIFIABLE` ``True``: its answer cannot be told
+    apart from its diagnostics, so the run is left unclassified rather than
+    read off the model's prose. Otherwise :meth:`LLMProvider.classify_exit_zero`,
+    best-effort: an adapter that raises, or answers something other than a
+    category name or ``None``, is ``(False, None)`` too. ``None`` from it is a
+    verdict, ``(True, None)``. ``spawn_failed`` reads as ``None``: a CLI that
+    refused its own invocation never exits 0, so the words came from a tool.
+    See docs/development/delegation.md#read-and-analyze-executor.
+    """
+    if getattr(provider, "EXIT0_CLASSIFIABLE", False) is not True:
+        return False, None
+    try:
+        category = provider.classify_exit_zero(stdout or "", stderr or "")
+    except Exception:  # noqa: BLE001 - classification must not break a failure path
+        return False, None
+    if category is not None and not isinstance(category, str):
+        return False, None
+    if category == STATUS_SPAWN_FAILED:
+        return True, None
+    return True, category
 
 
 def context_length_message(model: str) -> str:
@@ -3887,6 +3952,20 @@ class LLMProvider(ABC):
     #: separator rules were never designed for.
     exit_zero_failure_markers: Tuple["Pattern[str]", ...] = ()
 
+    #: Whether an **exit-0 failure** (exit 0, no usable answer) is classified
+    #: at all. On such a run stdout is usually the model's own answer, prose
+    #: quoting whatever the plan says about 429s and 401s, so a verdict may come
+    #: only from text the CLI itself wrote. ``True`` is a reviewed claim about
+    #: this adapter's envelope: :meth:`classify_exit_zero` never reads the
+    #: model's answer, in a complete envelope or an interrupted one. ``False``
+    #: (the default, and identity :meth:`vendor_text`'s only honest answer)
+    #: leaves the run unclassified on both lanes: the fan-out stops on it, the
+    #: executor keeps its parse failure's own retry. Read through
+    #: :func:`exit_zero_failure_category` only; the per-adapter decisions and
+    #: ``tests/test_exit_zero_prose_matrix.py`` are the review
+    #: (docs/development/delegation.md#read-and-analyze-executor).
+    EXIT0_CLASSIFIABLE: bool = False
+
     def supports_prompt_transport(self, transport: str) -> bool:
         """Whether this adapter can deliver a prompt over ``transport``."""
         return transport in self.supported_prompt_transports
@@ -3918,6 +3997,16 @@ class LLMProvider(ABC):
         (``command_execution`` output and ``agent_message`` prose), and
         claude-code (a clean envelope's ``result`` is the model's own prose);
         each keeps only what the vendor itself wrote.
+
+        **And it is narrower again on an exit 0 that left no answer**: stdout
+        is then usually the model's own answer, prose instead of the JSON
+        asked for. So aider (the span between its banner and its trailing
+        accounting line), cline (content events, ``done`` and a finished
+        ``run_result``), cursor-agent (a clean envelope, as claude-code),
+        gemini (an envelope with no ``error``), grok (a finished turn's
+        envelope) and kimi (``assistant`` and ``tool`` records) drop it here
+        too. What an exit 0 is classified on at all is
+        :meth:`classify_exit_zero`'s, behind :attr:`EXIT0_CLASSIFIABLE`.
 
         A caller-supplied ``vendor_text=`` argument could not fix it: every
         existing call site would have to opt in, and the §6.2 fixture rig calls
@@ -3952,9 +4041,8 @@ class LLMProvider(ABC):
         the verdict. Nothing else applies it. The module-level
         :func:`classify_streams` (and its quote-only twin
         :func:`match_streams`) deliberately does **not** grow it:
-        ``validation.py`` and Lane A's error-line fallback call that function
-        with no adapter in hand, and §7.2 depends on it staying the one rule both
-        lanes share. :meth:`classify_auth_probe`'s haystack — the second place
+        Lane A's error-line fallback calls that function with no adapter in
+        hand, and §7.2 depends on it staying the one rule both lanes share. :meth:`classify_auth_probe`'s haystack — the second place
         this module builds ``f"{stdout}\\n{stderr}".lower()``, over an
         ``auth_check`` run — is out of scope too: an auth probe never carries
         our prompt, so narrowing it fixes nothing and risks the one verdict
@@ -4005,6 +4093,21 @@ class LLMProvider(ABC):
             rate_limit_patterns=self.rate_limit_patterns,
             exit_zero_markers=self.exit_zero_failure_markers,
         )
+
+    def classify_exit_zero(self, stdout: str, stderr: str) -> Optional[str]:
+        """The verdict on an exit-0 capture whose answer did not parse.
+
+        Asked only when :attr:`EXIT0_CLASSIFIABLE` is ``True``, through
+        :func:`exit_zero_failure_category`. Base: :meth:`classify_failure` at
+        exit 0, which is sound only where :meth:`vendor_text` already drops the
+        model's answer from every exit-0 shape the CLI prints. An adapter whose
+        envelope can carry the answer next to its own diagnostics (an
+        ``is_error`` envelope, a cut one) overrides this to hand
+        :meth:`classify_failure` the envelope without the answer field, or to
+        read its structural fields alone; ``None`` means nothing the CLI wrote
+        was recognised, one transport retry on both lanes.
+        """
+        return self.classify_failure(stdout, stderr, 0)
 
     def classify_structural(
         self, stdout: str, stderr: str, exit_code: int = 0

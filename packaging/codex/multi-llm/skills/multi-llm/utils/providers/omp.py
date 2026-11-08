@@ -541,16 +541,13 @@ def stderr_diagnosis(stderr: str) -> str:
 def _named_for_the_ladder(token: str, sentence: str) -> str:
     """``sentence`` with ``token`` in front of it, unless it already says it.
 
-    **On an exit-0 failure Lane A classifies the error string, not the
-    streams.** A non-zero exit or a timeout carries
-    :meth:`OmpProvider.classify_failure`'s own verdict to its ladder
-    (``details["failure_category"]``); an exit-0 failure does not, and there
-    the file-output lane reaches for
-    ``classify_streams(str(result.get("error", "")), "")``
-    (``utils/review_orchestrator_base.py``) — that composed sentence is the only
-    thing it is handed. So on that path a structural verdict reaches Lane A's
-    ladder only insofar as this sentence carries a word the shared marker
-    tables recognise, and three of the four structural shapes carried none:
+    **The sentence names the verdict the ladder obeys.** Both lanes take
+    :meth:`OmpProvider.classify_failure`'s own verdict (the fan-out from
+    ``details["failure_category"]``, on an exit 0 too); the error sentence is
+    what ``.status.json`` and the log show, and what the fan-out's
+    ``classify_streams(str(result.get("error", "")), "")`` fallback reads when
+    an adapter gave no verdict. Read that way, three of the four structural
+    shapes carried no word the shared marker tables recognise:
 
     * the ``toolUse``-final deadline. ``Command aborted`` is deliberately not a
       marker — a tool error the model *recovered* from contains it — so "run
@@ -958,6 +955,13 @@ class OmpProvider(LLMProvider):
     #: ``Command aborted`` is deliberately **not** a marker — a successful run can
     #: contain it in a tool result the model recovered from.
     exit_zero_failure_markers: Tuple[Any, ...] = ()
+
+    #: :attr:`~.base.LLMProvider.EXIT0_CLASSIFIABLE`, reviewed: omp's
+    #: :meth:`vendor_text` keeps only the terminal message's ``errorMessage``
+    #: (``""`` on a ``stop``/``toolUse`` end, and on a stream with no assistant
+    #: message yet), never a message's content; a line cut inside an event is
+    #: not an event.
+    EXIT0_CLASSIFIABLE = True
 
     @property
     def name(self) -> str:
@@ -1460,18 +1464,14 @@ class OmpProvider(LLMProvider):
         nothing.
 
         **Which ladder reads this method, and which reads the sentence.** The
-        Lane B executor calls it, and so does ``invoke_with_provider`` on a
-        non-zero exit, for Lane A's ladder. On an exit-0 failure Lane A's
-        file-output lane does not: it classifies ``str(result["error"])``
-        through ``classify_streams``, so what reaches that ladder is whatever
-        :func:`terminal_verdict` wrote. :func:`_named_for_the_ladder` is what
-        keeps the two agreeing — the denial, the ``toolUse``/``aborted``
-        deadline and the 5xx ``error`` each carry the shared tables' own word in
-        the sentence, so Lane A lands on the same rung off the string that this
-        method reaches off the stream. Without it the exit-0 cut review
-        classified ``None`` (never retried) while the ``aborted`` half of the
-        same ``--max-time`` took rung 2, and the 500's structural
-        ``server_error`` never became the transport retry it names.
+        Lane B executor calls it, and so does ``invoke_with_provider`` on every
+        failed child, for Lane A's ladder. The sentence
+        :func:`terminal_verdict` wrote is the reader's account of the same
+        verdict, and the fan-out's error-line fallback when an adapter gave
+        none. :func:`_named_for_the_ladder` is what keeps the two agreeing:
+        the denial, the ``toolUse``/``aborted`` deadline and the 5xx ``error``
+        each carry the shared tables' own word in the sentence, so the string
+        reaches the same rung this method reaches off the stream.
 
         Anything the structural read has no branch for — including an
         unrecognized ``stopReason`` — falls through to the declared tables over

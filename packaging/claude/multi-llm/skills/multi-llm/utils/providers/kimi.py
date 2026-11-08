@@ -72,6 +72,7 @@ under the config root that :meth:`get_env` relocates per slot.
 """
 import json
 import os
+import re
 import shutil
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -349,6 +350,13 @@ class KimiProvider(LLMProvider):
     # refused connection alike. Adding a marker here would be guessing at a
     # failure mode this CLI does not have.
 
+    #: :attr:`~.base.LLMProvider.EXIT0_CLASSIFIABLE`, reviewed: kimi's answer
+    #: and tool output arrive as ``assistant`` and ``tool`` records, which
+    #: :meth:`vendor_text` drops, a final line cut inside one included; what
+    #: remains is kimi's ``meta`` records, and stderr carries every failure it
+    #: reports.
+    EXIT0_CLASSIFIABLE = True
+
     @property
     def name(self) -> str:
         return "kimi"
@@ -377,6 +385,50 @@ class KimiProvider(LLMProvider):
         argv byte-identical to omitting them (§1's guard).
         """
         return ["kimi", "--output-format", "stream-json", "-p", prompt]
+
+    #: The stream-json roles whose records are the model's turn: its answer
+    #: (``assistant``) and the tool results it was handed (``tool``, our own
+    #: data back), as the committed ``success`` and ``multi-assistant`` rows
+    #: carry them.
+    _MODEL_ROLES = frozenset({"assistant", "tool"})
+
+    #: A line cut inside one of those records: its role on an unparsable
+    #: final line.
+    _CUT_MODEL_RECORD = re.compile(r'"role"\s*:\s*"(?:assistant|tool)"')
+
+    def vendor_text(self, stdout: str, stderr: str) -> Tuple[str, str]:
+        """The stream without the model's records.
+
+        Measured on the committed rows: every failure is kimi's own
+        ``error: …`` line on stderr (exit 1) or its ``meta`` records (the
+        ``turn.step.retrying`` events of ``ephemeral-only``); the answer and
+        the tool output arrive as ``assistant`` and ``tool`` records. Those are
+        dropped, and so is a final line cut inside one of them
+        (:attr:`_CUT_MODEL_RECORD`); every other line, an unparsable one
+        included, is kept as it is. A reduction that raises returns its input;
+        stderr is never reduced.
+        """
+        try:
+            if not isinstance(stdout, str) or not stdout:
+                return stdout, stderr
+            lines = stdout.split("\n")
+            last = max((i for i, line in enumerate(lines) if line.strip()), default=-1)
+            kept = []
+            for index, line in enumerate(lines):
+                try:
+                    record = json.loads(line) if line.strip() else None
+                except ValueError:
+                    if index == last and self._CUT_MODEL_RECORD.search(line):
+                        continue
+                    record = None
+                if not (
+                    isinstance(record, dict)
+                    and record.get("role") in self._MODEL_ROLES
+                ):
+                    kept.append(line)
+            return "\n".join(kept), stderr
+        except Exception:  # noqa: BLE001 - a failed reduction returns its input
+            return stdout, stderr
 
     def parse_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
         """§3.4's two-step unwrap: JSONL envelope → answer text → JSON document.

@@ -184,9 +184,10 @@ class TestVendorTextPinsOmpsReduction:
 class TestAToolUseDeadlineKeepsToolContentsOutOfTheError:
     """A ``toolUse``-final stream is a deadline, whatever the tool read.
 
-    Lane A classifies the invocation's ``error`` string with
-    ``classify_streams(error, "")`` (``review_orchestrator_base``), and the
-    non-zero-exit path composes ``describe_failure`` into that string
+    The invocation's ``error`` string is the reader's account of the verdict
+    and the fan-out's ``classify_streams(error, "")`` fallback
+    (``review_orchestrator_base``), and the non-zero-exit path composes
+    ``describe_failure`` into that string
     (``llm_client``). A file read quoting 401/429 must not reach either.
     """
 

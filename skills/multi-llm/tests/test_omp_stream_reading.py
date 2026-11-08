@@ -322,14 +322,13 @@ class TestOmpStreamReading:
     def test_the_structural_verdict_survives_lane_as_string_classification(
         self, provider, row, exit_code
     ):
-        r"""On an exit-0 failure Lane A classifies the error STRING.
+        r"""The error STRING names the structural verdict.
 
-        There `run_single_model`'s file-output lane reaches for
-        `classify_streams(str(result["error"]), "")`; a non-zero exit carries
-        the structural read itself (`details["failure_category"]`), and the
-        exit-1 sentence is held to the same words regardless, as the reader's
-        account of the verdict. So a verdict the sentence does not name arrives
-        at the exit-0 ladder as `None`,
+        Every failed child carries the structural read itself
+        (`details["failure_category"]`), and the sentence is held to the same
+        words as the reader's account of the verdict and as the fan-out's
+        `classify_streams(str(result["error"]), "")` fallback, where a verdict
+        the sentence does not name arrives as `None`,
         and `RetryLadder.record`'s last branch never retries it. `Command
         aborted` is deliberately not a marker, the denial's own text is not one,
         and the 500 body's `(type=server_error)` matches no
@@ -608,9 +607,10 @@ class TestOmpStreamReading:
 class TestAToolUseDeadlineKeepsToolContentsOutOfTheError:
     """A ``toolUse``-final stream is a deadline, whatever the tool read.
 
-    Lane A classifies the invocation's ``error`` string with
-    ``classify_streams(error, "")`` (``review_orchestrator_base``), and the
-    non-zero-exit path composes ``describe_failure`` into that string
+    The invocation's ``error`` string is the reader's account of the verdict
+    and the fan-out's ``classify_streams(error, "")`` fallback
+    (``review_orchestrator_base``), and the non-zero-exit path composes
+    ``describe_failure`` into that string
     (``llm_client``). A tool result quoting 401/429 must not reach either —
     the same rule pi's adapter keeps. The stream is the committed
     ``exit-zero-failure`` row with its tool result swapped for the markers.

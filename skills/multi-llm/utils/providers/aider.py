@@ -762,6 +762,30 @@ class AiderProvider(LLMProvider):
         )
         return narrowed if narrowed.strip() else stream
 
+    def vendor_text(self, stdout: str, stderr: str) -> Tuple[str, str]:
+        """aider's own diagnostic lines, without the model's answer.
+
+        aider exits 0 on every outcome and prints the answer as plain text on
+        stdout, so on a failed parse the whole stdout is mostly the model's
+        prose. The lines kept are the ones :meth:`_exit_zero_failure` reads as
+        aider's (the module's structure note): the banner prologue and what
+        follows the trailing accounting line, or every line when there is
+        none (no request completed, or the answer was cut before the line).
+        Removal only; a reduction that raises returns its input, and stderr
+        (0 bytes on every capture) is passed through.
+        """
+        try:
+            lines = _drop_confirmation_pairs(
+                self._drop_tolerated_lines(stdout or "").splitlines()
+            )
+            accounting = _last_accounting_index(lines)
+            if accounting is None:
+                return stdout, stderr
+            kept = list(lines[:_prologue_end(lines)]) + list(lines[accounting + 1:])
+            return "\n".join(kept), stderr
+        except Exception:  # noqa: BLE001 - a failed reduction returns its input
+            return stdout, stderr
+
     def classify_failure(
         self, stdout: str, stderr: str, exit_code: int = 0
     ) -> Optional[str]:
@@ -790,6 +814,16 @@ class AiderProvider(LLMProvider):
             self._drop_adapter_gloss(self._drop_tolerated_lines(stderr)),
             exit_code,
         )
+
+    #: :attr:`~.base.LLMProvider.EXIT0_CLASSIFIABLE`, reviewed: ``False``.
+    #: aider exits 0 on every outcome and prints the answer as plain text, and
+    #: an answer cut before its accounting line can quote aider's own
+    #: diagnostic lines (``litellm.RateLimitError: …``, ``Model … has hit a
+    #: token limit!``) verbatim: a line's shape cannot say who wrote it. So an
+    #: exit 0 is never classified, on either lane, and aider's own provider
+    #: failures get the unclassified exit 0's handling
+    #: (docs/development/delegation.md#read-and-analyze-executor).
+    EXIT0_CLASSIFIABLE = False
 
     @property
     def name(self) -> str:

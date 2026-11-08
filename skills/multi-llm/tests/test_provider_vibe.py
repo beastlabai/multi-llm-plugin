@@ -241,6 +241,23 @@ class TestVibeProvider:
         assert result["data"] is None
         assert "stderr said: Error: Invalid configuration" in result["error"]
 
+    @pytest.mark.parametrize("stdout,stderr,expected", [
+        # Both measured shapes: opening stdout (2.26.0), opening a stderr line
+        # (2.26.1).
+        ("Invalid configuration (1 error(s)):\n  - models.x: bad\n", "", "spawn_failed"),
+        ("", "warn: x\nError: Invalid configuration (1 error(s)):\n", "spawn_failed"),
+        # A model's answer quoting it, on a line of its own after the run
+        # started: not the batch-fatal refusal.
+        ('{"role": "assistant"}\nInvalid configuration (1 error(s)):\n', "", None),
+        ("The review found that\nInvalid configuration (2 error(s)): is printed.", "", None),
+    ])
+    def test_the_config_refusal_is_read_only_where_vibe_prints_it(
+        self, provider, stdout, stderr, expected
+    ):
+        """``spawn_failed`` fails the executor's whole batch, so on stdout the
+        refusal counts only where it opens stdout, printed before any request."""
+        assert provider.classify_failure(stdout, stderr, 1) == expected
+
     @pytest.mark.parametrize(
         "row,outcome",
         [

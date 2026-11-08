@@ -1888,6 +1888,13 @@ class OpenCodeProvider(LLMProvider):
     _EMPTY_CREDENTIALS = re.compile(r"\b0 credentials\b")
     _ENVIRONMENT_KEYS = re.compile(r"\b\d+ environment variables?\b")
 
+    #: :attr:`~.base.LLMProvider.EXIT0_CLASSIFIABLE`, reviewed: opencode's
+    #: :meth:`vendor_text` drops the ``text``, ``reasoning``, ``tool_use`` and
+    #: ``step_*`` events, a final line cut inside one included, and keeps
+    #: opencode's ``error`` events and plain lines; in ``--format json`` the
+    #: answer is never a plain line.
+    EXIT0_CLASSIFIABLE = True
+
     @property
     def name(self) -> str:
         return "opencode"

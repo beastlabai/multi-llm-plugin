@@ -245,6 +245,13 @@ class MuseProvider(LLMProvider):
     sandbox_mechanism = "bubblewrap"
     sandbox_disabled_by = "--disable-sandbox"
 
+    #: :attr:`~.base.LLMProvider.EXIT0_CLASSIFIABLE`, reviewed: muse's
+    #: ``vendor_text`` drops only the prompt it echoes; the answer's text
+    #: (deltas and the terminal message) reaches the tables, so a review
+    #: quoting a rate limit, a 401 or a context limit classifies as one. Its
+    #: one exit-0 failure row classifies ``None``.
+    EXIT0_CLASSIFIABLE = False
+
     @property
     def name(self) -> str:
         return "muse"

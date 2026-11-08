@@ -131,6 +131,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         SandboxRung,
         StructuredOutputUnavailable,
         availability_from_failure,
+        exit_zero_failure_category,
         sandbox_bypassed_notice_text,
         sandbox_fallback_notice_text,
         sandbox_rung_allowed,
@@ -270,6 +271,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         SandboxRung,
         StructuredOutputUnavailable,
         availability_from_failure,
+        exit_zero_failure_category,
         sandbox_bypassed_notice_text,
         sandbox_fallback_notice_text,
         sandbox_rung_allowed,
@@ -9301,9 +9303,9 @@ def _quote_verdict(
 def _classify_failed_run(
     provider: Any, capture: _Capture, model: str = ""
 ) -> Optional[Tuple[str, str]]:
-    """Ladder rung 3, plus the two rung-1 verdicts (auth, invalid model) and the
-    rung-less ``context_length_exceeded``, consulted only for a run with no
-    result.
+    """Ladder rung 3, plus the rung-1 verdicts (auth, invalid model, sandbox,
+    and a refused invocation on a non-zero exit) and the rung-less
+    ``context_length_exceeded``, consulted only for a run with no result.
 
     Classification lives in the adapter — it is the only layer that knows the
     provider's error shape — and is deliberately **not** consulted for a run that
@@ -9319,7 +9321,18 @@ def _classify_failed_run(
     parse failure's own retryable status, which is the policy the classifier's
     table asks for; ``permission_denied`` can fail one task and not its
     neighbour, so a fatal mapping would be this function's complaint pointed
-    the other way. They return ``None`` on purpose.
+    the other way. They return ``None`` on purpose. ``spawn_failed`` (omp's
+    unknown ``--tools`` name, a shell's ``command not found``) is forwarded on
+    a non-zero exit: an install or argv refusal is identical for every sibling,
+    and the classifier reads it only off exit 127, stderr and an adapter's own
+    refusal shape, never off a model's or a tool's words on stdout
+    (``base.STDERR_LAUNCH_FAILURE_MARKERS``).
+
+    **An exit 0 is classified through** ``base.exit_zero_failure_category``,
+    the gate the fan-out reads too: only an adapter that declares
+    ``EXIT0_CLASSIFIABLE`` gives a verdict, read from what the CLI wrote and
+    never from the model's answer; for any other the parse failure's own
+    status stands (one transport retry), and ``spawn_failed`` is nothing.
 
     One more verdict is forwarded, and it is not a pattern verdict: an
     adapter's ``classify_structural`` ``runner_error`` (opencode's turn ended
@@ -9338,12 +9351,22 @@ def _classify_failed_run(
     except ImportError:  # pragma: no cover - direct-script import shim
         from utils.retry_ladder import STATUS_CONTEXT_LENGTH_EXCEEDED
 
-    try:
-        classified = provider.classify_failure(
-            capture.stdout, capture.stderr, capture.exit_code or 0
+    if capture.exit_code:
+        try:
+            classified = provider.classify_failure(
+                capture.stdout, capture.stderr, capture.exit_code
+            )
+        except Exception:  # noqa: BLE001 - classification must not raise
+            return None
+    else:
+        # An exit 0 that left no answer: stdout is usually the model's own
+        # prose, so the verdict comes through the one gate the fan-out reads
+        # too, and only from what the CLI wrote. An adapter that cannot tell
+        # that apart from the answer (`EXIT0_CLASSIFIABLE`) gives none and the
+        # parse failure's status stands; `spawn_failed` is read as nothing.
+        _, classified = exit_zero_failure_category(
+            provider, capture.stdout, capture.stderr
         )
-    except Exception:  # noqa: BLE001 - classification must not raise
-        return None
     # §4.5.3's fourth sink: this reason is printed by the exit-3 block, which is
     # `orchestrator-run.log` under `--detach`, and is also stored in
     # `subagent_batch_report.json`. Redaction runs on the full stream **before**
@@ -9368,7 +9391,7 @@ def _classify_failed_run(
         return STATUS_BUDGET_EXHAUSTED, "the provider exhausted its internal step budget"
     if classified not in (
         STATUS_AUTH_FAILED, STATUS_RATE_LIMITED, STATUS_INVALID_MODEL,
-        STATUS_SANDBOX_UNAVAILABLE,
+        STATUS_SANDBOX_UNAVAILABLE, STATUS_SPAWN_FAILED,
     ):
         # §4.2 step 4 (T4.3): a verdict the adapter reads off the stream's
         # SHAPE, with its own reason — opencode's turn ended by an auto-rejected
@@ -9445,6 +9468,12 @@ def _classify_failed_run(
         return STATUS_RATE_LIMITED, (
             f"the provider reported a rate limit / quota / overloaded condition. "
             f"Stream tail: {tail!r}"
+        )
+    if classified == STATUS_SPAWN_FAILED:
+        return STATUS_SPAWN_FAILED, (
+            f"the runner refused its own invocation (an argv or install "
+            f"refusal, identical for every sibling task), so no retry can fix "
+            f"it and the whole batch fails. Stream tail: {tail!r}"
         )
     return None
 

@@ -20,12 +20,14 @@ from .base import (
     LLMProvider,
     ReasoningLadder,
     StructuredSchema,
+    envelope_without_answer,
     matches_any,
     reset_flag_gate_cache,  # noqa: F401 - M14: the one gate's reset, re-exported
 )
 from .result_envelope import (
     classify_api_error_status,
     describe_refused_envelope,
+    is_clean_envelope,
     parse_result_envelope,
 )
 
@@ -1288,6 +1290,14 @@ class CursorAgentProvider(LLMProvider):
         "reads that local token without touching the network."
     )
 
+    #: :attr:`~.base.LLMProvider.EXIT0_CLASSIFIABLE`, reviewed: cursor-agent
+    #: prints one envelope (or, before a session starts, its own plain-text
+    #: refusal), and the answer is its ``result``, also when ``is_error`` is
+    #: set (the ``exit-zero-failure`` row). :meth:`classify_exit_zero` reads
+    #: the envelope without ``result``, a stdout cut inside the envelope not at
+    #: all (:func:`base.envelope_without_answer`).
+    EXIT0_CLASSIFIABLE = True
+
     @property
     def name(self) -> str:
         """Return the provider identifier."""
@@ -1477,6 +1487,39 @@ class CursorAgentProvider(LLMProvider):
         if category is not None:
             return category
         return super().classify_failure(stdout, stderr, exit_code)
+
+    def vendor_text(self, stdout: str, stderr: str) -> Tuple[str, str]:
+        """``("", stderr)`` for a clean envelope; the capture unchanged otherwise.
+
+        The ``success`` capture is one clean result envelope whose ``result``
+        is the model's own answer, the shape claude-code prints, so this is
+        claude-code's reduction over the shared envelope reader
+        (:func:`result_envelope.is_clean_envelope`). An envelope flagged
+        ``is_error`` (the ``exit-zero-failure`` row), a stream that is not one
+        envelope, or a reduction that raises keeps the capture whole; stderr is
+        never reduced.
+        """
+        try:
+            if is_clean_envelope(stdout):
+                return "", stderr
+        except Exception:  # noqa: BLE001 - a failed reduction returns its input
+            pass
+        return stdout, stderr
+
+    def classify_exit_zero(self, stdout: str, stderr: str) -> Optional[str]:
+        """:meth:`classify_failure` over the envelope without ``result``.
+
+        cursor-agent exits 0 on every outcome, and an ``is_error`` envelope's
+        ``result`` is still the model's answer (the ``exit-zero-failure``
+        row), so it is taken out whatever the flags say and a stdout cut
+        inside the envelope is dropped (:func:`base.envelope_without_answer`).
+        The ``is_error`` marker, the status rung and a plain-text refusal
+        printed instead of the envelope are read as before
+        (``EXIT0_CLASSIFIABLE``).
+        """
+        return self.classify_failure(
+            envelope_without_answer(stdout, ("result",)), stderr, 0,
+        )
 
     def describe_failure(self, stdout: str, stderr: str) -> Optional[str]:
         """The envelope's own line when there is one, else stderr's last line.

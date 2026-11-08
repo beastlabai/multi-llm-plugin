@@ -179,6 +179,13 @@ class AgyProvider(LLMProvider):
     #: timed out`` line (939 bytes, was 897).
     verified_version = "1.3.1"
 
+    #: :attr:`~.base.LLMProvider.EXIT0_CLASSIFIABLE`, reviewed: agy's envelope
+    #: is one JSON object whose ``response`` is the model's answer, and
+    #: :meth:`vendor_text` is identity, so an exit 0's stdout is that answer (a
+    #: review of "429 files" read as a rate limit). No failure shape of agy's
+    #: own exits 0 (its one row, ``auth-error``, exits 1).
+    EXIT0_CLASSIFIABLE = False
+
     @property
     def name(self) -> str:
         return "agy"

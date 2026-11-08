@@ -68,8 +68,8 @@ task kind's own shape check is left out, since it judges the task, not the
 provider). A row whose two statuses lead the ladder to different retry-or-stop
 answers carries ``open: <unit>`` naming the unit that will settle it; the
 grader fails when the marker is missing and when it is left on a row whose
-lanes agree. ``spawn_failed`` and ``permission_denied`` from the fan-out are
-the deliberate exception (docs/development/delegation.md#read-and-analyze-executor).
+lanes agree. ``permission_denied`` from the fan-out is the deliberate exception
+(docs/development/delegation.md#read-and-analyze-executor).
 Every graded row carries it, so a parser or classifier change shows here first.
 
 A row carries **either** files+``exit_code``+``expect`` **or**
@@ -180,7 +180,7 @@ LANE_STATUS_KEYS = ("lane_a", "lane_b")
 LANE_STATUS_OPEN = "open"
 #: The fan-out stops on these where the executor retries once, on purpose
 #: (docs/development/delegation.md#read-and-analyze-executor).
-LANE_A_STOPS_BY_DESIGN = frozenset({"spawn_failed", "permission_denied"})
+LANE_A_STOPS_BY_DESIGN = frozenset({"permission_denied"})
 
 
 def _load(provider_dir: Path) -> dict:
@@ -467,22 +467,29 @@ def _capture(provider: str, row: dict):
     )
 
 
-def _fan_out_view(outcome: dict) -> dict:
-    """What ``invoke_with_file_output`` returns for ``outcome`` when the model
-    wrote no result file: a hard failure as it is, stdout data it accepts as a
-    success, anything else as its "both failed" line, ``details`` kept.
-    ``test_the_fan_out_view_is_invoke_with_file_outputs`` holds this to the
-    real function."""
+def _fan_out_view(outcome: dict, provider: str, capture) -> dict:
+    """What ``invoke_with_file_output`` returns for ``outcome`` (``capture``'s
+    reading) when the model wrote no result file: a hard failure as it is,
+    stdout data it accepts as a success, anything else as its "both failed"
+    line, ``details`` kept. ``test_the_fan_out_view_is_invoke_with_file_outputs``
+    holds this to the real function."""
     from utils.llm_client import _is_valid_parsed_data
+    from utils.provider_outcome import FAILURE_CATEGORY_KEY, rejected_answer_category
 
     if not outcome.get("success") and outcome.get("error_code") in _HARD_FAILURES:
         return outcome
     if _is_valid_parsed_data(outcome.get("data")):
         return {"success": True, "details": outcome.get("details", {})}
+    details = outcome.get("details", {})
+    if outcome.get("success") and FAILURE_CATEGORY_KEY not in details:
+        # Parsed, but not into an answer: the executor's verdict for it.
+        details = {**details, FAILURE_CATEGORY_KEY: rejected_answer_category(
+            _PROVIDERS[provider], capture.stdout, capture.stderr,
+        )}
     return {
         "success": False,
         "error": "JSON parsing failed from both file and stdout",
-        "details": outcome.get("details", {}),
+        "details": details,
     }
 
 
@@ -493,7 +500,7 @@ def _lane_a_status(provider: str, capture) -> object:
     outcome = outcome_from_capture(
         _PROVIDERS[provider], capture, provider_name=provider, model="m",
     )
-    seen = _fan_out_view(outcome)
+    seen = _fan_out_view(outcome, provider, capture)
     return attempt_ladder_status(seen, seen.get("details") or {})
 
 

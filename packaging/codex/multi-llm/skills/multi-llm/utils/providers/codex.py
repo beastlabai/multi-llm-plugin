@@ -1257,6 +1257,14 @@ class CodexProvider(LLMProvider):
         configurable_by=(),
     )
 
+    #: :attr:`~.base.LLMProvider.EXIT0_CLASSIFIABLE`, reviewed: codex's
+    #: ``--json`` stream carries the model's words only in
+    #: ``agent_message``/``reasoning`` items and the repository's in
+    #: ``command_execution`` output, which :meth:`vendor_text` drops, a final
+    #: line cut inside one included; an unfinished turn (no ``turn.completed``)
+    #: keeps only codex's own events.
+    EXIT0_CLASSIFIABLE = True
+
     @property
     def name(self) -> str:
         return "codex"

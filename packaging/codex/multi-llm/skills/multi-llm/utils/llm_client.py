@@ -22,6 +22,7 @@ from . import landlock_dispatch as _landlock
 from . import readonly_audit as _readonly_audit_mod
 from . import result_files as _result_files
 from .metrics import describe_usage as _describe_usage
+from .retry_ladder import STATUS_UNPARSEABLE
 from .provider_registry import parse_model_spec, get_provider, get_provider_timeout
 from .providers.base import (
     JAIL_DENIED_MARKER,
@@ -76,6 +77,7 @@ from .provider_outcome import (  # noqa: F401 - re-exported, see above
     _salvage_hook_text,
     generic_answer_text,
     outcome_from_capture,
+    rejected_answer_category,
 )
 
 
@@ -1900,8 +1902,8 @@ def invoke_with_provider(
             ``--json-schema``. **Re-read date:** 2027-02-20. Until one of those
             fires, wiring a production caller here is a regression, not
             progress. See ``plans/harness-residual-work.md`` §3, W1.
-        _defer_parse_failure_log: Internal (§Fix1/F13). When ``log_file`` is
-            set and the child exited 0, writing the log here — before
+        _defer_parse_failure_log: Internal (§Fix1/F13). When the child
+            exited 0, writing the log here (if ``log_file`` is set) — before
             :func:`invoke_with_file_output` has chosen between the file
             channel and the stdout fallback — would either freeze
             ``Success: False`` on a run the file channel goes on to resolve
@@ -1912,7 +1914,10 @@ def invoke_with_provider(
             exit-0 outcome and hands the raw capture back on
             ``details["_deferred_log"]`` instead, so the one log entry gets
             written once the final outcome — file, stdout fallback, or both
-            failed — is known, and always carries `Result source:`. A hard
+            failed — is known, and always carries `Result source:`. The
+            capture rides back with no ``log_file`` too: the caller reads a
+            rejected stdout answer's verdict off it
+            (``provider_outcome.rejected_answer_category``). A hard
             failure (binary not found, timeout, non-zero exit) still logs
             immediately, unaffected by this flag — there is no channel choice
             to wait for.
@@ -1992,7 +1997,7 @@ def invoke_with_provider(
         want_answer_text=want_answer_text, schema=prepared.schema,
         schema_phase=schema_phase, structured_marker=prepared.structured_marker,
         jail=prepared.jail_read_back(),
-        defer_log=bool(log_file) and _defer_parse_failure_log,
+        defer_log=_defer_parse_failure_log,
         log=(
             functools.partial(_log_outcome, log_file, prompt, prepared)
             if log_file else None
@@ -3333,6 +3338,22 @@ def invoke_with_file_output(
     # Both failed. The returned `error` is the one string callers match; the
     # log also says when the file channel was the previous round's file, which
     # was never parsed at all.
+    details = result.get("details", {})
+    if result.get("success") and FAILURE_CATEGORY_KEY not in details:
+        # The child exited 0 and its stdout parsed, but not into an answer
+        # (`_is_valid_parsed_data`): the executor's verdict for the same
+        # rejection, read off the capture the exit 0 handed back, so both
+        # lanes' ladders agree
+        # (docs/development/delegation.md#read-and-analyze-executor).
+        held = deferred_log or {}
+        try:
+            provider = get_provider(parse_model_spec(model_spec, anchor=anchor)[0])
+            category = rejected_answer_category(
+                provider, held.get("stdout"), held.get("stderr")
+            )
+        except Exception:  # noqa: BLE001 - classification must not break a failure path
+            category = STATUS_UNPARSEABLE
+        details = {**details, FAILURE_CATEGORY_KEY: category}
     _finalize_file_output_log(
         log_file, deferred_log, result, model_spec, prompt,
         success=False,
@@ -3349,6 +3370,6 @@ def invoke_with_file_output(
         "file_error": file_result.get("error"),
         "stdout_error": result.get("error", "No valid JSON in stdout"),
         "output_file": str(output_json_path),
-        "details": result.get("details", {}),
+        "details": details,
         "data": None,
     }

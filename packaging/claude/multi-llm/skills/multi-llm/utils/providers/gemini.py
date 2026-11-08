@@ -10,6 +10,7 @@ from .base import (
     LLMProvider,
     ReasoningLadder,
     StructuredSchema,
+    envelope_without_answer,
 )
 
 #: M12 (§6.1): gemini has no rung on the ladder, and the reason is written down
@@ -306,6 +307,13 @@ class GeminiProvider(LLMProvider):
         configurable_by=(),
     )
 
+    #: :attr:`~.base.LLMProvider.EXIT0_CLASSIFIABLE`, reviewed: gemini's answer
+    #: is the envelope's ``response``, also beside an ``error`` object.
+    #: :meth:`classify_exit_zero` reads the envelope without it, and a stdout
+    #: cut inside the envelope not at all; stderr, where every gemini failure
+    #: is diagnosed, is read as it is.
+    EXIT0_CLASSIFIABLE = True
+
     @property
     def name(self) -> str:
         return "gemini"
@@ -467,6 +475,41 @@ class GeminiProvider(LLMProvider):
         if re.search(rf"(?<![\w.]){re.escape(str(code))}(?![\w.])", sentence):
             return sentence
         return f"{sentence} (code {code})"
+
+    def vendor_text(self, stdout: str, stderr: str) -> Tuple[str, str]:
+        """``("", stderr)`` for an envelope with no ``error``; else the capture.
+
+        Measured on the committed rows: gemini puts every failure's diagnosis on
+        stderr (stdout empty), or in the envelope's ``error`` object when it
+        exits 0 on an empty answer (``ephemeral-only``). An envelope without
+        ``error`` holds the model's ``response`` and bookkeeping ``stats``,
+        neither of them the vendor's verdict: ``exit-zero-failure``'s
+        ``response`` is the model's own "JSON written to …". Anything else, a
+        stdout that is not one JSON object included, is returned unchanged;
+        stderr is never reduced.
+        """
+        try:
+            envelope = json.loads(stdout) if stdout and stdout.strip() else None
+            if (
+                isinstance(envelope, dict) and "response" in envelope
+                and "error" not in envelope
+            ):
+                return "", stderr
+        except Exception:  # noqa: BLE001 - a failed reduction returns its input
+            pass
+        return stdout, stderr
+
+    def classify_exit_zero(self, stdout: str, stderr: str) -> Optional[str]:
+        """:meth:`classify_failure` over the envelope without ``response``.
+
+        ``response`` is the model's answer, also beside an ``error`` object,
+        so it is taken out and a stdout cut inside the envelope is dropped
+        (:func:`base.envelope_without_answer`); the ``error`` object and
+        stderr are read as before (``EXIT0_CLASSIFIABLE``).
+        """
+        return self.classify_failure(
+            envelope_without_answer(stdout, ("response",)), stderr, 0,
+        )
 
     def describe_failure(self, stdout: str, stderr: str) -> Optional[str]:
         """gemini's half of C4: the vendor's own words instead of an exit code.

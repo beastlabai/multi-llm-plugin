@@ -537,18 +537,20 @@ class TestEchoedPlanTextNoLongerDecidesTheBatch:
     AUTH_SENTENCE = "The plan says: the API returns 401 unauthorized on error."
     RATE_SENTENCE = "The plan says: retries must cover rate-limit responses."
 
-    def _capture(self, sentence):
+    def _capture(self, sentence, exit_code=0):
         from utils.subagent_executor import _Capture
 
         return _Capture(
-            stdout=_c1_goose_with_plan_sentence(sentence), stderr="", exit_code=0
+            stdout=_c1_goose_with_plan_sentence(sentence), stderr="",
+            exit_code=exit_code,
         )
 
+    @pytest.mark.parametrize("exit_code", [0, 1])
     @pytest.mark.parametrize("sentence_attr", ["AUTH_SENTENCE", "RATE_SENTENCE"])
-    def test_a_cut_stream_stays_transport_shaped(self, sentence_attr):
+    def test_a_cut_stream_stays_transport_shaped(self, sentence_attr, exit_code):
         from utils.subagent_executor import _classify_failed_run
 
-        capture = self._capture(getattr(self, sentence_attr))
+        capture = self._capture(getattr(self, sentence_attr), exit_code)
         assert _classify_failed_run(GooseProvider(), capture) is None
 
     @pytest.mark.parametrize("sentence_attr,was", [
@@ -556,10 +558,15 @@ class TestEchoedPlanTextNoLongerDecidesTheBatch:
         ("RATE_SENTENCE", STATUS_RATE_LIMITED),
     ])
     def test_and_before_C1_it_did_not(self, sentence_attr, was, monkeypatch):
-        """The same bytes, the same call, on the pre-C1 haystack."""
+        """The same bytes, the same call, on the pre-C1 haystack.
+
+        On a non-zero exit, where :meth:`classify_failure` and its hook decide.
+        goose is not ``EXIT0_CLASSIFIABLE``, so an exit 0 is never classified,
+        hook or not (``test_exit_zero_prose_matrix.py``).
+        """
         from utils.subagent_executor import _classify_failed_run
 
-        capture = self._capture(getattr(self, sentence_attr))
+        capture = self._capture(getattr(self, sentence_attr), exit_code=1)
         _c1_without_the_hook(monkeypatch, "goose")
         verdict = _classify_failed_run(GooseProvider(), capture)
         assert verdict is not None and verdict[0] == was

@@ -209,6 +209,11 @@ class KiloCodeProvider(LLMProvider):
     #: label that change against.
     answer_framing = "plain"
 
+    #: :attr:`~.base.LLMProvider.EXIT0_CLASSIFIABLE`, reviewed: kilocode's
+    #: stdout is the model's answer as plain text, so nothing on it can be told
+    #: apart from what kilocode wrote.
+    EXIT0_CLASSIFIABLE = False
+
     @property
     def name(self) -> str:
         return "kilocode"

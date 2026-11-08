@@ -2,7 +2,7 @@
 import json
 import re
 import shutil
-from typing import Any, Dict, List, NamedTuple, Optional
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from ..json_extractor import extract_json_from_text
 from .base import (
@@ -133,6 +133,37 @@ def read_cline_stream(stdout: str) -> ClineStreamReading:
     if iteration_tool:
         return ClineStreamReading("", None, finished)
     return ClineStreamReading((iteration_text or "").strip(), None, finished)
+
+
+#: The ``agent_event`` kinds whose lines carry the model's own words: its
+#: text, reasoning and tool content (a tool's input and output are our data
+#: handed back), as :func:`read_cline_stream` reads them, and ``done``, whose
+#: ``text`` is the turn's last text whatever its ``reason``.
+_MODEL_CONTENT_EVENTS = frozenset(
+    {"content_start", "content_update", "content_end", "done"}
+)
+
+#: A line cut inside one of those events, or inside a finished ``run_result``:
+#: the opener of either kind anywhere on an unparsable final line.
+_CUT_MODEL_LINE = re.compile(
+    r'"type"\s*:\s*"(?:content_start|content_update|content_end|done)"'
+    r'|"type"\s*:\s*"run_result"(?![^\n]*"finishReason"\s*:\s*"error")'
+)
+
+
+def _is_model_line(event: Any) -> bool:
+    """Whether one parsed ``--json`` line carries what the model wrote rather
+    than what cline reported: a content event, a ``done`` (its ``text`` is the
+    turn's text) or a ``run_result`` that is not an error."""
+    if not isinstance(event, dict):
+        return False
+    kind = event.get("type")
+    if kind == "run_result":
+        return event.get("finishReason") != "error"
+    inner = event.get("event") if kind == "agent_event" else None
+    if not isinstance(inner, dict):
+        return False
+    return inner.get("type") in _MODEL_CONTENT_EVENTS
 
 
 def cline_answer_text(stdout: str) -> str:
@@ -308,6 +339,14 @@ class ClineProvider(LLMProvider):
         re.compile(r'"errorclass"\s*:'),
     )
 
+    #: :attr:`~.base.LLMProvider.EXIT0_CLASSIFIABLE`, reviewed: cline's answer
+    #: arrives only in content events, ``done`` events and a finished
+    #: ``run_result``, which :meth:`vendor_text` drops whatever the turn's end,
+    #: a final line cut inside one of them included; what remains is cline's
+    #: ``error`` events and an error ``run_result``, whose ``text`` is the
+    #: upstream sentence.
+    EXIT0_CLASSIFIABLE = True
+
     @property
     def name(self) -> str:
         return "cline"
@@ -385,6 +424,39 @@ class ClineProvider(LLMProvider):
             return {"success": False, "error": "Empty text response", "raw": stdout, "data": None}
 
         return _unwrap_answer_text(text)
+
+    def vendor_text(self, stdout: str, stderr: str) -> Tuple[str, str]:
+        """The stream without the lines that carry the model's words.
+
+        Measured on the committed rows: every failure is reported by cline
+        itself, as an ``agent_event`` ``error`` plus a ``run_result`` whose
+        ``finishReason`` is ``error``, and no failure row carries content
+        events; the answer, reasoning and tool content arrive in content
+        events, ``done`` and a finished ``run_result``'s ``text``. Those lines
+        are dropped (:func:`_is_model_line`), and so is a final line cut
+        inside one of them (:data:`_CUT_MODEL_LINE`); every other line, an
+        unparsable one included, is kept as it is. Split on ``"\n"`` only, as
+        the reducer splits. A reduction that raises returns its input; stderr
+        is never reduced.
+        """
+        try:
+            if not isinstance(stdout, str) or not stdout:
+                return stdout, stderr
+            lines = stdout.split("\n")
+            last = max((i for i, line in enumerate(lines) if line.strip()), default=-1)
+            kept = []
+            for index, line in enumerate(lines):
+                try:
+                    event = json.loads(line) if line.strip() else None
+                except ValueError:
+                    if index == last and _CUT_MODEL_LINE.search(line):
+                        continue
+                    event = None
+                if not _is_model_line(event):
+                    kept.append(line)
+            return "\n".join(kept), stderr
+        except Exception:  # noqa: BLE001 - a failed reduction returns its input
+            return stdout, stderr
 
     def salvage_text(self, stdout: str) -> Optional[str]:
         """The reducer's answer text, never the event stream (D2.5).

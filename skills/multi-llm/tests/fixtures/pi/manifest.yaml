@@ -122,7 +122,7 @@ rows:
       classified as nothing (no table recognises the sentence); recorded, as at
       0.80.6.
     expect:
-      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U38b (PROV-1 phase 2)"}
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       success: false
       error_contains: ["Error reading response: malformed server-sent event JSON."]
       raw_contains: ['"willRetry":false', 'malformed server-sent event JSON']
@@ -172,7 +172,7 @@ rows:
       Byte-identical in shape to `truncated` at 0.87.1; at 1.1.0 it is the only
       row left with that shape.
     expect:
-      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U38b (PROV-1 phase 2)"}
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       success: false
       error_contains: ["Stream ended without finish_reason"]
       classify_failure: null
@@ -224,7 +224,7 @@ rows:
       measurement, not a gap. The two rows that shared these bytes at 0.80.6
       (`context-overflow`, `exit-zero-failure`) no longer do.
     expect:
-      lane_status: {lane_a: null, lane_b: runner_error, open: "U38b (PROV-1 phase 2)"}
+      lane_status: {lane_a: runner_error, lane_b: runner_error}
       success: false
       error_contains: ["Empty output"]
       classify_failure: null
@@ -378,7 +378,7 @@ rows:
       pi does not treat it as recoverable. `stopReason: length` reaches the
       parser directly: `Truncated output`, no error_code, classified nothing.
     expect:
-      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U38b (PROV-1 phase 2)"}
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       success: false
       error_contains: ["Truncated output (stopReason length: the model hit its output limit after 44 characters)"]
       raw_contains: ['"stopReason":"length"']
@@ -400,7 +400,7 @@ rows:
       the parser still keys a failed overflow compaction on that text, never on
       `reason: overflow`, and gives it this row's disposition.
     expect:
-      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U38b (PROV-1 phase 2)"}
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       success: false
       error_contains: ["Truncated output (stopReason length"]
       classify_failure: null

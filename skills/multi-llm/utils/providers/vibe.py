@@ -125,6 +125,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..json_extractor import extract_json_from_text
 from .base import (
+    STATUS_SPAWN_FAILED,
     InternalRetryEnvelope,
     LLMProvider,
     ReasoningLadder,
@@ -434,6 +435,13 @@ class VibeProvider(LLMProvider):
     #: recorded N/A for this CLI rather than left untested.
     exit_zero_failure_markers: Tuple[Any, ...] = ()
 
+    #: :attr:`~.base.LLMProvider.EXIT0_CLASSIFIABLE`, reviewed: vibe's
+    #: ``vendor_text`` drops only the ``user`` entries it echoes; the answer's
+    #: ``assistant`` entries reach the tables, so a review quoting a rate
+    #: limit, a 401 or a context limit classifies as one. Its exit-0 failure
+    #: rows classify ``None``.
+    EXIT0_CLASSIFIABLE = False
+
     @property
     def name(self) -> str:
         return "vibe"
@@ -525,6 +533,36 @@ class VibeProvider(LLMProvider):
         cmd = self.build_command(prompt, model, timeout_s=timeout_s, schema=schema)
         # Drop the prompt VALUE only; `-p` itself is what keeps vibe headless.
         return cmd[:-1], prompt
+
+    #: vibe's config-validation refusal: opening stdout at 2.24.1 and 2.26.0
+    #: (the ``stdout-error`` row), opening a stderr line behind ``Error: `` at
+    #: 2.26.1 (``config-error``). Both exit 1 before any request, so on stdout
+    #: it is the first thing vibe printed and is read nowhere else there: a
+    #: model's answer, which can quote it anywhere, comes after the run starts.
+    _CONFIG_REFUSAL = re.compile(r"(?:Error: )?Invalid configuration \(\d+ error\(s\)\):")
+
+    def classify_failure(
+        self, stdout: str, stderr: str, exit_code: int = 0
+    ) -> Optional[str]:
+        """``spawn_failed`` for a config-validation refusal, else the base rule.
+
+        A rejected config is a property of the install (the seed, or the user's
+        own vibe config), identical for every sibling slot, and it made zero
+        requests: the disposition omp's ``Config overlay not found`` gets in
+        ``base.STDERR_LAUNCH_FAILURE_MARKERS``, where a transport retry would
+        only repeat it. Read on a nonzero exit only: at the start of any
+        stderr line, and on stdout only where it opens stdout, since this
+        verdict fails the executor's whole batch.
+        """
+        if exit_code and (
+            any(
+                self._CONFIG_REFUSAL.match(line)
+                for line in (stderr or "").splitlines()
+            )
+            or self._CONFIG_REFUSAL.match((stdout or "").lstrip())
+        ):
+            return STATUS_SPAWN_FAILED
+        return super().classify_failure(stdout, stderr, exit_code)
 
     def vendor_text(self, stdout: str, stderr: str) -> Tuple[str, str]:
         """The transcript minus the ``role: "user"`` entries, which are ours.

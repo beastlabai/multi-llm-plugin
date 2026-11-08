@@ -452,6 +452,12 @@ class QwenCodeProvider(LLMProvider):
     #: backend wrote.
     auth_error_patterns = LLMProvider.auth_error_patterns + ("[api error: 401",)
 
+    #: :attr:`~.base.LLMProvider.EXIT0_CLASSIFIABLE`, reviewed: qwen-code's
+    #: ``vendor_text`` drops only its ripgrep advisory; the answer's
+    #: ``assistant`` and ``result`` records reach the tables, so a review
+    #: quoting a rate limit, a 401 or a context limit classifies as one.
+    EXIT0_CLASSIFIABLE = False
+
     @property
     def name(self) -> str:
         return "qwen-code"

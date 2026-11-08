@@ -179,7 +179,7 @@ rows:
       record here, so the expectation moved with the bytes and the verdict did
       not.
     expect:
-      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U38b (PROV-1 phase 2)"}
+      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U83 (PROV-1: exit-0 parity, adapter not EXIT0_CLASSIFIABLE)"}
       success: false
       error_contains: ["No output events found in output"]
       raw_contains:

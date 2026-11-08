@@ -541,6 +541,14 @@ class CopilotProvider(LLMProvider):
     #: answer.
     exit_zero_failure_markers: Tuple[Any, ...] = ()
 
+    #: :attr:`~.base.LLMProvider.EXIT0_CLASSIFIABLE`, reviewed: copilot's
+    #: ``vendor_text`` drops only the prompt it echoes; the answer's
+    #: ``assistant.message`` events reach the tables, so a review quoting a
+    #: rate limit, a 401 or a context limit classifies as one. No measured
+    #: failure of copilot's own exits 0 with a verdict (its exit-0 rows
+    #: classify ``None``).
+    EXIT0_CLASSIFIABLE = False
+
     @property
     def name(self) -> str:
         return "copilot"

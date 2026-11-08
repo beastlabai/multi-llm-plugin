@@ -631,9 +631,11 @@ class TestInvokeWithProvider:
 class TestTheAdapterVerdictRidesAFailedChild:
     """``details["failure_category"]``: what the fan-out's ladder obeys.
 
-    Set on a non-zero exit from the adapter's ``classify_failure`` and on a
-    deadline kill as ``timeout``; absent on every other failure, which is how
-    ``run_single_model`` knows to fall back to the error line.
+    Set from the adapter's ``classify_failure`` on a non-zero exit, from
+    ``exit_zero_failure_category`` on an exit 0 that left no answer, and on a
+    deadline kill as ``timeout``; absent on a parsed exit 0, for an adapter
+    that is not ``EXIT0_CLASSIFIABLE`` and when the adapter raised, which is
+    how ``attempt_ladder_status`` knows to fall back to the error line.
     """
 
     @pytest.fixture
@@ -685,10 +687,103 @@ class TestTheAdapterVerdictRidesAFailedChild:
         assert result["details"]["failure_category"] == "timeout"
         assert not result["error"].endswith("]"), "the line already says timed out"
 
-    def test_an_exit_zero_failure_carries_no_category(self, run):
+    def test_an_exit_zero_failure_carries_the_adapters_verdict(self, run):
         result = run(stdout="This is plain text without any JSON", returncode=0)
         assert result["success"] is False
+        assert "failure_category" in result["details"]
+        assert result["details"]["failure_category"] is None
+
+    def test_an_exit_zero_error_envelope_is_read_without_its_result(self, run):
+        """cursor-agent's ``is_error`` envelope can still hold the model's
+        answer in ``result`` (its ``exit-zero-failure`` row), so on an exit 0
+        the flag decides and the text never does."""
+        envelope = json.dumps({
+            "type": "result", "subtype": "success", "is_error": True,
+            "result": "HTTP 429 Too Many Requests",
+        })
+        result = run(stdout=envelope, returncode=0)
+        assert result["success"] is False
+        assert result["details"]["failure_category"] == "runner_error"
+
+    def test_an_exit_zero_error_envelopes_status_still_classifies(self, run):
+        envelope = json.dumps({
+            "type": "result", "subtype": "success", "is_error": True,
+            "api_error_status": 429, "result": "anything at all",
+        })
+        result = run(stdout=envelope, returncode=0)
+        assert result["details"]["failure_category"] == "rate_limited"
+
+    def test_an_adapter_that_is_not_exit0_classifiable_leaves_the_key_absent(self, run):
+        with patch.object(CursorAgentProvider, "EXIT0_CLASSIFIABLE", False):
+            result = run(stdout="This is plain text without any JSON", returncode=0)
+        assert result["success"] is False
         assert "failure_category" not in result["details"]
+
+    def test_an_exit_zero_answer_is_never_the_verdict(self, run):
+        """A clean envelope's ``result`` is the model's prose: cursor-agent's
+        ``vendor_text`` drops it, so a review that discusses rate limits and
+        missing credentials is a run nothing recognised, not a backoff or a
+        batch-wide auth failure."""
+        envelope = json.dumps({
+            "type": "result", "subtype": "success", "is_error": False,
+            "result": "The plan retries on HTTP 429 Too Many Requests and "
+                      "stops on 401 Unauthorized: invalid api key.",
+        })
+        result = run(stdout=envelope, returncode=0)
+        assert result["success"] is False
+        assert result["details"]["failure_category"] is None
+
+    def test_a_parsed_exit_zero_carries_no_category(self, run):
+        envelope = json.dumps({
+            "type": "result", "subtype": "success", "is_error": False,
+            "result": '["ok"]',
+        })
+        result = run(stdout=envelope, returncode=0)
+        assert result["success"] is True
+        assert "failure_category" not in result["details"]
+
+    @pytest.mark.parametrize("stderr,expected", [
+        ("HTTP 401 Unauthorized", "auth_failed"),
+        ("HTTP 429 Too Many Requests", "rate_limited"),
+        ("This model's maximum context length is 128000 tokens",
+         "context_length_exceeded"),
+        ("", "unparseable_result"),
+    ])
+    def test_a_rejected_answer_takes_the_executors_verdict(
+        self, tmp_path, stderr, expected
+    ):
+        """A clean envelope whose answer is a bare ``{"raw": …}`` wrapper, no
+        result file: ``invoke_with_file_output`` rejects it with the category
+        the executor gives the same capture after its own rejection, a real
+        diagnosis on stderr first (``rejected_answer_category``)."""
+        from utils import subagent_executor as executor
+
+        envelope = json.dumps({
+            "type": "result", "subtype": "success", "is_error": False,
+            "result": '{"raw":"hello"}',
+        })
+        completed = subprocess.CompletedProcess(
+            ["cursor-agent"], 0, stdout=envelope, stderr=stderr
+        )
+        with patch("shutil.which", return_value="/usr/bin/cursor-agent"), \
+                patch("utils.llm_client.subprocess.run", return_value=completed):
+            result = invoke_with_file_output(
+                prompt_template="Write to {output_json_path}",
+                model_spec="cursor-agent:auto", prompt_context={},
+                output_dir=tmp_path, phase="review-plan", cwd=str(tmp_path),
+            )
+        assert result["success"] is False
+        assert result["details"]["failure_category"] == expected
+
+        capture = executor._Capture(
+            argv=["/bin/true"], stdout=envelope, stderr=stderr, exit_code=0,
+        )
+        with pytest.raises(executor.ResultRejected) as rejected:
+            executor._extract_result_and_syntax(
+                CursorAgentProvider(), envelope, stderr, prefer_arrays=True,
+            )
+        verdict = executor._classify_failed_run(CursorAgentProvider(), capture, "m")
+        assert (verdict[0] if verdict else rejected.value.status) == expected
 
 
 class TestHardFailureStdoutExcerpt:

@@ -2407,14 +2407,13 @@ def extract_json_array(text: str) -> Optional[str]:
 #: ``context_length_exceeded`` and an unrecognized error line's ``None`` all
 #: fall through ``record``'s last branch to "never retried", which is what the
 #: deleted ``failure_category in RETRYABLE_FAILURE_CATEGORIES`` guard decided.
-#: An adapter's ``None`` on a non-zero exit never reaches this table:
-#: ``run_single_model`` makes it ``runner_error`` first, as the executor does.
+#: An adapter's ``None`` never reaches this table: :func:`attempt_ladder_status`
+#: makes it ``runner_error`` first, as the executor does.
 #: One table, not two.
 #: ``tests/test_lane_a_ladder.py`` pins the two vocabularies in agreement.
 #:
-#: Two verdicts stop here and are retried once by the executor, whose
-#: ``_classify_failed_run`` forwards neither: ``spawn_failed`` (an install or
-#: argv refusal, identical on every attempt) and ``permission_denied`` (a 403
+#: One verdict stops here and is retried once by the executor, whose
+#: ``_classify_failed_run`` does not forward it: ``permission_denied`` (a 403
 #: or a denied tool). That difference is deliberate; see
 #: docs/development/delegation.md#read-and-analyze-executor.
 _LADDER_STATUS_BY_CATEGORY = {
@@ -2435,17 +2434,21 @@ def attempt_ladder_status(
 ) -> Optional[str]:
     """The ladder status of one finished review fan-out attempt.
 
-    One classification per failed attempt. A non-zero exit or a deadline kill
-    carries the adapter's own verdict on ``details`` (read by
-    ``invoke_with_provider`` while it held the streams), and that is what the
-    ladder obeys, as on the executor lane; a verdict of ``None`` (nothing
-    recognised) is ``runner_error``, one transport retry. Any other failure (an
-    exit-0 run whose answer did not parse, a launch failure) has no such key
-    and falls back to the shared classifier over the error line alone, where an
-    unrecognised line is never retried; the boundary-aware matcher keeps a
-    model that wrote "reviewed 429 files" from reading as a rate limit. A jail
-    denial wins over every verdict: the ladder does not know its status, so it
-    is never retried and never moved to another rung.
+    One classification per failed attempt. A child that ran and failed (a
+    non-zero exit, an exit 0 that left no answer, a deadline kill) carries the
+    adapter's own verdict on ``details`` (read by ``invoke_with_provider`` while
+    it held the streams; on an exit 0 only through
+    ``base.exit_zero_failure_category``, which never reads the model's answer),
+    and that is what the ladder obeys, as on the executor lane; a verdict of
+    ``None`` (nothing recognised) is ``runner_error``, one transport retry, and
+    a parsed answer the file-output layer rejected takes the same gate's
+    verdict, else ``unparseable_result`` (``rejected_answer_category``). A
+    failure with no such key (a launch failure, an adapter whose
+    ``classify_failure`` raised, an exit 0 of an adapter that is not
+    ``EXIT0_CLASSIFIABLE``) falls back to the shared classifier over the error
+    line alone, where an unrecognised line is never retried. A jail denial
+    wins over every verdict: the ladder does not know its status, so it is
+    never retried and never moved to another rung.
     See docs/development/delegation.md#read-and-analyze-executor.
     """
     if result.get("success"):

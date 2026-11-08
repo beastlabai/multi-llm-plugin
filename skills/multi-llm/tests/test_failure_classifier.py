@@ -419,35 +419,32 @@ class TestLaunchFailureMarkers:
             STATUS_SPAWN_FAILED
         )
 
-    def test_lane_as_composed_sentence_still_reads_the_omp_refusal(self):
-        """Lane A classifies its own ``"<cli> exited with code N: <describe_failure>"``
-        string, handed over as stdout (``review_orchestrator_base``); omp's
-        ``describe_failure`` quotes the stderr line into it, so the refusal is
-        read there too, right after that prefix and nowhere else."""
+    def test_the_fan_out_reads_the_omp_refusal_off_stderr_not_its_own_line(self):
+        """The fan-out takes omp's own verdict (``details["failure_category"]``,
+        read off the capture by ``classify_failure``), so the refusal is read
+        where omp writes it, stderr at a line start, and the composed
+        ``"<cli> exited with code N: <describe_failure>"`` line is for the
+        reader, tagged with that verdict."""
+        from utils.provider_outcome import Capture, outcome_from_capture
         from utils.providers.omp import OmpProvider
+        from utils.review_orchestrator_base import attempt_ladder_status
 
         fixtures = Path(__file__).parent / "fixtures" / "omp"
         stdout = (fixtures / "invalid-tool.stdout.txt").read_text(encoding="utf-8")
         stderr = (fixtures / "invalid-tool.stderr.txt").read_text(encoding="utf-8")
-        reason = OmpProvider().describe_failure(stdout, stderr)
-        composed = f"omp exited with code 2: {reason}"
-        assert pbase.classify_streams(composed, "") == STATUS_SPAWN_FAILED
-        assert pbase.match_streams(composed, "").status == STATUS_SPAWN_FAILED
-        # The prefix is Lane A's own composition (`provider_outcome`), pinned
-        # through the real reading of the same capture so the two move together.
-        from utils.provider_outcome import Capture, outcome_from_capture
-
         result = outcome_from_capture(
             OmpProvider(), Capture(stdout=stdout, stderr=stderr, exit_code=2),
             provider_name="omp", model="m",
         )
-        assert result["error"].startswith(composed)
-        # Another runner's sentence that only quotes it later is not omp's.
-        quoted = (
-            "claude-code exited with code 1: the reviewer wrote that omp says "
-            "Error: Unknown tool in --tools: bogus."
-        )
-        assert pbase.classify_streams(quoted, "") != STATUS_SPAWN_FAILED
+        assert result["details"]["failure_category"] == STATUS_SPAWN_FAILED
+        assert result["error"].endswith(f" [{STATUS_SPAWN_FAILED}]")
+        assert attempt_ladder_status(result, result["details"]) == STATUS_SPAWN_FAILED
+        # The line alone names no launch failure: a sentence that quotes
+        # omp's refusal is not one.
+        reason = OmpProvider().describe_failure(stdout, stderr)
+        assert pbase.classify_streams(
+            f"omp exited with code 2: {reason}", ""
+        ) != STATUS_SPAWN_FAILED
 
     def test_a_root_refusal_is_read_as_the_root_cause_not_as_auth(self):
         """§7.2's ordering rule: a root refusal reads like a permission problem.

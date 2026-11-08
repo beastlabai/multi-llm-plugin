@@ -21,14 +21,15 @@ lanes** — the four §14.2 M9 acceptance checks, each red before the change:
   it cancels the task without killing the child (§8), so it may never be M9's
   enforcement point.
 
-It also pins what Lane A hands the ladder: on a non-zero exit or a deadline
-kill, the adapter's own verdict (``details["failure_category"]``, set by
-``invoke_with_provider``), with ``None`` taking one transport retry as on
-Lane B; every other failure falls back to classifying the error line. Every
-committed fixture row with a non-zero exit, and every row as a deadline kill,
-goes through both lanes' real dispatch loops and must be dispatched the same
-number of times, apart from the two verdicts the fan-out deliberately stops on
-(``_LANE_A_STOPS_LANE_B_RETRIES``).
+It also pins what Lane A hands the ladder: on a non-zero exit, an exit 0
+that left no answer or a deadline kill, the adapter's own verdict
+(``details["failure_category"]``, set by ``invoke_with_provider``), with
+``None`` taking one transport retry as on Lane B; a failure with no verdict (a
+launch failure, an adapter whose ``classify_failure`` raised) falls back to
+classifying the error line. Every committed failing fixture row, and every row
+as a deadline kill, goes through both lanes' real dispatch loops and must be
+dispatched the same number of times, apart from the one verdict the fan-out
+deliberately stops on (``_LANE_A_STOPS_LANE_B_RETRIES``).
 """
 
 from __future__ import annotations
@@ -52,7 +53,7 @@ from utils.subagent_tasks import build_inputs, make_task  # noqa: E402
 from tests.source_cache import source_tree
 
 #: ``_run_lane_a``'s "no ``failure_category`` key at all": the error-line
-#: fallback an exit-0 failure takes. ``None`` is a verdict, so it cannot mark
+#: fallback a launch failure takes. ``None`` is a verdict, so it cannot mark
 #: absence.
 _ABSENT = object()
 
@@ -89,8 +90,8 @@ def _run_lane_a(
     """Drive ``run_single_model`` against a provider that always fails.
 
     ``category`` is the adapter verdict ``invoke_with_provider`` puts on
-    ``details["failure_category"]`` for a non-zero exit or a timeout; leaving it
-    out is the error-line fallback. ``result`` replaces the whole fake return.
+    ``details["failure_category"]`` for a failed child; leaving it out is the
+    error-line fallback. ``result`` replaces the whole fake return.
     ``burn`` makes each fake dispatch spend real wall clock, which is the only
     way to observe the monotonic budget: an instantaneous fake leaves
     ``remaining()`` indistinguishable from a fresh ``timeout``.
@@ -652,7 +653,7 @@ class TestForever429EndsInsideResolvedTimeout:
 # ---------------------------------------------------------------------------
 
 class TestTheAdapterVerdictDecides:
-    """A non-zero exit or a timeout carries ``details["failure_category"]``.
+    """A failed child carries ``details["failure_category"]``.
 
     ``run_single_model`` obeys it and does not re-read the error line, which
     is composed for a human and can say less (a bare ``exited with code 1``)
@@ -680,9 +681,9 @@ class TestTheAdapterVerdictDecides:
         assert len(calls) == 2, "rung 4: one transport retry (driver.subagent_retries=1)"
 
     def test_spawn_failed_and_permission_denied_are_never_retried(self):
-        """The two verdicts the executor retries and the fan-out does not: an
-        install or argv refusal, and a 403 or a denied tool, fail the same way
-        on every attempt."""
+        """An install or argv refusal, and a 403 or a denied tool, fail the
+        same way on every attempt. The executor stops on the first too (it
+        fails the batch); the second it retries once, on purpose."""
         for category in ("spawn_failed", "permission_denied"):
             _, calls = _run_lane_a(
                 error=f"cli exited with code 1 [{category}]", category=category,
@@ -727,8 +728,9 @@ class TestTheAdapterVerdictDecides:
 
 
 class TestTheErrorLineFallback:
-    """No ``failure_category`` key (an exit-0 failure, a launch failure): the
-    shared classifier reads the error line alone, as before."""
+    """No ``failure_category`` key (a launch failure, an adapter whose
+    ``classify_failure`` raised): the shared classifier reads the error line
+    alone."""
 
     def test_a_rate_limit_line_backs_off(self):
         _, calls = _run_lane_a(error="HTTP 429 Too Many Requests")
@@ -821,12 +823,11 @@ def test_the_category_tag_only_ever_names_itself(untagged, category):
 
 _NONZERO_ROWS = [r for r in _ROWS if r[2].get("exit_code", 0) != 0]
 
-#: The two adapter verdicts the lanes answer differently on purpose. The
-#: executor's ``_classify_failed_run`` forwards neither, so it keeps its parse
-#: failure's rung-4/5 status and retries once; the fan-out stops, because an
-#: install or argv refusal, and a 403 or a denied tool, fail the same way on
-#: every attempt. Pinned both ways, so a change on either lane shows up here.
-_LANE_A_STOPS_LANE_B_RETRIES = frozenset({"spawn_failed", "permission_denied"})
+#: The adapter verdict the lanes answer differently on purpose: a 403 or a
+#: denied tool. The executor's ``_classify_failed_run`` does not forward it, so
+#: it keeps its parse failure's rung-4/5 status and retries once; the fan-out
+#: stops. Pinned both ways, so a change on either lane shows up here.
+_LANE_A_STOPS_LANE_B_RETRIES = frozenset({"permission_denied"})
 
 
 def _row_streams(provider, row):
@@ -837,6 +838,18 @@ def _row_streams(provider, row):
         return (_FIXTURES / provider / name).read_bytes().decode("utf-8", errors="replace")
 
     return read("stdout"), read("stderr")
+
+
+def _patch_adapter(monkeypatch, adapter, name, value):
+    """Shadow one method of a registry adapter for this test.
+
+    Through the instance ``__dict__``, whose undo deletes the key: the
+    registry's adapters are process-wide, and undoing an instance ``setattr``
+    leaves the original bound method behind on the instance, where it
+    shadows a later test's class-level patch of the same method
+    (``test_opencode_config_providers`` counts ``resolve_env`` calls that way).
+    """
+    monkeypatch.setitem(vars(adapter), name, value)
 
 
 def _replay(monkeypatch, tmp_path, provider_name, stdout, stderr, exit_code, *, kill=False):
@@ -863,11 +876,12 @@ def _replay(monkeypatch, tmp_path, provider_name, stdout, stderr, exit_code, *, 
     monkeypatch.setattr(llm_client, "_run_provider_cli", fake_run)
     monkeypatch.setattr(llm_client, "_resolve_executable", lambda name: ([name], False))
     monkeypatch.setattr(llm_client, "provider_dispatch_context", no_dispatch_context)
-    monkeypatch.setattr(adapter, "is_available", lambda: True)
-    monkeypatch.setattr(
+    _patch_adapter(monkeypatch, adapter, "is_available", lambda: True)
+    _patch_adapter(
+        monkeypatch,
         adapter, "build_command_for_transport", lambda *a, **k: (["/bin/true"], None)
     )
-    monkeypatch.setattr(adapter, "resolve_env", lambda *a, **k: {})
+    _patch_adapter(monkeypatch, adapter, "resolve_env", lambda *a, **k: {})
     return adapter, llm_client.invoke_with_file_output(
         prompt_template="hi {output_json_path}",
         model_spec=f"{provider_name}:m",
@@ -899,7 +913,9 @@ def _lane_b_dispatches(monkeypatch, phase_dir, provider_name, **capture):
         return executor._Capture(argv=["/bin/true"], **capture)
 
     monkeypatch.setattr(executor, "_spawn", fake_spawn)
-    monkeypatch.setattr(get_provider(provider_name), "supports_profile", lambda _p: True)
+    _patch_adapter(
+        monkeypatch, get_provider(provider_name), "supports_profile", lambda _p: True
+    )
     phase_dir = Path(phase_dir)
     phase_dir.mkdir(parents=True, exist_ok=True)
     executor.dispatch_task(
@@ -948,8 +964,8 @@ def test_every_verdict_gets_the_executors_call(monkeypatch, tmp_path, verdict):
     both lanes."""
     from utils.provider_registry import get_provider
 
-    monkeypatch.setattr(
-        get_provider("opencode"), "classify_failure", lambda *a, **k: verdict
+    _patch_adapter(
+        monkeypatch, get_provider("opencode"), "classify_failure", lambda *a, **k: verdict
     )
     lane_b = _lane_b_dispatches(
         monkeypatch, tmp_path, "opencode", stdout="", stderr="boom", exit_code=1,
@@ -1005,6 +1021,72 @@ def test_a_non_zero_exit_row_gets_the_executors_call(
         stdout=stdout, stderr=stderr, exit_code=exit_code,
     )
     _assert_lanes_agree(verdict, lane_a, lane_b)
+
+
+_EXIT_ZERO_FAILING_ROWS = [
+    r for r in _ROWS
+    if r[2].get("exit_code", 0) == 0 and r[2]["expect"]["success"] is False
+]
+
+
+@pytest.mark.parametrize(
+    "provider_name,row_name,row",
+    _EXIT_ZERO_FAILING_ROWS,
+    ids=[f"{p}/{n}" for p, n, _ in _EXIT_ZERO_FAILING_ROWS],
+)
+def test_an_exit_zero_failure_row_gets_the_executors_call(
+    monkeypatch, tmp_path, provider_name, row_name, row
+):
+    """An exit 0 that left no answer, and no result file: the fan-out gets
+    the verdict of the gate both lanes read (``exit_zero_failure_category``),
+    and both lanes' real paths dispatch it the same number of times. An
+    adapter that is not ``EXIT0_CLASSIFIABLE`` gives no verdict: the fan-out
+    stops on its error line and the executor keeps its parse failure's one
+    retry, the difference its rows mark ``open``."""
+    from utils.providers.base import exit_zero_failure_category
+
+    stdout, stderr = _row_streams(provider_name, row)
+    adapter, result = _replay(monkeypatch, tmp_path, provider_name, stdout, stderr, 0)
+    assert result["success"] is False
+    classified, verdict = exit_zero_failure_category(adapter, stdout, stderr)
+    if classified:
+        assert result["details"]["failure_category"] == verdict
+    else:
+        assert "failure_category" not in result["details"]
+
+    lane_a = _lane_a_dispatches(monkeypatch, result, provider_name)
+    lane_b = _lane_b_dispatches(
+        monkeypatch, tmp_path / "lane-b", provider_name,
+        stdout=stdout, stderr=stderr, exit_code=0,
+    )
+    if classified:
+        _assert_lanes_agree(verdict, lane_a, lane_b)
+    else:
+        assert "open" in row["expect"]["lane_status"]
+        assert (lane_a, lane_b) == (1, 1 + _ROW_RETRIES)
+
+
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_spawn_failed_stops_both_lanes_only_on_a_non_zero_exit(
+    monkeypatch, tmp_path, exit_code
+):
+    """A refused invocation never exits 0: on an exit 0 the launch-failure
+    words came from the model or a tool, and both lanes take the parse
+    failure's one transport retry; on a non-zero exit both stop."""
+    from utils.provider_registry import get_provider
+
+    _patch_adapter(
+        monkeypatch, get_provider("opencode"), "classify_failure",
+        lambda *a, **k: "spawn_failed",
+    )
+    lane_b = _lane_b_dispatches(
+        monkeypatch, tmp_path, "opencode", stdout="", stderr="boom",
+        exit_code=exit_code,
+    )
+    _, result = _replay(monkeypatch, tmp_path / "a", "opencode", "", "boom", exit_code)
+    lane_a = _lane_a_dispatches(monkeypatch, result, "opencode")
+    expected = 1 if exit_code else 1 + _ROW_RETRIES
+    assert (lane_a, lane_b) == (expected, expected)
 
 
 @pytest.mark.parametrize(

@@ -2,7 +2,7 @@
 import json
 import os
 import shutil
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..json_extractor import extract_json_from_text
 from .base import (
@@ -11,6 +11,7 @@ from .base import (
     LLMProvider,
     ReasoningLadder,
     StructuredSchema,
+    envelope_without_answer,
     split_reasoning_effort,
 )
 
@@ -280,6 +281,12 @@ class GrokProvider(LLMProvider):
     #: pins #1/#2): four requests per answered exec, and every retry chain short.
     verified_version = "1.0.46"
 
+    #: :attr:`~.base.LLMProvider.EXIT0_CLASSIFIABLE`, reviewed: grok prints one
+    #: envelope whose ``text`` is the answer, or its own ``{"type": "error"}``
+    #: object. :meth:`classify_exit_zero` reads the envelope without ``text``,
+    #: and a stdout cut inside the envelope not at all.
+    EXIT0_CLASSIFIABLE = True
+
     @property
     def name(self) -> str:
         return "grok"
@@ -350,6 +357,40 @@ class GrokProvider(LLMProvider):
             cmd += ["--reasoning-effort", effort]
         cmd += ["-p", prompt]
         return cmd
+
+    def vendor_text(self, stdout: str, stderr: str) -> Tuple[str, str]:
+        """``("", stderr)`` for a finished turn's envelope; else the capture.
+
+        Measured on the committed rows: every failure is one
+        ``{"type": "error", "message": …}`` object (exit 1), and a finished
+        turn is ``{"text", "stopReason", "sessionId", "requestId"}``, whose
+        ``text`` is the model's own answer and so never the vendor's verdict.
+        Any other stdout, including one that is not one JSON object, is
+        returned unchanged; stderr is never reduced.
+        """
+        try:
+            envelope = json.loads(stdout) if stdout and stdout.strip() else None
+            if (
+                isinstance(envelope, dict) and isinstance(envelope.get("text"), str)
+                and envelope.get("type") != "error"
+            ):
+                return "", stderr
+        except Exception:  # noqa: BLE001 - a failed reduction returns its input
+            pass
+        return stdout, stderr
+
+    def classify_exit_zero(self, stdout: str, stderr: str) -> Optional[str]:
+        """:meth:`classify_failure` over the envelope without ``text``.
+
+        ``text`` is the model's answer whatever ``stopReason`` says, so it is
+        taken out and a stdout cut inside the envelope is dropped
+        (:func:`base.envelope_without_answer`); grok's own ``{"type":
+        "error"}`` object has no ``text`` and is read whole
+        (``EXIT0_CLASSIFIABLE``).
+        """
+        return self.classify_failure(
+            envelope_without_answer(stdout, ("text",)), stderr, 0,
+        )
 
     def parse_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
         """Parse JSON wrapper output from Grok Build CLI."""

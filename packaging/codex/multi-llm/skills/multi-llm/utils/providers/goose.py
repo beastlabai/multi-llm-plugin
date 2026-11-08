@@ -197,6 +197,18 @@ class GooseProvider(LLMProvider):
         configurable_by=(),
     )
 
+    #: :attr:`~.base.LLMProvider.EXIT0_CLASSIFIABLE`, reviewed: ``False``.
+    #: goose exits 0 on a provider error and writes its diagnosis as a text
+    #: part of the last assistant message (``Ran into this error: …``), where
+    #: the answer arrives too, and nothing captured marks which one a text part
+    #: is: a model turn lacks the ``metadata.inference`` stamp whenever goose
+    #: could not resolve the model's info (1.41.0), and the structured
+    #: ``type: "error"`` part only goose builds appears on no exit-0 capture
+    #: (``tests/fixtures/goose/``: only the exit-1 401). So an exit 0 is never
+    #: classified, on either lane
+    #: (docs/development/delegation.md#read-and-analyze-executor).
+    EXIT0_CLASSIFIABLE = False
+
     @property
     def name(self) -> str:
         return "goose"

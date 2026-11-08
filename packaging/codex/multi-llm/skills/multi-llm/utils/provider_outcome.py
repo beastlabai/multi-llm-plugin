@@ -29,6 +29,7 @@ from .providers.base import (
     SANDBOX_RUNG_UNSANDBOXED,
     _matches_marker,
     availability_from_failure,
+    exit_zero_failure_category,
     sandbox_rung_id,
 )
 from .providers.result_envelope import is_clean_envelope
@@ -690,11 +691,32 @@ def _attach_usage(
 
 
 #: ``details`` key for the adapter's own verdict on a failed child: the
-#: ``classify_failure`` category of a non-zero exit, or ``timeout`` for a
-#: deadline kill. ``review_orchestrator_base.run_single_model`` hands it to the
-#: retry ladder instead of re-classifying the error line; see
+#: ``classify_failure`` category of a non-zero exit, the
+#: ``exit_zero_failure_category`` of an exit 0 that left no answer (absent for
+#: an adapter that is not ``EXIT0_CLASSIFIABLE``), ``unparseable_result`` for a
+#: capped stdout, :func:`rejected_answer_category` for a parsed answer the
+#: file-output layer rejected, or ``timeout`` for a deadline kill.
+#: ``review_orchestrator_base.attempt_ladder_status`` hands it to the retry
+#: ladder instead of re-classifying the error line; see
 #: docs/development/delegation.md#read-and-analyze-executor.
 FAILURE_CATEGORY_KEY = "failure_category"
+
+
+def rejected_answer_category(
+    provider: Any, stdout: Optional[str], stderr: Optional[str]
+) -> str:
+    """The ``failure_category`` of an exit 0 whose stdout parsed, but not into
+    an answer the file-output layer accepts (``invoke_with_file_output``).
+
+    The executor's precedence for the same rejection, so the two lanes agree:
+    the verdict of the one exit-0 gate (:func:`~.providers.base.
+    exit_zero_failure_category`, read off the CLI's own text and stderr, never
+    the answer) when it names a category, and otherwise the rejection's own
+    ``unparseable_result``, one retry
+    (docs/development/delegation.md#read-and-analyze-executor).
+    """
+    _, category = exit_zero_failure_category(provider, stdout, stderr)
+    return category or STATUS_UNPARSEABLE
 
 
 def _adapter_failure_category(
@@ -1065,9 +1087,21 @@ def outcome_from_capture(
         # `details` is born (Stage U), a failed child at the end of the tail;
         # each keeps the place in `details` it has always had.
         _attach_usage(details, provider, stdout, stderr)
-        # The executor's rung for a capped stdout, so the fan-out's ladder
-        # retries it as the executor does (`process_capture`).
-        classified, category = "stdout" in capped, STATUS_UNPARSEABLE
+        if "stdout" in capped:
+            # The executor's rung for a capped stdout, so the fan-out's ladder
+            # retries it as the executor does (`process_capture`).
+            classified, category = True, STATUS_UNPARSEABLE
+        elif result.get("success", False):
+            classified, category = False, None
+        else:
+            # An exit 0 with no answer: the adapter's own verdict, read while
+            # the streams are held, and only from what the CLI wrote — an
+            # adapter that cannot tell that from the answer gives none
+            # (`EXIT0_CLASSIFIABLE`). The file channel may still answer for
+            # the run, and then the fan-out never asks.
+            classified, category = exit_zero_failure_category(
+                provider, stdout, stderr
+            )
 
     # F1 (2026-09-30): the jailed slot's read-back samples live state (the
     # home, other children still running), so it is taken where each path has

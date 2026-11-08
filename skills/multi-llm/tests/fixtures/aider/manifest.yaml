@@ -85,7 +85,7 @@ rows:
       gloss (asserted below), and both classify on litellm's words instead of
       on it.
     expect:
-      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U38b (PROV-1 phase 2)"}
+      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U83 (PROV-1: exit-0 parity, adapter not EXIT0_CLASSIFIABLE)"}
       success: false
       # D4.1: the litellm line itself, not "No JSON found".
       error_contains: ["litellm.InternalServerError: InternalServerError: OpenAIException - Connection error."]
@@ -123,7 +123,7 @@ rows:
       `reasoning_content` in), because stub_server.py serves no `reasoning_content`
       field; the marker bytes are still aider's, from `replace_reasoning_tags`.
     expect:
-      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U38b (PROV-1 phase 2)"}
+      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U83 (PROV-1: exit-0 parity, adapter not EXIT0_CLASSIFIABLE)"}
       success: false
       error_contains: ["Empty answer after ANSWER marker"]
       raw_contains: ["► **THINKING**", "► **ANSWER**", "Tokens: 1 sent"]
@@ -168,7 +168,7 @@ rows:
       `exit_zero_failure_markers`. **This is the one row where that table is
       load-bearing**, and it is consulted last by construction (§7.2 step 6).
     expect:
-      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U38b (PROV-1 phase 2)"}
+      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U83 (PROV-1: exit-0 parity, adapter not EXIT0_CLASSIFIABLE)"}
       success: false
       error_contains: ["litellm.APIError: APIError: OpenAIException -"]
       raw_contains: ["litellm.APIError: APIError: OpenAIException - "]
@@ -197,7 +197,7 @@ rows:
       Lane A puts `server_error` and `runner_error` on the same rung 4, so the
       residual is the `Reason:` line's specificity, not the ladder.
     expect:
-      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U38b (PROV-1 phase 2)"}
+      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U83 (PROV-1: exit-0 parity, adapter not EXIT0_CLASSIFIABLE)"}
       success: false
       error_contains: ["litellm.InternalServerError: InternalServerError: OpenAIException - The server had an error"]
       raw_contains:
@@ -245,7 +245,7 @@ rows:
       appears anywhere in this capture, which is what the adapter's two added
       patterns are for.
     expect:
-      lane_status: {lane_a: null, lane_b: auth_failed}
+      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U83 (PROV-1: exit-0 parity, adapter not EXIT0_CLASSIFIABLE)"}
       success: false
       error_contains: ["litellm.AuthenticationError: AuthenticationError: OpenAIException - Incorrect API key provided"]
       raw_contains:
@@ -266,7 +266,7 @@ rows:
       an executor-level re-dispatch of a rate-limited aider slot doubles a wait
       that already ran for a minute and a quarter (§7.6(b)'s rule 6b).
     expect:
-      lane_status: {lane_a: null, lane_b: rate_limited, open: "U38b (PROV-1 phase 2)"}
+      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U83 (PROV-1: exit-0 parity, adapter not EXIT0_CLASSIFIABLE)"}
       success: false
       error_contains: ["litellm.RateLimitError: RateLimitError: OpenAIException - Rate limit reached"]
       raw_contains:
@@ -288,7 +288,7 @@ rows:
       dispatch. That asymmetry is what makes a stray `:effort` suffix findable at
       all, and it is why the assertion below is on the bare slug.
     expect:
-      lane_status: {lane_a: null, lane_b: invalid_model}
+      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U83 (PROV-1: exit-0 parity, adapter not EXIT0_CLASSIFIABLE)"}
       success: false
       error_contains: ["litellm.NotFoundError: OpenAIException - The model `stub-model` does not exist"]
       raw_contains:
@@ -317,7 +317,7 @@ rows:
       carrying this capture as their recorded evidence. The bytes are unchanged;
       only the expectation moved, and it moved because the product did.
     expect:
-      lane_status: {lane_a: null, lane_b: context_length_exceeded}
+      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U83 (PROV-1: exit-0 parity, adapter not EXIT0_CLASSIFIABLE)"}
       success: false
       # D4.1's fallback wording, exactly: aider's own block states no counts,
       # and its `~103 of 0` lines are approximate, so neither number is used.
@@ -356,7 +356,7 @@ rows:
       rejected — not aider's own estimate. No `Tokens:` line: the request never
       completed, so every line is scanned.
     expect:
-      lane_status: {lane_a: null, lane_b: context_length_exceeded}
+      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U83 (PROV-1: exit-0 parity, adapter not EXIT0_CLASSIFIABLE)"}
       success: false
       error_contains:
         - "aider: prompt exceeds the model's context window (1,083,501 > 1,048,576 tokens)"
@@ -382,7 +382,7 @@ rows:
       the aider row whose RAW stdout passes the salvage gate (the array), so the
       `none` label is what shows the hook moved it.
     expect:
-      lane_status: {lane_a: null, lane_b: context_length_exceeded}
+      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U83 (PROV-1: exit-0 parity, adapter not EXIT0_CLASSIFIABLE)"}
       success: false
       error_contains:
         - "aider: prompt exceeds the model's context window (1,083,501 > 1,048,576 tokens)"
@@ -418,7 +418,7 @@ rows:
       (`none`); tests/test_aider_provider.py pins that the hook returns the
       answer whole with no prompt text.
     expect:
-      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U38b (PROV-1 phase 2)"}
+      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U83 (PROV-1: exit-0 parity, adapter not EXIT0_CLASSIFIABLE)"}
       success: false
       error_contains: ["No JSON found in aider output", "Relevant files:"]
       raw_contains:

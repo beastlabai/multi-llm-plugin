@@ -181,7 +181,7 @@ rows:
       to be called rate-limited was our own plan text is precisely the live
       hazard, and this is the row that pins it.
     expect:
-      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U38b (PROV-1 phase 2)"}
+      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U83 (PROV-1: exit-0 parity, adapter not EXIT0_CLASSIFIABLE)"}
       salvage: none
       success: false
       error_contains: ["no assistant message in vibe's transcript"]
@@ -281,16 +281,18 @@ rows:
       trap, and it is why `parse_output` reports unparseable stdout as a failure
       CARRYING that text — handing these bytes to the extractor would find
       nothing and report an empty answer instead of the reason, which is the
-      one place the reason exists. The classification is `None`: a rejected
-      `thinking` level is not a transport condition and matches no table.
+      one place the reason exists. The classification is `spawn_failed`
+      (`VibeProvider._CONFIG_REFUSAL`): a rejected `thinking` level is not a
+      transport condition, made zero requests and fails the same way for every
+      sibling slot, so no retry is spent on it.
     expect:
-      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
+      lane_status: {lane_a: spawn_failed, lane_b: spawn_failed}
       salvage: none
       success: false
       error_contains:
         - "vibe produced non-JSON output on stdout"
         - "Invalid configuration"
-      classify_failure: null
+      classify_failure: spawn_failed
 
   empty:
     stdout: empty.stdout.txt
@@ -522,16 +524,16 @@ rows:
       line, now on **stderr** with stdout empty and no longer wrapped at 80
       columns, exit 1 (`config_error`), before any request. `parse_output`
       takes the empty-stdout branch and quotes it; the classification is
-      `None`, as on stdout.
+      `spawn_failed`, as on stdout.
     expect:
-      lane_status: {lane_a: runner_error, lane_b: runner_error}
+      lane_status: {lane_a: spawn_failed, lane_b: spawn_failed}
       salvage: none
       success: false
       error_contains:
         - "vibe produced no output on stdout"
         - "Invalid configuration"
       raw_contains: ["models.openai/gpt-5.6-luna.thinking"]
-      classify_failure: null
+      classify_failure: spawn_failed
 
   turn-limit:
     stdout: turn-limit.json
@@ -647,7 +649,7 @@ rows:
       because this capture's echoed prompt is a two-word test prompt rather
       than a plan.
     expect:
-      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U38b (PROV-1 phase 2)"}
+      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U83 (PROV-1: exit-0 parity, adapter not EXIT0_CLASSIFIABLE)"}
       salvage: none
       success: false
       error_contains: ["vibe produced non-JSON output on stdout"]
@@ -668,7 +670,7 @@ rows:
       what ships, and graded as the failure it is through the shipped adapter
       rather than left as an untested cell.
     expect:
-      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U38b (PROV-1 phase 2)"}
+      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U83 (PROV-1: exit-0 parity, adapter not EXIT0_CLASSIFIABLE)"}
       salvage: none
       success: false
       error_contains: ["vibe produced non-JSON output on stdout"]

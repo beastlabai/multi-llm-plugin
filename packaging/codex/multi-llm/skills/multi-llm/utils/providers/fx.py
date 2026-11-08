@@ -285,6 +285,14 @@ class FxProvider(LLMProvider):
     runs_shell_in_generate = True
     internal_retries = InternalRetryEnvelope(max_requests=None, retries_rate_limit=True)
 
+    #: :attr:`~.base.LLMProvider.EXIT0_CLASSIFIABLE`, reviewed: fx's
+    #: :meth:`vendor_text` keeps only fx's own line shapes (``API request
+    #: failed · HTTP …`` in a failed envelope's ``output``, anchored stderr
+    #: notices), and :meth:`classify_failure` reads the envelope's structured
+    #: ``error`` and ``auth_failure`` fields; neither is ever the model's
+    #: ``final_output``, and a cut envelope parses to none.
+    EXIT0_CLASSIFIABLE = True
+
     @property
     def name(self) -> str:
         return "fx"

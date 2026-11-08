@@ -296,9 +296,10 @@ def _is_overflow(final: Dict[str, Any], events: List[Dict[str, Any]]) -> bool:
 def _named_for_the_ladder(status: str, token: str, sentence: str) -> str:
     """``sentence``, with ``token`` in front when the shared tables would miss it.
 
-    Lane A classifies the composed error *string* through ``classify_streams``
-    with no adapter in hand, so a structural verdict reaches its ladder only if
-    the sentence carries a table word. omp's helper of the same name checks for
+    The ladder obeys :meth:`PiProvider.classify_failure`'s verdict on both
+    lanes; the error *string* is the reader's account of it, and the fan-out's
+    ``classify_streams`` fallback when an adapter gave none, so it carries the
+    table word that names the same verdict. omp's helper of the same name checks for
     the token as a substring; this one asks the table itself, so a sentence that
     already classifies (the measured ``400: … maximum context length …``) is
     returned untouched.
@@ -616,6 +617,13 @@ class PiProvider(LLMProvider):
         "No API key found for",
         "No API key for",
     )
+
+    #: :attr:`~.base.LLMProvider.EXIT0_CLASSIFIABLE`, reviewed: pi's
+    #: :meth:`vendor_text` is omp's: the terminal message's ``errorMessage``
+    #: only, ``""`` on ``stop``/``toolUse``/``length`` and before any assistant
+    #: message; ``generate`` always renders ``--mode json``, so the answer is
+    #: never plain stdout.
+    EXIT0_CLASSIFIABLE = True
 
     @property
     def name(self) -> str:

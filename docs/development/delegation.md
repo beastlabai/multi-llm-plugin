@@ -444,34 +444,60 @@ a structural `runner_error`). Any other verdict, `None` included, leaves the par
 status, rung 4 or 5: one transport retry. The review fan-out (`dispatch_with_ladder`, the one
 loop behind review-plan's and review-tasks' `run_single_model` and review-code's
 `run_single_review`) takes it from `details["failure_category"]`, which
-`llm_client.invoke_with_provider` sets on a **non-zero exit** while it still holds the streams (its reading is
+`llm_client.invoke_with_provider` sets on every failed child (a non-zero exit, and an exit 0 that
+left no answer, below) while it still holds the streams (its reading is
 `provider_outcome.outcome_from_capture`); only the category leaves, never the streams. The fan-out applies it the same way: `None` (the adapter recognised
 nothing) is `runner_error`, connection and server errors are rung 4 through
 `review_orchestrator_base._LADDER_STATUS_BY_CATEGORY`, and every other category reaches the ladder
-under its own name. Two verdicts stop on the fan-out and are retried once by the executor, which
-forwards neither: `spawn_failed` (an install or argv refusal, such as omp's unknown `--tools`
-name) and `permission_denied` (a 403 or a denied tool). Both fail the same way on every attempt,
-so the difference is deliberate. On both lanes a run killed at its deadline is `timeout` whatever
+under its own name. `spawn_failed` (an install or argv refusal, such as omp's unknown `--tools`
+name) stops both lanes on a non-zero exit and fails the executor's batch, so it is read only off
+exit 127, stderr (`base.STDERR_LAUNCH_FAILURE_MARKERS`: a shell's `command not found`, omp's
+refusals) and an adapter's own refusal shape (vibe's config refusal opening stdout), never off a
+model's answer or a tool's output on stdout. One verdict stops on the
+fan-out and is retried once by the executor, which does not forward it: `permission_denied` (a 403
+or a denied tool), which can fail one task and not its neighbour, so the difference is deliberate.
+On both lanes a run killed at its deadline is `timeout` whatever
 its partial streams say (the executor's `_classify_pre_parse`), and a jail denial is never retried
-whatever the category. The fan-out's error line ends with the category
+whatever the category. The fan-out's error line on a non-zero exit ends with the category
 (`<cli> exited with code 1: <reason> [rate_limited]`), so `.status.json` names why a slot stopped
 or retried. Read by `classify_streams`, that tag can only ever name its own category. An adapter
 whose `classify_failure` raises, or answers something other than a category name or `None`,
-sets no key, and that slot takes the exit-0 rule below.
+sets no key, and that slot falls back to its error line, below.
 
-An **exit-0 failure** (an answer that did not parse) carries no category, and the fan-out still
-classifies its error line alone with `classify_streams`, retrying only what that line names (a rate
-limit, a connection or server error); an unrecognised line is never retried. `classify_failure`
-over the stdout of a run that looked successful can match the model's own prose ("reviewed 429
-files"), and the adapters that do not override `vendor_text` have nothing to stop it. Moving those
-rows to the adapter's verdict is deferred, and until then the lanes differ there: the executor
-retries any run with no usable result once, so replayed through both real dispatch loops
-(2026-11-08), 35 of the 51 failing exit-0 fixture rows are retried by the executor and stopped by
-the fan-out.
-`tests/test_lane_a_ladder.py` replays every committed fixture row with a non-zero exit, and every
-row as a deadline kill, through both lanes' real paths (`invoke_with_file_output` into
+On an **exit-0 failure** (an answer that did not parse, and no result file) stdout is usually the
+model's own answer, prose quoting whatever the plan says about 429s and 401s, and **no answer may
+decide a retry, a backoff or a stop on either lane**. Both lanes read such a run through one gate,
+`providers/base.exit_zero_failure_category`. It gives a verdict only for an adapter that declares
+`EXIT0_CLASSIFIABLE = True`, a reviewed claim that its `classify_exit_zero` never reads the answer,
+in a complete envelope or an interrupted one: claude-code, cursor-agent, gemini and grok read their
+envelope without the answer field (and a cut envelope not at all), and codex, opencode, omp, pi,
+cline, kimi and fx through `vendor_text` reductions that keep only the CLI's own events. Each
+adapter's declaration carries its reason. agy, aider, goose, kilocode, copilot, muse, qwen-code and
+vibe declare `False`: their answer cannot be told apart from what the CLI wrote (aider's answer cut
+before its accounting line can quote its own `litellm.RateLimitError: …` line verbatim; goose's
+model turn can open with its `Ran into this error` wording and lacks the `metadata.inference` stamp
+whenever goose could not resolve the model), so the run is left unclassified, the fan-out stops on
+its error line and the executor keeps its parse failure's one retry; their exit-0 rows are marked
+`open`. A line's shape cannot say who wrote it, so only a structural marker the model cannot write
+earns `True`. `spawn_failed` from the gate is read as nothing (a CLI that refused its own invocation
+never exits 0). A stdout answer that parses but is not one (`_is_valid_parsed_data`, a bare `raw`
+wrapper) takes one verdict on both lanes: the gate's when it names a category (a real diagnosis on
+stderr, say), else `unparseable_result`. The executor's `_classify_failed_run` asks the gate after
+its own rejection; `invoke_with_file_output` asks it the same way, through
+`provider_outcome.rejected_answer_category`, over the capture the exit 0 handed back, and carries the
+verdict on `details`. A failure with no verdict at all (a launch failure, an adapter that
+raised, an adapter that is not `EXIT0_CLASSIFIABLE`) is classified by its error line alone with
+`classify_streams`, retrying only what that line names (a rate limit, a connection or server
+error); an unrecognised line is never retried. `tests/test_exit_zero_prose_matrix.py` feeds every
+adapter rate-limit, auth, context-length, numeric and launch prose, and quoted diagnostic lines, in
+its complete, unfinished and cut envelopes and asserts neither lane moves off its status for a
+neutral answer; it also gives every adapter a rejected `raw` answer with and without a stderr
+diagnosis and asserts both lanes agree.
+`tests/test_lane_a_ladder.py` replays every committed failing fixture row, exit 0 included, and
+every row as a deadline kill, through both lanes' real paths (`invoke_with_file_output` into
 `run_single_model`, and `dispatch_task` with the spawn stubbed and the profile gate lifted) and
-asserts the same number of dispatches, apart from the two deliberate verdicts above.
+asserts the same number of dispatches, apart from the deliberate verdict and the `open` exit-0
+rows above.
 `tests/test_code_review_ladder.py` drives the same verdicts through review-code's slot and asserts it
 dispatches each as often as review-plan's. On both review lanes the slot's deadline starts
 (`slot_ladder`) before its prompt and result baselines are prepared, which it pays for. A slot that

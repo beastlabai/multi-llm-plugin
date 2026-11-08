@@ -146,7 +146,7 @@ rows:
       **exit 0** — so the ONLY thing separating this from a good run is that the
       answer is empty.
     expect:
-      lane_status: {lane_a: null, lane_b: runner_error, open: "U38b (PROV-1 phase 2)"}
+      lane_status: {lane_a: runner_error, lane_b: runner_error}
       success: false
       error_contains: ["No valid JSON found in text"]
       raw_contains: ['"result":""', '"is_error":false', '"num_turns":2']
