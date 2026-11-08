@@ -8628,21 +8628,31 @@ class TestPublishGate:
             messages.add(pkg_build.check_stamp(staged, allow_dirty=True))
         assert len(messages) == 5, "two refusals share a message"
 
-    def test_the_publish_recipe_checks_the_stamp_before_npm(self):
-        """The refusal happens **before** npm is invoked at all.
-
-        ``opencode-publish`` no longer reaches npm: it refuses and names the two
-        guarded paths. The laptop one, ``opencode-publish-first``, checks the
-        stamp among its preflights, all of which run before the upload
-        (``test_opencode_first_release.py`` grades the order and each refusal).
-        """
+    def test_the_publish_recipe_never_reaches_npm(self):
+        """``opencode-publish`` no longer uploads: it refuses, names the workflow
+        dispatch (the one guarded path, with provenance) and exits non-zero."""
         recipes = _makefile_recipes(REPO_ROOT / "Makefile")
-        assert not any(
-            re.search(r"\bnpm\s+publish\b", line) for line in recipes["opencode-publish"]
-        )
-        assert any("first_release.py" in line for line in recipes["opencode-publish-first"])
-        source = (PACKAGE_DIR / "first_release.py").read_text(encoding="utf-8")
-        assert source.index('"--check-stamp"') < source.index('"npm", "publish"')
+        body = " ".join(recipes["opencode-publish"])
+        assert body, "opencode-publish has no recipe"
+        assert not re.search(r"\bnpm\s+publish\b", body) and "--provenance" not in body
+        assert "workflow" in body
+        assert body.rstrip().endswith("exit 1")
+
+    @pytest.mark.skipif(shutil.which("make") is None or os.name == "nt",
+                        reason="needs make and a POSIX shell for the recipe")
+    def test_the_publish_recipe_refuses_and_names_the_workflow(self):
+        done = subprocess.run(["make", "-s", "opencode-publish"], cwd=REPO_ROOT,
+                              capture_output=True, text=True, timeout=60)
+        assert done.returncode != 0
+        assert "workflow dispatch" in done.stderr
+        assert "opencode-publish-first" not in done.stderr, "a removed target is still named"
+
+    def test_the_first_release_target_is_gone(self):
+        """The first npm release (0.1.1) is done, and its laptop path with it:
+        npm only refuses a second "first" publish, so the target could only
+        ever refuse. packaging/opencode/README.md keeps the record's pointer."""
+        assert "opencode-publish-first" not in _makefile_recipes(REPO_ROOT / "Makefile")
+        assert not (PACKAGE_DIR / "first_release.py").exists()
 
     def test_the_publish_recipe_never_allows_a_dirty_tree(self):
         """``ALLOW_DIRTY`` is a development convenience and must not reach here.

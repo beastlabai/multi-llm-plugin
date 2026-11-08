@@ -26,6 +26,11 @@ replaced the refusal. It owns three things and nothing else:
   evidence it writes under ``.gate/`` (gitignored) is what ``build.py
   --write-stamp`` requires and embeds.
 
+Each tier's image build and container rows run through ``release_gate.py step``,
+which bounds them by wall clock and keeps their output in ``.gate/logs/``. The
+step runner, the session and the record vocabulary are the helper layer this
+gate shares with the opencode one (``packaging/common/gate.py``).
+
 What the evidence says about row 1 is deliberately narrow. Upstream's
 ``validate_plugin.py`` has shipped in no codex since 0.156.1; the
 ``upstream-validator`` row records ``absent`` or runs what it finds. The
@@ -38,9 +43,7 @@ by the host's own ingestion on all three builds — rows 6b, 7 and 13.
 from __future__ import annotations
 
 import argparse
-import datetime
 import json
-import os
 import re
 import subprocess
 import sys
@@ -49,6 +52,10 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = PACKAGE_DIR.parent.parent
+if str(REPO_ROOT / "packaging") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "packaging"))
+from common import gate as common_gate  # noqa: E402
+
 SKILL_DIR = REPO_ROOT / "skills" / "multi-llm"
 CONTAINER_DIR = SKILL_DIR / "tests" / "container"
 HOST_MATRIX = CONTAINER_DIR / "host_matrix.yaml"
@@ -88,8 +95,7 @@ NPM_PACKAGE = "@openai/codex"
 _SEMVER = re.compile(r"\d+\.\d+\.\d+")
 
 
-class GateError(Exception):
-    """A refusal, worded for the maintainer reading the make output."""
+GateError = common_gate.GateError
 
 
 # ---------------------------------------------------------------------------
@@ -200,31 +206,12 @@ def resolve_version(tier: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _harness():
-    if str(SKILL_DIR) not in sys.path:
-        sys.path.insert(0, str(SKILL_DIR))
-    from tests.container import harness  # noqa: WPS433 — the record vocabulary
-
-    return harness
+    return common_gate.harness(SKILL_DIR)
 
 
-def _read_json(path: Path) -> Any:
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-
-
-_STAMP = re.compile(r"\d{8}T\d{6}Z")
-
-
-def _records_for(row_id: str, since: str, records_dir: Path) -> List[Path]:
-    """Every record of ``row_id`` started at or after ``since``, oldest first."""
-    found = []
-    for path in sorted(records_dir.glob(f"*-{row_id}.json")):
-        stamp = path.name[: -len(f"-{row_id}.json")]
-        if _STAMP.fullmatch(stamp) and stamp >= since:
-            found.append(path)
-    return found
+_read_json = common_gate.read_json
+_STAMP = common_gate.STAMP_RE
+_records_for = common_gate.records_for
 
 
 def _version_key(version: str) -> tuple:
@@ -235,7 +222,7 @@ def _version_key(version: str) -> tuple:
 # The session: one gate invocation's evidence, never a mix of several
 # ---------------------------------------------------------------------------
 
-SESSION_NAME = "session.json"
+SESSION_NAME = common_gate.SESSION_NAME
 
 
 def begin_session(directory: Path = EVIDENCE_DIR) -> Dict[str, str]:
@@ -245,22 +232,12 @@ def begin_session(directory: Path = EVIDENCE_DIR) -> Dict[str, str]:
     accepts only evidence carrying the current id — so a tier that went green
     weeks ago, under another harness, cannot be stamped beside today's.
     """
-    import uuid
-
-    directory.mkdir(parents=True, exist_ok=True)
-    for old in directory.glob("*.json"):
-        old.unlink()
-    session = {"id": uuid.uuid4().hex,
-               "started_at": datetime.datetime.now(datetime.timezone.utc).strftime(
-                   "%Y-%m-%dT%H:%M:%SZ")}
-    (directory / SESSION_NAME).write_text(json.dumps(session, indent=2) + "\n",
-                                          encoding="utf-8")
-    return session
+    return common_gate.begin_session(directory)
 
 
 def current_session(directory: Path = EVIDENCE_DIR) -> Optional[str]:
-    session = _read_json(directory / SESSION_NAME)
-    return str(session["id"]) if isinstance(session, dict) and session.get("id") else None
+    session = common_gate.current_session(directory)
+    return str(session["id"]) if session else None
 
 
 def _session_for_check(directory: Path) -> str:
@@ -394,8 +371,7 @@ def check_tier(tier: str, image: str, since: str, version: str, *,
         "image_digest": next(iter(image_digests), None),
         "codex_version": version, "digest": digest, "version": manifest_version(),
         "since": since,
-        "checked_at": datetime.datetime.now(datetime.timezone.utc).strftime(
-            "%Y-%m-%dT%H:%M:%SZ"),
+        "checked_at": common_gate.iso(common_gate.now()),
         "run": next(iter(stamps), None),
         "rows": evidence_rows, "features": features,
         "upstream_validator": validator, "git_route": git_route,
@@ -407,9 +383,8 @@ def write_evidence(evidence: Mapping, directory: Path = EVIDENCE_DIR) -> Path:
     the tier runs on its own)."""
     directory.mkdir(parents=True, exist_ok=True)
     stamped = {**evidence, "session": evidence.get("session") or _session_for_check(directory)}
-    path = directory / f"{evidence['tier']}.json"
-    path.write_text(json.dumps(stamped, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return path
+    return common_gate.write_json(directory / f"{evidence['tier']}.json", stamped,
+                                  sort_keys=True)
 
 
 def load_evidence(directory: Path = EVIDENCE_DIR) -> Dict[str, Any]:
@@ -489,6 +464,27 @@ def describe(evidence: Mapping[str, Any]) -> List[str]:
 
 
 # ---------------------------------------------------------------------------
+# One bounded gate step, with its log kept
+# ---------------------------------------------------------------------------
+
+#: How long a step's process group gets between SIGTERM and SIGKILL. A tier's
+#: steps are ``docker build`` and the container pytest: a ``docker run`` CLI
+#: given SIGTERM proxies it to its container, whose entrypoint then has
+#: ``docker stop``'s ten seconds; the rest is ``uv run`` relaying the signal and
+#: the interpreters unwinding.
+STEP_GRACE_S = 30.0
+
+
+def run_step(name: str, argv: Sequence[str], *, timeout: float,
+             capture: Optional[Path] = None, directory: Path = EVIDENCE_DIR,
+             stdin: Optional[Path] = None) -> int:
+    """One gate step under a wall-clock bound, its output tee'd to
+    ``.gate/logs/<name>.log`` (:func:`common.gate.run_step` has the contract)."""
+    return common_gate.run_step(name, argv, timeout=timeout, grace=STEP_GRACE_S,
+                                directory=directory, capture=capture, stdin=stdin)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -507,7 +503,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     check.add_argument("--since", required=True, help="the tier's start, YYYYmmddTHHMMSSZ")
     check.add_argument("--version", required=True, dest="codex_version")
     sub.add_parser("summary", help="describe the evidence on disk")
-    args = parser.parse_args(list(argv) if argv is not None else None)
+    common_gate.add_step_parser(sub)
+    words, command = common_gate.split_step_command(
+        list(argv) if argv is not None else sys.argv[1:])
+    args = parser.parse_args(words)
     try:
         if args.command == "preflight":
             problems = schedule_problems()
@@ -533,6 +532,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         elif args.command == "summary":
             for line in describe(load_evidence()):
                 print(line)
+        elif args.command == "step":
+            if not command:
+                parser.error("step needs a command after --")
+            return run_step(args.name, command, timeout=args.timeout, capture=args.capture,
+                            directory=EVIDENCE_DIR, stdin=args.stdin)
     except GateError as exc:
         print(f"REFUSING: {exc}", file=sys.stderr)
         return 1

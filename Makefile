@@ -37,6 +37,9 @@ IMAGE_LATEST  := mllm-e2e:latest-probe
 PLATFORM ?= linux/amd64
 
 PYTEST := uv run --project skills/multi-llm -- pytest skills/multi-llm/tests
+# The unpinned host lane's credential guards (tests/container/lane_guard.py), run
+# by `e2e-container-latest-host` before its image is built and after its pytest.
+LANE_GUARD := uv run --project skills/multi-llm -- python $(CONTAINER_DIR)/lane_guard.py
 
 # --- The opencode npm package (packaging/opencode/) -------------------------- #
 # A different layer of npm from the container's pinned CLIs above: those are
@@ -104,6 +107,23 @@ PACKAGE_PYTEST := uv run --project skills/multi-llm -- pytest \
     skills/multi-llm/tests/test_opencode_package.py \
     skills/multi-llm/tests/test_uv_candidates.py
 
+# WHICH PLAIN ROWS THE THREE `-ci` TIERS RUN. `all` (the default, and what the
+# publish workflows and the full gates run) runs each route's whole plain
+# selection beside its `package` rows, so a tier graded by itself stands on its
+# own evidence. `graded` is the PR `package` job's spelling: that job runs in the
+# same workflow as the Ubuntu `test` leg, which has already run every plain row,
+# so it keeps only the plain rows a grader reads (opencode's rows 1-6 and 5b,
+# `release_gate.py ci-nodes`) and leaves the rest to `test`. The `package`-marked
+# rows, the clean rebuilds and the moved-tree rule run in both. Anything else
+# is refused here rather than read as one of the two.
+PLAIN_ROWS ?= all
+ifneq ($(PLAIN_ROWS),all)
+ifneq ($(PLAIN_ROWS),graded)
+$(error PLAIN_ROWS must be `all` or `graded`, not `$(PLAIN_ROWS)`)
+endif
+endif
+PLAIN_GRADED := $(filter graded,$(PLAIN_ROWS))
+
 # --- The codex plugin (packaging/codex/) ------------------------------------ #
 # Unlike the npm package, the built tree `packaging/codex/multi-llm/` is
 # COMMITTED: the Git marketplace route serves the checked-in copy with no build
@@ -151,6 +171,12 @@ CLAUDE_PACKAGE_PYTEST := uv run --project skills/multi-llm -- pytest \
 # each tier runs, and the accounting that turns run records into the evidence
 # the stamp requires.
 CODEX_GATE := uv run --project skills/multi-llm -- python $(CODEX_PKG)/release_gate.py
+# One bounded tier step (`release_gate.py step NAME --timeout S -- CMD`): its own
+# session with no terminal, SIGTERM then SIGKILL to its process group at the
+# bound, its output kept in $(CODEX_PKG)/.gate/logs/<step>.log. The bounds sit
+# above what each step needs: an image build, or MLLM_E2E_MATRIX_TIMEOUT_S's
+# default lane cap plus the harness's own start-up.
+CODEX_GATE_STEP := $(CODEX_GATE) step
 CODEX_VERSION_DOCKERFILE := skills/multi-llm/tests/container/Dockerfile.codex-version
 CODEX_MINIMUM_IMAGE := mllm-e2e:codex-minimum
 CODEX_CEILING_IMAGE := mllm-e2e:codex-ceiling
@@ -185,7 +211,7 @@ export MLLM_E2E_MATRIX_TIMEOUT_S
         opencode-stage opencode-package opencode-package-check-ci \
         opencode-package-check opencode-publish opencode-bump opencode-latest-check \
         opencode-print-registry opencode-check-bump opencode-registry-check \
-        opencode-registry-absent opencode-publish-first \
+        opencode-registry-absent \
         codex-regen codex-package codex-package-check-ci codex-package-check \
         codex-gate-reset codex-gate-pinned codex-gate-minimum codex-gate-ceiling \
         codex-gate-derived codex-publish \
@@ -218,8 +244,7 @@ help:
 	@echo "  make opencode-package-check-ci    rows 1-6 and 5b, graded test by test: no Docker, no registry, no opencode binary"
 	@echo "  make opencode-package-check       the FULL gate: rows 7-9 too, in one session; stamps and exports its record only if all passed"
 	@echo "  make opencode-registry-absent [OUT=f] row 9: the version must be absent from the single registry"
-	@echo "  make opencode-publish-first [DRY_RUN=1] the laptop FIRST release: uploads the gated tarball"
-	@echo "  make opencode-publish             refuses: names the two guarded publish paths"
+	@echo "  make opencode-publish             refuses: names the guarded publish path"
 	@echo "  make opencode-bump VERSION=x.y.z  move every opencode pin to one release; re-capture its fixtures (\$$0)"
 	@echo "                                    (a release older than the pin also needs ALLOW_DOWNGRADE=1)"
 	@echo "  make opencode-latest-check        exit 1 when npm has a newer opencode than the pin"
@@ -490,7 +515,9 @@ e2e-container-latest: e2e-image-latest
 	  $(PYTEST) -m "container and not live and not live_provider" -rs
 
 # The one place in this design where an unpinned image is allowed near a key.
-# The guard is a target-level refusal, not a README sentence.
+# The guard is a target-level refusal, not a README sentence. Both checks are
+# $(LANE_GUARD) subcommands, so tests/test_makefile_lanes.py executes them; any
+# exit but 0 stops the recipe, so a guard that crashes refuses too.
 #
 # THE KEY IS REQUIRED UP FRONT, and that is not a convenience check. This target
 # *is* the credentialed host lane under an unpinned image: every test its
@@ -538,27 +565,7 @@ e2e-container-latest: e2e-image-latest
 # exited on `unrecognized arguments` and printed no delta at all, which is the
 # one thing it must not do before handing a live key to unreviewed binaries.
 e2e-container-latest-host: e2e-preflight
-	@test -n "$${OPENROUTER_API_KEY:-}" || { \
-	  echo "make: this target IS the credentialed host lane, so it needs OPENROUTER_API_KEY"; \
-	  echo "      (a DEDICATED key carrying a key-level spend limit). Without one every row"; \
-	  echo "      skips, the lane covers nothing, and an @latest image proves nothing —"; \
-	  echo "      refusing here rather than building it first."; \
-	  echo "      Credential-free instead: make e2e-container-host-discovery  (host lane, free tier)"; \
-	  echo "                               make e2e-container-latest          (provider lane @latest)"; \
-	  exit 1; }
-	@if [ "$${MLLM_ALLOW_UNPINNED_HOST_LANE:-}" != "1" ]; then \
-	  echo "make: refusing to run the host lane against an UNPINNED image with a credential present."; \
-	  echo "      found: OPENROUTER_API_KEY"; \
-	  for v in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN OPENAI_API_KEY GEMINI_API_KEY; do \
-	    if [ -n "$${!v:-}" ]; then \
-	      echo "      also exported: $$v (unset for the run below — no container is ever given it)"; \
-	    fi; \
-	  done; \
-	  echo "      This target installs every CLI @latest — unreviewed, unhashed binaries — and would"; \
-	  echo "      hand them a live key plus outbound network. If that is what you want, set"; \
-	  echo "      MLLM_ALLOW_UNPINNED_HOST_LANE=1 deliberately; it must never come from a shell profile."; \
-	  exit 1; \
-	fi
+	@$(LANE_GUARD) unpinned-host
 	$(MAKE) e2e-image-latest
 	@$(MAKE) --no-print-directory e2e-version-delta
 	@mkdir -p $(CONTAINER_DIR)/records
@@ -567,14 +574,7 @@ e2e-container-latest-host: e2e-preflight
 	env -u ANTHROPIC_API_KEY -u ANTHROPIC_AUTH_TOKEN -u OPENAI_API_KEY -u GEMINI_API_KEY \
 	  MLLM_E2E_IMAGE=$(IMAGE_LATEST) \
 	  $(PYTEST) -m "container and live" -rs; \
-	if [ "$$(find $(CONTAINER_DIR)/records -name '*.json' -newer "$$stamp" | wc -l)" -eq 0 ]; then \
-	  echo "make: NOT-RUN — pytest exited green but not one host-lane row executed:"; \
-	  echo "      no $(CONTAINER_DIR)/records/<utc>-<row>.json was written by this invocation,"; \
-	  echo "      and a row that ran always writes one. A lane that covered nothing is a"; \
-	  echo "      distinct outcome from a pass, and it is reported as one."; \
-	  echo "      The named skip reasons are in the run above (-rs) and in $(CONTAINER_DIR)/runs/."; \
-	  exit 1; \
-	fi
+	$(LANE_GUARD) rows-ran --records $(CONTAINER_DIR)/records --since "$$stamp"
 
 # --------------------------------------------------------------------------- #
 # The credentialed PROVIDER lane (harness-expansion.md §7.4) — the third lane.
@@ -772,16 +772,20 @@ opencode-package:
 # selections always run and the grader always reads both, so a red run still
 # names every row it cost; the recipe then fails if any of the three did. Inside a
 # full-gate session for HEAD the grader also writes each row's evidence; anywhere
-# else (the PR job's fresh clone) it grades only.
+# else (the PR job's fresh clone) it grades only. With PLAIN_ROWS=graded the plain
+# selection is exactly the nodes the rows name (`ci-nodes`), and an empty or
+# failed listing stops the recipe before pytest could collect anything else.
 opencode-package-check-ci:
 	$(OPENCODE_BUILD)
 	cd $(OPENCODE_PKG) && npm pack --dry-run
 	@mkdir -p $(OPENCODE_GATE_DIR)/junit
 	@rm -f $(OPENCODE_GATE_DIR)/junit/ci-package-rows.xml $(OPENCODE_GATE_DIR)/junit/ci-plain-rows.xml
 	rc=0; \
+	$(if $(PLAIN_GRADED),plain="$$($(OPENCODE_GATE) ci-nodes)"; test -n "$$plain";) \
 	MLLM_REQUIRE_PACKAGE_ROWS=1 $(PYTEST) -m "package and not container" -q \
 	  --junitxml=$(OPENCODE_GATE_DIR)/junit/ci-package-rows.xml || rc=$$?; \
-	$(PACKAGE_PYTEST) -m "not live and not container and not package" -q \
+	$(if $(PLAIN_GRADED),uv run --project skills/multi-llm -- pytest $$plain,$(PACKAGE_PYTEST)) \
+	  -m "not live and not container and not package" -q \
 	  --junitxml=$(OPENCODE_GATE_DIR)/junit/ci-plain-rows.xml || rc=$$?; \
 	$(OPENCODE_GATE) grade-ci --junit $(OPENCODE_GATE_DIR)/junit/ci-package-rows.xml \
 	  --junit $(OPENCODE_GATE_DIR)/junit/ci-plain-rows.xml || rc=$$?; \
@@ -793,8 +797,8 @@ opencode-package-check-ci:
 # scenarios (8) and the registry-absence check (9) — then bump discipline, then
 # the stamp, then the release-gate record.
 #
-# IT STAMPS ONLY WHAT IT RAN, IN THIS RUN. The stamp is what authorizes
-# `opencode-publish-first`, and npm makes a published version permanent, so a stamp
+# IT STAMPS ONLY WHAT IT RAN, IN THIS RUN. The stamp is what the release rests
+# on, and npm makes a published version permanent, so a stamp
 # written after a SUBSET of the rows is an authorization nobody earned. Recipe
 # order is not what enforces that: `begin` opens a gate SESSION (earlier evidence
 # deleted, a fresh id beside the candidate commit), every row's grader writes its
@@ -844,12 +848,11 @@ opencode-package-check-ci:
 # $(OPENCODE_GATE_DIR)/export/ (never records/, where an untracked file would
 # make the tree dirty and the stamp refuse). It is copied into
 # $(CONTAINER_DIR)/records/ and committed in the default branch's own commit after
-# the fast-forward (plan step 2), never in the tag's tree; the tag's commit is
-# then checked out again before `make opencode-publish-first`. `export-record`
+# the fast-forward (plan step 2), never in the tag's tree. `export-record`
 # prints those lines.
 opencode-package-check:
 	@$(OPENCODE_GATE) begin $(if $(ALLOW_DIRTY),--allow-dirty,)
-	$(OPENCODE_GATE_STEP) ci-rows --timeout 3600 -- $(MAKE) --no-print-directory opencode-package-check-ci
+	$(OPENCODE_GATE_STEP) ci-rows --timeout 3600 -- $(MAKE) --no-print-directory opencode-package-check-ci PLAIN_ROWS=all
 	$(OPENCODE_GATE_STEP) candidate --timeout 900 -- $(MAKE) --no-print-directory opencode-package
 	$(OPENCODE_GATE_STEP) host-install --timeout 900 --capture $(OPENCODE_GATE_DIR)/raw/opencode-bin.txt -- \
 	  uv run --project skills/multi-llm -- python $(OPENCODE_PKG)/bump.py install --prefix $(abspath $(OPENCODE_GATE_DIR))/host
@@ -895,40 +898,21 @@ opencode-registry-absent:
 	node $(OPENCODE_PKG)/registry_absent.mjs --registry $(OPENCODE_REGISTRY) $(if $(OUT),--out "$(OUT)") \
 	  $(if $(and $(filter command line,$(origin PACKAGE_JSON)),$(PACKAGE_JSON)),--package-json "$(PACKAGE_JSON)")
 
-# THE LAPTOP FIRST RELEASE, and only that. npm's trusted publishing still needs
-# an existing package (`npm trust`: "The package you're configuring must already
-# exist", rechecked 2026-10-25), so the first version is uploaded from the
-# maintainer's machine, authenticated interactively and WITHOUT provenance; every
-# later version goes through the workflow dispatch, with it. first_release.py
-# refuses, naming the condition, unless the tree is clean, the full stamp binds
-# the gated tarball, the annotated `opencode-v<version>` tag names HEAD, HEAD is
-# on origin/master, every required check run on that SHA succeeded (`test (<os>)`
-# per test.yml matrix leg, plus `package`), the shared-version bump check and
-# row 9 pass, it IS the first release (npm lists no version of the package at
-# all, and HEAD's capabilities name no `public_version`), and the gated tarball
-# still recomputes to the stamp. Then it
-# uploads THAT FILE with `--ignore-scripts`, never the directory, and reads
-# `dist.integrity` back from a fresh cache until it equals the gated one.
-# `DRY_RUN=1` runs every preflight and prints the upload without running it.
-# No ALLOW_DIRTY here, and the script strips MULTI_LLM_ALLOW_DIRTY from its children.
-opencode-publish-first:
-	uv run --project skills/multi-llm -- python $(OPENCODE_PKG)/first_release.py $(if $(DRY_RUN),--dry-run)
-
 # NO LONGER A PUBLISH PATH. This target used to run the upload in the package
 # directory with `--provenance`, and that shipped the wrong bytes: the
 # manifest's `prepack` hook rebuilt dist/ there and npm uploaded whatever that
 # rebuild produced, while `--check-stamp` had compared a separate rebuild a
-# moment earlier. Nothing compared the uploaded tarball with the gated one. Both
-# guarded paths now upload the exact tarball the full gate packed, scanned and
-# loaded (`npm pack` once, then the file, with `--ignore-scripts`); the `prepack`
-# hook stays only as the backstop for a hand-typed bare `npm pack`. Measured: a
-# tarball upload runs no lifecycle scripts, so nothing can repack it.
+# moment earlier. Nothing compared the uploaded tarball with the gated one. The
+# guarded path uploads the exact tarball its gate packed, scanned and loaded
+# (`npm pack` once, then the file, with `--ignore-scripts`); the `prepack` hook
+# stays only as the backstop for a hand-typed bare `npm pack`. Measured: a
+# tarball upload runs no lifecycle scripts, so nothing can repack it. The first
+# release (0.1.1) was a one-off laptop upload; docs/development/hosts.md says
+# where its record lives.
 opencode-publish:
-	@echo "make: REFUSING: opencode-publish no longer uploads anything. The two guarded paths:" >&2; \
-	echo "      * the FIRST release, from this machine: make opencode-publish-first" >&2; \
-	echo "        (DRY_RUN=1 to run its preflights only)" >&2; \
-	echo "      * every later release: the publish-opencode-plugin workflow dispatch" >&2; \
-	echo "        (mode: publish, tag: opencode-v<version>), with provenance" >&2; \
+	@echo "make: REFUSING: opencode-publish no longer uploads anything. The guarded path:" >&2; \
+	echo "      the publish-opencode-plugin workflow dispatch" >&2; \
+	echo "      (mode: publish, tag: opencode-v<version>), with provenance" >&2; \
 	exit 1
 
 # THE SUPPORTED OPENCODE IS ITS NEWEST RELEASE, AND ONLY THAT ONE. It is the
@@ -1027,10 +1011,11 @@ codex-package:
 # The rows that need no Docker daemon and no codex binary: the plain rows of the
 # codex suite, then every `package`-marked row with skips turned into failures.
 # Writes NO stamp. `ALLOW_DIRTY=1` swaps the clean build for the regeneration,
-# for a local run mid-edit; CI never sets it.
+# for a local run mid-edit; CI never sets it. PLAIN_ROWS=graded leaves the plain
+# rows to the `test` job: no grader reads them here.
 codex-package-check-ci:
 	$(if $(ALLOW_DIRTY),$(MAKE) codex-regen,$(MAKE) codex-package)
-	$(CODEX_PACKAGE_PYTEST) -m "not live and not container and not package" -q
+	$(if $(PLAIN_GRADED),@echo "codex-package-check-ci: plain rows left to the test job (PLAIN_ROWS=graded)",$(CODEX_PACKAGE_PYTEST) -m "not live and not container and not package" -q)
 	MLLM_REQUIRE_PACKAGE_ROWS=1 $(CODEX_PACKAGE_PYTEST) -m "package and not container" -q
 	@echo "codex-package-check-ci: CI tier green (no stamp written)"
 
@@ -1062,10 +1047,11 @@ claude-check-bump:
 
 # The rows that need no Docker daemon and no claude binary. `ALLOW_DIRTY=1` swaps
 # the clean build for the regeneration, for a local run mid-edit; CI never sets it.
+# PLAIN_ROWS=graded leaves the plain rows to the `test` job: no grader reads them.
 claude-package-check-ci:
 	$(if $(ALLOW_DIRTY),$(MAKE) claude-regen,$(MAKE) claude-package)
 	$(MAKE) --no-print-directory claude-check-release
-	$(CLAUDE_PACKAGE_PYTEST) -m "not live and not container and not package" -q
+	$(if $(PLAIN_GRADED),@echo "claude-package-check-ci: plain rows left to the test job (PLAIN_ROWS=graded)",$(CLAUDE_PACKAGE_PYTEST) -m "not live and not container and not package" -q)
 	MLLM_REQUIRE_PACKAGE_ROWS=1 $(CLAUDE_PACKAGE_PYTEST) -m "package and not container" -q
 	@echo "claude-package-check-ci: CI tier green"
 
@@ -1131,9 +1117,11 @@ claude-publish:
 # `make -j` cannot reorder the reset after a tier or race two tiers on the
 # shared records directory and docker. The reset begins a gate SESSION and the
 # stamp takes only evidence from it: every tier of one invocation, none older.
+# Each tier's image build and container rows are $(CODEX_GATE_STEP)s, bounded
+# by wall clock, so a hung build or row ends the gate instead of holding it.
 codex-package-check:
 	$(MAKE) --no-print-directory codex-gate-reset
-	$(MAKE) --no-print-directory codex-package-check-ci
+	$(MAKE) --no-print-directory codex-package-check-ci PLAIN_ROWS=all
 	$(MAKE) --no-print-directory codex-gate-pinned
 	$(MAKE) --no-print-directory codex-gate-minimum
 	$(MAKE) --no-print-directory codex-gate-ceiling
@@ -1148,43 +1136,51 @@ codex-gate-reset:
 	@$(CODEX_GATE) begin
 
 # Rows 1, 6b, 7 and 13 on the image `make e2e-image` builds from this tree: every
-# package probe row, as the gate has always run them.
-codex-gate-pinned: e2e-image
+# package probe row, as the gate has always run them. The image is a bounded
+# step, not a prerequisite, so a hung build ends at its bound like the rows do.
+codex-gate-pinned:
+	$(CODEX_GATE_STEP) pinned-image --timeout 3600 -- $(MAKE) --no-print-directory e2e-image
 	@$(CODEX_GATE) preflight
 	@since="$$(date -u +%Y%m%dT%H%M%SZ)"; \
 	  version="$$($(CODEX_GATE) version pinned)" || exit 1; \
-	  MLLM_CODEX_GATE_TIER=pinned MLLM_E2E_IMAGE=$(IMAGE) $(CODEX_GATE_PYTEST) && \
+	  MLLM_CODEX_GATE_TIER=pinned MLLM_E2E_IMAGE=$(IMAGE) \
+	    $(CODEX_GATE_STEP) pinned-rows --timeout 5400 -- $(CODEX_GATE_PYTEST) && \
 	  $(CODEX_GATE) check pinned --image $(IMAGE) --since "$$since" --version "$$version"
 
 # The declared floor, measured rather than assumed: the pinned tier runs on the
 # container's pin, which is not the minimum users are told they need. Under this
 # tier the lane holds the rows to `min_host_version` instead of host_matrix's
 # `plugin_floor` (which tracks the pin and would refuse them).
-codex-gate-minimum: e2e-image
+codex-gate-minimum:
+	$(CODEX_GATE_STEP) minimum-base-image --timeout 3600 -- $(MAKE) --no-print-directory e2e-image
 	@version="$$($(CODEX_GATE) version minimum)" || exit 1; \
 	  $(MAKE) --no-print-directory codex-gate-derived TIER=minimum \
 	    CODEX_VERSION="$$version" CODEX_IMAGE=$(CODEX_MINIMUM_IMAGE)
 
 # A4 row 14, the ceiling: npm's newest @openai/codex, asked NOW. A fetch that
 # fails stops here naming what it could not reach — never a skip.
-codex-gate-ceiling: e2e-image
+codex-gate-ceiling:
+	$(CODEX_GATE_STEP) ceiling-base-image --timeout 3600 -- $(MAKE) --no-print-directory e2e-image
 	@version="$$($(CODEX_GATE) version ceiling)" || exit 1; \
 	  echo "codex-gate-ceiling: npm's newest @openai/codex is $$version"; \
 	  $(MAKE) --no-print-directory codex-gate-derived TIER=ceiling \
 	    CODEX_VERSION="$$version" CODEX_IMAGE=$(CODEX_CEILING_IMAGE)
 
 # The pinned image with only codex moved (Dockerfile.codex-version: built with no
-# context, the fetch is this build's one network access), then the tier's rows
-# on it. Internal: the two targets above are what to type.
+# context, `-` with the Dockerfile on stdin; the fetch is this build's one network
+# access), then the tier's rows on it. Internal: the two targets above are what
+# to type.
 codex-gate-derived:
 	@test -n "$(TIER)" && test -n "$(CODEX_VERSION)" && test -n "$(CODEX_IMAGE)" || { \
 	  echo "usage: make codex-gate-minimum | codex-gate-ceiling (sets TIER, CODEX_VERSION, CODEX_IMAGE)"; exit 1; }
 	@$(CODEX_GATE) preflight
-	docker build --platform $(PLATFORM) \
+	$(CODEX_GATE_STEP) $(TIER)-image --timeout 1800 --stdin $(CODEX_VERSION_DOCKERFILE) -- \
+	  docker build --platform $(PLATFORM) \
 	  --build-arg BASE_IMAGE=$(IMAGE) --build-arg CODEX_VERSION=$(CODEX_VERSION) \
-	  -t $(CODEX_IMAGE) - < $(CODEX_VERSION_DOCKERFILE)
+	  -t $(CODEX_IMAGE) -
 	@since="$$(date -u +%Y%m%dT%H%M%SZ)"; \
-	  MLLM_CODEX_GATE_TIER=$(TIER) MLLM_E2E_IMAGE=$(CODEX_IMAGE) $(CODEX_GATE_PYTEST) && \
+	  MLLM_CODEX_GATE_TIER=$(TIER) MLLM_E2E_IMAGE=$(CODEX_IMAGE) \
+	    $(CODEX_GATE_STEP) $(TIER)-rows --timeout 5400 -- $(CODEX_GATE_PYTEST) && \
 	  $(CODEX_GATE) check $(TIER) --image $(CODEX_IMAGE) --since "$$since" --version $(CODEX_VERSION)
 
 # Developer-facing, never a CI target: CI holds no credential that pushes a tag.

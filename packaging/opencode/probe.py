@@ -134,6 +134,12 @@ SKILL_SOURCE = REPO_ROOT / "skills" / "multi-llm"
 #: not ship, and this is the same server the container lane runs.
 STUB_SERVER = SKILL_SOURCE / "tests" / "container" / "stub_server.py"
 
+# ``packaging/common/procgroup.py`` ends a bounded child's session. It travels in
+# the registry-check kit beside this file (``registry_check.KIT_FILES``).
+if str(REPO_ROOT / "packaging") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "packaging"))
+from common import procgroup  # noqa: E402
+
 ROW = "7"
 #: The slash command the plugin's ``config`` hook injects (``COMMAND_NAME`` in
 #: ``src/index.mjs``). The tool's name is not spelled here: it is the payload's
@@ -500,58 +506,13 @@ class Bounded:
         return f"exit {self.returncode} after {self.elapsed_s:.1f}s"
 
 
-def _session_members(sid: int) -> List[int]:
-    """Every live pid in session ``sid`` (Linux ``/proc``; empty elsewhere)."""
-    members = []
-    proc = Path("/proc")
-    if not proc.is_dir():
-        return members
-    for entry in proc.iterdir():
-        if not entry.name.isdigit():
-            continue
-        try:
-            text = (entry / "stat").read_text(encoding="utf-8", errors="replace")
-            fields = text[text.rfind(")") + 2:].split()
-            if int(fields[3]) == sid:
-                members.append(int(entry.name))
-        except (OSError, ValueError, IndexError):
-            continue
-    return members
-
-
-def _signal_session(sid: int, sig: int) -> None:
-    """``sig`` to the session leader's group and to every other member.
-
-    A process group is not enough: the plugin starts ``uv`` in a group of its
-    own so that its own kill can reach the Python under it, and that group is
-    still inside this session.
-    """
-    targets = set(_session_members(sid))
-    try:
-        os.killpg(sid, sig)
-    except OSError:
-        pass
-    for pid in targets:
-        try:
-            os.kill(pid, sig)
-        except OSError:
-            pass
-
-
 def _stop(proc: "subprocess.Popen[bytes]") -> None:
-    if os.name == "nt":
-        # The gate runs on Linux; on Windows this only has to end the child the
-        # suite's own cases start, which spawn nothing.
-        proc.kill()
-        proc.wait()
-        return
-    _signal_session(proc.pid, signal.SIGTERM)
-    try:
-        proc.wait(timeout=KILL_GRACE_S)
-    except subprocess.TimeoutExpired:
-        pass
-    _signal_session(proc.pid, signal.SIGKILL)
-    proc.wait()
+    """A bounded child's whole session: SIGTERM, :data:`KILL_GRACE_S` for its
+    leader, then SIGKILL to every member left (:func:`procgroup.stop`). The
+    session, not just the group: the plugin starts ``uv`` in a group of its own
+    so that its own kill can reach the Python under it, and that group is still
+    inside this session."""
+    procgroup.stop(proc, grace=KILL_GRACE_S, session=True, until="leader")
 
 
 def run_bounded(argv: Sequence[str], *, cwd: Path, env: Mapping[str, str], budget_s: float,
@@ -604,7 +565,7 @@ def run_bounded(argv: Sequence[str], *, cwd: Path, env: Mapping[str, str], budge
                     if proc.poll() is None:
                         _stop(proc)
                     elif os.name != "nt":
-                        _signal_session(proc.pid, signal.SIGKILL)
+                        procgroup.signal_group(proc.pid, signal.SIGKILL, session=True)
     killed = reason is not None
     return Bounded(argv=tuple(argv), returncode=None if killed else proc.returncode,
                    killed=killed, reason=reason, elapsed_s=round(time.monotonic() - start, 2),

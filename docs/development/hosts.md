@@ -253,6 +253,14 @@ asserts a required inventory, sweeps for credentials and **never invokes npm**;
 `packaging/common/payload.py` is that machinery, shared so a second host's packaging plan is a thin driver
 over it.
 
+**Every npm release after the first goes through `publish-opencode-plugin.yml`.** npm configures a trusted
+publisher only on a package that already exists, so 0.1.1 (tag `opencode-v0.1.1`) was a one-off upload from the
+maintainer's machine, and its evidence is
+`tests/container/records/20261026T175524Z-opencode-release-network-check.json`. The laptop target and
+`packaging/opencode/first_release.py` were removed once that release shipped, since they could only refuse
+after it. A second npm package needing its own first upload would restore them from git history
+(`git log --diff-filter=D -- packaging/opencode/first_release.py`).
+
 The JS holds no mode word, alias, summary, flag name, exit code or message of its own — everything
 the model reads is generated into `dist/cli-surface.json` from
 `modes.py`/`cli_common.py`, and `tests/test_opencode_package.py` greps the committed

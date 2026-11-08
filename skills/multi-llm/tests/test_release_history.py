@@ -591,8 +591,8 @@ class TestNpmStub:
          "printed no manifest"),
         (manifest("0.1.1"), "printed no manifest"),
         (manifest(name="another-package"), "printed no manifest"),
-        # A runner that turns its timeout into exit 124 says so only on stderr
-        # (first_release.Runner): the refusal must still name it.
+        # A runner that turns its timeout into exit 124 says so only on stderr:
+        # the refusal must still name it.
         ({"exit": 124, "stdout": "", "stderr": "npm: no answer within 90 s\n"},
          "code <none> (npm: no answer within 90 s)"),
     ], ids=["E500", "E503", "E403", "E429", "ECONNREFUSED", "stderr-only", "E404-no-match",

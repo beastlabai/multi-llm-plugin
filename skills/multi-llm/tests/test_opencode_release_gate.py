@@ -26,6 +26,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
@@ -1151,7 +1152,7 @@ class TestExport:
     def test_the_default_export_stays_out_of_the_payload_prefix(self, tmp_path, monkeypatch, built):
         """records/ lies under skills/multi-llm/, the prefix the payload's
         dirty-tree refusal covers: an untracked record written there made
-        `--check-stamp` and `opencode-publish-first` refuse the candidate the
+        `--check-stamp` refuse the candidate the
         gate had just stamped (measured on the first green full gate). So the
         default lands in the gitignored evidence directory, and the record
         reaches records/ only in the post-fast-forward commit."""
@@ -1448,16 +1449,18 @@ class TestStep:
                 sent.append(sig)
             return real_killpg(pgid, sig)
 
-        monkeypatch.setattr(gate.os, "killpg", darwin_killpg)
+        from common import procgroup
+
+        monkeypatch.setattr(procgroup.os, "killpg", darwin_killpg)
         try:
-            gate._kill(child, grace=10.0)
+            procgroup.stop(child, grace=10.0, until="group")
         finally:
             if child.poll() is None:
                 child.kill()
                 child.wait()
         assert child.returncode is not None
         assert len(probes) >= 4, probes  # past the EPERM answers, to ESRCH
-        assert sent == [gate.signal.SIGTERM], sent
+        assert sent == [signal.SIGTERM], sent
 
     def test_the_grace_is_the_probes_sweep_bound_plus_a_margin(self):
         """Imported from the probe, never re-typed: a sweep that grows moves

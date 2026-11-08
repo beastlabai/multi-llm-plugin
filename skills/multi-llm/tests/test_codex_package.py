@@ -1525,9 +1525,12 @@ class TestMake:
             "the tiers are recipe lines, never prerequisites: `make -j` would "
             "reorder the reset after a tier")
         lines = _makefile_recipes()["codex-package-check"]
-        steps = [line.split()[-1] for line in lines if line.startswith("$(MAKE)")]
+        steps = [next(word for word in reversed(line.split()) if "=" not in word)
+                 for line in lines if line.startswith("$(MAKE)")]
         assert steps == ["codex-gate-reset", "codex-package-check-ci",
                          "codex-gate-pinned", "codex-gate-minimum", "codex-gate-ceiling"]
+        assert "$(MAKE) --no-print-directory codex-package-check-ci PLAIN_ROWS=all" in lines, (
+            "the full gate runs every plain row, whatever PLAIN_ROWS the maintainer typed")
         recipe = "\n".join(lines)
         assert "$(CODEX_GATE) begin" in "\n".join(_makefile_recipes()["codex-gate-reset"])
         assert "REFUSING (rows 6b, 14)" not in makefile
@@ -1552,9 +1555,39 @@ class TestMake:
             assert "|| exit 1" in recipe, f"{target}: a failed version lookup must stop"
             assert "codex-gate-derived" in recipe, target
         derived = "\n".join(recipes["codex-gate-derived"])
-        assert "- < $(CODEX_VERSION_DOCKERFILE)" in derived, (
-            "the derived image is built with no context")
+        assert "--stdin $(CODEX_VERSION_DOCKERFILE)" in derived and "-t $(CODEX_IMAGE) -" in derived, (
+            "the derived image is built with no context: `-`, the Dockerfile on stdin")
         assert "--build-arg BASE_IMAGE=$(IMAGE)" in derived
+
+    def test_every_tier_step_that_can_hang_is_bounded(self):
+        """A hung ``docker build`` or container row ends at its bound instead of
+        holding the maintainer's gate forever: the image builds and the rows
+        are ``release_gate.py step``s with a ``--timeout``, never bare commands
+        or prerequisites."""
+        makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+        assert "CODEX_GATE_STEP := $(CODEX_GATE) step" in makefile
+        recipes = _makefile_recipes()
+        joined = {target: " ".join(recipes[target]).replace("\\ ", " ")
+                  for target in ("codex-gate-pinned", "codex-gate-minimum",
+                                 "codex-gate-ceiling", "codex-gate-derived")}
+        for target in ("codex-gate-pinned", "codex-gate-minimum", "codex-gate-ceiling"):
+            header = re.search(rf"^{target}:(.*)$", makefile, re.M).group(1)
+            assert not header.strip(), f"{target}: the image is a bounded step, not a prerequisite"
+            first = recipes[target][0]
+            assert first.startswith("$(CODEX_GATE_STEP) ") and "--timeout" in first, target
+            assert first.endswith("-- $(MAKE) --no-print-directory e2e-image"), target
+        for target in ("codex-gate-pinned", "codex-gate-derived"):
+            recipe = joined[target]
+            assert re.search(r"\$\(CODEX_GATE_STEP\) \S+-rows --timeout \d+ -- \$\(CODEX_GATE_PYTEST\)",
+                             recipe), target
+        assert re.search(r"\$\(CODEX_GATE_STEP\) \$\(TIER\)-image --timeout \d+ "
+                         r"--stdin \$\(CODEX_VERSION_DOCKERFILE\) -- +docker build",
+                         joined["codex-gate-derived"])
+        for target, recipe in joined.items():
+            assert recipe.count("$(CODEX_GATE_PYTEST)") == recipe.count("-- $(CODEX_GATE_PYTEST)"), (
+                f"{target}: a container pytest outside a bounded step")
+            assert recipe.count("docker build") == len(re.findall(r"-- +docker build", recipe)), (
+                f"{target}: a docker build outside a bounded step")
 
     def test_the_gate_pytest_runs_no_credentialed_row(self):
         makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
@@ -1566,6 +1599,13 @@ class TestMake:
                      "not live_next_command"):
             assert mark in block, mark
         assert "test_container_host_lane.py" in block
+
+    def test_the_publish_workflow_runs_every_plain_row(self):
+        """Only the PR ``package`` job may leave the plain rows to the ``test``
+        job; the publish workflow's gate runs the CI tier whole."""
+        text = (REPO_ROOT / ".github" / "workflows" / "publish-codex-plugin.yml").read_text("utf-8")
+        assert "make codex-package-check-ci" in text
+        assert "PLAIN_ROWS" not in text
 
     def test_ci_runs_the_codex_tier_beside_opencode(self):
         workflow = (REPO_ROOT / ".github" / "workflows" / "test.yml").read_text("utf-8")

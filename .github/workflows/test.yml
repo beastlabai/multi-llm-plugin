@@ -130,6 +130,12 @@ jobs:
   # point, because a gate that skips silently everywhere is indistinguishable
   # from a gate that passes. `MLLM_REQUIRE_PACKAGE_ROWS` is what turns a skip
   # into a failure, and `make opencode-package-check-ci` sets it.
+  #
+  # `PLAIN_ROWS=graded` on each tier: the Ubuntu `test` leg above already runs
+  # every plain (unmarked) row of these suites on the same commit, so this job
+  # runs only the plain rows a grader reads (opencode's rows 1-6 and 5b) beside
+  # the `package` rows, the clean rebuilds and the moved-tree rule. The publish
+  # workflows run the tiers with every plain row, as they must.
   package:
     runs-on: ubuntu-latest
     steps:
@@ -152,16 +158,16 @@ jobs:
       # the difference between the two targets is the whole reason a publish
       # demands the full one rather than trusting a green PR.
       - name: Package gate (A4 rows 1-6)
-        run: make opencode-package-check-ci
+        run: make opencode-package-check-ci PLAIN_ROWS=graded
       # The codex plugin's CI tier, beside the npm one: the clean rebuild must
       # equal the committed `packaging/codex/multi-llm/` (the Git route serves
-      # those bytes with no build), then the codex suite's plain and
-      # `package`-marked rows. No Docker, no codex binary, no stamp.
+      # those bytes with no build), then the codex suite's `package`-marked
+      # rows. No Docker, no codex binary, no stamp.
       - name: Codex plugin gate (CI tier)
-        run: make codex-package-check-ci
+        run: make codex-package-check-ci PLAIN_ROWS=graded
       # The Claude Code plugin's CI tier: the clean rebuild must equal the committed
-      # `packaging/claude/multi-llm/`, the moved-tree rule must hold, then the plain
-      # and `package`-marked rows. No Docker, no claude binary, no registry.
+      # `packaging/claude/multi-llm/`, the moved-tree rule must hold, then the
+      # `package`-marked rows. No Docker, no claude binary, no registry.
       #
       # The moved-tree rule is on a pull request where the shared-version check is
       # not, because Claude Code installs follow `master` and cache by version: a
@@ -174,4 +180,4 @@ jobs:
       - name: Claude Code plugin gate (CI tier)
         env:
           CLAUDE_RELEASE_BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
-        run: make claude-package-check-ci
+        run: make claude-package-check-ci PLAIN_ROWS=graded

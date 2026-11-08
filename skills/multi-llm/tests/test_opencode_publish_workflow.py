@@ -62,9 +62,18 @@ WORKFLOW_ENV = {key: str(value) for key, value in DOCUMENT["env"].items()}
 #: The tag whose push once took the retired bootstrap path in place of row 9.
 #: It is an ordinary tag now, graded as every other one is.
 FORMER_BOOTSTRAP_TAG = "opencode-v0.1.1"
+#: The local composite actions the workflow calls (``uses: ./<dir>``), by that
+#: path: their text and their parsed ``action.yml``.
+ACTION_TEXTS = {
+    f"./{path.parent.relative_to(REPO_ROOT).as_posix()}": path.read_text(encoding="utf-8")
+    for path in sorted((REPO_ROOT / ".github" / "actions").glob("*/action.yml"))
+}
+ACTIONS = {ref: yaml.safe_load(text) for ref, text in ACTION_TEXTS.items()}
 #: The workflow's text without its comment lines, shell comments in ``run``
-#: blocks included: what the runner actually reads.
-UNCOMMENTED = "\n".join(line for line in TEXT.splitlines() if not line.lstrip().startswith("#"))
+#: blocks included, and the same of every local action it calls: what the runner
+#: actually reads.
+UNCOMMENTED = "\n".join(line for text in (TEXT, *ACTION_TEXTS.values())
+                        for line in text.splitlines() if not line.lstrip().startswith("#"))
 
 needs_shell = pytest.mark.skipif(
     os.name == "nt" or shutil.which("bash") is None or shutil.which("git") is None,
@@ -235,8 +244,48 @@ def reached(context: dict) -> set:
 # Steps
 # ---------------------------------------------------------------------------
 
+def _with_inputs(value, inputs: dict):
+    """``value`` with every ``${{ inputs.<name> }}`` replaced by the call's own
+    ``with:`` value, as the runner evaluates a composite step."""
+    if isinstance(value, str):
+        return re.sub(r"\$\{\{\s*inputs\.([\w-]+)\s*\}\}",
+                      lambda match: str(inputs[match.group(1)]), value)
+    if isinstance(value, dict):
+        return {key: _with_inputs(item, inputs) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_with_inputs(item, inputs) for item in value]
+    return value
+
+
+def _effective(job_steps: list) -> list:
+    """A job's steps as they run: a call of a local composite action is
+    replaced by that action's steps, with the call's inputs. ``shell`` is
+    dropped from them: a composite step must name one, and
+    ``TestTheToolchainAction`` grades that it runs the script as the job's
+    default shell would."""
+    out = []
+    for s in job_steps:
+        ref = str(s.get("uses") or "")
+        if not ref.startswith("./"):
+            out.append(s)
+            continue
+        assert ref in ACTIONS, f"{ref} is not a local action in .github/actions/"
+        assert ACTIONS[ref]["runs"]["using"] == "composite", ref
+        for inner in ACTIONS[ref]["runs"]["steps"]:
+            out.append(_with_inputs({k: v for k, v in inner.items() if k != "shell"},
+                                    s.get("with") or {}))
+    return out
+
+
+_EFFECTIVE: dict = {}
+
+
 def steps(job_id: str) -> list:
-    return JOBS[job_id]["steps"]
+    """The job's effective steps (:func:`_effective`), built once so a step is
+    the same object on every call."""
+    if job_id not in _EFFECTIVE:
+        _EFFECTIVE[job_id] = _effective(JOBS[job_id]["steps"])
+    return _EFFECTIVE[job_id]
 
 
 def step(job_id: str, name: str) -> dict:
@@ -648,13 +697,27 @@ class TestVerify:
         assert steps("publish")[0] == steps("verify")[0]
 
     def test_it_reruns_the_gate_rows(self):
+        """The same six steps as the gate's, whole: name, id, env, bound and
+        script. They stay written out in both jobs because each carries its own
+        ``timeout-minutes``, which a composite action's steps cannot; this is
+        what keeps the two copies one."""
         names = [s.get("name") for s in steps("verify")]
         for name in ("Shared-version check", "Package gate (rows 1-6 and 5b)",
                      "Build, pack and sweep the candidate",
                      "The pinned OpenCode, from the container lockfile",
                      "Clean-install probe of the candidate tarball (row 7)", ROW9_NAME):
             assert name in names, name
-            assert step("verify", name)["run"] == step("gate", name)["run"], name
+            assert step("verify", name) == step("gate", name), name
+            assert isinstance(step("gate", name).get("timeout-minutes"), int), name
+
+    def test_the_gate_jobs_run_every_plain_row(self):
+        """The PR ``package`` job may leave the plain rows to the ``test`` job
+        (``PLAIN_ROWS=graded``); a publishing job trusts no earlier run, so it
+        runs the CI tier whole."""
+        for job_id in ("gate", "verify"):
+            tier = step(job_id, "Package gate (rows 1-6 and 5b)")
+            assert tier["run"].strip() == "make opencode-package-check-ci", job_id
+        assert "PLAIN_ROWS" not in UNCOMMENTED
 
     def test_its_outputs_are_set_after_every_check(self):
         outputs = JOBS["verify"]["outputs"]
@@ -886,6 +949,58 @@ class TestTheRow9Canary:
 
 
 # ===========================================================================
+# The toolchain action
+# ===========================================================================
+
+TOOLCHAIN = "./.github/actions/opencode-toolchain"
+
+
+class TestTheToolchainAction:
+    """``gate`` and ``verify`` set up uv, Node and npm through one local
+    composite action; ``publish``, which holds ``id-token``, keeps the same
+    three steps inline."""
+
+    def _calls(self, job_id: str) -> list:
+        return [i for i, s in enumerate(JOBS[job_id]["steps"]) if s.get("uses") == TOOLCHAIN]
+
+    def test_gate_and_verify_call_it_right_after_their_checkout(self):
+        for job_id in ("gate", "verify"):
+            raw = JOBS[job_id]["steps"]
+            [at] = self._calls(job_id)
+            assert _uses(raw[at - 1]) == "actions/checkout", job_id
+            assert raw[at]["with"] == {"node-version": "${{ env.NODE_VERSION }}"}, job_id
+
+    def test_publish_keeps_its_own_inline_copy(self):
+        assert not self._calls("publish")
+        assert not any(str(s.get("uses") or "").startswith("./") for s in JOBS["publish"]["steps"])
+
+    def test_it_is_publish_s_three_setup_steps_exactly(self):
+        toolchain = _effective([{"uses": TOOLCHAIN,
+                                 "with": {"node-version": "${{ env.NODE_VERSION }}"}}])
+        publish = JOBS["publish"]["steps"]
+        start = next(i for i, s in enumerate(publish) if _uses(s) == "astral-sh/setup-uv")
+        assert toolchain == publish[start:start + len(toolchain)]
+        assert [s.get("name") or _uses(s) for s in toolchain] == [
+            "astral-sh/setup-uv", "actions/setup-node", "Install the pinned npm"]
+
+    def test_its_shell_runs_the_script_as_the_job_default_would(self):
+        """A composite run step must name its shell; ``bash`` there adds
+        ``-o pipefail`` to the job default's ``-e``, and the script sets
+        ``-euo pipefail`` itself, so the two run it alike."""
+        for inner in ACTIONS[TOOLCHAIN]["runs"]["steps"]:
+            if "run" in inner:
+                assert inner["shell"] == "bash", inner.get("name")
+                assert inner["run"].startswith("set -euo pipefail\n"), inner.get("name")
+
+    def test_it_holds_nothing_that_needs_its_own_bound(self):
+        """Composite steps take no ``timeout-minutes``, so no gate row may move
+        into the action: the job's bound would be its only one."""
+        text = ACTION_TEXTS[TOOLCHAIN]
+        assert "timeout-minutes" not in text
+        assert not re.search(r"\bmake\b|probe\.py|bump\.py|build\.py|release_gate", text)
+
+
+# ===========================================================================
 # Checkouts, pins and bounds
 # ===========================================================================
 
@@ -905,9 +1020,13 @@ class TestHygiene:
             match = re.search(r"uses:\s*([\w./-]+)@([0-9a-f]{40})", line)
             if match:
                 pinned[match.group(1)] = match.group(2)
-        uses = re.findall(r"uses:\s*(\S+)(.*)", TEXT)
+        uses = [found for text in (TEXT, *ACTION_TEXTS.values())
+                for found in re.findall(r"uses:\s*(\S+)(.*)", text)]
         assert uses
         for ref, rest in uses:
+            if ref.startswith("./"):
+                assert ref in ACTIONS and not rest.strip(), ref
+                continue
             action, _, sha = ref.partition("@")
             assert re.fullmatch(r"[0-9a-f]{40}", sha), ref
             assert re.fullmatch(r"\s*# v\d+\.\d+\.\d+", rest), f"{ref}: no `# vX.Y.Z` label"

@@ -547,14 +547,16 @@ class TestCiWiring:
     def test_the_package_job_runs_the_tier(self):
         step = _package_step()
         assert step is not None, "the package job does not run the Claude tier"
-        assert step["run"].strip() == "make claude-package-check-ci"
+        assert step["run"].strip() == "make claude-package-check-ci PLAIN_ROWS=graded"
 
     def test_the_tier_runs_beside_the_other_two(self):
+        """Each with ``PLAIN_ROWS=graded``: the Ubuntu ``test`` leg of the same
+        workflow already ran every plain row."""
         document = yaml.safe_load(TEST_WORKFLOW.read_text(encoding="utf-8"))
         runs = [step.get("run") for step in document["jobs"]["package"]["steps"]]
         for target in ("opencode-package-check-ci", "codex-package-check-ci",
                        "claude-package-check-ci"):
-            assert f"make {target}" in runs, target
+            assert f"make {target} PLAIN_ROWS=graded" in runs, target
 
     def test_the_three_os_job_does_not(self):
         """The clean rebuild needs the Linux job's guarantees, as the other two
