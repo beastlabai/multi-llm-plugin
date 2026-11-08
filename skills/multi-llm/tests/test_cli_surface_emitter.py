@@ -196,7 +196,33 @@ def test_v4_keys_are_present_and_non_empty(host):
     assert rendered["runbook"] == {
         "core_end_marker": multi_llm.CORE_END_MARKER,
         "banner_opening": multi_llm.TRUNCATION_BANNER_OPENING,
+        # The tool route's runbook pages (additive within v7).
+        "pages": {
+            "option": "--page",
+            "size_option": "--page-size",
+            "header": multi_llm.CORE_PAGE_HEADER,
+            "end": multi_llm.CORE_PAGE_END,
+            "sha_chars": multi_llm.CORE_PAGE_SHA_CHARS,
+            "size_default": multi_llm.CORE_PAGE_SIZE_DEFAULT,
+            "size_min": multi_llm.CORE_PAGE_SIZE_MIN,
+            "rule": multi_llm.TOOL_PAGES_RULE,
+            "rule_one": multi_llm.TOOL_PAGES_RULE_ONE,
+            "again": multi_llm.TOOL_PAGES_AGAIN,
+            "floor": multi_llm.TOOL_PAGES_FLOOR,
+            "served": multi_llm.TOOL_PAGES_SERVED,
+        },
     }
+    pages = rendered["runbook"]["pages"]
+    # The page options are the ones `util instructions` itself takes, and every
+    # template carries the tokens the server fills.
+    for option in (pages["option"], pages["size_option"]):
+        assert option in multi_llm._INSTRUCTIONS_OPTIONS
+    for key in ("rule", "rule_one"):
+        for token in ("{mode}", "{sha}", "{size}", "{again}"):
+            assert token in pages[key], (key, token)
+    assert "{smaller}" in pages["again"] and "{size}" in pages["floor"]
+    for token in ("{page}", "{pages}", "{mode}"):
+        assert token in pages["served"]
 
     # The keys D3 rule 3 composes an argv out of.
     assert rendered["baked_flags"] == ["--host", host, "--yes", "--exec-subagents"]

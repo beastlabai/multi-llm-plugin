@@ -1028,6 +1028,30 @@ def cli_surface(host_id: str) -> Dict[str, Any]:
         "runbook": {
             "core_end_marker": multi_llm.CORE_END_MARKER,
             "banner_opening": multi_llm.TRUNCATION_BANNER_OPENING,
+            # How a server pages the runbook it attaches (docs/development/
+            # hosts.md, "Paged delivery on the Codex tool route"): each page
+            # framed by `util instructions --page`'s two lines, the rule in
+            # `rule`/`rule_one` with `again`/`floor` as its `{again}`, and a
+            # call whose `extra_flags` carry `option` or `size_option`
+            # answered with one page alone, before anything runs. Additive
+            # within v7 (no bump): the tool's arguments are unchanged, and a
+            # server whose surface lacks it attaches the runbook whole.
+            "pages": {
+                "option": multi_llm.TOOL_PAGE_OPTION,
+                "size_option": multi_llm.TOOL_PAGE_SIZE_OPTION,
+                # `{mode}`, `{page}`, `{pages}`, `{sha}` (and the header's
+                # `{bytes}`), filled by plain substitution.
+                "header": multi_llm.CORE_PAGE_HEADER,
+                "end": multi_llm.CORE_PAGE_END,
+                "sha_chars": multi_llm.CORE_PAGE_SHA_CHARS,
+                "size_default": multi_llm.CORE_PAGE_SIZE_DEFAULT,
+                "size_min": multi_llm.CORE_PAGE_SIZE_MIN,
+                "rule": multi_llm.TOOL_PAGES_RULE,
+                "rule_one": multi_llm.TOOL_PAGES_RULE_ONE,
+                "again": multi_llm.TOOL_PAGES_AGAIN,
+                "floor": multi_llm.TOOL_PAGES_FLOOR,
+                "served": multi_llm.TOOL_PAGES_SERVED,
+            },
         },
     }
 

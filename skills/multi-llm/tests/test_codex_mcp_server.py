@@ -751,6 +751,8 @@ class TestNoWordOfItsOwn:
                       DISPATCHER["review_gate"]["flag"]])
         flags.update(DISPATCHER["mechanical_continuations"])
         flags.update(SURFACE["uv"]["default_run_args"])
+        pages = SURFACE["runbook"]["pages"]
+        flags.update([pages["option"], pages["size_option"]])
         for flag in sorted(flags):
             pattern = re.compile(r"(?<![\w-])" + re.escape(flag) + r"(?![\w-])")
             hits = [lit for lit in literals if pattern.search(lit)]
@@ -770,6 +772,9 @@ class TestNoWordOfItsOwn:
             # Schema v5: neither the route variable's name nor its value.
             ROUTE_ENV["name"], ROUTE_ENV["value"],
             *SURFACE["uv"]["candidates"], *SURFACE["nested_exec_reasons"],
+            # The runbook's page lines (U84): their markers and their fields.
+            pages["header"].split()[0], pages["end"].split()[0],
+            "page={page}/{pages}",
         ]
         # Routing words, by equality once surface-key reads are set aside.
         for word in [*DISPATCHER["poll"][:1], *DISPATCHER["instructions"],
@@ -787,6 +792,7 @@ class TestNoWordOfItsOwn:
             SURFACE["write_posture_refusal"]["posture_unreadable"],
             SURFACE["anchor_unresolved"], SURFACE["shell_missing"],
             SURFACE["uninstall_command"], SURFACE["outcomes_line"],
+            *(pages[key] for key in ("rule", "rule_one", "again", "floor", "served")),
             *(mode["summary"] for mode in SURFACE["modes"]),
             (SKILL_ROOT / SURFACE["uv"]["missing_message_file"]).read_text(),
         ]
@@ -3393,9 +3399,11 @@ class TestTheWayForwardLeadsTheResult:
         envelope, result, _, _ = self._blocked(harness)
         assert list(envelope)[:4] == ["ok", "state", "user_next_step", "resume_command"]
         assert list(envelope)[4:6] == ["options", "message"]
-        assert list(envelope)[-1] == "runbook"
+        # The runbook and its paging rule close the result (U84): the result
+        # carries page 1 now, still long enough for the cut to drop a middle.
+        assert list(envelope)[-2:] == ["runbook", "runbook_pages"]
         text = result["content"][0]["text"]
-        assert len(text) > 40_000
+        assert codex_cut(text) != text
         assert json.dumps(envelope["resume_command"]) in codex_cut(text)
         # Fix round 8: the re-invoke options trailed `result`, `output` and
         # `stderr`, inside the dropped middle.
@@ -3411,9 +3419,9 @@ class TestTheWayForwardLeadsTheResult:
             meta=self.META, extra_env={"MLLM_TEST_POLL_BUDGET_MS": "1000"})
         assert envelope["ok"] is True and envelope["state"] == STATES["running"]
         assert list(envelope)[:5] == ["ok", "state", "next", "abort_command", "message"]
-        assert list(envelope)[-1] == "runbook"
+        assert list(envelope)[-2:] == ["runbook", "runbook_pages"]
         text = result["content"][0]["text"]
-        assert len(text) > 40_000
+        assert codex_cut(text) != text
         for key in ("next", "abort_command"):
             assert json.dumps(envelope[key]) in codex_cut(text), key
 
@@ -4463,7 +4471,21 @@ class TestRealDispatcher:
             capture_output=True, text=True, timeout=120, check=True)
         harness.runbook.write_text(out.stdout, encoding="utf-8")
         envelope, _, _, _ = harness.run(REVIEW, [launch_step(), {"exit": 3}])
-        runbook = envelope["runbook"]
+        # The result carries page 1 (U84); the runbook is every page's body.
+        pages = SURFACE["runbook"]["pages"]
+        client = harness.client()
+        bodies, call = [], envelope["runbook_pages"].get("next_page")
+        first = envelope["runbook"].split("\n")
+        bodies.append("\n".join(first[1:-2]) + "\n")
+        while call is not None:
+            page, _ = client.envelope(client.start_call(call))
+            lines = page["runbook"].split("\n")
+            assert lines[0].startswith(pages["header"].split()[0]) and lines[-1] == ""
+            bodies.append("\n".join(lines[1:-2]) + "\n")
+            call = page["runbook_pages"].get("next_page")
+        assert client.close() == 0
+        assert len(bodies) == envelope["runbook_pages"]["pages"] > 1
+        runbook = "".join(bodies)
         sentinel = SURFACE["runbook"]["core_end_marker"] + " review-plan"
         assert runbook.split("\n").count(sentinel) == 1
         assert SURFACE["runbook"]["banner_opening"] not in runbook

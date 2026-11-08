@@ -206,14 +206,42 @@ number past the last, `--page-size` without `--page`, `--page` with `--to-file` 
 minimum are exit 3, with the core printed nowhere. Without `--page` both other forms are byte for
 byte what they were.
 
-The Codex package route is cut the same way and is not paged yet. Its server reads the printed core
-through a pipe, whole, but attaches it to a tool result as `runbook`, and codex cuts a tool result as
-it cuts shell output: measured on 0.160.0 (racing re-run 3, 06b), a 50,355-character result read
-through a code-mode `exec` cell kept its head and tail, and the runbook sat in the dropped middle.
-The server orders its keys so that a cut loses runbook text, never the way forward
-(`WAY_FORWARD_KEYS`, `LAST_KEYS`), and drops the banner, so the model there is not told that a cut
-runbook is incomplete. Paging it needs a page argument on the tool and so a surface schema bump,
-which the OpenCode package shares.
+**Paged delivery on the Codex tool route.** The package server reads the printed core through a
+pipe, whole, and attaches it to a tool result, and codex cuts a tool result as it cuts shell output:
+measured on 0.160.0 (racing re-run 3, 06b), a 50,355-character result read through a code-mode
+`exec` cell kept its head and tail, and the runbook sat in the dropped middle with its closing line
+kept. So the server drops the banner, scrubs the runbook, and cuts the rest (the runbook and its last
+line's newline) the way `--page` cuts the core: the same greedy line packing and the same two lines,
+whose `sha` is the digest of that text. Every page has the whole size as room, since this route's
+rule is a key of its own rather than a banner on page 1. An unfinished run's result carries page 1
+as `runbook` and then `runbook_pages`: the page, the count, the sha, the size, the rule, and the calls
+`next_page` and `smaller`, for the next page and for page 1 at half the size (absent on the last page
+and at the floor). Both keys close the result (`LAST_KEYS`), because a head-and-tail cut keeps the
+tail at any budget while a needs-human `message` alone can fill a small head; the way forward still
+leads (`WAY_FORWARD_KEYS`). The rule, the surface's `runbook.pages.rule` (`rule_one` for one page):
+
+- fetch pages 1 to `<n>` at one size, with calls whose `extra_flags` are
+  `["--page", "<i>", "--page-size", "<size>"]`;
+- each page opens with its header and closes with its end line, all with one `sha`, and one page
+  carries `MULTI_LLM_CORE_END: <mode>`;
+- a note from the host that it truncated or omitted part of a result makes that page incomplete: fetch
+  again with `smaller`, start over at page 1 and never combine sizes; at the floor, stop and tell the
+  user.
+
+Every runbook is framed, one-page ones included. `review-commits` and `apply-commit-fixes` fit on one
+page (12.6 and 11.6 KB scrubbed), and at the 06b budget (about 4,600 tokens) a cut of such a result
+still keeps the closing line, so the rule has to come with every runbook.
+
+A page request needs no schema bump: it is an ordinary call whose `extra_flags`, an array of strings
+the schema has always accepted, carry `--page <i>` and optionally `--page-size <bytes>`.
+`runbook_page_request` recognizes it before validation, from the mode word alone. The server answers
+with the one `util instructions <mode> --host <id>` fetch the result makes, cut the same way, so page 1
+of a request is page 1 of the result. Its plan, question, range, write posture and every other flag go
+unread, so fetching a page never starts, resumes or repeats a run, and a malformed one is an argument
+error before any spawn. The rule's words are `multi_llm.TOOL_PAGES_*`, built from the page constants,
+and the server spells none of them. The `runbook.pages` block is additive within surface schema v7: a
+server whose surface lacks it attaches the runbook whole and forwards a page flag as before. The
+OpenCode package reads its instructions from a file and does not page.
 
 **Steps a clean run never takes live in `references/`, behind a trigger sentence.** A served core
 stays in the host's context for the whole phase, so a conditional branch (interrupted-run recovery,

@@ -1390,6 +1390,18 @@ CORE_PAGE_MARKER = "[CORE_PAGE]"
 #: Closes every page: ``[CORE_PAGE_END] mode=<m> page=<i>/<n> sha=<sha12>``.
 CORE_PAGE_END_MARKER = "[CORE_PAGE_END]"
 
+#: The two page lines, whole: ``str.format`` templates over ``mode``, ``page``,
+#: ``pages``, ``sha`` and (the header) ``bytes``, the page's UTF-8 byte count
+#: between its two lines. The one spelling of the format, which the Codex tool
+#: route's pages carry too (``packaging/common/surface.py``, ``runbook.pages``).
+CORE_PAGE_HEADER = (
+    CORE_PAGE_MARKER + " mode={mode} page={page}/{pages} sha={sha} bytes={bytes}"
+)
+CORE_PAGE_END = CORE_PAGE_END_MARKER + " mode={mode} page={page}/{pages} sha={sha}"
+
+#: Hex digits of the sha every page line carries.
+CORE_PAGE_SHA_CHARS = 12
+
 #: The most core bytes one page holds when ``--page-size`` is not given:
 #: 4,000 tokens as codex counts them (4 bytes a token), 40% of the 10,000-token
 #: budget its shell and code-mode ``exec`` results default to. The model can
@@ -1438,7 +1450,7 @@ def _core_sha(text: str) -> str:
     """
     import hashlib
 
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:12]
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:CORE_PAGE_SHA_CHARS]
 
 
 def _serve_core_page(mode_name: str, text: str, page: int, size: Optional[int]) -> int:
@@ -1467,11 +1479,11 @@ def _serve_core_page(mode_name: str, text: str, page: int, size: Optional[int]) 
             f"{'' if count == 1 else 's'}, so --page takes 1 to {count}."
         )
     body = pages[page - 1]
-    where = f"mode={mode_name} page={page}/{count} sha={sha}"
-    out = f"{CORE_PAGE_MARKER} {where} bytes={len(body.encode('utf-8'))}\n"
+    where = {"mode": mode_name, "page": page, "pages": count, "sha": sha}
+    out = CORE_PAGE_HEADER.format(bytes=len(body.encode("utf-8")), **where) + "\n"
     if page == 1:
         out += _paged_notice(mode_name, text, count, sha, size)
-    out += body + f"{CORE_PAGE_END_MARKER} {where}\n"
+    out += body + CORE_PAGE_END.format(**where) + "\n"
     sys.stdout.write(out)
     return EXIT_OK
 
@@ -1528,7 +1540,7 @@ def _paged_notice(mode_name: str, text: str, count: int, sha: str, size: int) ->
         f"    {CORE_PAGE_MARKER} {where} bytes=<n>\n"
         f"    {CORE_PAGE_END_MARKER} {where}\n"
         "\n"
-        "The last page's core ends with this line:\n"
+        "One of the pages ends the core with this line (a --host section may follow it):\n"
         "\n"
         f"    {CORE_END_MARKER} {mode_name}\n"
         "\n"
@@ -1537,6 +1549,77 @@ def _paged_notice(mode_name: str, text: str, count: int, sha: str, size: int) ->
         "Do not run any command from the core until you hold every page.\n"
         "=== the core begins on the next line ===\n"
     )
+
+
+# The tool route's paging rule (docs/development/hosts.md, "Paged delivery on
+# the Codex tool route"). The Codex MCP server pages the runbook it attaches to
+# a tool result, with the two page lines above, and states this rule in the
+# key that closes the result, right after the page: a middle cut keeps the tail.
+# Templates the surface carries (``runbook.pages``): the server fills the
+# ``{name}`` tokens by plain substitution and spells none of these words.
+
+#: The option a page request carries in ``extra_flags``, and the size option.
+TOOL_PAGE_OPTION = "--page"
+TOOL_PAGE_SIZE_OPTION = "--page-size"
+
+_TOOL_PAGE_LINES = (
+    f"each opens with `{CORE_PAGE_MARKER} mode={{mode}} page=<i>/{{pages}} "
+    "sha={sha} bytes=<n>` and closes with "
+    f"`{CORE_PAGE_END_MARKER} mode={{mode}} page=<i>/{{pages}} sha={{sha}}`"
+)
+
+_TOOL_PAGE_CUT = (
+    "A note from your host anywhere in a result that it truncated or omitted "
+    "part of that result means its page is incomplete, even with both of its "
+    "lines there: a host that cuts the middle keeps the head and the end."
+)
+
+#: ``runbook_pages.rule`` for a runbook of several pages.
+TOOL_PAGES_RULE = (
+    "`runbook` holds page {page} of the {mode} runbook, which is {pages} pages "
+    "of at most {size} bytes. You hold the whole runbook only when every page "
+    f"from 1 to {{pages}} arrived whole: {_TOOL_PAGE_LINES}, every one with the "
+    "same sha, and one of them carries the line that closes the core, "
+    f"`{CORE_END_MARKER} {{mode}}`. To fetch page <i>, call this tool again "
+    f'with mode "{{mode}}" and extra_flags ["{TOOL_PAGE_OPTION}", "<i>", '
+    f'"{TOOL_PAGE_SIZE_OPTION}", "{{size}}"] (`next_page` is that call for the '
+    "next page): a call whose extra_flags carry "
+    f"{TOOL_PAGE_OPTION} returns that page and nothing else, and never starts, "
+    f"resumes or repeats a run. {_TOOL_PAGE_CUT} {{again}} Do not run any step "
+    "of the runbook until you hold every page."
+)
+
+#: ``runbook_pages.rule`` for a runbook that fits on one page.
+TOOL_PAGES_RULE_ONE = (
+    "`runbook` holds the whole {mode} runbook, on one page of at most {size} "
+    "bytes: there is no other page to fetch. You hold it only when it arrived "
+    f"whole: it opens with `{CORE_PAGE_MARKER} mode={{mode}} page=1/1 "
+    "sha={sha} bytes=<n>` and closes with "
+    f"`{CORE_PAGE_END_MARKER} mode={{mode}} page=1/1 sha={{sha}}`. "
+    f"{_TOOL_PAGE_CUT} {{again}} Do not run any step of the runbook until you "
+    "hold all of it."
+)
+
+#: The rule's ``{again}`` while a smaller size is left.
+TOOL_PAGES_AGAIN = (
+    f"Fetch it again at {TOOL_PAGE_SIZE_OPTION} {{smaller}} (`smaller` is that "
+    "call, for page 1): a new size cuts the runbook afresh, so start again at page 1 "
+    "with that size and keep it for every later page; never combine pages of "
+    "two sizes."
+)
+
+#: The rule's ``{again}`` at the smallest size.
+TOOL_PAGES_FLOOR = (
+    f"{TOOL_PAGE_SIZE_OPTION} {{size}} is already the smallest this tool "
+    "serves, so your host cannot pass a page whole: stop and tell the user."
+)
+
+#: The ``message`` of a page request's result.
+TOOL_PAGES_SERVED = (
+    "This call fetched page {page} of {pages} of the {mode} runbook into "
+    "`runbook`, and nothing else: it started, resumed and repeated no run. "
+    "`runbook_pages` says when you hold the whole runbook."
+)
 
 
 #: Heading the ``--host`` verb block is served under. The core files name the
