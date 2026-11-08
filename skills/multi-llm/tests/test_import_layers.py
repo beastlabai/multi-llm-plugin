@@ -100,6 +100,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.landlock_dispatch",
         "utils.landlock_exec",
         "utils.llm_client",
+        "utils.provider_outcome",
         "utils.provider_registry",
         "utils.providers",
         "utils.providers.*",
@@ -196,7 +197,7 @@ KNOWN_UPWARD: Dict[Tuple[str, str], str] = {
     # Redaction and the state home live in the 2,500-line write_safety (L3).
     ("utils.landlock_dispatch", "utils.write_safety"):
         "state_home: belongs in output_handler (L1)",
-    ("utils.llm_client", "utils.write_safety"):
+    ("utils.provider_outcome", "utils.write_safety"):
         "redact_text: belongs in a leaf redaction module that write_safety re-imports",
     ("utils.providers.codex_stream_audit", "utils.write_safety"):
         "redact_text: belongs in a leaf redaction module that write_safety re-imports",

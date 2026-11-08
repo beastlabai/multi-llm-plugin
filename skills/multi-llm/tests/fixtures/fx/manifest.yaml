@@ -15,6 +15,7 @@ rows:
     stderr: success.stderr.txt
     exit_code: 0
     expect:
+      lane_status: {lane_a: ok, lane_b: ok}
       success: true
       classify_failure: null
       salvage: answer
@@ -26,6 +27,7 @@ rows:
     stderr: truncated.stderr.txt
     exit_code: 1
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       success: false
       classify_failure: server_error
       salvage: none
@@ -38,6 +40,7 @@ rows:
     stderr: ephemeral-only.stderr.txt
     exit_code: -15
     expect:
+      lane_status: {lane_a: runner_error, lane_b: runner_error}
       success: false
       classify_failure: null
       salvage: none
@@ -50,6 +53,7 @@ rows:
     stderr: multi-assistant.stderr.txt
     exit_code: 0
     expect:
+      lane_status: {lane_a: ok, lane_b: ok}
       success: true
       classify_failure: null
       salvage: answer
@@ -61,6 +65,7 @@ rows:
     stderr: error-envelope.stderr.txt
     exit_code: 1
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       success: false
       classify_failure: server_error
       salvage: none
@@ -73,6 +78,7 @@ rows:
     stderr: exit-zero-failure.stderr.txt
     exit_code: 0
     expect:
+      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U38b (PROV-1 phase 2)"}
       success: false
       classify_failure: null
       salvage: none
@@ -83,6 +89,7 @@ rows:
     stderr: stdout-error.stderr.txt
     exit_code: 1
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       success: false
       classify_failure: null
       salvage: none
@@ -95,6 +102,7 @@ rows:
     stderr: empty.stderr.txt
     exit_code: -15
     expect:
+      lane_status: {lane_a: runner_error, lane_b: runner_error}
       success: false
       classify_failure: null
       salvage: none
@@ -107,6 +115,7 @@ rows:
     stderr: auth-error.stderr.txt
     exit_code: 1
     expect:
+      lane_status: {lane_a: auth_failed, lane_b: auth_failed}
       success: false
       classify_failure: auth_failed
       salvage: none
@@ -117,6 +126,7 @@ rows:
     stderr: rate-limit.stderr.txt
     exit_code: -15
     expect:
+      lane_status: {lane_a: rate_limited, lane_b: rate_limited}
       success: false
       classify_failure: rate_limited
       salvage: none
@@ -129,6 +139,7 @@ rows:
     stderr: invalid-model.stderr.txt
     exit_code: 1
     expect:
+      lane_status: {lane_a: invalid_model, lane_b: invalid_model}
       success: false
       classify_failure: invalid_model
       salvage: none
@@ -137,6 +148,7 @@ rows:
     stderr: context-overflow.stderr.txt
     exit_code: 1
     expect:
+      lane_status: {lane_a: context_length_exceeded, lane_b: context_length_exceeded}
       success: false
       classify_failure: context_length_exceeded
       salvage: none
@@ -145,6 +157,7 @@ rows:
     stderr: shell-reviewed.stderr.txt
     exit_code: 0
     expect:
+      lane_status: {lane_a: ok, lane_b: ok}
       success: true
       classify_failure: null
       salvage: answer
@@ -161,6 +174,7 @@ rows:
     stderr: shell-held.stderr.txt
     exit_code: 0
     expect:
+      lane_status: {lane_a: null, lane_b: runner_error, open: "U38b (PROV-1 phase 2)"}
       success: false
       classify_failure: null
       salvage: none
@@ -173,6 +187,7 @@ rows:
     stderr: reviewer-malformed.stderr.txt
     exit_code: 0
     expect:
+      lane_status: {lane_a: null, lane_b: runner_error, open: "U38b (PROV-1 phase 2)"}
       success: false
       classify_failure: null
       salvage: none
@@ -185,6 +200,7 @@ rows:
     stderr: markdown-markers.stderr.txt
     exit_code: 0
     expect:
+      lane_status: {lane_a: ok, lane_b: ok}
       success: true
       classify_failure: null
       salvage: answer

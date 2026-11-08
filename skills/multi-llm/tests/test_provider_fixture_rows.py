@@ -34,6 +34,7 @@ provider may sit without one — by name, with a reason.
           raw_contains: ["..."]      # optional: substrings of the captured bytes
           classify_failure: null     # optional, and `null` is an assertion
           salvage: answer            # optional: none | partial | answer
+          lane_status: {lane_a: ok, lane_b: ok}   # required: see below
       empty:
         not_applicable: "<the measurement that says why>"
 
@@ -56,6 +57,21 @@ none. The three values, graded by each adapter's ``salvage_text`` sweep
 Only these three values are accepted, so a typo cannot quietly assert nothing
 (plan: review-run-scope-salvage-and-failure-visibility §4, T4.1).
 
+``expect.lane_status`` pins the retry-ladder status each lane gives the row,
+read without a child process: ``lane_a`` is the review fan-out's
+(``utils.provider_outcome.outcome_from_capture``, then what
+``invoke_with_file_output`` makes of it when the model wrote no result file,
+then ``review_orchestrator_base.attempt_ladder_status``; ``null`` is an error
+line nothing recognises), ``lane_b`` the executor's (``_classify_pre_parse``,
+the extraction, then ``_classify_failed_run`` for a reclassifiable status; the
+task kind's own shape check is left out, since it judges the task, not the
+provider). A row whose two statuses lead the ladder to different retry-or-stop
+answers carries ``open: <unit>`` naming the unit that will settle it; the
+grader fails when the marker is missing and when it is left on a row whose
+lanes agree. ``spawn_failed`` and ``permission_denied`` from the fan-out are
+the deliberate exception (docs/development/delegation.md#read-and-analyze-executor).
+Every graded row carries it, so a parser or classifier change shows here first.
+
 A row carries **either** files+``exit_code``+``expect`` **or**
 ``not_applicable`` with a measured reason — §6.3's rule, enforced here: *"not
 applicable, because …" is an acceptable cell; an untested one is not.* Every
@@ -70,6 +86,8 @@ would assert nothing at all, which is the failure mode this whole module exists
 to remove.
 """
 
+import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -153,9 +171,16 @@ _ALLOWED_TOP = {"schema_version", "provider", "cli_version", "captured", "method
 _ALLOWED_ROW = {"stdout", "stderr", "exit_code", "expect", "not_applicable",
                 "synthesized", "provenance", "notes", "wall_s", "requests"}
 _ALLOWED_EXPECT = {"success", "data", "error_contains", "raw_contains",
-                   "classify_failure", "salvage"}
+                   "classify_failure", "salvage", "lane_status"}
 #: ``expect.salvage``'s whole vocabulary (see the module docstring).
 SALVAGE_LABELS = ("none", "partial", "answer")
+#: ``expect.lane_status``'s keys: the two statuses, and the marker of a row
+#: whose lanes still answer retry-or-stop differently.
+LANE_STATUS_KEYS = ("lane_a", "lane_b")
+LANE_STATUS_OPEN = "open"
+#: The fan-out stops on these where the executor retries once, on purpose
+#: (docs/development/delegation.md#read-and-analyze-executor).
+LANE_A_STOPS_BY_DESIGN = frozenset({"spawn_failed", "permission_denied"})
 
 
 def _load(provider_dir: Path) -> dict:
@@ -336,6 +361,20 @@ def test_row_is_well_formed(provider, row_name):
             f"expect.salvage is {expect['salvage']!r}; it must be one of "
             f"{list(SALVAGE_LABELS)}"
         )
+    lane_status = expect.get("lane_status")
+    assert isinstance(lane_status, dict), (
+        "expect.lane_status is required: {lane_a: <status>, lane_b: <status>}"
+    )
+    assert set(lane_status) <= {*LANE_STATUS_KEYS, LANE_STATUS_OPEN}, (
+        f"unknown lane_status keys: {sorted(set(lane_status) - {*LANE_STATUS_KEYS, LANE_STATUS_OPEN})}"
+    )
+    assert all(key in lane_status for key in LANE_STATUS_KEYS), (
+        "expect.lane_status names both lanes, `null` included"
+    )
+    if LANE_STATUS_OPEN in lane_status:
+        assert re.search(r"\bU\d+[a-z]?\b", str(lane_status[LANE_STATUS_OPEN])), (
+            "lane_status.open names the unit that will settle the row"
+        )
     for key in ("stdout", "stderr"):
         if row.get(key):
             assert (FIXTURES / provider / row[key]).is_file(), (
@@ -404,3 +443,179 @@ def test_row_classifies_as_declared(provider, row_name):
         _stream(provider, row, "stderr"),
         row["exit_code"],
     ) == row["expect"]["classify_failure"]
+
+
+# --------------------------------------------------------------------------- #
+# Both lanes' ladder status, read from the capture alone
+# --------------------------------------------------------------------------- #
+
+#: ``invoke_with_file_output``'s hard failures: returned as they are, the file
+#: channel never read.
+_HARD_FAILURES = frozenset({
+    "BINARY_NOT_FOUND", "TIMEOUT", "SUBPROCESS_FAILED", "PROMPT_TOO_LONG",
+    "PROMPT_UNSAFE",
+})
+
+
+def _capture(provider: str, row: dict):
+    from utils.provider_outcome import Capture
+
+    return Capture(
+        stdout=_stream(provider, row, "stdout"),
+        stderr=_stream(provider, row, "stderr"),
+        exit_code=row["exit_code"],
+    )
+
+
+def _fan_out_view(outcome: dict) -> dict:
+    """What ``invoke_with_file_output`` returns for ``outcome`` when the model
+    wrote no result file: a hard failure as it is, stdout data it accepts as a
+    success, anything else as its "both failed" line, ``details`` kept.
+    ``test_the_fan_out_view_is_invoke_with_file_outputs`` holds this to the
+    real function."""
+    from utils.llm_client import _is_valid_parsed_data
+
+    if not outcome.get("success") and outcome.get("error_code") in _HARD_FAILURES:
+        return outcome
+    if _is_valid_parsed_data(outcome.get("data")):
+        return {"success": True, "details": outcome.get("details", {})}
+    return {
+        "success": False,
+        "error": "JSON parsing failed from both file and stdout",
+        "details": outcome.get("details", {}),
+    }
+
+
+def _lane_a_status(provider: str, capture) -> object:
+    from utils.provider_outcome import outcome_from_capture
+    from utils.review_orchestrator_base import attempt_ladder_status
+
+    outcome = outcome_from_capture(
+        _PROVIDERS[provider], capture, provider_name=provider, model="m",
+    )
+    seen = _fan_out_view(outcome)
+    return attempt_ladder_status(seen, seen.get("details") or {})
+
+
+def _lane_b_status(provider: str, capture) -> object:
+    """The executor's reading of one capture, in ``dispatch_task``'s order."""
+    from utils import subagent_executor as executor
+    from utils.retry_ladder import STATUS_OK
+
+    adapter = _PROVIDERS[provider]
+    status, _ = executor._classify_pre_parse(capture)
+    if status != STATUS_OK:
+        return status
+    try:
+        executor._extract_result_and_syntax(
+            adapter, capture.stdout, capture.stderr, prefer_arrays=True,
+            capped="stdout" in capture.capped_streams,
+        )
+    except executor.ResultRejected as exc:
+        status = exc.status
+    else:
+        return STATUS_OK
+    if status in executor.RECLASSIFIABLE_STATUSES:
+        reclassified = executor._classify_failed_run(adapter, capture, "m")
+        if reclassified is not None:
+            status = reclassified[0]
+    return status
+
+
+def _retried(provider: str, status: object) -> bool:
+    """Whether one attempt with ``status`` is sent again, on the same ladder
+    for both lanes: one retry, the adapter's own retry envelope."""
+    from utils.retry_ladder import RetryLadder
+
+    ladder = RetryLadder(
+        timeout=100000, retries=1,
+        envelope=getattr(_PROVIDERS[provider], "internal_retries", None),
+    )
+    ladder.next_attempt()
+    return ladder.record(status).retry
+
+
+@pytest.mark.parametrize("provider,row_name", ROW_IDS,
+                         ids=[f"{p}-{r}" for p, r in ROW_IDS])
+def test_row_reaches_its_lane_status(provider, row_name):
+    """Both lanes' status for the captured bytes, against the manifest's pin.
+
+    A changed parser or classifier fails here, naming the row and both
+    statuses. ``open`` must sit exactly on the rows whose lanes answer
+    retry-or-stop differently, outside the deliberate exception."""
+    row = _row(provider, row_name)
+    if "not_applicable" in row:
+        pytest.skip(row["not_applicable"])
+    pinned = row["expect"].get("lane_status") or {}
+    capture = _capture(provider, row)
+    found = {
+        "lane_a": _lane_a_status(provider, capture),
+        "lane_b": _lane_b_status(provider, capture),
+    }
+    assert found == {key: pinned.get(key) for key in LANE_STATUS_KEYS}, (
+        f"{provider}/{row_name}: the lanes now say {found}; the manifest pins "
+        f"{ {key: pinned.get(key) for key in LANE_STATUS_KEYS} }"
+    )
+    differs = (
+        _retried(provider, found["lane_a"]) != _retried(provider, found["lane_b"])
+        and found["lane_a"] not in LANE_A_STOPS_BY_DESIGN
+    )
+    if differs:
+        assert LANE_STATUS_OPEN in pinned, (
+            f"{provider}/{row_name}: the fan-out "
+            f"{'retries' if _retried(provider, found['lane_a']) else 'stops'} and "
+            f"the executor does not; mark the row `open: <unit>` or fix a lane"
+        )
+    else:
+        assert LANE_STATUS_OPEN not in pinned, (
+            f"{provider}/{row_name}: both lanes now make the same call; delete "
+            f"the row's `open: {pinned[LANE_STATUS_OPEN]}` marker"
+        )
+
+
+@pytest.mark.parametrize("provider,row_name", ROW_IDS,
+                         ids=[f"{p}-{r}" for p, r in ROW_IDS])
+def test_the_fan_out_view_is_invoke_with_file_outputs(
+    provider, row_name, monkeypatch, tmp_path
+):
+    """:func:`_fan_out_view` against the real ``invoke_with_file_output``, spawn
+    stubbed: the fast path above reads the fan-out's status the way the
+    fan-out does, or this fails first."""
+    import contextlib
+
+    from utils import llm_client
+    from utils.review_orchestrator_base import attempt_ladder_status
+
+    row = _row(provider, row_name)
+    if "not_applicable" in row:
+        pytest.skip(row["not_applicable"])
+    capture = _capture(provider, row)
+    adapter = _PROVIDERS[provider]
+
+    def spawn(cmd, **_kwargs):
+        return subprocess.CompletedProcess(
+            cmd, capture.exit_code, capture.stdout, capture.stderr
+        )
+
+    @contextlib.contextmanager
+    def no_dispatch_context(*_args, **_kwargs):
+        class _Dispatch:
+            refusal = None
+        yield _Dispatch()
+
+    monkeypatch.setattr(llm_client, "_run_provider_cli", spawn)
+    monkeypatch.setattr(llm_client, "_resolve_executable", lambda name: ([name], False))
+    monkeypatch.setattr(llm_client, "provider_dispatch_context", no_dispatch_context)
+    monkeypatch.setattr(adapter, "is_available", lambda: True)
+    monkeypatch.setattr(
+        adapter, "build_command_for_transport", lambda *a, **k: (["/bin/true"], None)
+    )
+    monkeypatch.setattr(adapter, "resolve_env", lambda *a, **k: {})
+    result = llm_client.invoke_with_file_output(
+        prompt_template="hi {output_json_path}", model_spec=f"{provider}:m",
+        prompt_context={}, output_dir=tmp_path, phase="review-plan", timeout=30,
+        prefer_arrays=True, cwd=str(tmp_path),
+    )
+    assert attempt_ladder_status(result, result.get("details") or {}) == (
+        _lane_a_status(provider, capture)
+    )

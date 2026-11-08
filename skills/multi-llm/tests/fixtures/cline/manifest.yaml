@@ -73,6 +73,7 @@ rows:
       and that classify_failure is None — the assertion that catches an adapter
       reading its own happy path as a failure.
     expect:
+      lane_status: {lane_a: ok, lane_b: ok}
       salvage: answer
       success: true
       data:
@@ -100,6 +101,7 @@ rows:
       README), though the wire condition is still not named — no decode error, no
       byte count, no partial frame. Byte-shape identical to `error-envelope`.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       salvage: none
       success: false
       error_contains: ["Response stream ended without a finish reason."]
@@ -129,6 +131,7 @@ rows:
       3.0.70 say it of this row alone, and this is the one failure row with no
       `"errorClass":` key.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       salvage: none
       success: false
       error_contains: ["Model returned empty response"]
@@ -161,6 +164,7 @@ rows:
       carries `FIRST ANSWER (must NOT be selected)`; a first-wins parser returns
       the D999 document and a concatenating one returns neither.
     expect:
+      lane_status: {lane_a: ok, lane_b: ok}
       salvage: answer
       success: true
       data:
@@ -187,6 +191,7 @@ rows:
       pattern table. The only thing that says this run failed is the adapter's
       own `finishReason` marker.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       salvage: none
       success: false
       error_contains: ["Response stream ended without a finish reason."]
@@ -263,6 +268,7 @@ rows:
       moves. At 3.0.69 and 3.0.70 cline also tags this error `errorClass: "auth"` (3.0.55:
       `"unknown"`); the adapter reads the key's presence, never its value.
     expect:
+      lane_status: {lane_a: auth_failed, lane_b: auth_failed}
       salvage: none
       success: false
       error_contains: ["Incorrect API key provided"]
@@ -292,6 +298,7 @@ rows:
       `rate limit` in base.rate_limit_patterns matches before the exit-0 marker
       gets its turn.
     expect:
+      lane_status: {lane_a: rate_limited, lane_b: rate_limited}
       salvage: none
       success: false
       error_contains: ["Rate limit reached"]
@@ -312,6 +319,7 @@ rows:
       the `openai/stub-model` spec the config used — which is the asymmetry that
       makes a stray `:effort` suffix findable at all.
     expect:
+      lane_status: {lane_a: invalid_model, lane_b: invalid_model}
       salvage: none
       success: false
       raw_contains:
@@ -336,6 +344,7 @@ rows:
       reached with no retry budget spent — one request, under 1 s (3.0.69:
       0.96 s, 3.0.70: 0.73 s).
     expect:
+      lane_status: {lane_a: context_length_exceeded, lane_b: context_length_exceeded}
       salvage: none
       success: false
       error_contains: ["exceeds the model's context window"]
@@ -383,6 +392,7 @@ rows:
       `Reason:` line does move, "the runner reported a failure" →
       "Connection/network error", which is the point.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       salvage: none
       success: false
       error_contains: ["Cannot connect to API"]
@@ -416,6 +426,7 @@ rows:
       base.SERVER_ERROR_MARKERS — every entry there wants the literal words
       "server error", "internal server error" or "api error".
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       salvage: none
       success: false
       error_contains: ["The server had an error while processing your request"]
@@ -446,6 +457,7 @@ rows:
       timeout pattern, so the row reads `timeout` rather than falling to the
       adapter's `finishReason` marker.
     expect:
+      lane_status: {lane_a: timeout, lane_b: unparseable_result}
       salvage: none
       success: false
       error_contains: ["The operation timed out."]

@@ -6476,6 +6476,17 @@ def _write_failure_capture(
 
 @dataclass
 class _Capture:
+    """One dispatch's capture on this lane.
+
+    The stream half (``stdout`` to ``launch_error``, and ``capped_streams``) is
+    ``provider_outcome.Capture``'s, field for field, and this lane's readers
+    (``_classify_pre_parse``, ``_extract_result_and_syntax``,
+    ``_classify_failed_run``) take either. This one stays mutable: the spawn
+    fills it in steps, the jail read-back adds its evidence once the child is
+    gone, and ``_parse_and_validate`` records ``reply_syntax_error`` for the
+    re-ask. ``tests/test_provider_outcome.py`` holds the two to the same fields.
+    """
+
     stdout: str = ""
     stderr: str = ""
     exit_code: Optional[int] = None

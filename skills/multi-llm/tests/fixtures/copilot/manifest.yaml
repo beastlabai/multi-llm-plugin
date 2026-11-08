@@ -93,6 +93,7 @@ rows:
       that fix, and the bytes are unchanged and still carry the full prompt, so
       a regression fails here.
     expect:
+      lane_status: {lane_a: ok, lane_b: ok}
       success: true
       data:
         - {id: "S001", title: "Bound the retry ladder", severity: "high"}
@@ -121,6 +122,7 @@ rows:
       rather than a copilot verdict; the classification is `None` either way,
       because a half-written event stream says nothing about *why* it stopped.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       success: false
       error_contains: ["no assistant.message record in copilot output"]
       raw_contains: ["model.call_start"]
@@ -157,6 +159,7 @@ rows:
       the fragment — and the `null` below is that. `truncated.jsonl` is
       unaffected and stays the record-boundary case.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       success: false
       error_contains: ["no assistant.message record in copilot output"]
       raw_contains: ['{"type":"user.message"', "rate-limit"]
@@ -181,6 +184,7 @@ rows:
       Note what is NOT here — no `user.message` — which makes this the row where
       `vendor_text` is a no-op, and the classification `None` before and after.
     expect:
+      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U38b (PROV-1 phase 2)"}
       success: false
       error_contains: ["no assistant.message record in copilot output"]
       classify_failure: null
@@ -206,6 +210,7 @@ rows:
       also carries the echoed `user.message`, so it is the second row whose
       classification moved from `rate_limited` to `null` with the C1 fix.
     expect:
+      lane_status: {lane_a: ok, lane_b: ok}
       success: true
       data:
         - {id: "S001", title: "Bound the retry ladder", severity: "high"}
@@ -241,6 +246,7 @@ rows:
       detection is structural in `parse_output`. The classification is therefore
       `None`, correctly: nothing in the capture says what went wrong.
     expect:
+      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U38b (PROV-1 phase 2)"}
       success: false
       error_contains: ["copilot returned an empty assistant message"]
       raw_contains: ['"exitCode":0']
@@ -263,6 +269,7 @@ rows:
       names a cause, so the classification is `None` — the same transport-shaped
       verdict the 1.0.80 row gets.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       success: false
       error_contains: ["query: No response was returned"]
       raw_contains: ['"exitCode":1', '"content":""']
@@ -301,6 +308,7 @@ rows:
       branch). The classifier answers `None` on an empty haystack by
       construction.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: runner_error}
       success: false
       error_contains: ["Empty output from copilot"]
       classify_failure: null
@@ -318,6 +326,7 @@ rows:
       adapter adds no pattern of its own for it. At 1.0.93 the gloss's second
       line also names COPILOT_PROVIDER_API_KEY_COMMAND.
     expect:
+      lane_status: {lane_a: auth_failed, lane_b: auth_failed}
       success: false
       error_contains: ["authentication (HTTP 401)"]
       raw_contains:
@@ -338,6 +347,7 @@ rows:
       `retries_rate_limit=True` envelope — an executor-level re-dispatch of a
       rate-limited copilot slot repeats a chain the CLI already ran.
     expect:
+      lane_status: {lane_a: rate_limited, lane_b: rate_limited}
       success: false
       error_contains: ["rate_limit (HTTP 429)"]
       raw_contains:
@@ -359,6 +369,7 @@ rows:
       vibe's otherwise-identical 404s to the server rung (that ordering defect is
       C2's, not this row's).
     expect:
+      lane_status: {lane_a: invalid_model, lane_b: invalid_model}
       success: false
       error_contains: ["query (HTTP 404)"]
       raw_contains: ["Model 'gpt-5.5' not found on provider"]
@@ -378,6 +389,7 @@ rows:
       That is the opposite of goose, which swallows the same upstream text and
       substitutes its own compaction report.
     expect:
+      lane_status: {lane_a: context_length_exceeded, lane_b: context_length_exceeded}
       success: false
       error_contains: ["query (HTTP 400)"]
       raw_contains: ["maximum context length is 8192 tokens"]
@@ -400,6 +412,7 @@ rows:
       from `rate_limited` to `null` — the reduction is keyed on record type, not
       on stream mode.
     expect:
+      lane_status: {lane_a: ok, lane_b: ok}
       success: true
       data:
         - {id: "S001", title: "Bound the retry ladder", severity: "high"}
@@ -423,6 +436,7 @@ rows:
       from a `session.error`. The row exists to keep that trade-off measured
       rather than remembered.
     expect:
+      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U38b (PROV-1 phase 2)"}
       success: false
       error_contains: ["no assistant.message record in copilot output"]
       raw_contains: ["S001"]

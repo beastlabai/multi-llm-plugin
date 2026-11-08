@@ -92,6 +92,7 @@ rows:
       has here and the first half of the `supports_file_output` finding in the
       README.
     expect:
+      lane_status: {lane_a: ok, lane_b: ok}
       success: true
       data:
         - {id: "S001", title: "Bound the retry ladder", severity: "high"}
@@ -116,6 +117,7 @@ rows:
       stream on its short ladder (0.25.2 sent one request and stopped), not on
       the 429 / 500 rows' ten-request one.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: runner_error}
       success: false
       # C4 tier (ii): the prose after the `Full report available at:` path. The
       # path itself never reaches the message — it is a fresh /tmp/mllm-inv/
@@ -151,6 +153,7 @@ rows:
       unembellished. That is the measurement — gemini wrote no diagnosis — not a
       gap in the hook.
     expect:
+      lane_status: {lane_a: null, lane_b: runner_error, open: "U38b (PROV-1 phase 2)"}
       success: false
       error_contains: ["No valid JSON found in text"]
       raw_contains: ['"response": ""', '"totalRequests": 4', '"NO_RESPONSE_TEXT": 1']
@@ -175,6 +178,7 @@ rows:
       The literal §6.2 shape (two assistant *messages*) is unreachable: gemini
       concatenates every turn into one `response` string before printing.
     expect:
+      lane_status: {lane_a: ok, lane_b: ok}
       success: true
       data:
         - {id: "S001", title: "Bound the retry ladder", severity: "high"}
@@ -197,6 +201,7 @@ rows:
       mis-served: nothing from the error object reaches any pattern table, and
       the two rows are distinguishable only by the server that produced them.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: runner_error}
       success: false
       # C4 tier (ii), same sentence as `truncated` — the two rows stay
       # indistinguishable in the ERROR too, because the provider's own text
@@ -245,6 +250,7 @@ rows:
       report` path and no trailing envelope; at 0.63.0 that line follows three
       lines of start-up chatter (fact 5), which the parser drops first.
     expect:
+      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U38b (PROV-1 phase 2)"}
       success: false
       error_contains:
         - "No valid JSON found in text"
@@ -300,6 +306,7 @@ rows:
       committed bytes rather than by new ones, and the row reads `auth_failed`.
       See README, defect 3.
     expect:
+      lane_status: {lane_a: auth_failed, lane_b: auth_failed}
       success: false
       # C4 tier (i): the LAST `ApiError: {…}` blob's message and code. Never the
       # trailing envelope's `error.message`, which was `[object Object]` at 0.25.2
@@ -331,6 +338,7 @@ rows:
       already ran four. The classification works here only because the vendor's
       own words carry `rate limit` and `429`.
     expect:
+      lane_status: {lane_a: rate_limited, lane_b: rate_limited}
       success: false
       # C4 tier (i), and the row that shows why "the LAST blob" is the rule:
       # NINE identical `ApiError` blobs, one per backoff attempt, collapse to
@@ -359,6 +367,7 @@ rows:
       `ModelNotFoundError`, so `\bmodel .{0,40}does not exist` matches and the
       classification is right — one of only four categories this CLI reaches.
     expect:
+      lane_status: {lane_a: invalid_model, lane_b: invalid_model}
       success: false
       # C4 tier (ii): no `ApiError` blob here, so the diagnosis is the prose
       # after the `Full report` path. The trailing envelope contributes only its
@@ -388,6 +397,7 @@ rows:
       carries the real status (`"code": 400`) rather than the generic `1`, as the
       401, 429 and 500 rows' do at 0.63.0.
     expect:
+      lane_status: {lane_a: context_length_exceeded, lane_b: context_length_exceeded}
       success: false
       # C4 tier (i). The vendor's own sentence, with the 400 from the blob.
       error_contains: ["JSON parse error", "400: This model's maximum context length"]
@@ -414,6 +424,7 @@ rows:
       that phrasing (`server error` as a phrase never appears, and the `5\d{2}`
       pattern needs the status adjacent to the word). See README, defect 5.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: runner_error}
       success: false
       # C4 tier (i). 14,484 bytes of stderr and ten identical blobs, capped to
       # one line. The classification cell is unchanged and still `null` — C4
@@ -444,6 +455,7 @@ rows:
       Retrying with backoff...`, where 0.25.2 sent one request and gave up in 2 s
       (1,582 bytes of stderr).
     expect:
+      lane_status: {lane_a: runner_error, lane_b: runner_error}
       success: false
       # C4 tier (ii): undici's generic failure, which still matches nothing in
       # CONNECTION_ERROR_MARKERS — so this row keeps `classify_failure: null`

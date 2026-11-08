@@ -433,15 +433,15 @@ class TestLaunchFailureMarkers:
         composed = f"omp exited with code 2: {reason}"
         assert pbase.classify_streams(composed, "") == STATUS_SPAWN_FAILED
         assert pbase.match_streams(composed, "").status == STATUS_SPAWN_FAILED
-        # The prefix is llm_client's own composition, pinned so the two move
-        # together.
-        client = (
-            Path(__file__).parent.parent / "utils" / "llm_client.py"
-        ).read_text(encoding="utf-8")
-        assert (
-            'error_message = f"{provider_name} exited with code '
-            '{result.returncode}"' in client
+        # The prefix is Lane A's own composition (`provider_outcome`), pinned
+        # through the real reading of the same capture so the two move together.
+        from utils.provider_outcome import Capture, outcome_from_capture
+
+        result = outcome_from_capture(
+            OmpProvider(), Capture(stdout=stdout, stderr=stderr, exit_code=2),
+            provider_name="omp", model="m",
         )
+        assert result["error"].startswith(composed)
         # Another runner's sentence that only quotes it later is not omp's.
         quoted = (
             "claude-code exited with code 1: the reviewer wrote that omp says "

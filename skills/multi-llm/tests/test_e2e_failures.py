@@ -1011,7 +1011,7 @@ def _real_hard_failure(model_spec: str, stdout: str, stderr: str) -> Dict[str, A
     `_unparseable_reply`) are literals, and a literal `details` dict is a snapshot
     of what the plumbing looked like on the day it was typed. `details` is exactly
     where the plumbing and its consumers meet: `_attach_stdout_excerpt`
-    (`utils/llm_client.py:413`) decides which keys appear and salvage site A
+    (`utils/provider_outcome.py`) decides which keys appear and salvage site A
     decides which it reads, and `_hard_failure_with_empty_stderr` below spent a
     release asserting — in its own docstring — that a non-zero exit carries no
     stdout, which stopped being true the moment that helper landed. A fixture that
@@ -1257,7 +1257,7 @@ class TestSalvageSiteAReadsTheAnswerTheProviderLeftOnStdout:
     landed (its `raw_output` was the empty string), so this closes a latent hole
     rather than a regression — but site A is the one place the gate could turn
     that hole into a *visible* loss, which is why the two halves shipped in the
-    same pass: `_attach_stdout_excerpt` (`utils/llm_client.py:413`) puts the text
+    same pass: `_attach_stdout_excerpt` (`utils/provider_outcome.py`) puts the text
     on the envelope, and this reads it.
 
     Every test here drives the real provider chain
@@ -1319,7 +1319,7 @@ class TestSalvageSiteAReadsTheAnswerTheProviderLeftOnStdout:
         kilocode's dead-account failure is four words of ANSI-coloured prose on
         stderr by a CLI that never emitted a byte of answer, so
         `_attach_stdout_excerpt` omits `stdout_excerpt` entirely rather than
-        setting it to `""` (`utils/llm_client.py:413` — "absent means absent").
+        setting it to `""` (`utils/provider_outcome.py` — "absent means absent").
         Reading stdout *ahead of* stderr must therefore leave stderr reachable: a
         precedence written as a replacement would blank `raw_content` for every
         provider that dies before speaking, and the gate would then reach the
@@ -1429,7 +1429,7 @@ def _hard_failure_with_empty_stderr() -> Dict[str, Any]:
     and that opencode's error body being absent was "the point of the fixture,
     not an omission in it". That was true of the code it was written against and
     is false of the code now: `_attach_stdout_excerpt`
-    (`utils/llm_client.py:413`) attaches the excerpt on all three losing paths,
+    (`utils/provider_outcome.py`) attaches the excerpt on all three losing paths,
     non-zero exit included, and salvage site A reads exactly that key ahead of
     `details["stderr"]`.
 
@@ -1596,7 +1596,7 @@ class TestAProviderWhoseFailureIsItselfJSON:
         gate's judgement — site A built `raw_content` from `details["stderr"]`
         alone, a non-zero exit carried no stdout, and so the error body never
         reached the predicate at all. Both halves of that have now landed:
-        `_attach_stdout_excerpt` (`utils/llm_client.py:413`) puts the body on the
+        `_attach_stdout_excerpt` (`utils/provider_outcome.py`) puts the body on the
         envelope and site A reads `details["stdout_excerpt"]` ahead of
         `details["stderr"]`, so `OPENCODE_ERROR_EVENT` now goes straight into
         `has_salvageable_json`'s clause 1 and the verdict below is the gate's own.

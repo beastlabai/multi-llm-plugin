@@ -12,6 +12,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [Model catalog snapshots](#model-catalog-snapshots)
 - [Provider output channels](#provider-output-channels)
 - [Capturing a CLI's streams](#capturing-a-clis-streams)
+- [Reading a capture](#reading-a-capture)
 - [Usage reporting](#usage-reporting)
 - [Child Python environments](#child-python-environments)
 - [Provider outcome logs](#provider-outcome-logs)
@@ -50,7 +51,7 @@ Then work through the steps in order. Each test named fails until its step is do
 | 4 | `ENV_ALLOWLIST_PROFILES` in `utils/providers/base.py` | A `RunnerEnvProfile`: CA family (`node` or `native`), the env prefixes the CLI owns, its home and config variable names. | `test_env_allowlist.py` |
 | 5 | Test tables | `MODELS` in `test_provider_housekeeping.py`; `PRE_L5_ARGV` and `PRE_L5_ARGV_MODELS` in `test_provider_timeouts.py` (also read by `test_structured_output.py`); `TRANSPORT_CASES` in `test_provider_contract.py`; a `ROWS` entry in `test_answer_text.py`. Each holds a real model id from step 2, never a placeholder. The `ROWS` entry passes only when the answer is readable: a clean `{"type": "result"}` or `{"response": ...}` envelope, plain stdout (`answer_framing = "plain"`), or a `salvage_text` hook. | those files |
 | 6 | `TestDeclaredOutputChannel.CANNOT_WRITE_FILES` in `test_provider_contract.py`; `NO_WRITE_TOOL_AT_ALL` in `test_provider_housekeeping.py` | **Only for an adapter declaring `supports_file_output = False`** (it answers on stdout): its name in `CANNOT_WRITE_FILES`. **Also, only when no argv atom causes the declaration** (step 1 added no `STOPS_FILE_WRITES` row, because the CLI ships no write tool): a `NO_WRITE_TOOL_AT_ALL` row naming the probe that measured it ([output channels](#provider-output-channels)). | `test_provider_contract.py::TestDeclaredOutputChannel`; `test_provider_housekeeping.py::TestReadOnlyArgvMatchesTheDeclaration` |
-| 7 | `tests/fixtures/<name>/` | `manifest.yaml` and the captured streams, one cell per canonical row (`success`, `truncated`, ... `context-overflow`; a measured `not_applicable` counts). Until they are captured, a `FIXTURES_PENDING` row in `test_provider_fixture_rows.py` with the measured reason. | `test_provider_fixture_rows.py` |
+| 7 | `tests/fixtures/<name>/` | `manifest.yaml` and the captured streams, one cell per canonical row (`success`, `truncated`, ... `context-overflow`; a measured `not_applicable` counts), each graded row with its `expect.lane_status` ([reading a capture](#reading-a-capture); the failing test prints the values). Until they are captured, a `FIXTURES_PENDING` row in `test_provider_fixture_rows.py` with the measured reason. | `test_provider_fixture_rows.py` |
 | 8 | `_PROVIDER_ICON_KEYS` in `utils/html_report_generator.py` | A row naming an `_ICON_DEFS` key: the CLI's own mark, or a letter icon `(None, letter, colour)`. A bundled mark also goes in `docs/attribution.md`. | `test_provider_roster.py` |
 | 9 | Docs | A row in the `docs/providers.md` table (key, binary, link). In the repository root, the harness link and count in `README.md` and the count in `.claude-plugin/plugin.json` and `marketplace.json`. The provider→`binary` list and the declaration-order list in `instructions/init-config.md`, and the base-order list in `docs/configuration.md`. The "Not affiliated" names in `docs/attribution.md` are not checked. | `test_provider_roster.py` |
 | 10 | `tests/test_provider_<name>.py` | The adapter's own cases: argv per profile, parse edge cases, failure classification over the fixtures. | (new) |
@@ -694,6 +695,46 @@ real pipes, as the tests use, has nothing to take, and its own `communicate` ans
 `TestLaneACaptureEndsWithTheCliAndIsBounded` in `tests/test_llm_client.py`, the capped-stdout row
 in `tests/test_lane_b_structured_output.py`, and the held-pipe and capture-bound rows beside the
 surviving-grandchild test in `tests/test_subagent_executor.py`.
+
+## Reading a capture
+
+`llm_client.invoke_with_provider` is three steps: `prepare_dispatch` (provider, timeout, transport,
+phase schema, jail grant, argv, child env, and every refusal before a spawn), the spawn
+(`_run_dispatch`), and the reading of what it captured (`provider_outcome.outcome_from_capture`).
+The reading spawns nothing and touches no file itself, so a fixture's bytes become the result a
+caller sees without a child process or a patch: build a `provider_outcome.Capture` (the streams,
+how the run ended, the duration, the capped streams and the bound they were capped at) and hand it
+to `outcome_from_capture`.
+
+- **One tail.** A non-zero exit, an exit 0, a deadline kill and a launch failure each start the
+  result their own way (the error line, the parse, the timeout line), then every child that ran
+  goes through the same tail: read-only audit, `stream_capped`, `failure_category`, the
+  `sandbox` word, the jail read-back, then on a failure `stdout_excerpt` and `salvage_text`, then
+  `answer_text` and `usage`. A key the reading has nothing for is absent, never empty; a launch
+  failure carries none of them. Each path keeps the key order it has always had, and the order of
+  its calls: the jail read-back samples live state, so a non-zero exit takes it before the audit
+  (its keys still land after `sandbox`), a timeout and an exit 0 after it.
+- **Full stream first, redacted before bounded.** The audit, the salvage and answer hooks and
+  usage read the whole stream; any stream text that leaves is redacted, then cut.
+- **The jail stays the caller's.** Its read-back needs the attempt's live context, so it comes in
+  as a callable (`JailReadBack`); a jail denial replaces the error line, carries no category tag
+  and wins over any category.
+- **Logs.** The caller passes the log writer in (`log`, `LogWriter`; `_log_outcome`), and the
+  reading calls it once, where each path has always logged, so a reading that raises later still
+  leaves the log: a hard failure once its error line is final, before the excerpt, salvage,
+  answer and usage steps; an exit 0 after its salvage, before its answer text, unless the caller
+  defers it (`details["_deferred_log"]`, see [provider outcome logs](#provider-outcome-logs)).
+  The prepared dispatch's contexts are closed in a `finally` on every outcome.
+- **The schema verdict** (`schema_phase`, W1: deferred by the owner, no production caller) sits
+  behind `_phase_schema` before the spawn and `provider_outcome._schema_verdict` after it.
+
+The executor's `subagent_executor._Capture` carries the same stream fields but stays mutable (the
+spawn fills it in steps, the jail and the parse write to it afterwards), and its readers read a
+status, not this result, so it shares the fields and its readers accept a `Capture`
+(`tests/test_provider_outcome.py`). Every graded fixture row pins both lanes' ladder status as
+`expect.lane_status` (`tests/test_provider_fixture_rows.py`): `lane_a` from `outcome_from_capture`
+as the review fan-out reads it with no result file, `lane_b` from the executor's readers. A row
+whose two statuses retry differently carries `open: <unit>` until that unit settles it.
 
 ## Usage reporting
 

@@ -116,6 +116,7 @@ rows:
       `"harness"` where 2.24.1 wrote `null`), and 2.26.1 changed nothing in
       them. One request, 3.2 s.
     expect:
+      lane_status: {lane_a: ok, lane_b: ok}
       salvage: answer
       success: true
       data:
@@ -155,6 +156,7 @@ rows:
       `base.CONNECTION_ERROR_MARKERS`. Recorded, not fixed: the run falls to the
       executor's bounded transport retry.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: runner_error}
       salvage: none
       success: false
       error_contains: ["ended without a finish reason"]
@@ -179,6 +181,7 @@ rows:
       to be called rate-limited was our own plan text is precisely the live
       hazard, and this is the row that pins it.
     expect:
+      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U38b (PROV-1 phase 2)"}
       salvage: none
       success: false
       error_contains: ["no assistant message in vibe's transcript"]
@@ -205,6 +208,7 @@ rows:
       This capture carries the echoed user entry too, so it is the second vibe
       row whose classification moved from `rate_limited` to `null`.
     expect:
+      lane_status: {lane_a: ok, lane_b: ok}
       salvage: answer
       success: true
       data:
@@ -240,6 +244,7 @@ rows:
       error never becomes an answer), and so is the cost: the vendor's own
       message is lost, and the row classifies `None`.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: runner_error}
       salvage: none
       success: false
       error_contains: ["produced no chunks"]
@@ -279,6 +284,7 @@ rows:
       one place the reason exists. The classification is `None`: a rejected
       `thinking` level is not a transport condition and matches no table.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       salvage: none
       success: false
       error_contains:
@@ -306,6 +312,7 @@ rows:
       wording because there is no stderr text to quote. The classifier answers
       `None` on an empty haystack by construction.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: runner_error}
       salvage: none
       success: false
       error_contains: ["Empty output from vibe"]
@@ -326,6 +333,7 @@ rows:
       member of the adapter's `auth_error_patterns`, so the credential failure
       lands on rung 1 where it belongs.
     expect:
+      lane_status: {lane_a: auth_failed, lane_b: auth_failed}
       salvage: none
       success: false
       error_contains: ["Invalid API key"]
@@ -351,6 +359,7 @@ rows:
       its own vendor body) 150 requests one second apart, 152.8 s — the header
       is taken as given below the 30 s cap, so a short one sets the count.
     expect:
+      lane_status: {lane_a: rate_limited, lane_b: rate_limited}
       salvage: none
       success: false
       error_contains: ["429 Too Many Requests"]
@@ -376,6 +385,7 @@ rows:
       2.26.x carries no `api error` token and no error code at all; the row
       classifies `invalid_model` either way.
     expect:
+      lane_status: {lane_a: invalid_model, lane_b: invalid_model}
       salvage: none
       success: false
       error_contains: ["The model `stub-model` does not exist"]
@@ -405,6 +415,7 @@ rows:
       400 is swallowed into a compaction report that matches nothing and burns
       the whole retry budget on the one condition §7.2 calls terminal.
     expect:
+      lane_status: {lane_a: context_length_exceeded, lane_b: context_length_exceeded}
       salvage: none
       success: false
       error_contains: ["maximum context length is 8192 tokens"]
@@ -426,6 +437,7 @@ rows:
       (2.26.0: 1). `server_error` is the correct answer and the status line
       produces it.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: runner_error}
       salvage: none
       success: false
       error_contains: ["500 Internal Server Error"]
@@ -448,6 +460,7 @@ rows:
       from stderr and both answer `None`; the `error-envelope` row is no longer
       a third member of that set.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: runner_error}
       salvage: none
       success: false
       error_contains: ["ended without a finish reason"]
@@ -468,6 +481,7 @@ rows:
       classification is `None` and the run falls to the executor's bounded
       transport retry, as the `truncated` row does.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: runner_error}
       salvage: none
       success: false
       error_contains: ["Server disconnected without sending a response"]
@@ -490,6 +504,7 @@ rows:
       `timed out` marker now classifies it `timeout` (2.26.0's bytes answered
       `None`).
     expect:
+      lane_status: {lane_a: timeout, lane_b: runner_error}
       salvage: none
       success: false
       error_contains: ["stderr said: Error: Timed out waiting for the model"]
@@ -509,6 +524,7 @@ rows:
       takes the empty-stdout branch and quotes it; the classification is
       `None`, as on stdout.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: runner_error}
       salvage: none
       success: false
       error_contains:
@@ -536,6 +552,7 @@ rows:
       own, since a failed run can still hold an answer worth salvaging. The
       only paths in it are the container's own `/tmp/work-turn-limit`.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       salvage: answer
       success: false
       error_contains: ["vibe stopped before finishing (Stopped: turn_limit)"]
@@ -561,6 +578,7 @@ rows:
       exactly like `success`; stderr is the only difference, which is why the
       refusal reads stderr.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       salvage: answer
       success: false
       error_contains: ["vibe stopped before finishing (Stopped: price_limit)"]
@@ -581,6 +599,7 @@ rows:
       a ONE-record document (`S001`, salvaged out of the cut array) — the worst
       of the four, because the answer it served was short rather than absent.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       salvage: partial
       success: false
       error_contains: ["vibe stopped before finishing (Stopped: length)"]
@@ -604,6 +623,7 @@ rows:
       (not committed). `llm_client` and the executor already treat a kill they
       sent as a timeout; the refusal makes the parser agree.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       salvage: partial
       success: false
       error_contains: ["vibe stopped before finishing (Stopped: terminated)"]
@@ -627,6 +647,7 @@ rows:
       because this capture's echoed prompt is a two-word test prompt rather
       than a plan.
     expect:
+      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U38b (PROV-1 phase 2)"}
       salvage: none
       success: false
       error_contains: ["vibe produced non-JSON output on stdout"]
@@ -647,6 +668,7 @@ rows:
       what ships, and graded as the failure it is through the shipped adapter
       rather than left as an untested cell.
     expect:
+      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U38b (PROV-1 phase 2)"}
       salvage: none
       success: false
       error_contains: ["vibe produced non-JSON output on stdout"]

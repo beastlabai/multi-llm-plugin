@@ -24,6 +24,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import llm_client
+from utils import provider_outcome
 from utils.llm_client import (
     ERROR_TIMEOUT,
     ERROR_PARSE_ERROR,
@@ -1099,8 +1100,9 @@ class TestHardFailureStdoutExcerpt:
         output is what makes an inlined fourth copy fail here instead of shipping.
         """
         seen = []
+        # The helper lives with the outcome rules (`utils.provider_outcome`).
         with patch.object(
-            llm_client,
+            provider_outcome,
             "_attach_stdout_excerpt",
             side_effect=lambda details, stdout: seen.append(stdout),
         ):
@@ -1280,7 +1282,7 @@ class TestSalvageTextOnTheLosingPaths:
     def test_all_three_losing_paths_route_through_the_one_helper(self):
         seen = []
         with patch.object(
-            llm_client, "_attach_salvage_text",
+            provider_outcome, "_attach_salvage_text",
             # `**_`: the sites now pass the one hook reading as `hook_text`
             # (plans/ask-answer-recovery-and-false-success.md D2.2).
             side_effect=lambda details, provider, stdout, **_: seen.append(stdout),
@@ -4448,6 +4450,48 @@ class TestHardFailureOnAnExitZeroRunWritesItsLog:
         written = log_file.read_text(encoding="utf-8")
         assert "stream-bytes" in written
         assert "the stream reported a terminal error" in written
+
+
+class TestTheLogIsWrittenBeforeTheRestOfTheReading:
+    """The provider log is written where each path writes it: a hard failure
+    once its error line is final, before the excerpt, salvage, answer and usage
+    steps; an exit 0 after its salvage, before its answer text. Whatever raises
+    later in the reading, an interrupt included, leaves the log behind
+    (docs/development/providers.md#reading-a-capture)."""
+
+    class _Interrupted(BaseException):
+        """Raised by a later step of the reading; a ``BaseException``, as a
+        Ctrl-C is, so no handler on the way out can swallow it."""
+
+    @pytest.mark.parametrize("ending,stdout,step,return_code", [
+        ("nonzero", "the partial answer\n", "_attach_stdout_excerpt", "1"),
+        ("nonzero", "the partial answer\n", "_attach_answer_text", "1"),
+        ("nonzero", "the partial answer\n", "_attach_usage", "1"),
+        ("timeout", "the partial answer\n", "_attach_stdout_excerpt", "-1"),
+        ("timeout", "the partial answer\n", "_attach_answer_text", "-1"),
+        ("timeout", "the partial answer\n", "_attach_usage", "-1"),
+        ("exit0", "[]\n", "_attach_answer_text", "0"),
+        ("exit0", "the partial answer\n", "_attach_answer_text", "0"),
+    ])
+    def test_a_step_that_raises_after_the_log_leaves_it(
+        self, tmp_path, monkeypatch, ending, stdout, step, return_code,
+    ):
+        def interrupted(*_args, **_kwargs):
+            raise self._Interrupted(step)
+
+        monkeypatch.setattr(provider_outcome, step, interrupted)
+        log = tmp_path / "log.txt"
+
+        with pytest.raises(self._Interrupted):
+            _invoke_answer(
+                KILO_SPEC, stdout, returncode=0 if ending == "exit0" else 1,
+                timeout=ending == "timeout", log_file=log,
+            )
+
+        assert log.exists(), f"the {ending} log was lost to a raise in {step}"
+        text = log.read_text(encoding="utf-8")
+        assert f"Return Code: {return_code}\n" in text
+        assert stdout.strip() in text
 
 
 # --------------------------------------------------------------------------- #

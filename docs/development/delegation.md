@@ -443,8 +443,8 @@ a structural `runner_error`). Any other verdict, `None` included, leaves the par
 status, rung 4 or 5: one transport retry. The review fan-out (`dispatch_with_ladder`, the one
 loop behind review-plan's and review-tasks' `run_single_model` and review-code's
 `run_single_review`) takes it from `details["failure_category"]`, which
-`llm_client.invoke_with_provider` sets on a **non-zero exit** while it still holds the streams; only the category leaves that
-function, never the streams. The fan-out applies it the same way: `None` (the adapter recognised
+`llm_client.invoke_with_provider` sets on a **non-zero exit** while it still holds the streams (its reading is
+`provider_outcome.outcome_from_capture`); only the category leaves, never the streams. The fan-out applies it the same way: `None` (the adapter recognised
 nothing) is `runner_error`, connection and server errors are rung 4 through
 `review_orchestrator_base._LADDER_STATUS_BY_CATEGORY`, and every other category reaches the ladder
 under its own name. Two verdicts stop on the fan-out and are retried once by the executor, which
@@ -613,7 +613,7 @@ learned to re-derive the verdict out of `subagent_batch_report.json`. **With the
 and the documented native flow is byte-for-byte unchanged**: no dispatch, so no outcome, so the
 markers, the salvage-then-reaggregate loop and every printed command are what they were.
 
-**And the gate that decides all of this now reads stdout, not stderr alone.** `llm_client._attach_stdout_excerpt`
+**And the gate that decides all of this now reads stdout, not stderr alone.** `provider_outcome._attach_stdout_excerpt`
 attaches `details["stdout_excerpt"]` — redacted *then* bounded, and the key omitted rather than set empty
 so `details.get("stdout_excerpt")` means "the provider said something worth reading" — on all three losing
 paths (non-zero exit, timeout kill, zero-exit parse failure), and the code-review salvage site reads

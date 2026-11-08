@@ -55,6 +55,7 @@ rows:
       `["ok"]`) and returns the array; `classify_failure` is None, the assertion
       that catches an adapter reading its own happy path as a failure.
     expect:
+      lane_status: {lane_a: ok, lane_b: ok}
       success: true
       data: ["ok"]
       raw_contains:
@@ -105,6 +106,7 @@ rows:
       thing this row now protects — a status rung that swallowed the text ladder
       would take this CLI's only failure signal with it.
     expect:
+      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U38b (PROV-1 phase 2)"}
       success: false
       error_contains: ["is_error: true"]
       raw_contains: ['"is_error":true']
