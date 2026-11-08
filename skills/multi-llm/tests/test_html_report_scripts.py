@@ -584,7 +584,8 @@ class TestEveryAttributeValueIsEscaped:
 #: Fields a reviewer or validator controls outside the markdown bodies. Each
 #: tries to leave its attribute (a handler, a forged selection id), open a
 #: tag, or break out of an inline handler's JS string; the importance hides
-#: its handler in entities that survive the generator's uppercasing.
+#: its handler in entities that survive uppercasing (every page now reads a
+#: value naming no level as MEDIUM, so it never reaches the page).
 EVIL_STATUS = ('x" onmouseover="alert(11)" data-cg-id="forged">'
                '<img src=x onerror=alert(12)><input type="checkbox" data-cg-id="forged">')
 EVIL_IMPORTANCE = "<img src=x onerror=&#97;&#108;&#101;&#114;&#116;(13)>"
@@ -741,13 +742,12 @@ class TestHostileMetadataStaysText:
         # The page rendered (an empty page passes the checks above), and the
         # hostile values are its text.
         text = "".join(parsed.text)
-        # An importance naming no level reads as MEDIUM on the flat and PR
-        # pages (utils/importance.py), so the hostile value is replaced, not
-        # shown; the consolidated page still shows it, as escaped text.
-        importance_text = EVIL_IMPORTANCE.upper() if kind == "consolidated" else "MEDIUM"
-        for value in (EVIL_STATUS, importance_text, EVIL_REFERENCE if "review-plan" in kind
+        # An importance naming no level reads as MEDIUM on every page
+        # (utils/importance.py), so the hostile value is replaced, not shown.
+        for value in (EVIL_STATUS, "MEDIUM", EVIL_REFERENCE if "review-plan" in kind
                       or kind == "consolidated" else EVIL_PATH):
             assert value in text, (value, text[:2000])
+        assert EVIL_IMPORTANCE not in text and EVIL_IMPORTANCE.upper() not in text
         if kind != "consolidated":
             assert EVIL_LABEL in text and EVIL_MODEL in text
 
@@ -760,7 +760,7 @@ class TestHostileMetadataStaysText:
             assert cards[0]["data-cg-id"] == EVIL_CG_ID
             assert cards[0]["data-reference"] == EVIL_REFERENCE
             assert cards[0]["data-validation"] == EVIL_STATUS
-            assert cards[0]["data-importance"] == EVIL_IMPORTANCE
+            assert cards[0]["data-importance"] == "MEDIUM"
             return
         assert {a["data-validation"] for a in attrs
                 if "data-validation" in a and "data-group-id" in a} == {EVIL_STATUS}

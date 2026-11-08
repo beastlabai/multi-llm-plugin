@@ -20,12 +20,14 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 try:
     from .state_manager import (
         generate_group_id as _state_generate_group_id,
+        stamped_group_id as _stamped_group_id,
         CURRENT_FORMAT_VERSION,
         load_groups_payload,
     )
 except ImportError:
     from utils.state_manager import (
         generate_group_id as _state_generate_group_id,
+        stamped_group_id as _stamped_group_id,
         CURRENT_FORMAT_VERSION,
         load_groups_payload,
     )
@@ -106,9 +108,16 @@ CONSOLIDATION_RECOMMENDED_THRESHOLD = 15
 #: a file.
 CONSOLIDATION_PROMPT_TEMPLATE = "consolidation_batch_{index}.prompt.txt"
 
-# Character budget for combined suggestion content per batch (themes +
-# descriptions). Batches exceeding this limit are split further.
+# Character budget for one group's content (theme + suggestion texts): a solo
+# batch's group above it has its suggestion texts truncated in the prompt.
 CONSOLIDATION_CHAR_BUDGET = 12000
+
+#: The content budget batch formation applies: none, so batches are cut by
+#: count alone, in priority order, as every recorded consolidation ran.
+#: Splitting on ``CONSOLIDATION_CHAR_BUDGET`` (or by section) gives more,
+#: smaller batches and fewer merges, and waits on the decision in
+#: docs/development/review-results.md ("Consolidation batches").
+CONSOLIDATION_BATCH_CHAR_BUDGET: Optional[int] = None
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +144,9 @@ def generate_group_id(group: Dict[str, Any]) -> str:
 
     This is DIFFERENT from state_manager.py's generate_group_id() which uses
     a 16-char hex hash and different input fields. Both coexist — this version
-    is used by the consolidation pipeline for group identity tracking.
+    is used by the consolidation pipeline for group identity tracking. Same-
+    content groups share it, so ids are assigned through
+    :func:`consolidation_group_ids`, never by calling this per group.
 
     Algorithm:
         canonical_string = theme + "\\x00" + "\\x00".join(sorted_titles)
@@ -153,6 +164,95 @@ def generate_group_id(group: Dict[str, Any]) -> str:
     sorted_titles = sorted(s.get("title", "") for s in suggestions)
     canonical_string = theme + "\x00" + "\x00".join(sorted_titles)
     return hashlib.sha256(canonical_string.encode()).hexdigest()[:12]
+
+
+def consolidation_group_ids(groups: List[Dict[str, Any]]) -> List[str]:
+    """Each group's consolidation id, one per group and no two alike.
+
+    The first group with a given :func:`generate_group_id` keeps it, so an
+    ordinary group's id is that content hash. Same-content groups (the hash
+    reads only the theme and the titles) each get their own: one derived from
+    the group's stamped ``group_hash`` (``state_manager.stamped_group_id``).
+    Every writer and reader of consolidation ids goes through this, never
+    through :func:`generate_group_id` alone (docs/development/review-results.md,
+    "Consolidation batches").
+    """
+    ids: List[str] = []
+    taken: Set[str] = set()
+    for group in groups:
+        gid = generate_group_id(group)
+        if gid in taken:
+            seed = f"{gid}\x00{_stamped_group_id(group)}"
+            for n in range(len(taken) + 1):
+                gid = hashlib.sha256(f"{seed}\x00{n}".encode()).hexdigest()[:12]
+                if gid not in taken:
+                    break
+            else:  # pragma: no cover - the truncated hash itself repeated
+                raise ValueError(f"Cannot give group {len(ids) + 1} a consolidation id")
+        taken.add(gid)
+        ids.append(gid)
+    return ids
+
+
+#: ``consolidated.json``'s ``group_id_format``: every ``underlying_group_ids``
+#: entry is one group's own id (:func:`consolidation_group_ids`). A file
+#: without it was written when same-content groups shared one id
+#: (:func:`_decision_join`).
+GROUP_ID_FORMAT = "distinct"
+
+
+def _batch_id_map(
+    batch_info: Dict[str, Any],
+    ids: List[str],
+    plain_ids: List[str],
+    id_to_index: Dict[str, int],
+) -> Dict[str, List[str]]:
+    """A batch's ids as its prompt gave them -> the own ids of the groups
+    each names: the only ids a reply to that batch may name.
+
+    The task file is the trusted source: each listed id is read through the
+    ``group_indices`` entry beside it. A task file written before same-content
+    groups had ids of their own listed each copy under the plain id, so that
+    id names the copies the batch was given, never a copy it was not. A
+    listed id its index does not match (``grouped.json`` changed since) names
+    the group it is the id of.
+    """
+    listed = batch_info.get("group_ids") or []
+    indices = batch_info.get("group_indices") or []
+    mapping: Dict[str, List[str]] = {}
+    for position, gid in enumerate(listed):
+        if not isinstance(gid, str):
+            continue
+        idx = indices[position] if position < len(indices) else None
+        if (isinstance(idx, int) and not isinstance(idx, bool)
+                and 0 <= idx < len(ids) and gid in (ids[idx], plain_ids[idx])):
+            own = ids[idx]
+        elif gid in id_to_index:
+            own = gid
+        else:
+            continue
+        named = mapping.setdefault(gid, [])
+        if own not in named:
+            named.append(own)
+    return mapping
+
+
+def _decision_join(
+    groups: List[Dict[str, Any]], distinct: bool,
+) -> Dict[str, List[int]]:
+    """Consolidation id -> the group indices a decision filed under it covers.
+
+    A ``consolidated.json`` that records :data:`GROUP_ID_FORMAT` (*distinct*)
+    names each group by its own id. One without it was written when
+    same-content groups shared the plain :func:`generate_group_id`, so that
+    id covers every copy, as it did when the decision was made.
+    """
+    ids = (consolidation_group_ids(groups) if distinct
+           else [generate_group_id(group) for group in groups])
+    join: Dict[str, List[int]] = {}
+    for idx, gid in enumerate(ids):
+        join.setdefault(gid, []).append(idx)
+    return join
 
 
 def generate_consolidated_id(underlying_group_ids: List[str]) -> str:
@@ -266,6 +366,10 @@ def pre_group_by_section(
     section_total: Dict[str, int] = {}
 
     for idx, group in enumerate(groups):
+        # A group record carries no ``reference`` (``SuggestionGroup.to_dict``
+        # writes none), so every group lands in ``_uncategorized``: one
+        # section. Deriving sections from the members is an open decision
+        # (docs/development/review-results.md, "Consolidation batches").
         reference = group.get("reference", None)
         section_key = normalize_reference(reference)
 
@@ -294,11 +398,23 @@ def pre_group_by_section(
 # Batch preparation helpers
 # ---------------------------------------------------------------------------
 
+def _suggestion_text_key(suggestion: Dict[str, Any]) -> str:
+    """The key a suggestion's text is under: ``desc``, the field reviewers
+    answer in (``schemas/review_suggestions.schema.json``), else the older
+    ``description``."""
+    return "desc" if suggestion.get("desc") else "description"
+
+
+def _suggestion_text(suggestion: Dict[str, Any]) -> str:
+    """A suggestion's text (:func:`_suggestion_text_key`), ``""`` when absent."""
+    return str(suggestion.get(_suggestion_text_key(suggestion)) or "")
+
+
 def _measure_group_content_length(group: Dict[str, Any]) -> int:
     """
     Measure the character length of a group's content for budget purposes.
 
-    Counts the theme length plus all suggestion description lengths within
+    Counts the theme length plus all suggestion text lengths within
     the group. This corresponds to the content that will appear in the
     consolidation prompt for this group.
 
@@ -306,11 +422,11 @@ def _measure_group_content_length(group: Dict[str, Any]) -> int:
         group: A suggestion group dict with ``theme`` and ``suggestions``.
 
     Returns:
-        Total character count of theme + all suggestion descriptions.
+        Total character count of theme + all suggestion texts.
     """
     length = len(group.get("theme", ""))
     for suggestion in group.get("suggestions", []):
-        length += len(suggestion.get("description", ""))
+        length += len(_suggestion_text(suggestion))
     return length
 
 
@@ -332,15 +448,16 @@ def _truncate_group_content(group: Dict[str, Any], budget: int) -> Dict[str, Any
     import copy
 
     truncated = copy.deepcopy(group)
-    # Truncate each suggestion description proportionally
+    # Truncate each suggestion text proportionally, under the key it came from
     for suggestion in truncated.get("suggestions", []):
-        desc = suggestion.get("description", "")
+        key = _suggestion_text_key(suggestion)
+        desc = _suggestion_text(suggestion)
         if len(desc) <= 100:
             # Too short to meaningfully truncate
             continue
         # Keep first 20% and last 20%, replace middle with marker
         keep_chars = max(20, int(len(desc) * 0.2))
-        suggestion["description"] = (
+        suggestion[key] = (
             desc[:keep_chars] + " [...truncated...] " + desc[-keep_chars:]
         )
     return truncated
@@ -350,7 +467,7 @@ def _split_into_budget_batches(
     group_indices: List[int],
     groups: List[Dict[str, Any]],
     max_per_batch: int,
-    char_budget: int,
+    char_budget: Optional[int],
 ) -> List[List[int]]:
     """
     Split group indices into sub-batches respecting both size and char budget.
@@ -364,11 +481,19 @@ def _split_into_budget_batches(
         group_indices: Indices into ``groups`` to be batched.
         groups: The full list of suggestion group dicts.
         max_per_batch: Maximum number of groups per batch.
-        char_budget: Maximum combined content characters per batch.
+        char_budget: Maximum combined content characters per batch; ``None``
+            cuts by count alone (``CONSOLIDATION_BATCH_CHAR_BUDGET``).
 
     Returns:
         A list of sub-batches, where each sub-batch is a list of group indices.
     """
+    if char_budget is None:
+        step = max(1, max_per_batch)
+        return [
+            list(group_indices[start:start + step])
+            for start in range(0, len(group_indices), step)
+        ]
+
     batches: List[List[int]] = []
     current_batch: List[int] = []
     current_chars = 0
@@ -442,13 +567,18 @@ def build_consolidation_group_records(
             "index": idx,
             "group_id": group_ids[idx],
             "theme": group.get("theme", "Unknown"),
-            "importance": group.get("importance", "MEDIUM"),
+            # A group has no importance field: its members' highest
+            # (docs/development/review-results.md, "Importance levels").
+            "importance": _importance.group_importance(group),
+            # Neither is a group field either; both stay inert with the
+            # sections (docs/development/review-results.md, "Consolidation
+            # batches").
             "type": group.get("type", "unknown"),
             "reference": group.get("reference", ""),
             "suggestions": [
                 {
                     "title": s.get("title", ""),
-                    "description": s.get("description", s.get("desc", "")),
+                    "description": _suggestion_text(s),
                 }
                 for s in group.get("suggestions", [])
             ],
@@ -520,9 +650,7 @@ def prepare_consolidation_tasks(
     phase_path = Path(phase_dir)
 
     # Pre-compute group_ids for all groups
-    group_ids: List[str] = []
-    for group in groups:
-        group_ids.append(generate_group_id(group))
+    group_ids = consolidation_group_ids(groups)
 
     # Read once, embed per batch: the template is I/O, the generator is pure.
     template = load_prompt("consolidate_suggestions.txt")
@@ -547,9 +675,9 @@ def prepare_consolidation_tasks(
 
         # Determine batching strategy
         if len(indices) <= CONSOLIDATION_SPLIT_THRESHOLD:
-            # Section fits in one batch — but still check char budget
+            # Section fits in one batch (a content budget would split it)
             sub_batches = _split_into_budget_batches(
-                indices, groups, len(indices), CONSOLIDATION_CHAR_BUDGET
+                indices, groups, len(indices), CONSOLIDATION_BATCH_CHAR_BUDGET
             )
         else:
             # Large section — split into sub-batches
@@ -557,7 +685,7 @@ def prepare_consolidation_tasks(
                 indices,
                 groups,
                 MAX_GROUPS_PER_CONSOLIDATION_BATCH,
-                CONSOLIDATION_CHAR_BUDGET,
+                CONSOLIDATION_BATCH_CHAR_BUDGET,
             )
 
         # Create batch entries with global sequential numbering
@@ -577,9 +705,10 @@ def prepare_consolidation_tasks(
             )
             if not budget.fits(prompt):
                 # Sections are already split by MAX_GROUPS_PER_CONSOLIDATION_BATCH
-                # and CONSOLIDATION_CHAR_BUDGET, so an over-budget prompt here
-                # means the runner's transport is the constraint. Fail loudly with
-                # the fix; never truncate the instruction tail.
+                # (and CONSOLIDATION_BATCH_CHAR_BUDGET, when set), so an
+                # over-budget prompt here means the runner's transport is the
+                # constraint. Fail loudly with the fix; never truncate the
+                # instruction tail.
                 budget.resolution(prompt, splittable=False)
 
             batches.append(make_task(
@@ -807,8 +936,9 @@ def _make_singleton_consolidated(
     if group_type not in TYPE_PRIORITY:
         group_type = "clarification"
 
-    # Determine importance
-    importance = _importance.normalize(group.get("importance"), "LOW")
+    # A group has no importance field: its members' highest
+    # (docs/development/review-results.md, "Importance levels").
+    importance = _importance.group_importance(group)
 
     return {
         "title": group.get("theme", "Untitled"),
@@ -823,6 +953,23 @@ def _make_singleton_consolidated(
         "is_singleton": True,
         "reasoning": reasoning or "Singleton group — no related groups to merge.",
     }
+
+
+def _reply_group_ids(
+    batch_map: Dict[str, List[str]], reply_id: Any, batch_index: Any,
+) -> List[str]:
+    """The batch's groups a reply's id names (:func:`_batch_id_map`); none
+    for an id the batch was not given: a guess, a typo, another batch's
+    group, or not a string at all."""
+    named = batch_map.get(reply_id) if isinstance(reply_id, str) else None
+    if not named:
+        logger.warning(
+            "Consolidation batch %s names group_id %r, which is not one of "
+            "its groups — ignored",
+            batch_index, reply_id,
+        )
+        return []
+    return named
 
 
 # ---------------------------------------------------------------------------
@@ -869,26 +1016,35 @@ def merge_consolidation_results(
     """
     phase_path = Path(phase_dir)
 
-    # Build group_id lookup: group_id -> index in groups list
-    group_id_to_index: Dict[str, int] = {}
-    for idx, group in enumerate(groups):
-        gid = generate_group_id(group)
-        group_id_to_index[gid] = idx
+    # Build group_id lookup: group_id -> index in groups list. One id per
+    # group (consolidation_group_ids), so same-content groups stay apart.
+    group_ids = consolidation_group_ids(groups)
+    plain_ids = [generate_group_id(group) for group in groups]
+    group_id_to_index: Dict[str, int] = {
+        gid: idx for idx, gid in enumerate(group_ids)
+    }
+
+    # Each batch's ids -> its groups' own ids (_batch_id_map): a reply is
+    # read through its own batch's map, so it can name only that batch's
+    # groups (docs/development/review-results.md, "Consolidation batches").
+    batch_id_maps: List[Dict[str, List[str]]] = [
+        _batch_id_map(batch_info, group_ids, plain_ids, group_id_to_index)
+        for batch_info in tasks_metadata.get("batches", [])
+    ]
 
     # Collect all group_ids assigned to batches for completeness check later
     all_batch_group_ids: Set[str] = set()
-    for batch_info in tasks_metadata.get("batches", []):
-        for gid in batch_info.get("group_ids", []):
-            all_batch_group_ids.add(gid)
+    for batch_map in batch_id_maps:
+        for own_ids in batch_map.values():
+            all_batch_group_ids.update(own_ids)
 
     # Also collect singleton section group IDs
     all_singleton_group_ids: Set[str] = set()
     singleton_sections = tasks_metadata.get("singleton_sections", {})
     for _section_key, indices in singleton_sections.items():
         for idx in indices:
-            if idx < len(groups):
-                gid = generate_group_id(groups[idx])
-                all_singleton_group_ids.add(gid)
+            if 0 <= idx < len(groups):
+                all_singleton_group_ids.add(group_ids[idx])
 
     # The full set of input group_ids we expect to cover
     all_input_group_ids = all_batch_group_ids | all_singleton_group_ids
@@ -909,7 +1065,7 @@ def merge_consolidation_results(
     # Helper to emit all assigned groups as singletons for a failed batch
     # -------------------------------------------------------------------
     def _emit_as_singletons(
-        assigned_gids: Set[str], reason: str,
+        assigned_gids: List[str], reason: str,
     ) -> None:
         """Emit all assigned group_ids as singletons into batch_singletons."""
         for gid in assigned_gids:
@@ -927,10 +1083,12 @@ def merge_consolidation_results(
     # Steps 1-6: Read each batch file, validate, handle errors, dedup
     # -------------------------------------------------------------------
     batches = tasks_metadata.get("batches", [])
-    for batch_info in batches:
+    for batch_info, batch_map in zip(batches, batch_id_maps):
         batch_index = batch_info["batch_index"]
         section_key = batch_info.get("section_key", "_uncategorized")
-        assigned_group_ids = set(batch_info.get("group_ids", []))
+        assigned_group_ids: List[str] = list(dict.fromkeys(
+            gid for own_ids in batch_map.values() for gid in own_ids
+        ))
         batch_file = phase_path / f"consolidation_batch_{batch_index}.json"
 
         # --- Read and parse ---
@@ -992,14 +1150,8 @@ def merge_consolidation_results(
                 len(assigned_group_ids),
             )
             failed_batch_indices.append(batch_index)
-            # Error batches may include a 'groups' array of group_ids
-            error_gids = batch_data.get("groups", [])
-            fallback_gids = set(error_gids) if error_gids else set()
-            _emit_as_singletons(
-                fallback_gids,
-                f"Batch {batch_index} error fallback — treated as singleton.",
-            )
-            # Also cover any assigned IDs not in the error groups list
+            # Every group the task file assigns, not the reply's own
+            # ``groups`` list: a reply never decides which groups are shown.
             _emit_as_singletons(
                 assigned_group_ids,
                 f"Batch {batch_index} error fallback — treated as singleton.",
@@ -1063,27 +1215,28 @@ def merge_consolidation_results(
             if not isinstance(underlying_ids, list):
                 continue
 
-            # Remove any group_ids already claimed by an earlier cluster
+            # Keep the batch's own groups not claimed by an earlier cluster,
+            # checked before any is claimed; every index comes from an id,
+            # never from the reply's underlying_group_indices.
             deduped_ids: List[str] = []
-            deduped_indices: List[int] = []
-            original_indices = cluster.get("underlying_group_indices", [])
-            for i, gid in enumerate(underlying_ids):
-                if gid in claimed_group_ids:
-                    logger.warning(
-                        "Duplicate group_id %s found across batches — "
-                        "assigned to first occurrence",
-                        gid,
-                    )
-                else:
-                    deduped_ids.append(gid)
-                    if i < len(original_indices):
-                        deduped_indices.append(original_indices[i])
-                    claimed_group_ids.add(gid)
+            for reply_id in underlying_ids:
+                for gid in _reply_group_ids(batch_map, reply_id, batch_index):
+                    if gid in claimed_group_ids:
+                        logger.warning(
+                            "Duplicate group_id %s found across batches — "
+                            "assigned to first occurrence",
+                            gid,
+                        )
+                    elif gid not in deduped_ids:
+                        deduped_ids.append(gid)
+            claimed_group_ids.update(deduped_ids)
 
             cluster["underlying_group_ids"] = deduped_ids
-            cluster["underlying_group_indices"] = deduped_indices
+            cluster["underlying_group_indices"] = [
+                group_id_to_index[gid] for gid in deduped_ids
+            ]
 
-            # If cluster was reduced to 0 or 1 group after dedup
+            # A cluster is what is left of it: none, one group, or more
             if len(deduped_ids) == 0:
                 continue  # Skip empty cluster
             elif len(deduped_ids) == 1:
@@ -1108,25 +1261,25 @@ def merge_consolidation_results(
         for singleton in singletons_data:
             if not isinstance(singleton, dict):
                 continue
-            gid = singleton.get("group_id", "")
-            if not gid:
+            reply_id = singleton.get("group_id", "")
+            if not reply_id:
                 continue
-            if gid in claimed_group_ids:
-                logger.warning(
-                    "Duplicate group_id %s found across batches — "
-                    "assigned to first occurrence",
-                    gid,
-                )
-                continue
-            claimed_group_ids.add(gid)
-            idx = group_id_to_index.get(gid)
-            g_index = singleton.get(
-                "group_index", idx if idx is not None else -1
-            )
-            if idx is not None and idx < len(groups):
+            # The id names the group; the reply's group_index is a position
+            # it copied and may get wrong, so the entry's index is the one
+            # its content comes from.
+            for gid in _reply_group_ids(batch_map, reply_id, batch_index):
+                if gid in claimed_group_ids:
+                    logger.warning(
+                        "Duplicate group_id %s found across batches — "
+                        "assigned to first occurrence",
+                        gid,
+                    )
+                    continue
+                claimed_group_ids.add(gid)
+                idx = group_id_to_index[gid]
                 batch_singletons.append(
                     _make_singleton_consolidated(
-                        gid, g_index, groups[idx],
+                        gid, idx, groups[idx],
                         reasoning=singleton.get("reasoning", ""),
                     )
                 )
@@ -1250,7 +1403,7 @@ def merge_consolidation_results(
             merged_clusters.append(cluster_i)
 
     # -------------------------------------------------------------------
-    # Step 9: Type field validation for each merged cluster
+    # Step 9: Type and importance validation for each merged cluster
     # -------------------------------------------------------------------
     for cluster in merged_clusters:
         underlying_ids = cluster.get("underlying_group_ids", [])
@@ -1262,6 +1415,15 @@ def merge_consolidation_results(
             expected_type, 0
         ):
             cluster["type"] = expected_type
+        # Never below its most important group: the level the prompt asks
+        # for ("the highest importance level among the underlying groups").
+        cluster["importance"] = _importance.highest([
+            cluster.get("importance"),
+            *(
+                _importance.group_importance(groups[group_id_to_index[gid]])
+                for gid in underlying_ids if gid in group_id_to_index
+            ),
+        ])
 
     # -------------------------------------------------------------------
     # Step 10: Build partial_failures metadata
@@ -1277,8 +1439,8 @@ def merge_consolidation_results(
     # -------------------------------------------------------------------
     for section_key, indices in singleton_sections.items():
         for idx in indices:
-            if idx < len(groups):
-                gid = generate_group_id(groups[idx])
+            if 0 <= idx < len(groups):
+                gid = group_ids[idx]
                 # Only add if not already claimed (edge case safety)
                 if gid not in claimed_group_ids:
                     batch_singletons.append(
@@ -1298,7 +1460,12 @@ def merge_consolidation_results(
     # Add merged clusters (non-singleton)
     for cluster in merged_clusters:
         underlying_ids = cluster.get("underlying_group_ids", [])
-        underlying_indices = cluster.get("underlying_group_indices", [])
+        # The ids name the groups (as for a singleton): each index is the
+        # group its id names, so the decision join and the display agree.
+        underlying_indices = list(dict.fromkeys(
+            group_id_to_index[gid] for gid in underlying_ids
+            if gid in group_id_to_index
+        ))
 
         # Compute model count and suggestion count from underlying groups
         model_set: Set[str] = set()
@@ -1427,6 +1594,8 @@ def generate_consolidated_json(
     # --- Build the output payload ---
     payload: Dict[str, Any] = {
         "format_version": CURRENT_FORMAT_VERSION,
+        # Which ids ``underlying_group_ids`` holds (load_merged_suggestions)
+        "group_id_format": GROUP_ID_FORMAT,
         "consolidated_groups": consolidated_groups,
         "metadata": metadata,
     }
@@ -1494,6 +1663,22 @@ def _umbrella_entry(
         for idx in underlying_indices if 0 <= idx < len(groups)
     ]
     return _scope_report.umbrella_scope(members)
+
+
+def consolidated_importance(
+    entry: Dict[str, Any], groups: List[Dict[str, Any]],
+) -> str:
+    """The level a consolidated entry shows: the highest of its own (a value
+    naming no level reads as MEDIUM) and each underlying group's
+    ``importance.group_importance``, the rule the flat and PR pages use."""
+    return _importance.highest([
+        entry.get("importance"),
+        *(
+            _importance.group_importance(groups[idx])
+            for idx in entry.get("underlying_group_indices", [])
+            if isinstance(idx, int) and 0 <= idx < len(groups)
+        ),
+    ])
 
 
 def generate_consolidated_report(
@@ -1622,7 +1807,7 @@ def generate_consolidated_report(
         consolidated_id = cg.get("consolidated_id", "")
         title = cg.get("title", "Untitled")
         description = cg.get("description", "")
-        importance = cg.get("importance", "MEDIUM")
+        importance = consolidated_importance(cg, groups)
         reference = cg.get("reference", "")
         model_count = cg.get("model_count", 1)
         underlying_indices = cg.get("underlying_group_indices", [])
@@ -1708,9 +1893,7 @@ def generate_consolidated_report(
             lines.append("")
 
             for sugg in orig_group.get("suggestions", []):
-                sugg_desc = sugg.get(
-                    "description", sugg.get("desc", "")
-                )
+                sugg_desc = _suggestion_text(sugg)
                 lines.append(_scope_report.md_member_line(sugg))
                 lines.append(f"> {_rm.neutralize_model_text(sugg_desc)}")
                 lines.append("")
@@ -1952,12 +2135,10 @@ def generate_consolidated_html(
                 suggs.append({
                     "id": sugg_id,
                     "title": sugg.get("title", "Untitled"),
-                    "description": sugg.get(
-                        "description", sugg.get("desc", "")
-                    ),
-                    "importance": sugg.get(
-                        "importance", "MEDIUM"
-                    ).upper(),
+                    "description": _suggestion_text(sugg),
+                    # The page shows the level Python sends, by the flat
+                    # page's rule (utils/importance.py).
+                    "importance": _importance.normalize(sugg.get("importance")),
                     "model": sugg.get("source_model", "unknown"),
                     "scope": _scope_report.member_scope(sugg),
                 })
@@ -1994,7 +2175,7 @@ def generate_consolidated_html(
             "displayIndex": cg.get("display_index", 0),
             "title": cg.get("title", ""),
             "description": cg.get("description", ""),
-            "importance": cg.get("importance", "MEDIUM"),
+            "importance": consolidated_importance(cg, groups),
             "reference": cg.get("reference", ""),
             "type": cg.get("type", "modification"),
             "isSingleton": cg.get("is_singleton", True),
@@ -2259,16 +2440,16 @@ def load_merged_suggestions(
     # ------------------------------------------------------------------
     # Step 3: Build consolidated_id → list of underlying group indices
     # ------------------------------------------------------------------
-    # First, build a group_id → group index (0-based) mapping
-    group_id_to_indices: Dict[str, List[int]] = {}
-    for idx, group in enumerate(groups):
-        gid = generate_group_id(group)
-        if gid not in group_id_to_indices:
-            group_id_to_indices[gid] = []
-        group_id_to_indices[gid].append(idx)
+    # First, build a group_id → group index (0-based) mapping: each id names
+    # its own group in a file that says so, every same-content copy in one
+    # from before (_decision_join).
+    consolidated_groups_list = consolidated_data.get("consolidated_groups", [])
+    group_id_to_indices = _decision_join(
+        groups,
+        distinct=consolidated_data.get("group_id_format") == GROUP_ID_FORMAT,
+    )
 
     # Build consolidated_id → list of 0-based group indices
-    consolidated_groups_list = consolidated_data.get("consolidated_groups", [])
     cid_to_group_indices: Dict[str, List[int]] = {}
 
     for cgroup in consolidated_groups_list:

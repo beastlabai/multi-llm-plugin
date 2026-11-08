@@ -13,6 +13,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [Validation statuses](#validation-statuses)
 - [Importance levels](#importance-levels)
 - [Grouping and section references](#grouping-and-section-references)
+- [Consolidation batches](#consolidation-batches)
 - [Reaggregation and result identity](#reaggregation-and-result-identity)
 - [Malformed result entries](#malformed-result-entries)
 - [Report regeneration](#report-regeneration)
@@ -211,6 +212,43 @@ fixture groups to byte-identical `group_hash` lists under both, so no golden mov
 `reference` such as `## Design Requirements / ### 7. Lap Integration` is split on a delimited ` / `
 or `, ` (a bare slash is part of a heading), so per-section counts no longer
 under-report.
+
+## Consolidation batches
+
+`utils/consolidation.py` clusters the valid groups of a finished round (`--consolidate`, and
+`full-workflow`/`improve-plan` on `[CONSOLIDATION_RECOMMENDED]`). It reads the group record
+`SuggestionGroup.to_dict` writes, which has no `reference`, `importance` or `type`.
+
+- **Importance comes from the members.** Group records in the prompt, singleton entries and the
+  consolidated reports use `importance.group_importance`; a merged cluster is never below its most
+  important group (the level the prompt asks for). Both report pages show the level Python sends:
+  a value naming no level reads as MEDIUM, as on the flat and PR pages.
+- **A suggestion's text is `desc`** (`description` only in older records). The content measure and
+  the truncation of an oversized solo group read it.
+- **Batches are cut by count alone**, in priority order, in one `_uncategorized` section: no group
+  carries a `reference`, and `CONSOLIDATION_BATCH_CHAR_BUDGET` is `None`. This is how every recorded
+  consolidation ran. Both alternatives give more, smaller batches, and a cluster forms only inside
+  one batch, so duplicates in different batches stop merging. On 29 recorded rounds a 12,000-char
+  content budget split 8 of them into one to three more batches, some holding one group. Sections
+  derived from the members, or a content budget, wait on a check against a recorded `grouped.json`.
+- **Ids.** A group's consolidation id is the 12-char `generate_group_id` (theme and titles),
+  assigned through `consolidation_group_ids`: the first group with a given hash keeps it, so an
+  ordinary group's id is unchanged; each later same-content group gets one derived from its stamped
+  `group_hash`, so it stays its own entry. `consolidated.json` says so with `group_id_format:
+  "distinct"`; a file without it is from before, when every copy was filed under the first one's
+  id, so a decision on that id covers every copy, as it did when it was made. A
+  `consolidation_tasks.json` from before listed every copy under that id too: its `group_indices`
+  say which copies each batch was given, and that batch's reply is read through them, so a copy
+  no batch was given (validation excluded it) stays out.
+- **A reply names only its own batch's groups.** Each reply is read through its batch's entry in
+  the task file: an id the batch was not given (a guess, another batch's group, an excluded group,
+  a non-string) is dropped before anything is claimed, and every index in an entry comes from an
+  accepted id, never from the reply's `underlying_group_indices` or `group_index`, so the decision
+  join (ids) and the pages (indices) show the same groups. What is left of a cluster sets its
+  shape: nothing, a singleton, or a cluster. An error reply's `groups` list is not read: every
+  group of the batch becomes a singleton. In 9 recorded rounds whose task files predate embedded
+  prompts, models invented ids (`group_3`, slugs); the merge showed those clusters by the model's
+  indices and the same groups again as missing singletons, and decisions on them reached no group.
 
 ## Reaggregation and result identity
 
