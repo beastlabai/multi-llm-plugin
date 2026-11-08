@@ -1671,6 +1671,18 @@ def _run_abort(plan_path: Path, args: argparse.Namespace) -> int:
                 f"{view['run'].get('pid')} survived SIGKILL — "
                 f"log: {view['run'].get('log_path')}"
             )
+        elif result["result"] == "incomplete":
+            survived += 1
+            print(
+                f"INCOMPLETE: {name} run {run_id} pid {view['run'].get('pid')}: "
+                "not every process it left could be confirmed stopped (kill "
+                f"verdict {result.get('verdict') or 'unknown'}"
+                + (f"; {result['detail']}" if result.get("detail") else "")
+                + "); what could not be identified as the run's was not "
+                "signalled. Check its process group "
+                f"{view['run'].get('pgid') or '?'} by hand, or abort again to "
+                f"retry — log: {view['run'].get('log_path')}"
+            )
         elif result["result"] == "needs_force":
             needs_force += 1
             print(
@@ -1691,19 +1703,36 @@ def _run_sweep(plan_path: Path, args: argparse.Namespace) -> int:
     """Close out orphans across every phase dir under this plan, deliberately."""
     phase = _resolve_phase(args.phase)
     closed: List[str] = []
+    incomplete: List[str] = []
     for directory in status_views.discover_phase_dirs(plan_path, phase=phase):
         before = status_file.read_run(str(directory)).get("state")
         view = detach.classify_run(str(directory), close_out=True)
         after = view["run"].get("state")
         if before != after:
             closed.append(f"{os.path.basename(str(directory))}: {before} -> {after}")
+        # A close-out whose kill could not confirm every process stopped, now
+        # or before: the same verdict and recovery `--abort` prints, exit 3.
+        run = status_file.read_run(str(directory))
+        if detach.cleanup_incomplete(run):
+            cleanup = run["cleanup"]
+            incomplete.append(
+                f"INCOMPLETE: {os.path.basename(str(directory))} run "
+                f"{run.get('run_id') or '?'} pid {run.get('pid')}: not every process "
+                "it left could be confirmed stopped (kill verdict "
+                f"{cleanup.get('verdict') or 'unknown'}); what could not be identified "
+                f"as the run's was not signalled. Check its process group "
+                f"{cleanup.get('pgid') or run.get('pgid') or '?'} by hand, or retry with: "
+                f"{status_commands._abort_command(plan_path, dict(view, run=run))} — log: "
+                f"{run.get('log_path')}")
     if closed:
         print("swept:")
         for line in closed:
             print(f"  {line}")
     else:
         print("swept: nothing to close out")
-    return EXIT_OK
+    for line in incomplete:
+        print(line)
+    return EXIT_NEEDS_HUMAN if incomplete else EXIT_OK
 
 
 if __name__ == "__main__":  # pragma: no cover - direct invocation

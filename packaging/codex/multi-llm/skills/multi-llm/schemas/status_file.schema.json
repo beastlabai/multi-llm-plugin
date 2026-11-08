@@ -256,6 +256,20 @@
         "closed_out_at": {
           "type": "string",
           "description": "When status or --abort closed the run out."
+        },
+        "cleanup": {
+          "type": "object",
+          "description": "The teardown of the run's processes (docs/development/runtime.md, 'When not everything is confirmed stopped'): pending while an abort's kill is under way, incomplete when a kill could not confirm them all stopped, until a later abort or util runs --sweep does; complete once one has.",
+          "properties": {
+            "state": { "type": "string", "enum": ["pending", "incomplete", "complete"] },
+            "verdict": {
+              "type": ["string", "null"],
+              "description": "The last kill's verdict (survived, unresolved, skipped, killed, gone); null when the kill raised."
+            },
+            "pid": { "type": ["integer", "null"] },
+            "pgid": { "type": ["integer", "null"] },
+            "checked_at": { "type": "string" }
+          }
         }
       }
     },

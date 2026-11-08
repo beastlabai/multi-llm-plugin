@@ -60,6 +60,7 @@ from .status_views import (
 )
 from .status_commands import (
     Speller,
+    _abort_command,
     _rerun_command,
     _resume_lines,
     _stale_review_of,
@@ -360,6 +361,15 @@ def render_run_text(
         # Three state fields, three lines, never collapsed.
         lines.append(f"      run.state:      {_run_state_text(view)}")
         lines.append(f"      phase state:    {view.get('state') or '(none)'}")
+        if detach.cleanup_incomplete(run):
+            cleanup = run["cleanup"]
+            lines.append(
+                f"      cleanup:        {str(cleanup.get('state')).upper()} — not every "
+                "process the run left could be confirmed stopped (kill verdict "
+                f"{cleanup.get('verdict') or 'unknown'}, process group "
+                f"{cleanup.get('pgid') or '?'}, checked {cleanup.get('checked_at') or '?'})"
+            )
+            lines.append(f"      try it again with: {_abort_command(plan_path, view)}")
         if workflow is not None:
             phase_name = view.get("phase") or name
             wf = (workflow.get("phases") or {}).get(phase_name, {})

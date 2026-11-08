@@ -6537,6 +6537,10 @@ class _Capture:
     #: The streams the capture cut at :data:`MAX_STREAM_BYTES`
     #: (``process_capture``). A capped stdout is refused at rung 5, unparsed.
     capped_streams: FrozenSet[str] = frozenset()
+    #: The timeout kill's verdict (:func:`_kill_timed_out`), and the runner's
+    #: pid it was about; ``None`` when no timeout kill was made.
+    kill_verdict: Optional[str] = None
+    kill_pid: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -7067,7 +7071,8 @@ def _spawn_in_context(
             capture.exit_code = proc.returncode
             capture.capped_streams = streams.capped
         except subprocess.TimeoutExpired as exc:
-            _kill_timed_out(proc, pgid, job)
+            capture.kill_verdict = _kill_timed_out(proc, pgid, job)
+            capture.kill_pid = proc.pid
             stdout, stderr = _drain_after_kill(streams, exc)
             capture.duration = time.time() - start
             capture.timed_out = True
@@ -7183,38 +7188,89 @@ def _read_jailed_outcome(
             )
 
 
+#: Timeout-kill verdicts that confirm the runner stopped. Every other outcome
+#: (``survived``, ``unresolved``, ``skipped``, ``None`` for a kill that
+#: raised, any other word) is unconfirmed (:func:`_unconfirmed_kill`).
+_CONFIRMED_KILLS = ("killed", "gone")
+
+
+def _unconfirmed_kill(verdict: Optional[str]) -> Optional[str]:
+    """Why a timeout kill that returned *verdict* did not confirm the runner
+    stopped; ``None`` when it did."""
+    if verdict in _CONFIRMED_KILLS:
+        return None
+    if verdict == "survived":
+        return "it was still running after the kill's SIGKILL window"
+    if verdict in ("unresolved", "skipped"):
+        return ("not every process could be identified as this run's child, and "
+                "what could not was not signalled")
+    if verdict is None:
+        return "the kill itself failed"
+    return f"the kill answered {verdict!r}, which confirms nothing"
+
+
 def _kill_timed_out(
     proc: Any, pgid: Optional[int], job: Optional["process_control.TreeJob"] = None,
-) -> None:
+) -> Optional[str]:
     """SIGTERM → SIGKILL the child *and its group*, through the one facade.
+    Returns ``kill_tree``'s verdict; ``None`` when the kill raised (the child
+    was then sent a kill through its job or its ``Popen``, unconfirmed).
 
-    ``start_time=None`` is how an unverified kill is *requested* (see
-    ``process_control.kill_tree``): this pid is not a record read off disk, it is
-    a child this process is still holding open, so there is nothing to
-    corroborate and nothing to recycle. *proc* goes along as ``child``: unreaped
-    until :func:`_drain_after_kill` collects it, it anchors its pid and group
-    through the kill where the owned kill runs (Linux, glibc or musl; see
-    ``kill_tree``), which counts its zombie as exited. The verdict is advisory:
-    what matters is that the signals reached the group. *job* is the child's
-    Windows Job Object, the group's stand-in there (``None`` elsewhere).
+    This pid is not a record read off disk: it is a child this process is
+    still holding open, unreaped until :func:`_drain_after_kill` collects it,
+    so no other process can take its pid. *proc* goes along as ``child``: it
+    anchors its pid and group through the kill where the owned kill runs
+    (Linux, glibc or musl; see ``kill_tree``), which counts its zombie as
+    exited. Where the kill goes by identity it is also dated: its start time,
+    read while its row names this process as its parent
+    (``process_control.dated_own_child``), so the kill by identity holds it
+    without the ``sigaction`` ABI the anchor needs; a child whose ownership
+    cannot be established goes undated, and is not signalled. Elsewhere
+    ``start_time=None`` requests the kill by number's unverified kill, and a
+    ``survived`` that is only the child's own zombie is confirmed by its exit
+    (``process_control.own_child_stopped``).
+
+    Only ``killed`` and ``gone`` confirm the runner stopped. Any other outcome
+    (:func:`_unconfirmed_kill`) gets a warning naming the pid, and a detached
+    run's record keeps it for a later abort or sweep
+    (``detach.note_left_running``). *job* is the child's Windows Job Object,
+    the group's stand-in there (``None`` elsewhere).
     """
     try:
-        process_control.kill_tree(
+        start_time = (process_control.dated_own_child(proc)
+                      if process_control.signals_by_identity() else None)
+        verdict: Optional[str] = process_control.kill_tree(
             proc.pid,
-            start_time=None,
+            start_time=start_time,
             pgid=pgid,
             escalate_after_s=TIMEOUT_KILL_GRACE_S,
             poll_interval_s=0.05,
             job=job,
             child=proc,
         )
+        if verdict == "survived" and process_control.own_child_stopped(proc, pgid):
+            verdict = "killed"
     except Exception:  # noqa: BLE001 - teardown must never mask the timeout
-        if job is not None and job.terminate():
-            return
-        try:
-            proc.kill()
-        except OSError:
-            pass
+        verdict = None
+        if job is None or not job.terminate():
+            try:
+                proc.kill()
+            except OSError:
+                pass
+    reason = _unconfirmed_kill(verdict)
+    if reason is not None:
+        print(
+            f"WARNING: the timed-out runner pid {proc.pid} (process group "
+            f"{pgid if pgid is not None else '?'}) could not be confirmed stopped "
+            f"(kill verdict {verdict}): {reason}, so it may still be running. "
+            "Check it by hand; a detached run keeps it in its record for "
+            "status --abort.",
+            file=sys.stderr,
+        )
+        detach = sys.modules.get(f"{__package__}.detach") if __package__ else None
+        if detach is not None:
+            detach.note_left_running(proc.pid, pgid, verdict)
+    return verdict
 
 
 def _drain_after_kill(
@@ -8925,6 +8981,18 @@ def _classify_pre_parse(capture: _Capture) -> Tuple[str, str]:
             f"is missing/not executable, or the host sandbox denied the spawn."
         )
     if capture.timed_out:
+        # The pid is set once the executor's own timeout kill was made; Lane
+        # A's shared `Capture` makes none.
+        pid = getattr(capture, "kill_pid", None)
+        verdict = getattr(capture, "kill_verdict", None)
+        reason = _unconfirmed_kill(verdict) if pid is not None else None
+        if reason is not None:
+            return STATUS_TIMEOUT, (
+                f"the runner exceeded its per-task timeout and could not be "
+                f"confirmed stopped (kill verdict {verdict}, pid {pid}): {reason}, "
+                "so it may still be running; no partial result file exists "
+                "(executor writes are atomic)"
+            )
         return STATUS_TIMEOUT, (
             "the runner exceeded its per-task timeout and was killed; no partial "
             "result file exists (executor writes are atomic)"

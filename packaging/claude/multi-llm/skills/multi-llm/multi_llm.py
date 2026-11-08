@@ -1825,6 +1825,11 @@ def _sweep_live_clis_on_interrupt() -> None:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    from utils import process_control
+
+    # The CLI's process, and the detached worker's: SIGCHLD at its default, so
+    # every provider child stays this process's until it is reaped.
+    process_control.restore_sigchld_default()
     argv = list(sys.argv[1:] if argv is None else argv)
     if _WORKER_FLAG in argv:
         from utils.detach import prepare_worker_output

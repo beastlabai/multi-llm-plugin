@@ -474,6 +474,9 @@ class TestTheWorker:
         monkeypatch.setattr(process_control, "enter_detached_worker",
                             lambda log, run_id=None: entered.append((log, run_id)))
         monkeypatch.setattr(detach, "RunHandle", Handle)
+        # The stand-in handle never finishes, which is what stops the worker
+        # recording its launches: kept to this test, not the next one's spawns.
+        monkeypatch.setattr(process_control, "_CLI_RECORD", [])
         phase = tmp_path / "review-plan"
         phase.mkdir()
         handle = detach.begin_worker_run(
@@ -803,11 +806,19 @@ class TestTheKillSites:
     def test_off_windows_each_site_calls_kill_tree_as_it_did(
         self, posix, host_locks, run_dirs, tmp_path, monkeypatch, site
     ):
-        """POSIX, byte for byte: the same pid and keywords, no ``job``."""
+        """POSIX, byte for byte: the same pid and keywords, no ``job``. Where
+        the kill goes by identity a teardown also hands over ``obligations``,
+        what it collects for its reread's kill, not a parameter of the kill."""
         plan, phase = run_dirs
         seen = []
-        monkeypatch.setattr(process_control, "kill_tree",
-                            lambda pid, **kwargs: (seen.append((pid, kwargs)), "killed")[1])
+
+        def kill_tree(pid, **kwargs):
+            owed = kwargs.pop("obligations", None)
+            assert owed is None or isinstance(owed, process_control.KillObligations)
+            seen.append((pid, kwargs))
+            return "killed"
+
+        monkeypatch.setattr(process_control, "kill_tree", kill_tree)
         if site == "sweep":
             root = tmp_path / "project"
             old = run_registry.write_entry(str(root), {

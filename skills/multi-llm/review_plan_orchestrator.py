@@ -583,4 +583,8 @@ async def main(argv: Optional[List[str]] = None) -> int:
 
 
 if __name__ == "__main__":
+    from utils import process_control
+
+    # A process entry of its own: provider children must stay this process's.
+    process_control.restore_sigchld_default()
     sys.exit(asyncio.run(main(sys.argv[1:])))

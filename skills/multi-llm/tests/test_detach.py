@@ -4019,13 +4019,20 @@ class TestTheCliTreeSnapshot:
         leader = _orphan_sleeper(own_session=True)
         moved = _orphan_sleeper(own_session=True)
         real_signal_tree = process_control._signal_tree
+        real_send = process_control._IdentityUnit._send
 
         def deaf_to_the_moved_member(pid, pgid, sig):
             if pid == moved and pgid is None:
                 return
             real_signal_tree(pid, pgid, sig)
 
+        def deaf_through_its_pidfd(unit, api, held, sig):
+            if held.pid != moved:
+                real_send(unit, api, held, sig)
+
+        # By number off Linux's pidfds, through the moved member's pidfd on it.
         monkeypatch.setattr(process_control, "_signal_tree", deaf_to_the_moved_member)
+        monkeypatch.setattr(process_control._IdentityUnit, "_send", deaf_through_its_pidfd)
         try:
             snapshot = [
                 process_control.Descendant(
@@ -4198,6 +4205,7 @@ class TestTheSweepIsBoundedByOneClock:
         if route == "ps":
             monkeypatch.setattr(process_control, "_linux_start_time", lambda pid: None)
             monkeypatch.setattr(process_control, "_linux_process_table", lambda: None)
+            monkeypatch.setattr(process_control, "_pidfd_api", lambda: None)
             monkeypatch.setattr(process_control, "_linux_state", lambda pid: None)
         leader = subprocess.Popen(["sleep", "60"], start_new_session=True)
         cli = subprocess.Popen([sys.executable, "-c", "pass"])

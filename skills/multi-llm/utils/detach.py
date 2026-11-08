@@ -276,6 +276,23 @@ def rotated_log_path(phase_dir: str, run_id: str) -> str:
     return os.path.join(str(phase_dir), f"orchestrator-run.{run_id}.log")
 
 
+def cli_record_path(phase_dir: str, run_id: str) -> str:
+    """The file a detached worker records every process it starts in, by
+    pid, start time and group (:func:`process_control.record_cli_identities`):
+    what a close-out signals once the worker itself is gone. Removed when the
+    run ends, or once a kill has confirmed every process stopped; kept while
+    a teardown is under way or unconfirmed (:func:`cleanup_incomplete`). Only
+    ever opened as the run's own (:func:`process_control.read_cli_record`)."""
+    return os.path.join(str(phase_dir), process_control.cli_record_name(run_id))
+
+
+def _discard_cli_record(phase_dir: str, run_id: Any) -> None:
+    try:
+        os.unlink(cli_record_path(phase_dir, str(run_id)))
+    except OSError:
+        pass
+
+
 def rotate_log(phase_dir: str, previous_run_id: Optional[str]) -> Optional[str]:
     """Move an existing log aside so ``orchestrator-run.log`` names *this* run.
 
@@ -833,7 +850,8 @@ def classify_run(
 
     if expired and identity == process_control.DEAD:
         if close_out:
-            close_out_dead_run(phase_dir, reason="heartbeat_timeout")
+            close_out_dead_run(phase_dir, reason="heartbeat_timeout",
+                               expect_run_id=run.get("run_id"))
             refreshed = status_file.read_run(phase_dir)
             view["run"] = dict(refreshed)
             view["run_state"] = refreshed.get("state")
@@ -847,7 +865,8 @@ def classify_run(
     if identity == process_control.DEAD and run_state == RUN_STATE_STARTING:
         # It never came up and its process is gone: nothing will ever beat.
         if close_out:
-            close_out_dead_run(phase_dir, reason="worker_never_started")
+            close_out_dead_run(phase_dir, reason="worker_never_started",
+                               expect_run_id=run.get("run_id"))
             # Read back rather than assert: the compare-and-set is refused when a
             # new run claimed the dir between the read above and the close-out,
             # and rendering that fresh, live run as failed would send a poller to
@@ -1003,36 +1022,408 @@ def _retire_driven_phase_maps(
     return swept
 
 
-def close_out_dead_run(phase_dir: str, *, reason: str = "heartbeat_timeout") -> bool:
+#: The kill verdicts that leave a run's processes not all confirmed stopped:
+#: something outlived its SIGKILL (``survived``), or could not be identified as
+#: the run's and was not signalled (``unresolved``, ``skipped``).
+INCOMPLETE_KILL_VERDICTS = ("survived", "unresolved", "skipped")
+
+#: ``run.cleanup.state`` while a run's processes are not all confirmed stopped.
+CLEANUP_INCOMPLETE = "incomplete"
+
+#: ``run.cleanup.state`` an abort writes before its kill, until the kill's
+#: verdict replaces it: a teardown under way is not yet a confirmed one, and a
+#: worker finishing inside it must leave the run's trackers alone
+#: (:meth:`RunHandle.finish`). An aborter that dies first leaves it standing,
+#: which reads as unconfirmed, as it is.
+CLEANUP_PENDING = "pending"
+
+#: ``run.cleanup.state`` once a later kill confirmed every process stopped.
+CLEANUP_COMPLETE = "complete"
+
+
+def cleanup_incomplete(record: Dict[str, Any]) -> bool:
+    """Does *record* (a ``.status.json`` run record, or a registry entry)
+    carry a cleanup not confirmed: :data:`CLEANUP_INCOMPLETE`, or
+    :data:`CLEANUP_PENDING`?"""
+    cleanup = record.get("cleanup") if isinstance(record, dict) else None
+    return isinstance(cleanup, dict) and cleanup.get("state") in (
+        CLEANUP_INCOMPLETE, CLEANUP_PENDING)
+
+
+def _left_running(verdict: Optional[str]) -> bool:
+    """A kill that returned *verdict* (``None``: it raised) may have left
+    something of the run running."""
+    return verdict is None or verdict in INCOMPLETE_KILL_VERDICTS
+
+
+def _cleanup_entry(verdict: Optional[str], run: Dict[str, Any], *,
+                   state: Optional[str] = None) -> Dict[str, Any]:
+    """``run.cleanup`` after a kill that returned *verdict*."""
+    return {
+        "state": state or (CLEANUP_INCOMPLETE if _left_running(verdict) else CLEANUP_COMPLETE),
+        "verdict": verdict,
+        "pid": run.get("pid"),
+        "pgid": run.get("pgid"),
+        "checked_at": status_file.now_iso(),
+    }
+
+
+def _claimed_run(phase_dir: str, expect_run_id: Optional[str]) -> Optional[Dict[str, Any]]:
+    """*phase_dir*'s run record, read under its checkpoint lock (the one
+    ``claim_run`` takes), when it is run *expect_run_id*'s (any run's when
+    ``None``); ``None`` otherwise. Its pid, start time, group and run id are
+    what the caller's kill targets: never a record read again later, which a
+    new run may have claimed since."""
+    with status_file.checkpoint_lock(phase_dir):
+        run = status_file.read_run(phase_dir)
+    run_id = run.get("run_id")
+    if not run_id:
+        return None
+    if expect_run_id is not None and str(run_id) != str(expect_run_id):
+        return None
+    return dict(run)
+
+
+def kill_recorded_tree(
+    phase_dir: str, run: Dict[str, Any], *, start_time: Optional[str],
+    escalate_after_s: Optional[float] = None,
+    record: Optional[process_control.CliRecord] = None,
+    obligations: Optional[process_control.KillObligations] = None,
+) -> Optional[str]:
+    """``kill_run_tree`` on *run*'s recorded pid and group (a run record or a
+    registry entry), with the processes its worker recorded starting
+    (:func:`cli_record_path`; *record* when the caller already read it) as its
+    members; the verdict, or ``None`` when the kill itself failed.
+    *obligations* gets what the verdict leaves unconfirmed (``kill_tree``)."""
+    pid = run.get("pid")
+    pgid = run.get("pgid")
+    kwargs: Dict[str, Any] = {
+        "start_time": start_time, "pgid": int(pgid) if pgid else None,
+    }
+    if escalate_after_s is not None:
+        kwargs["escalate_after_s"] = escalate_after_s
+    if obligations is not None:
+        kwargs["obligations"] = obligations
+    try:
+        if record is None and phase_dir:
+            record = _read_record(phase_dir, run)
+        if record is not None:
+            if record.members:
+                kwargs["members"] = record.members
+            if not record.complete:
+                kwargs["members_complete"] = False
+        return process_control.kill_run_tree(run.get("run_id"), int(pid) if pid else 0,
+                                             **kwargs)
+    except Exception:  # noqa: BLE001 - a teardown never raises
+        return None
+
+
+def _read_record(phase_dir: str, run: Dict[str, Any]) -> process_control.CliRecord:
+    """Run *run*'s record of the processes its worker started; lines of
+    another run found in it are ignored, and said on stderr."""
+    record = process_control.read_cli_record(phase_dir, str(run.get("run_id")))
+    _report_foreign(phase_dir, run, record)
+    return record
+
+
+def _report_foreign(phase_dir: str, run: Dict[str, Any],
+                    record: Optional[process_control.CliRecord]) -> None:
+    if record is not None and record.foreign:
+        print(
+            f"WARNING: {cli_record_path(phase_dir, str(run.get('run_id')))}: "
+            f"{record.foreign} line(s) recorded for another run were ignored; "
+            "nothing they name was signalled.",
+            file=sys.stderr,
+        )
+
+
+#: Kill verdicts, worst first (:func:`_worst_verdict`).
+_VERDICTS_WORST_FIRST = ("survived", "unresolved", "skipped", "killed", "gone")
+
+
+def _worst_verdict(verdicts: Sequence[Optional[str]]) -> str:
+    """The worst of *verdicts*: an unconfirmed one over ``killed`` over
+    ``gone``; a word that is none of the kill's counts as ``unresolved``."""
+    ranks = [_VERDICTS_WORST_FIRST.index(verdict) if verdict in _VERDICTS_WORST_FIRST
+             else _VERDICTS_WORST_FIRST.index("unresolved") for verdict in verdicts]
+    return _VERDICTS_WORST_FIRST[min(ranks)] if ranks else "gone"
+
+
+def _owed_by(verdict: Optional[str],
+             owed: process_control.KillObligations) -> Optional[List[Optional[str]]]:
+    """What a kill that returned *verdict* still owes once a later kill has
+    run, re-checked now (:meth:`process_control.KillObligations.outstanding`).
+    Only what the kill named can be cleared, and only by that re-check: a
+    verdict worse than everything it named (``None``, a kill that raised,
+    included) is owed as it stands."""
+    if verdict in ("killed", "gone"):
+        return []
+    named: List[str] = list(owed.identities.values())
+    if owed.groups or owed.record_incomplete:
+        named.append("unresolved")
+    if (verdict is None or not named
+            or _worst_verdict([verdict, *named]) != _worst_verdict(named)):
+        return [verdict]
+    return list(owed.outstanding())
+
+
+def _kill_after_the_gate(
+    phase_dir: str, run: Dict[str, Any], first: process_control.CliRecord,
+    verdict: Optional[str], owed: process_control.KillObligations, *,
+    start_time: Optional[str], escalate_after_s: Optional[float] = None,
+) -> Optional[str]:
+    """A teardown's kill, finished once its worker is stopped: the run's
+    record read again. When it names a process the first read (*first*, taken
+    under the closed launch gate) did not, or that read could not vouch for
+    every launch, the kill is made again with every identity recorded now, so
+    a launch whose intent got in before the gate and whose identity came after
+    is stopped too. The verdict is then the worst of that kill's, and of what
+    the first kill (*verdict*, which left *owed*) still owes once re-checked
+    on its own (:func:`_owed_by`): a group the first kill found running
+    something unidentified stays ``unresolved`` until it runs nothing, though
+    the second kill no longer sees it (the process that showed it has exited);
+    ``killed`` before ``gone`` stays ``killed``. A record that still has an
+    intent with no identity, or whose gate never closed, leaves the verdict
+    ``unresolved`` at best: the worker may have started a process nothing
+    names."""
+    again = process_control.read_cli_record(phase_dir, str(run.get("run_id")))
+    if again.foreign != first.foreign:
+        _report_foreign(phase_dir, run, again)
+    if not again.closed:
+        again = again._replace(complete=False)
+    seen = {(member.pid, member.start_time) for member in first.members}
+    late = [member for member in again.members
+            if (member.pid, member.start_time) not in seen]
+    if not late and first.complete:
+        if not again.complete and not _left_running(verdict):
+            return "unresolved"
+        return verdict
+    final = kill_recorded_tree(phase_dir, run, start_time=start_time, record=again,
+                               escalate_after_s=escalate_after_s,
+                               obligations=process_control.KillObligations())
+    earlier = _owed_by(verdict, owed)
+    if final is None or None in earlier:
+        return None
+    return _worst_verdict([final, *earlier, *(["killed"] if verdict == "killed" else [])])
+
+
+def stop_recorded_run(
+    phase_dir: Optional[str], run: Dict[str, Any], *, start_time: Optional[str],
+    escalate_after_s: Optional[float] = None,
+) -> Optional[str]:
+    """Every teardown's kill of what run *run* left (a run record or a
+    registry entry), whether or not its worker still runs: an abort, the
+    retry of a cleanup not confirmed, a close-out, ``util runs --sweep``.
+
+    The steps, in order: the run's launch gate closed
+    (:func:`process_control.close_launch_gate`), so its worker, if it still
+    runs, starts nothing more; the kill of the worker and of every identity
+    the record names under that gate (:func:`kill_recorded_tree`); the record
+    read again and every identity added since killed
+    (:func:`_kill_after_the_gate`), the first kill's unconfirmed outcome kept
+    until re-checked. The verdict, or ``None`` when a kill
+    raised: only a reread after the gate closed can confirm every process
+    stopped. Without a phase dir there is no record, and off the identity
+    kill no gate (``None``): the kill alone, as it always was. Never raises."""
+    try:
+        gate = (process_control.close_launch_gate(phase_dir, str(run.get("run_id")))
+                if phase_dir else None)
+        _report_foreign(str(phase_dir or ""), run, gate)
+        owed = process_control.KillObligations() if gate is not None else None
+        verdict = kill_recorded_tree(str(phase_dir or ""), run, start_time=start_time,
+                                     escalate_after_s=escalate_after_s, record=gate,
+                                     obligations=owed)
+        if gate is None or owed is None:
+            return verdict
+        return _kill_after_the_gate(str(phase_dir), run, gate, verdict, owed,
+                                    start_time=start_time,
+                                    escalate_after_s=escalate_after_s)
+    except Exception:  # noqa: BLE001 - a teardown never raises
+        return None
+
+
+def _write_cleanup(phase_dir: str, run_id: str, cleanup: Dict[str, Any]) -> bool:
+    """*cleanup* into run *run_id*'s record, if the phase dir is still its: a
+    closed record takes only a restatement of its own state beside it."""
+    with status_file.checkpoint_lock(phase_dir):
+        current = status_file.read_run(phase_dir)
+        if str(current.get("run_id")) != str(run_id):
+            return False
+        updates: Dict[str, Any] = {"cleanup": cleanup}
+        if current.get("state") in TERMINAL_RUN_STATES:
+            updates["state"] = current.get("state")
+        return status_file.update_run(phase_dir, updates, expect_run_id=str(run_id),
+                                      quiet=True)
+
+
+def _settle_cleanup(phase_dir: Optional[str], run: Dict[str, Any],
+                    cleanup: Optional[Dict[str, Any]], *,
+                    project_root: Optional[str] = None) -> None:
+    """What tracks a run's processes, after a kill whose outcome is
+    *cleanup* (``None``: confirmed). Confirmed: its registry entry and its
+    CLI record go. Not: both are kept, and the entry carries *cleanup* itself,
+    so a later ``util runs --sweep`` or ``status --abort`` tries again from the
+    run's own identities even once its phase dir belongs to another run."""
+    run_id = str(run.get("run_id"))
+    try:
+        root = project_root or run_registry.resolve_project_root(
+            str(run.get("plan_file") or phase_dir))
+    except Exception:  # noqa: BLE001 - the record of what is left must not raise
+        root = None
+    if cleanup is not None and cleanup_incomplete({"cleanup": cleanup}):
+        if root is not None:
+            run_registry.mark_cleanup(root, run_id, cleanup, run, phase_dir=phase_dir)
+        return
+    if phase_dir:
+        _discard_cli_record(phase_dir, run_id)
+    if root is not None:
+        try:
+            run_registry.remove_entry(root, run_id)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def retry_cleanup(phase_dir: str, *, expect_run_id: Optional[str] = None,
+                  ) -> Optional[Dict[str, Any]]:
+    """Try again to stop what a closed run left that was not confirmed stopped.
+
+    For a terminal run (run *expect_run_id*, when given) whose ``run.cleanup``
+    is not confirmed: the same kill its close-out ran, from that very record,
+    and the record rewritten with what this one found. Returns the new
+    ``run.cleanup``; ``None`` when there was nothing to retry. Never raises.
+    """
+    try:
+        run = _claimed_run(phase_dir, expect_run_id)
+        if (run is None or run.get("state") not in TERMINAL_RUN_STATES
+                or not cleanup_incomplete(run)):
+            return None
+        # Its worker may still run (an earlier kill could not stop it): the
+        # whole sequence again, gate first (`stop_recorded_run`).
+        verdict = stop_recorded_run(phase_dir, run,
+                                    start_time=run.get("process_start_time"),
+                                    escalate_after_s=1.0)
+        entry = _cleanup_entry(verdict, run)
+        _write_cleanup(phase_dir, str(run["run_id"]), entry)
+        _settle_cleanup(phase_dir, run, entry if cleanup_incomplete({"cleanup": entry})
+                        else None)
+        return entry
+    except Exception:  # noqa: BLE001 - a teardown never raises
+        return None
+
+
+#: :func:`close_out_entry`'s *killed* when the caller made no kill of its own.
+_NO_KILL_YET = object()
+
+
+def close_out_entry(entry: Dict[str, Any], *, reason: str = "heartbeat_timeout",
+                    project_root: Optional[str] = None, kill: bool = True,
+                    killed: Any = _NO_KILL_YET) -> Optional[Dict[str, Any]]:
+    """``util runs --sweep``'s close-out of one registry entry: its worker is
+    gone, its cleanup is still not confirmed, or it is old enough to prune.
+
+    When the phase dir still holds the entry's own run, open, that run is
+    closed out (:func:`close_out_dead_run`, held to the entry's run id).
+    Otherwise (closed already, or the dir is another run's now) what the run
+    left is stopped from the entry's own identities and the CLI record named
+    by its run id, never from the dir's current record: *killed* is the
+    verdict of that kill when the caller already made it (the prune's), and
+    with *kill* false none is made. A run still open takes *killed* as its
+    close-out's kill too, rather than a second kill whose verdict would stand
+    for what only the first one saw. Returns the outcome (``run.cleanup``'s
+    shape); ``None`` when there was no kill. Never raises.
+    """
+    run_id = entry.get("run_id")
+    phase_dir = entry.get("phase_dir")
+    if not run_id:
+        return None
+    try:
+        run = _claimed_run(str(phase_dir), str(run_id)) if phase_dir else None
+        if run is not None and run.get("state") not in TERMINAL_RUN_STATES:
+            return _close_out(str(phase_dir), reason=reason, expect_run_id=str(run_id),
+                              project_root=project_root, run=run, killed=killed)[1]
+        identity = {key: entry.get(key) for key in (
+            "run_id", "pid", "process_start_time", "pgid", "plan_file", "mode")}
+        if killed is not _NO_KILL_YET:
+            verdict = killed
+        elif kill:
+            verdict = stop_recorded_run(str(phase_dir or ""), identity,
+                                        start_time=identity.get("process_start_time"),
+                                        escalate_after_s=1.0)
+        else:
+            return None
+        outcome = _cleanup_entry(verdict, identity)
+        unconfirmed = cleanup_incomplete({"cleanup": outcome})
+        if run is not None and (unconfirmed or cleanup_incomplete(run)):
+            _write_cleanup(str(phase_dir), str(run_id), outcome)
+        _settle_cleanup(phase_dir, identity, outcome if unconfirmed else None,
+                        project_root=project_root)
+        return outcome
+    except Exception:  # noqa: BLE001 - a teardown never raises
+        return {"state": CLEANUP_INCOMPLETE, "verdict": None,
+                "pid": entry.get("pid"), "pgid": entry.get("pgid"),
+                "checked_at": status_file.now_iso()}
+
+
+def close_out_dead_run(phase_dir: str, *, reason: str = "heartbeat_timeout",
+                       expect_run_id: Optional[str] = None) -> bool:
     """Write the terminal record for a run whose process is gone.
 
     Compare-and-set on ``run_id``, so a worker that was merely paused (SIGSTOP, a
     suspended laptop) and resumes after being closed out fails the check and exits
-    rather than writing over the terminal record. Also breaks the lock, removes
-    the registry entry, and kills any surviving member of the recorded process
-    group whose creation time still matches — the crash case where no handler ran.
+    rather than writing over the terminal record. *expect_run_id* holds it to
+    one run: the record is read under the phase's checkpoint lock, and when it
+    is not that run's nothing is signalled and nothing written, since a new run
+    may have claimed the dir since the caller looked. Also breaks the lock, and
+    kills what the worker left running — the crash case where no handler ran: by
+    the recorded process group, or on Linux with pidfds by the processes the
+    worker recorded starting (:func:`cli_record_path`), each by its identity,
+    their groups only read (docs/development/runtime.md, "A target known only by
+    number"). When not everything could be confirmed stopped the record says so
+    (``run.cleanup``, :data:`CLEANUP_INCOMPLETE`), and the registry entry, which
+    carries the same, and the CLI record are kept for another try
+    (:func:`retry_cleanup`, :func:`close_out_entry`); otherwise both are removed.
+
+    A run already closed whose cleanup is still not confirmed is tried again
+    here (``status``, an abort), and ``False`` is returned: no terminal record
+    was written.
     """
-    run = status_file.read_run(phase_dir)
-    run_id = run.get("run_id")
-    if not run_id or run.get("state") in TERMINAL_RUN_STATES:
-        return False
+    return _close_out(phase_dir, reason=reason, expect_run_id=expect_run_id)[0]
+
+
+def _close_out(
+    phase_dir: str, *, reason: str, expect_run_id: Optional[str],
+    project_root: Optional[str] = None, run: Optional[Dict[str, Any]] = None,
+    killed: Any = _NO_KILL_YET,
+) -> Tuple[bool, Optional[Dict[str, Any]]]:
+    """:func:`close_out_dead_run`: whether it wrote the terminal record, and
+    the outcome of its kill (``run.cleanup``'s shape; ``None`` for no kill).
+    *run* is the record the caller already read with :func:`_claimed_run`;
+    *killed* the verdict of the kill the caller already made of it (the
+    prune's, :func:`close_out_entry`), which stands in for this one's."""
+    if run is None:
+        run = _claimed_run(phase_dir, expect_run_id)
+    if run is None:
+        return False, None
+    run_id = str(run["run_id"])
+    if run.get("state") in TERMINAL_RUN_STATES:
+        return False, retry_cleanup(phase_dir, expect_run_id=run_id)
     pid = run.get("pid")
     pgid = run.get("pgid")
-    if pid or pgid:
-        try:
-            # The leader is normally already dead here — that is what "close out"
-            # means — so the recorded process group is the only handle left on the
-            # provider CLIs it spawned. On Windows the run's named job is that
-            # handle, while anything still holds it open (`kill_run_tree`).
-            process_control.kill_run_tree(
-                run_id,
-                int(pid) if pid else 0,
-                start_time=run.get("process_start_time"),
-                pgid=int(pgid) if pgid else None,
-                escalate_after_s=1.0,
-            )
-        except Exception:
-            pass
+    outcome: Optional[Dict[str, Any]] = None
+    if killed is not _NO_KILL_YET:
+        outcome = _cleanup_entry(killed, run)
+    elif pid or pgid or os.path.exists(cli_record_path(phase_dir, run_id)):
+        # The leader is normally already dead here — that is what "close out"
+        # means — so the recorded process group, and the processes the worker
+        # recorded starting, are the only handles left on the provider CLIs it
+        # spawned. On Windows the run's named job is that handle, while anything
+        # still holds it open (`kill_run_tree`).
+        verdict = stop_recorded_run(phase_dir, run,
+                                    start_time=run.get("process_start_time"),
+                                    escalate_after_s=1.0)
+        outcome = _cleanup_entry(verdict, run)
+    cleanup = outcome if outcome is not None and cleanup_incomplete(
+        {"cleanup": outcome}) else None
     with status_file.checkpoint_lock(phase_dir):
         wrote = status_file.update_run(
             phase_dir,
@@ -1041,8 +1432,9 @@ def close_out_dead_run(phase_dir: str, *, reason: str = "heartbeat_timeout") -> 
                 "exit_code": None,      # no exit status was ever observed
                 "error": reason,
                 "closed_out_at": status_file.now_iso(),
+                **({"cleanup": cleanup} if cleanup else {}),
             },
-            expect_run_id=str(run_id),
+            expect_run_id=run_id,
             quiet=True,
         )
         if wrote:
@@ -1074,14 +1466,11 @@ def close_out_dead_run(phase_dir: str, *, reason: str = "heartbeat_timeout") -> 
         holder = process_control.read_lock_holder(lock_path(phase_dir))
         if holder is None or holder.get("run_id") == run_id:
             process_control.break_lock(lock_path(phase_dir))
-        plan = run.get("plan_file") or phase_dir
-        try:
-            run_registry.remove_entry(
-                run_registry.resolve_project_root(str(plan)), str(run_id)
-            )
-        except Exception:
-            pass
-    return wrote
+    if wrote or cleanup is not None:
+        # What is left unconfirmed is kept whether or not this wrote the
+        # record: the registry entry carries it past a dir taken by another run.
+        _settle_cleanup(phase_dir, run, cleanup, project_root=project_root)
+    return wrote, outcome
 
 
 def abort_run(phase_dir: str, *, force: bool = False) -> Dict[str, Any]:
@@ -1090,31 +1479,78 @@ def abort_run(phase_dir: str, *, force: bool = False) -> Dict[str, Any]:
     Returns ``{"result": …}`` where result is ``aborted`` (a live run was stopped),
     ``not_running`` (already terminal, or no record at all — so a cleanup step is
     safe to run unconditionally), ``survived`` (the pid outlived the SIGKILL
-    window; a human gets pid, run_id and the log path) or ``needs_force`` (the
-    identity probe was inconclusive).
+    window; a human gets pid, run_id and the log path), ``incomplete`` (not
+    every process of the run could be confirmed stopped: the kill's
+    ``verdict`` was ``unresolved`` or ``skipped``, now or in the close-out of
+    a run already gone; the same human check) or ``needs_force`` (the
+    identity probe was inconclusive). ``survived`` and ``incomplete`` leave
+    ``run.cleanup`` :data:`CLEANUP_INCOMPLETE` and keep the registry entry, and
+    an abort of a run already closed that way tries its cleanup again.
+
+    Before its kill the abort marks the record :data:`CLEANUP_PENDING`, so a
+    worker that finishes inside the kill (its SIGTERM handler) leaves its
+    registry entry and CLI record to this abort, which retires them only once
+    the kill confirms every process stopped. On Linux with pidfds it also
+    closes the run's launch gate first, so the worker starts no provider CLI
+    after the abort read what it started, and reads that record again once the
+    worker is stopped (:func:`stop_recorded_run`, which the retry of a closed
+    run's cleanup runs too). ``force`` overrides an
+    inconclusive probe; where the kill goes by identity it still kills by the
+    recorded start time.
     """
-    run = status_file.read_run(phase_dir)
-    if not run or run.get("state") in TERMINAL_RUN_STATES:
-        return {"result": "not_running", "run": run, "phase_dir": str(phase_dir)}
+    run = _claimed_run(phase_dir, None)
+    if not run:
+        return {"result": "not_running", "run": status_file.read_run(phase_dir),
+                "phase_dir": str(phase_dir)}
     run_id = str(run.get("run_id"))
+    if run.get("state") in TERMINAL_RUN_STATES:
+        if not cleanup_incomplete(run):
+            return {"result": "not_running", "run": run, "phase_dir": str(phase_dir)}
+        entry = retry_cleanup(phase_dir, expect_run_id=run_id) or run["cleanup"]
+        if cleanup_incomplete({"cleanup": entry}):
+            return {"result": "incomplete", "run": run, "phase_dir": str(phase_dir),
+                    "verdict": entry.get("verdict"),
+                    "detail": "the run is over, but what it left is still not "
+                              "all confirmed stopped"}
+        return {"result": "not_running", "run": run, "phase_dir": str(phase_dir),
+                "detail": "what the run left is now confirmed stopped"}
     pid = run.get("pid")
     verdict = process_control.probe(pid, run.get("process_start_time"))
     if verdict == process_control.DEAD:
-        close_out_dead_run(phase_dir, reason="aborted_by_request (process already gone)")
+        _wrote, outcome = _close_out(
+            phase_dir, reason="aborted_by_request (process already gone)",
+            expect_run_id=run_id)
+        if outcome is not None and cleanup_incomplete({"cleanup": outcome}):
+            return {"result": "incomplete", "run": run, "phase_dir": str(phase_dir),
+                    "verdict": outcome.get("verdict"),
+                    "detail": "process was already gone; what it left could not "
+                              "all be confirmed stopped"}
         return {"result": "not_running", "run": run, "phase_dir": str(phase_dir),
                 "detail": "process was already gone; record closed out"}
     if verdict == process_control.UNKNOWN and not force:
         return {"result": "needs_force", "run": run, "phase_dir": str(phase_dir)}
 
-    # Windows: through the run's named job when it opens and the live pid is
-    # in it, so the escalation ends exactly the run's tree rather than
-    # `taskkill /T`'s parent-pid walk (`process_control.kill_run_tree`).
-    kill_verdict = process_control.kill_run_tree(
-        run.get("run_id"),
-        int(pid),
-        start_time=None if force else run.get("process_start_time"),
-        pgid=int(run["pgid"]) if run.get("pgid") else None,
-    )
+    # The teardown is under way, and unconfirmed, from here until its verdict
+    # replaces this: a worker finishing in its SIGTERM handler sees it.
+    _write_cleanup(phase_dir, run_id,
+                   _cleanup_entry(None, run, state=CLEANUP_PENDING))
+    # `--force` overrides a probe that could not read the identity. Where the
+    # kill goes by identity it still kills by the recorded start time, the
+    # only thing that tells the worker from a process that took its pid (an
+    # unreadable one makes the kill `skipped`, nothing sent); the kill by
+    # number takes it as the unverified kill it always requested.
+    start_time = run.get("process_start_time")
+    if force and not process_control.signals_by_identity():
+        start_time = None
+    # No new provider launch from here on (the launch gate, `stop_recorded_run`):
+    # what the record names now, and what a launch already past the gate adds
+    # before the worker stops, is what the kill reaches. Windows: through the
+    # run's named job when it opens and the live pid is in it, so the
+    # escalation ends exactly the run's tree rather than `taskkill /T`'s
+    # parent-pid walk (`process_control.kill_run_tree`).
+    kill_verdict = stop_recorded_run(phase_dir, run, start_time=start_time)
+    outcome = _cleanup_entry(kill_verdict, run)
+    cleanup = outcome if cleanup_incomplete({"cleanup": outcome}) else None
     with status_file.checkpoint_lock(phase_dir):
         wrote = status_file.update_run(
             phase_dir,
@@ -1123,6 +1559,7 @@ def abort_run(phase_dir: str, *, force: bool = False) -> Dict[str, Any]:
                 "exit_code": EXIT_NEEDS_HUMAN,
                 "error": "aborted_by_request",
                 "closed_out_at": status_file.now_iso(),
+                "cleanup": outcome,
             },
             expect_run_id=run_id,
             quiet=True,
@@ -1140,6 +1577,11 @@ def abort_run(phase_dir: str, *, force: bool = False) -> Dict[str, Any]:
             from . import progress_tracker
 
             progress_tracker.retire_live_entries(phase_dir)
+    if not wrote:
+        # The worker closed its own record first (its handler, or an ending
+        # that beat the signal), which takes no `aborted` over it: the kill's
+        # outcome still replaces the pending mark beside the state it wrote.
+        _write_cleanup(phase_dir, run_id, outcome)
     if wrote:
         # Same blind spot as `close_out_dead_run`: a composite run's maps live
         # in the phase dirs it drove, not in the dir it claimed. Outside the lock
@@ -1148,15 +1590,12 @@ def abort_run(phase_dir: str, *, force: bool = False) -> Dict[str, Any]:
     holder = process_control.read_lock_holder(lock_path(phase_dir))
     if holder is None or holder.get("run_id") == run_id:
         process_control.break_lock(lock_path(phase_dir))
-    try:
-        plan = run.get("plan_file") or phase_dir
-        run_registry.remove_entry(
-            run_registry.resolve_project_root(str(plan)), run_id
-        )
-    except Exception:
-        pass
+    _settle_cleanup(phase_dir, run, cleanup)
     if kill_verdict == "survived":
         return {"result": "survived", "run": run, "phase_dir": str(phase_dir)}
+    if cleanup is not None:
+        return {"result": "incomplete", "run": run, "phase_dir": str(phase_dir),
+                "verdict": kill_verdict}
     return {"result": "aborted", "run": run, "phase_dir": str(phase_dir),
             "recorded": wrote}
 
@@ -2477,6 +2916,10 @@ class RunHandle:
             return
         self._closed = True
         self._stop.set()
+        # The worker's teardown has begun: from here until it exits it starts
+        # no provider CLI (`process_control.refuse_launches`), while a launch
+        # already past its intent still records its identity for the abort.
+        process_control.refuse_launches(self.run_id)
         if state is None:
             state = state_for_exit(exit_code)
         if error is None and exit_code == EXIT_NEEDS_HUMAN and state == RUN_STATE_FAILED:
@@ -2507,6 +2950,13 @@ class RunHandle:
                 from . import progress_tracker
 
                 progress_tracker.retire_live_entries(self.phase_dir)
+            # An abort's kill under way (`CLEANUP_PENDING`), or a teardown
+            # that could not confirm every process stopped: the run's trackers
+            # are whoever records that outcome's to retire, not this ending's.
+            current = status_file.read_run(self.phase_dir)
+            teardown_open = (
+                str(current.get("run_id")) == str(self.run_id) and cleanup_incomplete(current)
+            ) or run_registry.entry_cleanup_open(self.project_root, self.run_id)
         if recorded and state != RUN_STATE_DONE:
             # And the dirs this run drove but does not own. A composite
             # (`full`) is the only kind of mode where those differ from
@@ -2514,7 +2964,10 @@ class RunHandle:
             # directory that holds no map at all.
             # Outside the lock above on purpose — see `_retire_driven_phase_maps`.
             _retire_driven_phase_maps(self.phase_dir, self.mode)
-        run_registry.remove_entry(self.project_root, self.run_id)
+        if not teardown_open:
+            # Its CLIs have ended, so nothing will read the record.
+            run_registry.remove_entry(self.project_root, self.run_id)
+            _discard_cli_record(self.phase_dir, self.run_id)
         self._lock.release()
         if _ACTIVE is self:
             _ACTIVE = None
@@ -2544,6 +2997,9 @@ class RunHandle:
         # exactly that reason (F1, 2026-09-20); nothing may be added here that
         # expects to run after it.
         name = _signal_name(signum)
+        # No provider CLI starts from here on (as in `finish`), so the sweep
+        # below and the abort's reread see every one there is.
+        process_control.refuse_launches(self.run_id)
         # Every line from here on goes straight to the fd: the signal may
         # have landed inside a buffered write to the very stream this would
         # print through, and a second copy may land inside this handler's
@@ -2678,6 +3134,37 @@ def finish_active_run(
     handle = _ACTIVE
     if handle is not None:
         handle.finish(exit_code, error=error, result_state=result_state)
+
+
+def note_left_running(pid: Optional[int], pgid: Optional[int],
+                      verdict: Optional[str]) -> bool:
+    """A kill made inside this process's run (the executor's timeout kill of
+    its runner) could not confirm *pid* stopped (*verdict*): ``run.cleanup``
+    :data:`CLEANUP_INCOMPLETE` on the run's record, naming *pid* and *pgid*.
+    ``finish`` then keeps the run's CLI record, which holds that process's
+    identity, and its registry entry; ``status`` and ``status --sweep`` report
+    it, and an abort (or ``util runs --sweep`` once the worker is gone) stops
+    it by that identity (:func:`retry_cleanup`). Only for a run whose worker
+    records its launches (:func:`process_control.record_cli_identities`):
+    elsewhere no record holds an identity a later kill could use. A cleanup
+    already open (an abort under way) is left to its kill. ``True`` once
+    written. Never raises."""
+    handle = _ACTIVE
+    try:
+        if (handle is None or handle._closed
+                or process_control._CLI_RECORD[:1] != [(handle.phase_dir, handle.run_id)]):
+            return False
+        with status_file.checkpoint_lock(handle.phase_dir):
+            current = status_file.read_run(handle.phase_dir)
+            if str(current.get("run_id")) != str(handle.run_id) or cleanup_incomplete(current):
+                return False
+            return status_file.update_run(handle.phase_dir, {"cleanup": {
+                "state": CLEANUP_INCOMPLETE, "verdict": verdict,
+                "pid": int(pid) if pid else None, "pgid": int(pgid) if pgid else None,
+                "checked_at": status_file.now_iso(),
+            }}, expect_run_id=handle.run_id, quiet=True)
+    except Exception:  # noqa: BLE001 - a teardown never raises
+        return False
 
 
 def report_progress(phase_dir: str, **updates: Any) -> None:
@@ -3143,28 +3630,41 @@ def _launch(
         if handoff is not None:
             os.close(handoff)
 
+    teardown: Optional[str] = None
     try:
         observed = _await_handshake(phase_dir, run_id)
         if observed is None:
+            # By the start time read the moment the spawn reported the pid
+            # (`process_control.detached_worker_start_time`): where the kill
+            # goes by identity a pid alone is not signalled, and where it does
+            # not, the call is the unverified kill it always was.
+            kill_kwargs: Dict[str, Any] = {"escalate_after_s": 1.0}
+            worker_start = process_control.detached_worker_start_time(worker_pid)
+            if worker_start is not None:
+                kill_kwargs["start_time"] = worker_start
+            if run_job is not None:
+                kill_kwargs["job"] = run_job
             try:
-                if run_job is None:
-                    process_control.kill_tree(worker_pid, escalate_after_s=1.0)
-                else:
-                    process_control.kill_tree(
-                        worker_pid, escalate_after_s=1.0, job=run_job
-                    )
+                teardown = process_control.kill_tree(worker_pid, **kill_kwargs)
             except Exception:
-                pass
+                teardown = None
     finally:
         if run_job is not None:
             run_job.close()
         _handed_over(hold)
     if observed is None:
         tail = _log_tail(log, 20)
+        if _left_running(teardown):
+            ending = (
+                f"       Not confirmed stopped (kill verdict {teardown or 'unknown'}): "
+                "what could not be identified as the worker was not signalled.\n"
+                f"       Check pid {worker_pid} and what it started by hand.\n")
+        else:
+            ending = "       Nothing is left half-detached: the worker was terminated.\n"
         raise DetachError(
             f"ERROR: the detached worker (pid {worker_pid}) never published "
             f"run {run_id} within {handshake_timeout():.0f}s.\n"
-            "       Nothing is left half-detached: the worker was terminated.\n"
+            + ending
             + (f"       Last log lines:\n{tail}" if tail else "")
         )
 
@@ -3438,6 +3938,10 @@ def begin_worker_run(
         # The run id goes with it: on Windows the worker holds the run's named
         # Job Object for life from here, which is what an abort opens.
         process_control.enter_detached_worker(log_path(phase_dir), run_id=run_id)
+        # Every process this worker starts from here on (`popen_tree`), by
+        # pid, start time and group: if it dies without its handler, they are
+        # what its close-out signals (`close_out_dead_run`).
+        process_control.record_cli_identities(phase_dir, run_id)
     handle = RunHandle(
         phase_dir,
         run_id=run_id,

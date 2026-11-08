@@ -58,9 +58,12 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import itertools
 import json
 import os
+import select
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -69,7 +72,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import (
     Any, Awaitable, Callable, Dict, Iterator, List, NamedTuple, Optional, Sequence,
-    Tuple, TypeVar,
+    Set, Tuple, TypeVar,
 )
 
 try:  # pragma: no cover - import shim mirrors the rest of utils/
@@ -799,13 +802,30 @@ def kill_tree(
     poll_interval_s: float = 0.1,
     job: Optional[TreeJob] = None,
     child: Optional["subprocess.Popen[Any]"] = None,
+    members: Sequence["Descendant"] = (),
+    members_complete: bool = True,
+    obligations: Optional["KillObligations"] = None,
 ) -> str:
     """Terminate *pid* and every process it spawned. Returns a verdict string.
 
     ``gone`` (was already dead, and nothing of its group survives), ``killed``
     (died, gracefully or after the escalation), ``survived`` (still alive after
-    the SIGKILL window) or ``skipped`` (identity could not be corroborated — the
-    pid may have been recycled, so signalling it would hit an unrelated process).
+    the SIGKILL window), ``skipped`` (identity could not be corroborated — the
+    pid may have been recycled, so signalling it would hit an unrelated process)
+    or ``unresolved`` (Linux with pidfds only: something may still run that
+    could not be identified as the target's, so it was not signalled, or what
+    the kill needed to know could not be read). ``skipped`` and ``unresolved``
+    both mean not every process could be confirmed stopped.
+
+    *members* are processes recorded as the target's besides *pid*, each with
+    its pid, start time and the group it was started in (a detached worker's
+    provider CLIs, read back from :func:`read_cli_record`): on Linux with
+    pidfds each is signalled by its identity, and its group is read afterwards
+    like the target's. *members_complete* false says the record they came from
+    may be missing one (:attr:`CliRecord.complete`), which makes the verdict
+    ``unresolved`` there. Both are ignored everywhere else. So is
+    *obligations*, which on the kill by identity gets what the verdict leaves
+    unconfirmed, by what names it (:class:`KillObligations`).
 
     *child* is the ``Popen`` this process holds for *pid*, not yet reaped. On
     Linux with glibc or musl, in an ABI whose ``struct sigaction`` layout was
@@ -841,7 +861,8 @@ def kill_tree(
       --sweep`` over week-old entries whose ``/proc`` read failed), and a
       recycled pid's *process group* is an unrelated group.
     * an unverified kill is *requested*, never inferred: pass ``start_time=None``
-      — which is how ``--force`` and the failed-handshake teardown spell it.
+      — which is how ``--force`` and a failed-handshake teardown spell it off
+      the identity kill (below), which grants no such request.
 
     The worker is its own process-group leader and every provider CLI it spawns
     inherits that group, so a group signal takes the whole tree down and no
@@ -850,6 +871,17 @@ def kill_tree(
     itself is gone (the crash case D4b's close-out has to clean up); it is only
     ever the recorded value, never one re-derived from a pid whose identity just
     failed.
+
+    That is the kill by number, and it is what runs off Linux, or on a Linux
+    without pidfds or ``/proc``. On Linux with both no number is signalled at
+    all (:func:`_identity_kill`; docs/development/runtime.md, "A target known
+    only by number"): only *pid* and *members* are signalled, each through a
+    pidfd verified to hold it, and their groups are only read: what still runs
+    there unidentified is reported (``unresolved``), never signalled. There an
+    unverified kill cannot be requested: *pid* is held only by its recorded
+    *start_time*, or, without one, through a *child* that still anchors it;
+    with neither it is not signalled at all, and the verdict is
+    ``unresolved`` unless no process has the pid any more.
 
     Windows has no groups. There *job* is the child's :class:`TreeJob` from
     :func:`popen_tree`, which plays the group's part: the escalation
@@ -860,7 +892,7 @@ def kill_tree(
     (2026-10-25). Without one (a run whose job could not be opened, a child
     spawned without a job) the escalation is ``taskkill /T`` as before.
     """
-    if not pid and not pgid:
+    if not pid and not pgid and not members and members_complete:
         # Nothing recorded to probe or signal, but a job still names a tree: a
         # run whose record lost its pid, found by its run id (`kill_run_tree`).
         if IS_WINDOWS and job is not None:  # pragma: no cover - Windows
@@ -872,9 +904,11 @@ def kill_tree(
             return _posix_kill_owned(
                 tree, escalate_after_s, poll_interval_s,
                 by_number=lambda grace: _kill_by_number(
-                    pid, start_time, pgid, grace, poll_interval_s, job),
+                    pid, start_time, pgid, grace, poll_interval_s, job, members,
+                    members_complete, child, obligations),
             )
-    return _kill_by_number(pid, start_time, pgid, escalate_after_s, poll_interval_s, job)
+    return _kill_by_number(pid, start_time, pgid, escalate_after_s, poll_interval_s, job,
+                           members, members_complete, child, obligations)
 
 
 def _kill_by_number(
@@ -884,9 +918,18 @@ def _kill_by_number(
     escalate_after_s: float,
     poll_interval_s: float,
     job: Optional[TreeJob],
+    members: Sequence["Descendant"] = (),
+    members_complete: bool = True,
+    child: Optional[Any] = None,
+    obligations: Optional["KillObligations"] = None,
 ) -> str:
     """:func:`kill_tree` for a target known only by its numbers: its two
-    identity rules, then the kill of the group or the pid."""
+    identity rules, then the kill of the group or the pid. On Linux with
+    pidfds and ``/proc``, :func:`_identity_kill` instead."""
+    api = None if IS_WINDOWS else _pidfd_api()
+    if api is not None:
+        return _identity_kill(api, pid, start_time, pgid, members, members_complete,
+                              escalate_after_s, poll_interval_s, child, obligations)
     verdict = probe(pid, start_time) if pid else DEAD
     if verdict == UNKNOWN and start_time:
         return "skipped"
@@ -1014,6 +1057,671 @@ def _posix_kill_tree(
             return "killed"
         time.sleep(poll_interval_s)
     return "survived" if process_alive(pid) else "killed"
+
+
+# ---------------------------------------------------------------------------
+# Signals by identity: Linux with pidfds (docs/development/runtime.md,
+# "A target known only by number")
+# ---------------------------------------------------------------------------
+#
+# A number names whoever holds it when the signal lands. On Linux with pidfds
+# and /proc, no process this one does not own is signalled by a number, and
+# only processes identified one by one before the kill are signalled at all:
+#
+# * the target, by its pid and recorded start time, and the *members* the
+#   caller recorded the same way (a detached worker's provider CLIs, a Lane A
+#   CLI's snapshotted descendants). Each is *held* by a pidfd verified to name
+#   it (`_hold_process`): opened, then its /proc row read, then the pidfd asked
+#   whether its process is still there. Every signal goes through that pidfd,
+#   which reaches its process or nothing, and whether it has exited is the
+#   pidfd's answer too (`_held_state`). No identity, no signal: a target with
+#   no recorded start time is held only through the owned child that anchors
+#   its pid (`_hold_owned`), and otherwise not at all (``unresolved``);
+# * a process group is never signalled, and nothing found in one is. The
+#   groups the target and its members were in are only *read*, after the kill
+#   (`_IdentityUnit.report`): a process still running there that is none of the
+#   held ones may be the target's (a child nobody recorded) or a stranger's
+#   (the group's number made again). The kill cannot tell them apart, sends it
+#   nothing, and says ``unresolved``;
+# * what cannot be read is not taken as gone. A held process whose exit its
+#   pidfd cannot answer, a member whose identity cannot be read, a process
+#   table that cannot be listed, a member record the caller knows to be
+#   incomplete: each makes the verdict ``unresolved``.
+
+
+class _Pidfds:
+    """The pidfd calls (Linux 5.3+): a handle on one process that no later
+    process can take over, so a signal sent through it reaches that process or
+    fails (``ESRCH`` once it has been reaped). :func:`_pidfd_api` builds it."""
+
+    def __init__(self, open_call: Callable[[int], int],
+                 send_call: Callable[..., Any]) -> None:
+        self._open = open_call
+        self._send = send_call
+
+    def open(self, pid: int) -> Optional[int]:
+        """A pidfd on *pid*; ``None`` where none can be had (no descriptor
+        left, a sandbox that refuses the call). Raises ``ProcessLookupError``
+        when *pid* names no process at all."""
+        try:
+            return int(self._open(pid))
+        except ProcessLookupError:
+            raise
+        except (OSError, ValueError):
+            return None
+
+    def send(self, fd: int, sig: int) -> bool:
+        """*sig* to the process *fd* holds; ``False`` when it was not sent."""
+        try:
+            self._send(fd, sig)
+        except OSError:
+            return False
+        return True
+
+    def exists(self, fd: int) -> bool:
+        """Is the process *fd* holds still there (a zombie too)? Only its reap
+        ends it, and a process this one may not signal still exists."""
+        try:
+            self._send(fd, 0)
+        except ProcessLookupError:
+            return False
+        except OSError:
+            return True
+        return True
+
+    def exited(self, fd: int) -> Optional[bool]:
+        """Has the process *fd* holds exited (a zombie, or reaped)? A pidfd
+        polls readable from the moment its process exits, on every kernel that
+        has the calls (5.3+), so the answer needs no ``/proc`` row. ``None``
+        where the poll cannot answer."""
+        try:
+            poller = select.poll()
+            poller.register(fd, select.POLLIN)
+            events = poller.poll(0)
+        except (OSError, ValueError, AttributeError):
+            return None
+        for _fd, mask in events:
+            if mask & (select.POLLNVAL | select.POLLERR):
+                return None
+            if mask & (select.POLLIN | select.POLLHUP):
+                return True
+        return False
+
+    @staticmethod
+    def close(fd: int) -> None:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+#: :func:`_pidfd_api`'s answer once worked out.
+_PIDFDS: List[Optional[_Pidfds]] = []
+
+#: ``pidfd_open`` and ``pidfd_send_signal`` in the generic system-call table,
+#: which x86_64, i386 and aarch64 programs share (x32 numbers them apart).
+_NR_PIDFD_OPEN = 434
+_NR_PIDFD_SEND_SIGNAL = 424
+
+
+def _syscall_pidfds() -> Optional[Tuple[Callable[[int], int], Callable[..., Any]]]:
+    """``pidfd_open`` and ``pidfd_send_signal`` through the C library's
+    ``syscall()``, for a Python built without them: the standalone builds
+    ``uv`` installs are compiled against kernel headers older than the calls,
+    and have neither ``os.pidfd_open`` nor ``signal.pidfd_send_signal``. Only
+    where :func:`_sigaction_abi` names the program's ABI, whose numbers are the
+    generic table's; ``None`` anywhere else."""
+    if _sigaction_abi() is None:
+        return None
+    try:
+        import ctypes
+
+        call = ctypes.CDLL(None, use_errno=True).syscall
+        call.restype = ctypes.c_long
+    except Exception:  # noqa: BLE001 - no syscall(): the kill by number runs
+        return None
+
+    def checked(*args: Any) -> int:
+        result = call(*(ctypes.c_long(int(arg)) for arg in args))
+        if result < 0:
+            number = ctypes.get_errno()
+            raise OSError(number, os.strerror(number))
+        return int(result)
+
+    def open_call(pid: int) -> int:
+        return checked(_NR_PIDFD_OPEN, pid, 0)
+
+    def send_call(fd: int, sig: int) -> int:
+        return checked(_NR_PIDFD_SEND_SIGNAL, fd, sig, 0, 0)
+
+    return open_call, send_call
+
+
+def _working_pidfds(api: _Pidfds) -> bool:
+    """Do the calls work here: a pidfd on this process opens and answers? A
+    kernel older than 5.3 or a sandbox that refuses them fails this."""
+    try:
+        fd = api.open(os.getpid())
+    except ProcessLookupError:
+        return False
+    if fd is None:
+        return False
+    try:
+        return api.send(fd, 0)
+    finally:
+        api.close(fd)
+
+
+def _pidfd_api() -> Optional[_Pidfds]:
+    """The pidfd calls where the identity kill runs: Linux with ``/proc`` and
+    working pidfds, Python's own (3.9+) whatever the ABI, or else
+    :func:`_syscall_pidfds`, only in an ABI :func:`_sigaction_abi` names (its
+    numbers are that table's). An undated owned child is held only where that
+    ABI is named too (:func:`_hold_owned` reads SIGCHLD's disposition through
+    it); elsewhere it is ``unresolved``, never signalled by number. ``None``
+    anywhere else, where the kill by number runs. Worked out once."""
+    if not _PIDFDS:
+        built: Optional[_Pidfds] = None
+        if sys.platform == "linux" and os.path.exists("/proc/self/stat"):
+            open_call = getattr(os, "pidfd_open", None)
+            send_call = getattr(signal, "pidfd_send_signal", None)
+            if open_call is not None and send_call is not None:
+                built = _Pidfds(open_call, send_call)
+            else:
+                calls = _syscall_pidfds()
+                if calls is not None:
+                    built = _Pidfds(*calls)
+            if built is not None and not _working_pidfds(built):
+                built = None
+        _PIDFDS.append(built)
+    return _PIDFDS[0]
+
+
+def signals_by_identity() -> bool:
+    """Does a kill of a target known by number go by identity here (Linux
+    with pidfds and ``/proc``; the section below)? Where it does, a caller
+    hands over every identity it has, since nothing it cannot identify is
+    signalled; everywhere else the kill by number runs, as it always did."""
+    return not IS_WINDOWS and _pidfd_api() is not None
+
+
+def _linux_row(pid: int) -> Tuple[bool, Optional["_ProcRow"]]:
+    """``(answered, row)``: *pid*'s ``/proc`` row read now, ``None`` when no
+    such process is listed; ``answered`` is ``False`` where ``/proc`` cannot
+    be read at all."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as handle:
+            raw = handle.read()
+    except OSError:
+        return os.path.exists("/proc/self/stat"), None
+    return True, _parse_proc_stat(pid, raw)
+
+
+@dataclass
+class _HeldProc:
+    """A process held by a pidfd verified to name it (:func:`_hold_process`)."""
+
+    pid: int
+    start_time: str
+    fd: int
+    #: The group its verified row showed.
+    pgid: Optional[int]
+    #: The last signal sent through the pidfd, 0 for none.
+    sent: int = 0
+
+
+#: :func:`_hold_process`'s answer for a pid with no identity to check it by.
+_UNDATED = "undated"
+
+
+def _hold_process(api: _Pidfds, pid: Optional[int], start_time: Optional[str],
+                  into: List[_HeldProc], me: int) -> str:
+    """Hold *pid*: ``held`` once its pidfd is verified and appended to *into*,
+    which owns it from then on; ``gone`` when no process has the pid, when the
+    pidfd's process was reaped before its row could be paired with it (the row
+    may be its replacement's, and is not used), or when it is not the process
+    recorded with *start_time*; ``unread`` when its row or a pidfd could not be
+    had; :data:`_UNDATED` when there is no *start_time*: whatever has the pid
+    now may be another process, so nothing is held (no identity, no signal).
+    Every pidfd not handed to *into* is closed, whatever raises."""
+    if not pid or pid <= 0 or pid == me:
+        return "gone"
+    try:
+        fd = api.open(int(pid))
+    except ProcessLookupError:
+        return "gone"
+    if fd is None:
+        return "unread"
+    kept = False
+    try:
+        if not start_time:
+            return _UNDATED
+        _answered, row = _linux_row(int(pid))
+        if not api.exists(fd):
+            return "gone"
+        if row is None or not row.start_time:
+            return "unread"
+        if str(row.start_time) != str(start_time):
+            return "gone"
+        into.append(_HeldProc(int(pid), str(row.start_time), fd, row.pgid))
+        kept = True
+        return "held"
+    finally:
+        # Handed over the moment it is in *into*, whose owner closes it.
+        if not kept and not (into and into[-1].fd == fd):
+            api.close(fd)
+
+
+def _hold_owned(api: _Pidfds, child: Optional[Any], pid: Optional[int],
+                into: List[_HeldProc], me: int) -> str:
+    """Hold *pid*, recorded with no start time, through *child*: the
+    ``Popen`` this process holds for it. U74's anchor (an unreaped child's pid
+    names that child and nothing else; docs/development/runtime.md, "An owned
+    child's kill") is read before the pidfd opens and again after it, so the
+    pidfd and the row read next are the child's. :func:`_hold_process`'s
+    answers: ``gone`` too once *child* has its exit status (reaped through
+    it); :data:`_UNDATED` when there is no such *child* or its anchor does not
+    hold or cannot be read (an ABI :func:`_sigaction_abi` does not name), and
+    the pid is still some process's."""
+    if (child is None or getattr(child, "pid", None) != pid or not pid or pid <= 0
+            or pid == me):
+        return _hold_process(api, pid, None, into, me)
+    if getattr(child, "returncode", None) is not None:
+        return "gone"
+    if _owned_anchor(int(pid)) is not True:
+        return _hold_process(api, pid, None, into, me)
+    try:
+        fd = api.open(int(pid))
+    except ProcessLookupError:
+        return "gone"
+    if fd is None:
+        return "unread"
+    kept = False
+    try:
+        if _owned_anchor(int(pid)) is not True:
+            return _UNDATED
+        _answered, row = _linux_row(int(pid))
+        if row is None or not row.start_time:
+            return "unread"
+        into.append(_HeldProc(int(pid), str(row.start_time), fd, row.pgid))
+        kept = True
+        return "held"
+    finally:
+        if not kept and not (into and into[-1].fd == fd):
+            api.close(fd)
+
+
+#: :func:`_held_state`'s answers.
+_HELD_RUNNING = "running"
+_HELD_EXITED = "exited"
+_HELD_UNKNOWN = "unknown"
+
+
+def _held_state(api: _Pidfds, held: _HeldProc,
+                table: Optional[Dict[int, "_ProcRow"]]) -> str:
+    """Whether *held* runs: its pidfd's answer (exited once it is a zombie or
+    reaped). Where the poll cannot answer, a pidfd no longer there is exited,
+    and otherwise its ``/proc`` row decides, a zombie being exited; a row that
+    cannot be read is :data:`_HELD_UNKNOWN`, never exited."""
+    answer = api.exited(held.fd)
+    if answer is not None:
+        return _HELD_EXITED if answer else _HELD_RUNNING
+    if not api.exists(held.fd):
+        return _HELD_EXITED
+    row = table.get(held.pid) if table is not None else _linux_row(held.pid)[1]
+    if row is None or str(row.start_time) != held.start_time:
+        return _HELD_UNKNOWN
+    return _HELD_EXITED if row.state == "Z" else _HELD_RUNNING
+
+
+def _own_group() -> Optional[int]:
+    try:
+        return os.getpgid(0)
+    except (OSError, AttributeError):  # pragma: no cover - getpgid(0) does not fail
+        return None
+
+
+class _IdentityUnit:
+    """One target of :func:`_identity_run`: the processes held for it, and the
+    groups read after the kill for what they still run.
+
+    A group is read when a held process was seen in it during the kill, or
+    when the pid of its number is free or belongs to a process recorded as
+    the target's. A group's number is the pid of the process that made it and
+    is not handed out again while the group has a member, so a group whose
+    number is the pid of a live process that is none of the target's was made
+    by that process, not by the target, and is not read.
+    """
+
+    def __init__(self, own: Optional[int]) -> None:
+        self.own = own
+        self.held: List[_HeldProc] = []
+        #: The groups learned from records: read under the rule above.
+        self.recorded_groups: Set[int] = set()
+        #: The groups a held process was seen in: always read.
+        self.seen_groups: Set[int] = set()
+        #: Something of the target could not be read or held.
+        self.unknown = False
+        #: A recorded pid runs, but as another process (Lane A's ``skipped``).
+        self.reused = False
+        #: Whether a signal reached a held process while it ran.
+        self.ran = False
+        #: The last read of the groups: True something unidentified runs
+        #: there, False nothing does, None the process table was not read.
+        self.found: Optional[bool] = False
+        #: The groups that read found running something unidentified (every
+        #: group it would have read, when the table was not there).
+        self.found_groups: Set[int] = set()
+        #: Held processes the settled verdict did not confirm exited, by
+        #: identity: ``survived`` (running) or ``unresolved`` (unknown).
+        self.left: Dict[Tuple[int, str], str] = {}
+        self.verdict: Optional[str] = None
+
+    def _group(self, pgid: Optional[int]) -> Optional[int]:
+        try:
+            group = int(pgid) if pgid is not None else None
+        except (TypeError, ValueError):
+            return None
+        if group is None or group <= 1 or group == self.own:
+            return None
+        return group
+
+    def watch(self, pgid: Optional[int]) -> None:
+        group = self._group(pgid)
+        if group is not None:
+            self.recorded_groups.add(group)
+
+    def saw(self, pgid: Optional[int]) -> None:
+        group = self._group(pgid)
+        if group is not None:
+            self.seen_groups.add(group)
+
+    def note(self, table: Optional[Dict[int, "_ProcRow"]]) -> None:
+        """The groups *table* shows each held process in (a member may move)."""
+        if table is None:
+            return
+        for held in self.held:
+            row = table.get(held.pid)
+            if row is not None and str(row.start_time) == held.start_time:
+                self.saw(row.pgid)
+
+    def _send(self, api: _Pidfds, held: _HeldProc, sig: int) -> None:
+        if api.send(held.fd, sig):
+            held.sent = sig
+            self.ran = True
+
+    def signal(self, api: _Pidfds, sig: int,
+               table: Optional[Dict[int, "_ProcRow"]]) -> None:
+        """*sig* to every held process not known to have exited that has not
+        had it yet (a pidfd reaches its process or nothing)."""
+        for held in self.held:
+            if held.sent == signal.SIGKILL or held.sent == sig:
+                continue
+            if _held_state(api, held, table) != _HELD_EXITED:
+                self._send(api, held, sig)
+
+    def pending(self, api: _Pidfds, table: Optional[Dict[int, "_ProcRow"]]) -> bool:
+        """Is a held process running, or not known to have exited?"""
+        return any(_held_state(api, held, table) != _HELD_EXITED for held in self.held)
+
+    def report(self, table: Optional[Dict[int, "_ProcRow"]],
+               known: Set[Tuple[int, str]], me: int) -> Optional[bool]:
+        """Does a group of this unit run a process that is not a held or
+        recorded one (zombies aside)? ``None`` when *table* is not there."""
+        groups = set(self.seen_groups)
+        if table is None:
+            self.found_groups = groups | self.recorded_groups
+            self.found = None if self.found_groups else False
+            return self.found
+        for group in self.recorded_groups - groups:
+            leader = table.get(group)
+            if leader is None or (leader.pid, str(leader.start_time)) in known:
+                groups.add(group)
+        self.found_groups = {
+            row.pgid for row in table.values()
+            if row.pgid in groups and row.state != "Z" and row.pid != me
+            and (row.pid, str(row.start_time)) not in known}
+        self.found = bool(self.found_groups)
+        return self.found
+
+    def settle(self, api: _Pidfds, table: Optional[Dict[int, "_ProcRow"]]) -> None:
+        if self.verdict is not None:
+            return
+        states = [_held_state(api, held, table) for held in self.held]
+        for held, state in zip(self.held, states):
+            if state == _HELD_RUNNING:
+                self.left[(held.pid, held.start_time)] = "survived"
+            elif state == _HELD_UNKNOWN:
+                self.left[(held.pid, held.start_time)] = "unresolved"
+        if _HELD_RUNNING in states:
+            self.verdict = "survived"
+        elif self.unknown or _HELD_UNKNOWN in states or self.found is not False:
+            self.verdict = "unresolved"
+        elif self.ran:
+            self.verdict = "killed"
+        elif self.reused and not self.held:
+            self.verdict = "skipped"
+        else:
+            self.verdict = "gone"
+
+    def close(self, api: _Pidfds) -> None:
+        for held in self.held:
+            api.close(held.fd)
+        self.held = []
+
+
+def _identity_wait(api: _Pidfds, units: Sequence[_IdentityUnit], until: float,
+                   poll_interval_s: float) -> Optional[Dict[int, "_ProcRow"]]:
+    """Until no held process is pending, or *until*: one ``/proc`` pass per
+    poll, which also notes where each held process is. The last pass."""
+    while True:
+        looked = time.monotonic()
+        table = _linux_process_table()
+        for unit in units:
+            unit.note(table)
+        if not any(unit.pending(api, table) for unit in units):
+            return table
+        now = time.monotonic()
+        if now >= until:
+            return table
+        rest = max(poll_interval_s - (now - looked),
+                   poll_interval_s * _POLL_SLEEP_FLOOR_SHARE)
+        time.sleep(max(0.0, min(rest, until - now)))
+
+
+def _identity_report(units: Sequence[_IdentityUnit], until: float,
+                     poll_interval_s: float, known: Set[Tuple[int, str]],
+                     me: int) -> Optional[Dict[int, "_ProcRow"]]:
+    """Read every unit's groups until none runs anything unidentified, or
+    *until* (at least once): what the held processes' own ends take with them
+    gets that long to go. Signals nothing. The last pass."""
+    while True:
+        looked = time.monotonic()
+        table = _linux_process_table()
+        for unit in units:
+            unit.note(table)
+        if not [unit for unit in units if unit.report(table, known, me) is not False]:
+            return table
+        now = time.monotonic()
+        if now >= until:
+            return table
+        rest = max(poll_interval_s - (now - looked),
+                   poll_interval_s * _POLL_SLEEP_FLOOR_SHARE)
+        time.sleep(max(0.0, min(rest, until - now)))
+
+
+def _identity_run(api: _Pidfds, units: Sequence[_IdentityUnit], grace_s: float,
+                  clock: "_SweepClock", poll_interval_s: float,
+                  recorded: Set[Tuple[int, str]]) -> None:
+    """SIGTERM, the grace, SIGKILL, the confirmation, for *units* at once, each
+    held process through its own pidfd; then the read of their groups, until
+    nothing unidentified runs there or the confirmation window ends; settles
+    every unit's verdict. *recorded* are the identities known as the targets'
+    (held or not), which the read does not count as unidentified."""
+    me = os.getpid()
+    known = set(recorded) | {(h.pid, h.start_time) for unit in units for h in unit.held}
+    table = _linux_process_table()
+    for unit in units:
+        unit.note(table)
+        unit.signal(api, signal.SIGTERM, table)
+    table = _identity_wait(api, units, clock.grace_until(grace_s), poll_interval_s)
+    until: Optional[float] = None
+    if any(unit.pending(api, table) for unit in units):
+        for unit in units:
+            unit.signal(api, signal.SIGKILL, table)
+        until = clock.confirm_until()
+        _identity_wait(api, units, until, poll_interval_s)
+    if until is None:
+        until = clock.confirm_until()
+    table = _identity_report(units, until, poll_interval_s, known, me)
+    for unit in units:
+        unit.settle(api, table)
+
+
+class KillObligations:
+    """What a kill by identity could not confirm stopped, each by what names
+    it, so that a later look can re-check it on its own (:meth:`outstanding`):
+    a teardown that kills again must not let the later verdict stand for what
+    only the earlier kill saw (``detach.stop_recorded_run``;
+    docs/development/runtime.md, "When not everything is confirmed stopped").
+    :func:`kill_tree` fills one passed as *obligations* on the kill by
+    identity; anywhere else it stays empty."""
+
+    def __init__(self) -> None:
+        #: Groups read after the kill and found running something not
+        #: identified as the target's, or not read at all.
+        self.groups: Set[int] = set()
+        #: Identities not confirmed stopped, ``(pid, start time or None)``,
+        #: with the verdict each owes: ``survived``, ``unresolved`` (not held
+        #: or not read) or ``skipped`` (nothing sent: its row was unread).
+        self.identities: Dict[Tuple[int, Optional[str]], str] = {}
+        #: The record the kill was handed could not vouch for every launch;
+        #: only a later read of that record re-checks it.
+        self.record_incomplete = False
+
+    def named(self) -> bool:
+        """Does it name anything? A kill with an unconfirmed verdict and
+        nothing named owes what its verdict says, unclearable."""
+        return bool(self.groups or self.identities or self.record_incomplete)
+
+    def owe(self, pid: int, start_time: Optional[str], verdict: str) -> None:
+        key = (int(pid), str(start_time) if start_time else None)
+        earlier = self.identities.get(key)
+        if earlier is None or _OBLIGATION_ORDER.index(verdict) < _OBLIGATION_ORDER.index(earlier):
+            self.identities[key] = verdict
+
+    def take(self, unit: "_IdentityUnit") -> None:
+        """What *unit*'s settled kill left."""
+        for (pid, start), verdict in unit.left.items():
+            self.owe(pid, start, verdict)
+        self.groups |= unit.found_groups
+
+    def outstanding(self) -> List[str]:
+        """The verdict each named obligation still owes, re-checked now,
+        read-only, from one ``/proc`` pass (the record's aside: the caller's
+        later read re-checks it). A group is cleared once it runs nothing but
+        zombies; an identity once no process runs as it (no row for its pid,
+        another start time, a zombie), and one with no start time only once no
+        process but a zombie has its pid. Nothing is cleared when the table
+        cannot be read, or a row's start time is missing."""
+        if not self.groups and not self.identities:
+            return []
+        table = _linux_process_table()
+        if table is None:
+            return ["unresolved"] * len(self.groups) + list(self.identities.values())
+        me = os.getpid()
+        owed = ["unresolved" for group in sorted(self.groups) if any(
+            row.pgid == group and row.state != "Z" and row.pid != me
+            for row in table.values())]
+        for (pid, start), verdict in self.identities.items():
+            row = table.get(pid)
+            if row is None or row.state == "Z":
+                continue
+            if start is None or not row.start_time or str(row.start_time) == start:
+                owed.append(verdict)
+        return owed
+
+
+#: :class:`KillObligations`' verdicts, worst first.
+_OBLIGATION_ORDER = ("survived", "unresolved", "skipped")
+
+
+def _identity_kill(
+    api: _Pidfds,
+    pid: Optional[int],
+    start_time: Optional[str],
+    pgid: Optional[int],
+    members: Sequence["Descendant"],
+    members_complete: bool,
+    escalate_after_s: float,
+    poll_interval_s: float,
+    child: Optional[Any] = None,
+    obligations: Optional[KillObligations] = None,
+) -> str:
+    """:func:`kill_tree` by identity (the section above), for a target known
+    by its numbers: *pid* and every member held and signalled, the recorded
+    *pgid*, each member's recorded group and every group a held process is
+    seen in read afterwards.
+
+    *pid* is held by its recorded *start_time*; without one, only through
+    *child* while it anchors the pid (:func:`_hold_owned`). With neither it is
+    not held: nothing is sent to it, its members are still held by their own
+    identities, and the verdict is ``unresolved`` unless no process has the
+    pid at all.
+
+    ``skipped`` when *pid* runs but its identity cannot be read, and nothing
+    is sent at all; otherwise the unit's verdict
+    (:meth:`_IdentityUnit.settle`): ``unresolved`` too when a member could not
+    be held or read, or *members_complete* is false. *obligations*, when
+    given, gets what that verdict leaves unconfirmed (:class:`KillObligations`).
+    """
+    me = os.getpid()
+    unit = _IdentityUnit(_own_group())
+    recorded: Set[Tuple[int, str]] = set()
+    owed = obligations if obligations is not None else KillObligations()
+    try:
+        if not pid:
+            target = "gone"
+        elif start_time:
+            target = _hold_process(api, pid, start_time, unit.held, me)
+        else:
+            target = _hold_owned(api, child, pid, unit.held, me)
+        if target == "unread":
+            owed.owe(int(pid), start_time, "skipped")
+            return "skipped"
+        if target == _UNDATED:
+            unit.unknown = True
+            owed.owe(int(pid), None, "unresolved")
+        if pid and start_time:
+            recorded.add((int(pid), str(start_time)))
+        unit.watch(pgid)
+        if target == "held":
+            unit.saw(unit.held[0].pgid)
+        for member in members:
+            if not member.start_time:
+                unit.unknown = True
+                owed.owe(member.pid, None, "unresolved")
+                continue
+            recorded.add((int(member.pid), str(member.start_time)))
+            unit.watch(member.pgid)
+            if any((h.pid, h.start_time) == (member.pid, str(member.start_time))
+                   for h in unit.held):
+                continue
+            outcome = _hold_process(api, member.pid, member.start_time, unit.held, me)
+            if outcome == "unread":
+                unit.unknown = True
+                owed.owe(member.pid, member.start_time, "unresolved")
+            elif outcome == "held":
+                unit.saw(unit.held[-1].pgid)
+        if not members_complete:
+            unit.unknown = True
+            owed.record_incomplete = True
+        _identity_run(api, [unit], escalate_after_s, _SweepClock(), poll_interval_s,
+                      recorded)
+        owed.take(unit)
+        return str(unit.verdict)
+    finally:
+        unit.close(api)
 
 
 #: ``os.waitid`` where the platform has it, else ``None``: the kernel's own
@@ -1209,6 +1917,24 @@ def _children_become_zombies() -> Optional[bool]:
     return handler != int(signal.SIG_IGN) and not flags & _SA_NOCLDWAIT
 
 
+def restore_sigchld_default() -> None:
+    """At a process entry (the CLI's, the detached worker's, an orchestrator
+    run directly): SIGCHLD back to ``SIG_DFL`` when this process inherited it
+    as ``SIG_IGN``, which an ``exec`` keeps. Under ``SIG_IGN`` the kernel reaps
+    every child at its exit, so a ``Popen`` whose ``returncode`` is ``None``
+    no longer reserves its pid, and every kill of a child this process holds
+    rests on that reservation (docs/development/runtime.md, "An owned child's
+    kill"). POSIX only, from the main thread only; never raises."""
+    if IS_WINDOWS:
+        return
+    try:
+        if signal.getsignal(signal.SIGCHLD) == signal.SIG_IGN:
+            # subprocess needs it anyway: under SIG_IGN every Popen reads its child's exit as 0.
+            signal.signal(signal.SIGCHLD, signal.SIG_DFL)
+    except (ValueError, OSError, AttributeError):  # not the main thread; no SIGCHLD
+        pass
+
+
 class _OwnedTree(NamedTuple):
     """A child of this process that :func:`kill_tree` was handed, unreaped."""
 
@@ -1229,6 +1955,60 @@ def _owned_child_exited(pid: int) -> Optional[bool]:
     except OSError:
         return None
     return exited is not None
+
+
+def dated_own_child(child: Any) -> Optional[str]:
+    """*child*'s start time, read from its ``/proc`` row while that row names
+    this process as its parent and *child* (this process's ``Popen``) has no
+    exit status yet: an unreaped child of this process, whose pid no other
+    process can take, so the row is the child's and the start time its
+    identity for the kill by identity (docs/development/runtime.md, "A target
+    known only by number"). Needs no ``sigaction`` ABI. ``None`` where that
+    cannot be established: no ``/proc`` row, another parent, a child already
+    reaped, or children this process does not keep as zombies
+    (:func:`_children_become_zombies`, SIGCHLD ignored)."""
+    pid = getattr(child, "pid", None)
+    if (IS_WINDOWS or not isinstance(pid, int) or pid <= 0
+            or getattr(child, "returncode", 0) is not None
+            or _children_become_zombies() is False):
+        return None
+    _answered, row = _linux_row(pid)
+    if row is None or row.ppid != os.getpid() or not row.start_time:
+        return None
+    if getattr(child, "returncode", 0) is not None:
+        return None
+    return str(row.start_time)
+
+
+def own_child_stopped(child: Any, pgid: Optional[int]) -> bool:
+    """Has *child*, this process's ``Popen``, exited (its zombie, unreaped,
+    has), with no process of group *pgid* still running? The kill by number
+    reports such a child ``survived``: its zombie still answers
+    ``kill(pid, 0)``. Asked once that kill has returned, read-only where
+    ``waitid`` answers (``WNOWAIT``), else through the ``Popen``'s own
+    ``poll``, which the caller's drain would make anyway. ``False`` wherever
+    it cannot be confirmed: a group that cannot be read, a row whose state is
+    unknown, Windows."""
+    pid = getattr(child, "pid", None)
+    if IS_WINDOWS or not isinstance(pid, int) or pid <= 0:
+        return False
+    if getattr(child, "returncode", None) is None:
+        exited = _owned_child_exited(pid)
+        if exited is None:
+            try:
+                exited = child.poll() is not None
+            except Exception:  # noqa: BLE001 - unconfirmed
+                return False
+        if not exited:
+            return False
+    if not pgid:
+        return True
+    table = _process_table()
+    if not table:
+        return False
+    me = os.getpid()
+    return not any(row.pgid == pgid and row.pid != me and row.state != "Z"
+                   for row in table.values())
 
 
 def _owned_anchor(pid: int) -> Optional[bool]:
@@ -1589,7 +2369,27 @@ def popen_tree(args: Any, **kwargs: Any) -> Tuple[Any, Optional[TreeJob]]:
     cannot be resumed is killed and ``OSError`` is raised, so no spawn is ever
     left suspended. The caller owns the job and closes it once the child is
     done with (:meth:`TreeJob.close`).
+
+    Every provider run comes through here (Lane A's CLI, the executor's
+    task, in a session of its own or not), so this is also where a detached
+    worker records each process it starts, by pid, start time and group
+    (:func:`record_cli_identities`): :class:`LaunchRefused` (an ``OSError``)
+    before anything is started when that record cannot be written, or when an
+    abort has closed the run's launch gate (:func:`close_launch_gate`). The
+    bounded version, help and auth probes run through ``subprocess.run`` and
+    are not recorded.
     """
+    token = _record_launch()
+    try:
+        proc, job = _popen_tree(args, kwargs)
+    except BaseException:
+        _record_failed(token)
+        raise
+    _record_spawned(token, proc)
+    return proc, job
+
+
+def _popen_tree(args: Any, kwargs: Dict[str, Any]) -> Tuple[Any, Optional[TreeJob]]:
     spawn = subprocess.Popen
     api = _job_api() if IS_WINDOWS and spawn is _REAL_POPEN else None
     job_handle: Optional[int] = None
@@ -2060,24 +2860,31 @@ def _linux_process_table() -> Optional[Dict[int, _ProcRow]]:
                 raw = handle.read()
         except OSError:
             continue  # exited between listdir and open
-        # comm (field 2) is parenthesised and may itself contain ')'.
-        close = raw.rfind(b")")
-        fields = raw[close + 2:].split() if close != -1 else []
-        if len(fields) <= 19:
-            continue
-        try:
-            # After comm: state(3) ppid(4) pgrp(5) session(6) … starttime(22).
-            table[int(name)] = _ProcRow(
-                pid=int(name),
-                ppid=int(fields[1]),
-                pgid=int(fields[2]),
-                sid=int(fields[3]),
-                start_time=fields[19].decode("ascii", "replace"),
-                state=fields[0].decode("ascii", "replace"),
-            )
-        except ValueError:
-            continue
+        row = _parse_proc_stat(int(name), raw)
+        if row is not None:
+            table[row.pid] = row
     return table
+
+
+def _parse_proc_stat(pid: int, raw: bytes) -> Optional[_ProcRow]:
+    """*pid*'s row from the bytes of its ``/proc/<pid>/stat``."""
+    # comm (field 2) is parenthesised and may itself contain ')'.
+    close = raw.rfind(b")")
+    fields = raw[close + 2:].split() if close != -1 else []
+    if len(fields) <= 19:
+        return None
+    try:
+        # After comm: state(3) ppid(4) pgrp(5) session(6) … starttime(22).
+        return _ProcRow(
+            pid=pid,
+            ppid=int(fields[1]),
+            pgid=int(fields[2]),
+            sid=int(fields[3]),
+            start_time=fields[19].decode("ascii", "replace"),
+            state=fields[0].decode("ascii", "replace"),
+        )
+    except ValueError:
+        return None
 
 
 #: The ``ps`` columns :func:`_ps_process_table` asks for, each as its own ``-o``
@@ -2257,7 +3064,8 @@ class TreeSweep:
     ``terminated`` (exited within the grace after SIGTERM), ``killed`` (needed
     the SIGKILL) or ``survived``. ``groups`` maps each snapshotted process group
     to its verdict, in :func:`kill_tree`'s vocabulary (``gone``, ``killed``,
-    ``survived``, ``skipped``), in the order the snapshot met them.
+    ``survived``, ``skipped``, ``unresolved``), in the order the snapshot met
+    them.
 
     ``job`` is what ending the CLI's Windows Job Object did (2026-10-25):
     :data:`JOB_TERMINATED` or :data:`JOB_FAILED`, and ``None`` where there was
@@ -2275,6 +3083,10 @@ class TreeSweep:
     def survived(self) -> List[int]:
         return [pgid for pgid, verdict in self.groups.items() if verdict == "survived"]
 
+    @property
+    def unresolved(self) -> List[int]:
+        return [pgid for pgid, verdict in self.groups.items() if verdict == "unresolved"]
+
     def describe(self) -> str:
         line = f"cli {self.cli}"
         if self.job is not None:
@@ -2289,6 +3101,10 @@ class TreeSweep:
         if self.survived:
             line += (" — SURVIVED: " + ", ".join(str(pgid) for pgid in self.survived)
                      + " still running")
+        if self.unresolved:
+            line += (" — UNRESOLVED: " + ", ".join(str(pgid) for pgid in self.unresolved)
+                     + " still running something not identified as the cli's,"
+                     " left unsignalled")
         if self.job == JOB_FAILED:
             line += " — JOB NOT ENDED: what the cli started may still be running"
         return line
@@ -2354,7 +3170,7 @@ def _end_job(job: Optional[TreeJob]) -> Optional[str]:
 
 
 def _worst(verdicts: Sequence[str]) -> str:
-    for verdict in ("survived", "killed", "skipped"):
+    for verdict in ("survived", "unresolved", "killed", "skipped"):
         if verdict in verdicts:
             return verdict
     return "gone"
@@ -2630,11 +3446,36 @@ def _sweep_snapshots(
     enough detached groups ran past the SIGKILL that ends the worker and left the
     groups it had not reached yet running. Every wait is clipped by *clock*.
     Returns one ``{group: verdict}`` map per snapshot, in order.
+
+    On Linux with pidfds and ``/proc`` no group is signalled by its number:
+    :func:`_identity_sweep` instead.
+
+    A snapshot whose CLI could not be verified when it was taken
+    (:attr:`CliSnapshot.unverified_root`) also maps ``-pid`` to
+    ``unresolved``: nothing under it was adopted, so nothing was signalled.
     """
+    results = _sweep_snapshot_groups(snapshots, grace_s, poll_interval_s, clock)
+    for snapshot, groups in zip(snapshots, results):
+        root = getattr(snapshot, "unverified_root", None)
+        if root:
+            groups[-int(root)] = "unresolved"
+    return results
+
+
+def _sweep_snapshot_groups(
+    snapshots: Sequence[Sequence[Descendant]],
+    grace_s: float,
+    poll_interval_s: float,
+    clock: _SweepClock,
+) -> List[Dict[int, str]]:
+    """:func:`_sweep_snapshots`' sweep of the groups the snapshots name."""
     try:
         own: Optional[int] = os.getpgid(0)
     except (OSError, AttributeError):  # pragma: no cover - Windows; never in practice
         own = None
+    api = None if IS_WINDOWS else _pidfd_api()
+    if api is not None:
+        return _identity_sweep(api, snapshots, grace_s, poll_interval_s, clock, own)
     plans: List[List[_GroupTarget]] = []
     for snapshot in snapshots:
         by_group: Dict[int, List[Descendant]] = {}
@@ -2667,6 +3508,84 @@ def _sweep_snapshots(
             except Exception:  # noqa: BLE001 - one group must not stop the sweep
                 target.verdict = target.fallback()
     return [{target.key: str(target.verdict) for target in plan} for plan in plans]
+
+
+def _identity_sweep(
+    api: _Pidfds,
+    snapshots: Sequence[Sequence[Descendant]],
+    grace_s: float,
+    poll_interval_s: float,
+    clock: _SweepClock,
+    own: Optional[int],
+) -> List[Dict[int, str]]:
+    """:func:`_sweep_snapshots` by identity (:func:`_identity_run`).
+
+    Each snapshotted group is one unit, and its snapshotted members are what
+    it signals: each held by its recorded start time, through its own pidfd,
+    wherever it is now (GNU ``timeout``'s ``setpgid`` and a ``setsid`` move a
+    member out of the group it was snapshotted in). The group itself, and every
+    group a held member is seen in, is only read afterwards: a process running
+    there that the snapshot did not record gets no signal and makes the group
+    ``unresolved``. None held: ``skipped`` (no signal at all) if one of the
+    members' pids runs as another process, else ``gone``, as the kill by number
+    rules, unless the read finds something. A key that is this process's own
+    group, or no group, is never read, as the kill by number signals only the
+    members there.
+    """
+    me = os.getpid()
+    plans: List[List[Tuple[int, _IdentityUnit]]] = []
+    units: List[_IdentityUnit] = []
+    recorded: Set[Tuple[int, str]] = set()
+    try:
+        table = _linux_process_table()
+        for snapshot in snapshots:
+            by_group: Dict[int, List[Descendant]] = {}
+            for entry in snapshot or ():
+                key = entry.pgid if entry.pgid is not None else -entry.pid
+                by_group.setdefault(key, []).append(entry)
+            plan: List[Tuple[int, _IdentityUnit]] = []
+            for key, members in by_group.items():
+                unit = _IdentityUnit(own)
+                units.append(unit)
+                plan.append((key, unit))
+                try:
+                    unit.watch(key)
+                    for member in members:
+                        if not member.start_time:
+                            unit.reused = unit.reused or _table_pid_running(table, member.pid)
+                            continue
+                        recorded.add((int(member.pid), str(member.start_time)))
+                        outcome = _hold_process(api, member.pid, member.start_time,
+                                                unit.held, me)
+                        if outcome == "held":
+                            unit.saw(unit.held[-1].pgid)
+                        elif outcome == "unread":
+                            unit.unknown = True
+                        elif _table_pid_running(table, member.pid):
+                            unit.reused = True
+                except Exception:  # noqa: BLE001 - one group must not stop the sweep
+                    unit.verdict = "unresolved"
+            plans.append(plan)
+        live = [unit for unit in units if unit.verdict is None]
+        if live:
+            try:
+                _identity_run(api, live, grace_s, clock, poll_interval_s, recorded)
+            except Exception:  # noqa: BLE001 - a teardown never raises; unknown is unresolved
+                for unit in live:
+                    if unit.verdict is None:
+                        unit.verdict = "unresolved"
+    finally:
+        for unit in units:
+            unit.close(api)
+    return [{key: str(unit.verdict) for key, unit in plan} for plan in plans]
+
+
+def _table_pid_running(table: Optional[Dict[int, _ProcRow]], pid: int) -> bool:
+    """*pid* runs (not a zombie), whoever it is, in *table* or read alone."""
+    if table is None:
+        return _running(pid)
+    row = table.get(pid)
+    return row is not None and row.state != "Z"
 
 
 def _sweep_groups(
@@ -2716,6 +3635,30 @@ def terminate_timed_out(
                      job=ended)
 
 
+class CliSnapshot(list):
+    """:meth:`LiveCliRegistry.snapshot_for`'s answer: the descendants, and in
+    :attr:`unverified_root` the CLI's pid when its fresh walk was refused (its
+    row was not the process registered), ``None`` otherwise. A sweep reports
+    such a snapshot ``unresolved`` under that pid's key, ``-pid``, the key of
+    a member with no group (:func:`_sweep_snapshots`): what runs below it now
+    was not identified as the CLI's, and nothing was sent to it."""
+
+    def __init__(self, entries: Sequence[Descendant] = (), *,
+                 unverified_root: Optional[int] = None) -> None:
+        super().__init__(entries)
+        self.unverified_root = unverified_root
+
+
+def _verified_root(table: Dict[int, "_ProcRow"], pid: int,
+                   registered: Optional[str]) -> bool:
+    """Is *pid*'s row in *table* the process registered with start time
+    *registered*? ``False`` with no such row, no start time on either side,
+    or another one."""
+    row = table.get(pid) if table else None
+    return (row is not None and bool(registered) and bool(row.start_time)
+            and str(row.start_time) == str(registered))
+
+
 @dataclass
 class LiveCli:
     """One Lane A CLI this process is waiting on."""
@@ -2761,6 +3704,10 @@ class LiveCliRegistry:
         self._thread: Optional[threading.Thread] = None
 
     def register(self, proc: Any, job: Optional[TreeJob] = None) -> LiveCli:
+        # Worked out here, not first inside the abort's signal handler that
+        # sweeps: off Python's own calls it imports ctypes.
+        if not IS_WINDOWS:
+            _pidfd_api()
         entry = LiveCli(pid=int(proc.pid), start_time=process_start_time(proc.pid),
                         proc=proc, job=job)
         with self._lock:
@@ -2796,37 +3743,53 @@ class LiveCliRegistry:
             return len(self._entries)
 
     def refresh(self) -> None:
-        """Re-snapshot every entry from one scan. Identity-checked per entry."""
+        """Re-snapshot every entry from one scan. Identity-checked per entry:
+        only under a root whose row in that scan has the start time it was
+        registered with (:func:`_verified_root`)."""
         entries = self.entries()
         if not entries:
             return
         table = _process_table()
         for entry in entries:
-            row = table.get(entry.pid)
-            if row is None:
-                continue  # already gone: keep the last snapshot it had
-            if entry.start_time and row.start_time and row.start_time != entry.start_time:
-                continue  # the pid names someone else now
+            if not _verified_root(table, entry.pid, entry.start_time):
+                # Gone (keep the last snapshot it had), someone else's pid
+                # now, or not dated: nothing is adopted under it.
+                continue
             fresh = _descendants_in(table, entry.pid)
             with self._lock:
                 if id(entry.proc) in self._entries:
                     entry.snapshot = fresh
 
-    def snapshot_for(self, proc: Any) -> List[Descendant]:
+    def snapshot_for(self, proc: Any) -> "CliSnapshot":
         """The last refreshed snapshot of *proc*'s tree, merged with a fresh one.
 
         The fresh walk runs only while *proc* is un-reaped (``returncode`` still
-        ``None``): until then its pid cannot be recycled, so its children are
-        still its own. Afterwards only the stored snapshot, whose start times
-        protect every later signal, is used.
+        ``None``), and only under a root verified in the walk's own scan: its
+        row has the start time *proc* was registered with
+        (:func:`_verified_root`). ``returncode`` alone proves nothing where the
+        kernel reaps children itself (SIGCHLD ignored), and the pid may then
+        name another process, whose children are not the CLI's. A root that
+        cannot be verified (another start time, no row, none registered)
+        adopts nothing, and the snapshot says so
+        (:attr:`CliSnapshot.unverified_root`), which its sweep reports
+        ``unresolved``. Once *proc* is reaped only the stored snapshot, taken
+        under a verified root and protected by its start times, is used.
         """
         with self._lock:
             entry = self._entries.get(id(proc))
             stored = list(entry.snapshot) if entry else []
+            registered = entry.start_time if entry else None
         fresh: List[Descendant] = []
-        if getattr(proc, "returncode", 0) is None:
-            fresh = descendants(proc.pid)
-        return _merge_snapshots(fresh, stored)
+        unverified: Optional[int] = None
+        pid = getattr(proc, "pid", None)
+        if (getattr(proc, "returncode", 0) is None and not IS_WINDOWS
+                and isinstance(pid, int) and pid > 0):
+            table = _process_table()
+            if _verified_root(table, pid, registered):
+                fresh = _descendants_in(table, pid)
+            else:
+                unverified = pid
+        return CliSnapshot(_merge_snapshots(fresh, stored), unverified_root=unverified)
 
     def sweep(
         self,
@@ -2921,6 +3884,395 @@ class LiveCliRegistry:
 
 #: The process-wide registry every Lane A call registers its CLI in.
 live_cli_registry = LiveCliRegistry()
+
+#: The run whose record :func:`popen_tree` writes, once
+#: :func:`record_cli_identities` has named one: ``(phase_dir, run_id)``.
+_CLI_RECORD: List[Tuple[str, str]] = []
+
+#: The run in :data:`_CLI_RECORD` whose launches this process refuses for the
+#: rest of its life (:func:`refuse_launches`): its worker's teardown began.
+_LAUNCHES_REFUSED: List[str] = []
+
+#: Each launch's token in the record: this process's pid and a count.
+_LAUNCH_COUNT = itertools.count(1)
+
+#: How long a launch or an abort waits for a record's lock, which is held for
+#: one read and one append.
+_RECORD_LOCK_TIMEOUT_S = DEFAULT_MUTEX_TIMEOUT_S
+
+
+class CliRecord(NamedTuple):
+    """What :func:`read_cli_record` found: every process recorded by pid,
+    start time and group (as :class:`Descendant` entries, no session), and
+    whether the record is *complete*: every launch it announced has its
+    process's identity or its failure, and every line is whole."""
+
+    members: List[Descendant]
+    complete: bool
+    #: Lines naming another run: never members; the caller reports them.
+    foreign: int = 0
+    #: An abort closed the run's launch gate (:func:`close_launch_gate`).
+    closed: bool = False
+
+
+class LaunchRefused(OSError):
+    """:func:`popen_tree` refused a launch before starting anything: its run's
+    launch gate is closed (an abort is under way), or its run's record could
+    not take the launch's line."""
+
+
+def cli_record_name(run_id: str) -> str:
+    """The name of run *run_id*'s record of the processes its worker starts,
+    in its phase dir."""
+    return f"orchestrator-run.{run_id}.clis"
+
+
+def record_cli_identities(phase_dir: Optional[str], run_id: Optional[str] = None) -> None:
+    """From now on, record every process :func:`popen_tree` starts in run
+    *run_id*'s record in *phase_dir* (``None``: stop recording). Only where
+    the identity kill runs (:func:`signals_by_identity`), the one kill that
+    reads it: everywhere else a spawn stays exactly what it was, and Windows
+    ends the run's job instead.
+
+    The detached worker names its run, so a close-out after the worker died
+    without its handler still knows the provider CLIs it started, Lane A's and
+    the executor's alike, by pid, start time and group (:func:`read_cli_record`,
+    then :func:`kill_tree`'s *members*; docs/development/runtime.md, "A target
+    known only by number").
+
+    A launch is written twice: an intent before the spawn, and the process's
+    identity (or the spawn's failure) after it. The intent goes first because a
+    process cannot be recorded before it exists: a worker that dies between the
+    spawn and the second line leaves an intent with no identity, and the record
+    reads as incomplete rather than as a run that started nothing. The intent
+    is written under the record's lock, after reading that no abort closed the
+    run's launch gate (:func:`close_launch_gate`): an intent that cannot be
+    written, or a closed gate, stops the launch (:class:`LaunchRefused`), so
+    nothing is started that the record would not know about. A short write is
+    ended by a newline, leaving a torn line that reads as incomplete.
+
+    Every line carries the run id, and the record is reached only through
+    :func:`_open_record`, so a record is its run's alone: a link to another
+    run's file, or another run's line, is never read as this run's.
+
+    The identity line is written only for a process verified as this one's
+    child (:func:`_record_spawned`); one that is not is written as
+    unverified, which leaves the record incomplete and names nothing to
+    signal.
+    """
+    _LAUNCHES_REFUSED[:] = []
+    _CLI_RECORD[:] = (
+        [(str(phase_dir), str(run_id))]
+        if phase_dir and run_id and signals_by_identity() else [])
+
+
+def refuse_launches(run_id: Any) -> None:
+    """From now until this process exits, :func:`popen_tree` refuses every
+    launch of run *run_id* (:class:`LaunchRefused`, nothing started), when it
+    is the run this process records for: its worker's teardown has begun
+    (``RunHandle.finish``, its signal handler). The record stays named, so a
+    launch whose intent got in before this still writes its identity there,
+    for the abort's second read; nothing else may start once the worker is
+    ending. A later :func:`record_cli_identities` names a new run."""
+    if _CLI_RECORD and _CLI_RECORD[0][1] == str(run_id):
+        _LAUNCHES_REFUSED[:] = [str(run_id)]
+
+
+def _record_name(run_id: Any) -> str:
+    """:func:`cli_record_name`, for a run id that is one plain file name."""
+    text = str(run_id or "")
+    if (not text or text.startswith(".") or "/" in text or "\\" in text
+            or "\0" in text):
+        raise OSError(errno.EINVAL, f"not a run id a record can be named by: {text!r}")
+    return cli_record_name(text)
+
+
+def _records_bound_here() -> bool:
+    """Can a record be opened relative to its dir without following a link?"""
+    return (not IS_WINDOWS and bool(getattr(os, "O_NOFOLLOW", 0))
+            and bool(getattr(os, "O_DIRECTORY", 0)) and os.open in os.supports_dir_fd)
+
+
+def _open_record(phase_dir: str, run_id: Any, *, write: bool, create: bool = True) -> int:
+    """A descriptor on run *run_id*'s record in *phase_dir*, bound to that run.
+
+    The phase dir is opened without following a link and must be a directory
+    this user owns; the record is opened relative to that descriptor, without
+    following a link (for *write* append-only, and created when *create*), and
+    must be a regular file this user owns with exactly one link: a symlink or a
+    hard link to another run's record is refused, so is a file another user
+    planted. Both opens are non-blocking, so a FIFO or a device in the
+    record's place is refused by the check that follows rather than waited on;
+    the record's descriptor is made blocking again once it passed. ``OSError``
+    otherwise (``FileNotFoundError`` for no dir or no record)."""
+    name = _record_name(run_id)
+    if not _records_bound_here():
+        raise OSError(errno.ENOTSUP, "a record cannot be opened without following links here")
+    cloexec = getattr(os, "O_CLOEXEC", 0)
+    nonblock = getattr(os, "O_NONBLOCK", 0)
+    dir_fd = os.open(os.path.abspath(str(phase_dir)),
+                     os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | nonblock | cloexec)
+    try:
+        info = os.fstat(dir_fd)
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid():
+            raise OSError(errno.EPERM, f"{phase_dir} is not a directory this user owns")
+        flags = os.O_RDONLY
+        if write:
+            flags = os.O_RDWR | os.O_APPEND | (os.O_CREAT if create else 0)
+        fd = os.open(name, flags | os.O_NOFOLLOW | nonblock | cloexec, 0o600,
+                     dir_fd=dir_fd)
+    finally:
+        os.close(dir_fd)
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_uid != os.geteuid()):
+            raise OSError(errno.EPERM, f"{name} in {phase_dir} is not a regular file "
+                                       "of this user's with one link")
+        if nonblock:
+            os.set_blocking(fd, True)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+@contextmanager
+def _locked_record(phase_dir: str, run_id: Any, *, create: bool = True) -> Iterator[int]:
+    """Run *run_id*'s record (:func:`_open_record`, for writing) under its
+    exclusive lock: what a launch's check-then-intent and an abort's
+    gate-then-read each hold, so neither lands inside the other."""
+    fd = _open_record(phase_dir, run_id, write=True, create=create)
+    try:
+        if not wait_for_fd_lock(fd, timeout_s=_RECORD_LOCK_TIMEOUT_S):
+            raise OSError(errno.EAGAIN, f"the record of run {run_id} stayed locked")
+        try:
+            yield fd
+        finally:
+            release_fd_lock(fd)
+    finally:
+        os.close(fd)
+
+
+def _read_fd(fd: int) -> bytes:
+    chunks: List[bytes] = []
+    offset = 0
+    while True:
+        chunk = os.pread(fd, 1 << 16, offset)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+        offset += len(chunk)
+
+
+def _write_line(fd: int, line: Dict[str, Any]) -> bool:
+    """One line through *fd*; ``False`` when it was not written whole (a short
+    write is ended by a newline, so only that line is torn)."""
+    data = (json.dumps(line, separators=(",", ":")) + "\n").encode("utf-8")
+    written = os.write(fd, data)
+    if written != len(data):
+        os.write(fd, b"\n")
+        return False
+    return True
+
+
+def _append_record(line: Dict[str, Any]) -> bool:
+    """One line, with the recording run's id, into its record under the
+    record's lock; ``False`` when it was not written whole. It answers an
+    intent, so it never creates the record: one gone since was retired by a
+    teardown that no longer reads it."""
+    if not _CLI_RECORD:
+        return False
+    phase_dir, run_id = _CLI_RECORD[0]
+    try:
+        with _locked_record(phase_dir, run_id, create=False) as fd:
+            return _write_line(fd, dict(line, run=run_id))
+    except OSError:
+        return False
+
+
+def _record_launch() -> Optional[str]:
+    """The intent line before a spawn, written only while the run's launch
+    gate is open; its token, ``None`` when nothing is recorded. Raises
+    :class:`LaunchRefused` when the gate is closed, when this process's
+    worker is ending (:func:`refuse_launches`), or when the line cannot be
+    written: nothing may be started then."""
+    if not _CLI_RECORD:
+        return None
+    phase_dir, run_id = _CLI_RECORD[0]
+    if _LAUNCHES_REFUSED:
+        raise LaunchRefused(
+            errno.ECANCELED,
+            f"run {run_id} is ending (its worker's teardown has begun), so nothing "
+            "was started")
+    token = f"{os.getpid()}.{next(_LAUNCH_COUNT)}"
+    try:
+        with _locked_record(phase_dir, run_id) as fd:
+            if _parse_record(_read_fd(fd), run_id).closed:
+                raise LaunchRefused(
+                    errno.ECANCELED,
+                    f"run {run_id} is being aborted (its launch gate is closed), so "
+                    "nothing was started")
+            if _write_line(fd, {"run": run_id, "launch": token}):
+                return token
+            reason = "a short write"
+    except LaunchRefused:
+        raise
+    except OSError as exc:
+        reason = str(exc)
+    raise LaunchRefused(
+        errno.EIO,
+        f"the run's record of the processes it starts "
+        f"({os.path.join(phase_dir, cli_record_name(run_id))}) could not be written "
+        f"({reason}), so nothing was started",
+    )
+
+
+def _record_spawned(token: Optional[str], proc: Any) -> None:
+    """The started process's identity, for the intent *token*: its start time
+    and group from one ``/proc`` row, kept only while that row shows the
+    process is still this one's child. ``popen_tree`` returns before anything
+    waits on it, so its pid can have been handed out again only if it was
+    reaped behind its ``Popen`` (SIGCHLD ignored, ``SA_NOCLDWAIT``), and a
+    process that took it then is another parent's. A row that is not this
+    process's child, or that cannot be read, is written as unverified: the
+    intent stays unanswered, the record incomplete, and nothing is signalled
+    by it (the detached worker's start time is read under the same rule,
+    :func:`_note_worker_start`). Never raises: a line not written leaves the
+    intent unanswered too."""
+    if token is None:
+        return
+    try:
+        pid = int(proc.pid)
+        _answered, row = _linux_row(pid)
+        if row is None or row.ppid != os.getpid() or not row.start_time:
+            _append_record({"cli": token, "pid": pid, "start": None, "unverified": True})
+            return
+        _append_record({"cli": token, "pid": pid, "start": str(row.start_time),
+                        "pgid": row.pgid})
+    except Exception:  # noqa: BLE001 - the record stays incomplete
+        pass
+
+
+def _record_failed(token: Optional[str]) -> None:
+    if token is not None:
+        try:
+            _append_record({"failed": token})
+        except Exception:  # noqa: BLE001 - the record stays incomplete
+            pass
+
+
+def close_launch_gate(phase_dir: str, run_id: str) -> Optional[CliRecord]:
+    """Close run *run_id*'s launch gate, before an abort stops its worker:
+    a ``gate: closed`` line in its record, written under the record's lock,
+    after which :func:`popen_tree` in that worker refuses every launch
+    (:class:`LaunchRefused`, nothing started). Returns the record as it reads
+    under that same lock: every launch whose intent got in first is there,
+    with or without its identity yet. ``complete`` is false when the gate
+    could not be closed (the record cannot be opened as the run's own, its
+    lock was not had, the line was not written whole): a launch may then still
+    slip past. A phase dir that no longer exists reads as closed with nothing
+    recorded: no launch can write its intent there either. ``None`` where
+    nothing is recorded (off the identity kill, :func:`signals_by_identity`),
+    the kill by number's ground as before."""
+    if not signals_by_identity():
+        return None
+    try:
+        with _locked_record(phase_dir, run_id) as fd:
+            closed = _write_line(fd, {"run": str(run_id), "gate": "closed"})
+            record = _parse_record(_read_fd(fd), str(run_id))
+    except FileNotFoundError:
+        if _no_phase_dir(phase_dir):
+            return CliRecord([], True, 0, True)
+        return read_cli_record(phase_dir, run_id)._replace(complete=False)
+    except OSError:
+        return read_cli_record(phase_dir, run_id)._replace(complete=False)
+    return record if closed else record._replace(complete=False)
+
+
+def _no_phase_dir(phase_dir: str) -> bool:
+    """Is there nothing at all at *phase_dir* (not even a dangling link)?"""
+    return not os.path.lexists(os.path.abspath(str(phase_dir)))
+
+
+def read_cli_record(phase_dir: str, run_id: Any) -> CliRecord:
+    """The processes :func:`record_cli_identities` recorded for run *run_id*
+    in *phase_dir*, in order, read through :func:`_open_record`. No record:
+    nothing recorded, complete (and closed when there is no phase dir either:
+    no launch can be recorded there). A record that cannot be opened as the run's
+    own (a link, another user's, not a regular file), cannot be read, a line
+    that is not whole or names no run, or an intent with neither an identity
+    nor a failure: incomplete (a process may have been started that the
+    record does not name). Lines of another run are counted in ``foreign``
+    and otherwise ignored."""
+    try:
+        name = _record_name(run_id)
+    except OSError:
+        return CliRecord([], False)
+    if not _records_bound_here():
+        # Nothing records here (Windows; no O_NOFOLLOW): a file there is
+        # one this kill cannot vouch for.
+        return CliRecord([], not os.path.lexists(os.path.join(str(phase_dir), name)))
+    try:
+        fd = _open_record(phase_dir, run_id, write=False)
+    except FileNotFoundError:
+        # No record: nothing was started. No phase dir either: nothing can
+        # be (no intent can be written there), which is a closed gate.
+        return CliRecord([], True, 0, _no_phase_dir(phase_dir))
+    except OSError:
+        return CliRecord([], False)
+    try:
+        raw = _read_fd(fd)
+    except OSError:
+        return CliRecord([], False)
+    finally:
+        os.close(fd)
+    return _parse_record(raw, str(run_id))
+
+
+def _parse_record(raw: bytes, run_id: str) -> CliRecord:
+    """:func:`read_cli_record`'s reading of a record's bytes."""
+    complete = not raw or raw.endswith(b"\n")
+    launched: Set[str] = set()
+    answered: Set[str] = set()
+    found: List[Descendant] = []
+    foreign = 0
+    closed = False
+    for text in raw.split(b"\n"):
+        if not text.strip():
+            continue
+        try:
+            line = json.loads(text.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            complete = False
+            continue
+        if not isinstance(line, dict) or not isinstance(line.get("run"), str):
+            complete = False
+            continue
+        if line["run"] != run_id:
+            foreign += 1
+            continue
+        if "gate" in line:
+            if line["gate"] == "closed":
+                closed = True
+            else:
+                complete = False
+        elif isinstance(line.get("launch"), str):
+            launched.add(line["launch"])
+        elif isinstance(line.get("failed"), str):
+            answered.add(line["failed"])
+        elif isinstance(line.get("cli"), str):
+            pid, start, pgid = line.get("pid"), line.get("start"), line.get("pgid")
+            if not isinstance(pid, int) or pid <= 0 or not isinstance(start, str) or not start:
+                complete = False
+                continue
+            answered.add(line["cli"])
+            found.append(Descendant(pid, pgid if isinstance(pgid, int) else None, None, start))
+        else:
+            complete = False
+    if launched - answered:
+        complete = False
+    return CliRecord(found, complete, foreign, closed)
 
 
 def sweep_live_clis(tag: str) -> None:
@@ -3246,6 +4598,9 @@ def _spawn_detached_posix(
         raw = os.read(read_fd, 32)
     finally:
         os.close(read_fd)
+    # Before the intermediate is reaped: its pid, held by its zombie, is what
+    # proves the row read is the worker's (`_note_worker_start`).
+    _note_worker_start(raw, intermediate)
     try:
         os.waitpid(intermediate, 0)
     except OSError:
@@ -3256,6 +4611,42 @@ def _spawn_detached_posix(
         raise SpawnFailed(
             "the detach intermediate did not report a worker pid"
         )
+
+
+#: The last detached worker's ``{pid: start time}``, read the moment its pid
+#: was known (:func:`detached_worker_start_time`).
+_DETACHED_START: Dict[int, str] = {}
+
+
+def _note_worker_start(raw: bytes, intermediate: int) -> None:
+    """Record the start time of the worker whose pid *raw* carries, read while
+    *intermediate* (the spawn that made its session and forked it) is still
+    this process's unreaped child. Its pid is then held by it, so no other
+    session can have that number: a row whose session is *intermediate* is
+    the worker's, or a process the worker started that took its pid after
+    it. Only where the identity kill runs (:func:`signals_by_identity`), and
+    only under U74's anchor; anything else records nothing. Never raises."""
+    _DETACHED_START.clear()
+    try:
+        pid = int(raw.decode("ascii").strip())
+        if not signals_by_identity() or _owned_anchor(intermediate) is not True:
+            return
+        _answered, row = _linux_row(pid)
+        if (row is None or row.sid != intermediate or not row.start_time
+                or _owned_anchor(intermediate) is not True):
+            return
+        _DETACHED_START[pid] = str(row.start_time)
+    except Exception:  # noqa: BLE001 - a spawn never fails for its record
+        _DETACHED_START.clear()
+
+
+def detached_worker_start_time(pid: int) -> Optional[str]:
+    """The start time of the detached worker *pid* that :func:`spawn_detached`
+    started last, read the moment its pid was known; ``None`` when it could
+    not be proved the worker's (and everywhere the identity kill does not
+    run). What the launcher's teardown of a failed handshake kills it by:
+    without it, on Linux with pidfds, it is not signalled at all."""
+    return _DETACHED_START.get(int(pid)) if pid else None
 
 
 def _spawn_detached_windows(  # pragma: no cover - Windows
@@ -3398,6 +4789,9 @@ def enter_detached_worker(log_path: Optional[str], run_id: Optional[str] = None)
     the job an abort opens by name. The reaper job then nests inside it, as it
     nests inside any job the worker is already in. Without a *run_id* (a
     worker started some other way) nothing about the jobs changes.
+
+    POSIX: SIGCHLD goes back to its default if it was inherited ignored
+    (:func:`restore_sigchld_default`), as at every process entry.
     """
     redirect_output_to_log(log_path)
     if IS_WINDOWS:  # pragma: no cover - Windows
@@ -3408,6 +4802,7 @@ def enter_detached_worker(log_path: Optional[str], run_id: Optional[str] = None)
     from .stream_bootstrap import bootstrap_streams
 
     bootstrap_streams()
+    restore_sigchld_default()
 
 
 def _assign_own_job_object() -> None:  # pragma: no cover - Windows

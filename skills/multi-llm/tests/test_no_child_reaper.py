@@ -7,7 +7,8 @@ the process would end that early, behind the kill's back: a wait that reaps any
 child rather than one it names, and a SIGCHLD disposition that has the kernel
 reap every child at its exit (``SIG_IGN``, ``SA_NOCLDWAIT``). This test fails a
 runtime source (``skills/multi-llm/`` and ``packaging/``, tests excluded) that
-spells either.
+spells either. Any SIGCHLD disposition set counts, bar ``signal.signal`` back to
+``SIG_DFL``, which is what a process entry does with one inherited ignored.
 
 SIGCHLD is recognised by name (``signal.SIGCHLD``, ``signal.Signals.SIGCHLD``,
 an imported or renamed ``SIGCHLD``, a name assigned one of those), passed
@@ -186,6 +187,26 @@ def findings(source: str) -> List[Tuple[int, str]]:
             return func.attr in _DISPOSITION_SETTERS
         return False
 
+    def restores_default(node: ast.Call) -> bool:
+        """``signal.signal(SIGCHLD, SIG_DFL)``: the default disposition, under
+        which every child stays a zombie until it is waited for, the contract's
+        own (``process_control.restore_sigchld_default``). Only through
+        ``signal.signal``, whose ``SIG_DFL`` is the kernel's default."""
+        func, handler = node.func, _second_argument(node)
+        if isinstance(func, ast.Attribute):
+            through_signal = (func.attr == "signal" and isinstance(func.value, ast.Name)
+                              and func.value.id in signal_modules)
+        else:
+            through_signal = (isinstance(func, ast.Name)
+                              and signal_functions.get(func.id) == "signal")
+        if isinstance(handler, ast.Attribute):
+            default = (handler.attr == "SIG_DFL" and isinstance(handler.value, ast.Name)
+                       and handler.value.id in signal_modules)
+        else:
+            default = (isinstance(handler, ast.Name)
+                       and signal_functions.get(handler.id) == "SIG_DFL")
+        return through_signal and default
+
     def os_attribute(node: ast.AST) -> Optional[str]:
         """The ``os`` function *node* names: ``os.x``, ``getattr(os, "x")``."""
         if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
@@ -234,7 +255,7 @@ def findings(source: str) -> List[Tuple[int, str]]:
             second = _second_argument(node)
             reads = _callee(node.func) in _SIGCHLD_READERS or (
                 isinstance(second, ast.Constant) and second.value is None)
-            if not reads:
+            if not reads and not restores_default(node):
                 found.append((node.lineno, "SIGCHLD disposition set"))
     return sorted(set(found))
 
@@ -313,6 +334,9 @@ def test_the_scan_covers_the_skill_and_the_packaging_scripts():
     "import signal\nS: int = signal.SIGCHLD\nsignal.signal(S, on_child)\n",
     "import signal\nS = int(signal.SIGCHLD)\nsignal.signal(S, on_child)\n",
     "from signal import SIGCHLD\nS = SIGCHLD\nloop.add_signal_handler(S, on_child)\n",
+    # SIG_DFL only through signal.signal: asyncio installs a handler of its own.
+    "import signal\nloop.add_signal_handler(signal.SIGCHLD, signal.SIG_DFL)\n",
+    "import signal\nsignal.signal(signal.SIGCHLD, other.SIG_DFL)\n",
 ])
 def test_the_scan_finds(source):
     assert findings(source), source
@@ -336,6 +360,10 @@ def test_the_scan_is_best_effort(source):
     "import signal\nsignal.getsignal(signal.SIGCHLD)\n",
     "import signal\ncall(int(signal.SIGCHLD), None, old)\n",
     "import signal\nsignal.signal(signal.SIGTERM, on_term)\n",
+    # Back to the default: children stay zombies until waited for.
+    "import signal\nsignal.signal(signal.SIGCHLD, signal.SIG_DFL)\n",
+    "from signal import SIGCHLD, SIG_DFL, signal as install\ninstall(SIGCHLD, SIG_DFL)\n",
+    "import signal\nsignal.signal(signalnum=signal.SIGCHLD, handler=signal.SIG_DFL)\n",
     "proc.wait()\nproc.wait(timeout=5)\n",
     "import os\nos.waitstatus_to_exitcode(status)\n",
     "import signal\nsignal.signal(15, on_term)\n",

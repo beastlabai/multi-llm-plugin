@@ -234,8 +234,10 @@ class TestAHostThatLeftMidCall:
 
         import pytest
 
+        import signal
+
         from test_write_executor_orchestrators import MOCK_LLM, UV_STUB
-        from utils import detach, next_phase, run_status, status_file
+        from utils import detach, next_phase, process_control, run_status, status_file
         from utils.state_manager import get_or_create_state
 
         if os.name == "nt":  # pragma: no cover - POSIX double-spawn path
@@ -277,9 +279,29 @@ class TestAHostThatLeftMidCall:
             time.sleep(0.2)
         assert Path(f"{marker}.blocked").exists(), (phase_dir / "orchestrator-run.log").read_text()
 
-        # The host leaves: its tool server aborts the run it claimed.
-        assert run_status.main(["--plan-file", str(repo.plan), "--abort"]) == 0
-        capsys.readouterr()
+        # The host leaves: its tool server aborts the run it claimed. Where
+        # the identity kill runs, the blocked dispatch's CLI (a session of its
+        # own) is stopped by the identity the worker recorded; the `sleep` it
+        # started was never recorded, so it is reported, not signalled, and
+        # the abort says so (docs/development/runtime.md, "A target known only
+        # by number"). Elsewhere the kill is the one by number, as before.
+        run_id = status_file.read_run(str(phase_dir))["run_id"]
+        identity_kill = process_control.signals_by_identity()
+        try:
+            code = run_status.main(["--plan-file", str(repo.plan), "--abort"])
+            out = capsys.readouterr().out
+            if identity_kill:
+                assert code == 3 and "INCOMPLETE" in out, out
+                assert status_file.read_run(str(phase_dir))["cleanup"]["state"] == "incomplete"
+            else:
+                assert code == 0, out
+        finally:
+            for member in process_control.read_cli_record(str(phase_dir), run_id).members:
+                if member.pgid == member.pid:  # the test's own blocked `sleep`
+                    try:
+                        os.killpg(member.pgid, signal.SIGKILL)
+                    except OSError:
+                        pass
 
         run = status_file.read_run(str(phase_dir))
         assert run["state"] == "aborted", run

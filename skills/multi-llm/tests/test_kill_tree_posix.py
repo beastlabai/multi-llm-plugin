@@ -158,6 +158,9 @@ def process_table(request, monkeypatch):
         if shutil.which("ps") is None:
             pytest.skip("no ps on this host")
         monkeypatch.setattr(process_control, "_linux_process_table", lambda: None)
+        monkeypatch.setattr(process_control, "_linux_row", lambda _pid: (False, None))
+        # The identity kill needs /proc: without it the kill is by number.
+        monkeypatch.setattr(process_control, "_pidfd_api", lambda: None)
         monkeypatch.setattr(process_control, "_linux_state", lambda _pid: None)
         monkeypatch.setattr(process_control, "_linux_start_time", lambda _pid: None)
     elif process_control._linux_process_table() is None:
@@ -194,11 +197,24 @@ def _recording_os(record, *, send):
     return _RecordingOs()
 
 
+def _recording_pidfds(monkeypatch, record, *, send):
+    """The identity kill's signals too, as ``("pidfd", pid, signal name)``."""
+    real_send = process_control._IdentityUnit._send
+
+    def recording(unit, api, target, sig):
+        record.append(("pidfd", target.pid, signal.Signals(sig).name))
+        if send:
+            real_send(unit, api, target, sig)
+
+    monkeypatch.setattr(process_control._IdentityUnit, "_send", recording)
+
+
 @pytest.fixture
 def sent(monkeypatch):
     """Every signal the kill sends; each still goes out."""
     record = []
     monkeypatch.setattr(process_control, "os", _recording_os(record, send=True))
+    _recording_pidfds(monkeypatch, record, send=True)
     return record
 
 
@@ -207,6 +223,7 @@ def held(monkeypatch):
     """Every signal the kill would send; none goes out."""
     record = []
     monkeypatch.setattr(process_control, "os", _recording_os(record, send=False))
+    _recording_pidfds(monkeypatch, record, send=False)
     return record
 
 
@@ -432,8 +449,10 @@ class TestOnlyAnUnreapedChildAnchors:
         assert held == []
 
     def test_a_process_that_is_not_this_ones_child_does_not(self, sent):
-        """A grandchild leading its own group: the kill by number, a SIGTERM
-        only, once its own parent has reaped it."""
+        """A grandchild leading its own group, with no start time recorded.
+        Where the kill goes by identity nothing names it but its pid, so it is
+        not signalled at all (``unresolved``); by number, a SIGTERM only, once
+        its own parent has reaped it."""
         parent = subprocess.Popen([sys.executable, "-c", _PARENT_OF_A_SESSION_LEADER],
                                   start_new_session=True, stdout=subprocess.PIPE, text=True)
         grandchild = None
@@ -441,6 +460,9 @@ class TestOnlyAnUnreapedChildAnchors:
             grandchild = int(parent.stdout.readline())
             claimed = types.SimpleNamespace(pid=grandchild, returncode=None)
             verdict, _took = _kill_child(claimed, pgid=grandchild, escalate_after_s=3.0)
+            if process_control.signals_by_identity():
+                assert (verdict, sent) == ("unresolved", [])
+                return
             assert verdict == "killed"
             assert sent == [("killpg", grandchild, "SIGTERM")]
         finally:
@@ -487,6 +509,12 @@ class RecordingOs:
             sent.append(signal.Signals(sig).name)
         return real_os.kill(pid, sig)
 process_control.os = RecordingOs()
+real_send = process_control._IdentityUnit._send
+def recording_send(unit, api, target, sig):
+    sent.append(signal.Signals(sig).name)
+    return real_send(unit, api, target, sig)
+# Where the kill by number goes by identity (Linux with pidfds), its signals.
+process_control._IdentityUnit._send = recording_send
 child = subprocess.Popen(["sleep", "60"], start_new_session=True,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 try:
@@ -494,7 +522,10 @@ try:
                                         child=child, escalate_after_s=3.0,
                                         poll_interval_s=0.02)
     process_control.os = real_os
-    print(json.dumps({"verdict": verdict, "sent": sent, "wait": child.wait(timeout=5)}))
+    if child.poll() is None:
+        child.kill()  # not signalled by the kill: no identity, no signal
+    print(json.dumps({"verdict": verdict, "sent": sent, "wait": child.wait(timeout=5),
+                      "by_identity": process_control.signals_by_identity()}))
 finally:
     if child.poll() is None:
         child.kill()
@@ -509,8 +540,11 @@ _SIGACTION_READ_HERE = process_control._sigaction_abi() is not None
 class TestChildrenReapedAtExitAnchorNothing:
     """With SIGCHLD ignored or ``SA_NOCLDWAIT`` the kernel reaps a child at its
     exit, behind its ``Popen``: its pid is free at once and ``wait`` returns 0.
-    The kill is then the one by number. Each case runs in a process of its own,
-    so this one's disposition never changes."""
+    The child anchors nothing, and with no start time recorded nothing else
+    names it: where the kill goes by identity it is not signalled at all
+    (``unresolved``; no identity, no signal), and elsewhere the kill is the one
+    by number. Each case runs in a process of its own, so this one's
+    disposition never changes."""
 
     @pytest.mark.parametrize("how", [
         "signal module SIG_IGN", "native SIG_IGN", "SA_NOCLDWAIT"])
@@ -524,6 +558,9 @@ class TestChildrenReapedAtExitAnchorNothing:
         )
         assert result.returncode == 0, result.stderr
         outcome = json.loads(result.stdout)
+        if outcome.pop("by_identity"):
+            assert outcome == {"verdict": "unresolved", "sent": [], "wait": 0}, outcome
+            return
         # By number: the SIGTERM ended it and the kernel reaped it at once. The
         # owned kill would have closed with a SIGKILL (refused, the anchor gone).
         assert outcome == {"verdict": "killed", "sent": ["SIGTERM"], "wait": 0}, outcome
@@ -563,17 +600,30 @@ class _Host:
     (EPERM), after running the action it maps to, if any. A process ``spawn`` starts is a bystander, one
     ``fork`` starts is a member of the tree, and every signal records the pids
     it reached.
+
+    With *pidfd* (and ``/proc``: *fast_path*) the host has pidfds, and a kill
+    of a target known by number goes by identity: each pidfd holds the process
+    its pid named when it was opened (a pid taken again later is another
+    *generation*), and a signal through it reaches that process or fails. Their
+    numbers are never real descriptors: the host closes them itself. Without
+    (the default) the kill is the one by number.
     """
 
     OWN_PGID = 9999
 
-    def __init__(self, procs, *, deaf=(), fast_path=True, owned=(), unkillable=()):
+    def __init__(self, procs, *, deaf=(), fast_path=True, owned=(), unkillable=(),
+                 pidfd=False):
         self.now = 0.0
         self.procs = dict(procs)
         self.deaf = set(deaf)
         self.owned = set(owned)
         self.unkillable = set(unkillable)
         self.zombies = set()
+        self.pidfd = pidfd
+        #: pid -> how many times it was handed out again; fd -> (pid, generation).
+        self.generation = {}
+        self.pidfds = {}
+        self.open_pidfds = set()
         #: Sorted by delay; set once the host's actions are built.
         self.after_term = []
         self.before_sigkill = []
@@ -607,6 +657,8 @@ class _Host:
         def action():
             assert pid not in self.procs, f"pid {pid} is still in use"
             self.procs[pid] = (pgid, start)
+            self.generation[pid] = self.generation.get(pid, 0) + 1
+            self.deaf.discard(pid)
             self.bystanders.add(pid)
         return action
 
@@ -614,9 +666,44 @@ class _Host:
         def action():
             assert pid not in self.procs, f"pid {pid} is still in use"
             self.procs[pid] = (pgid, f"{pid}-start")
+            self.generation[pid] = self.generation.get(pid, 0) + 1
             if deaf:
                 self.deaf.add(pid)
         return action
+
+    def setsid(self, pid):
+        """*pid* leaves its group for a session and group of its own."""
+        def action():
+            self.procs[pid] = (pid, self.procs[pid][1])
+        return action
+
+    # The pidfd calls.
+
+    def pidfd_open(self, pid):
+        self._tick()
+        if pid not in self.procs:
+            raise ProcessLookupError(pid)
+        fd = 1_000_000 + len(self.pidfds)
+        self.pidfds[fd] = (pid, self.generation.get(pid, 0))
+        self.open_pidfds.add(fd)
+        return fd
+
+    def pidfd_exited(self, fd):
+        """A pidfd polls readable once its process has exited: a zombie, or
+        reaped (its pid perhaps handed out again since)."""
+        self._tick()
+        pid, generation = self.pidfds[fd]
+        return (pid not in self.procs or self.generation.get(pid, 0) != generation
+                or pid in self.zombies)
+
+    def pidfd_send_signal(self, fd, sig):
+        self._tick()
+        self._sigkill_lands(sig)
+        pid, generation = self.pidfds[fd]
+        if pid not in self.procs or self.generation.get(pid, 0) != generation:
+            raise ProcessLookupError(pid)
+        if sig:
+            self._deliver([pid], sig, f"pidfd {pid}")
 
     def _tick(self):
         while (self.term_at is not None and self.after_term
@@ -724,6 +811,17 @@ class _Host:
 
         clock = types.SimpleNamespace(
             time=lambda: self.now, monotonic=lambda: self.now, sleep=self.sleep)
+        host = self
+        pidfds = None
+        if self.pidfd and hasattr(process_control, "_Pidfds"):
+            class _HostPidfds(process_control._Pidfds):
+                def close(self, fd):
+                    host.open_pidfds.discard(fd)
+
+                def exited(self, fd):
+                    return host.pidfd_exited(fd)
+
+            pidfds = _HostPidfds(self.pidfd_open, self.pidfd_send_signal)
         for name, value in {
             "os": _Os(), "time": clock,
             # A scripted Linux host under glibc or musl: SIGCHLD at its default.
@@ -733,9 +831,16 @@ class _Host:
             "_linux_start_time": lambda pid: (
                 self.start_time(pid) if self.fast_path else None),
             "_linux_process_table": lambda: self.table() if self.fast_path else None,
+            "_linux_row": lambda pid: (
+                (True, self.table().get(pid)) if self.fast_path else (False, None)),
             "_process_table": self.table, "_waiting_process_table": self.table,
+            "_pidfd_api": lambda: pidfds if self.fast_path else None,
         }.items():
-            monkeypatch.setattr(process_control, name, value)
+            # Not raising: the same scripted host runs against a kill without
+            # pidfds or per-pid rereads (an older one), where the scenarios in
+            # test_signal_identity_posix.py show what it signalled.
+            monkeypatch.setattr(process_control, name, value,
+                                raising=name not in ("_linux_row", "_pidfd_api"))
         # Linux answers an owned child's exit with waitid, /proc or not.
         monkeypatch.setattr(process_control, "_waitid", self.waitid)
         return self

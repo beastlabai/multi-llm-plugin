@@ -8653,6 +8653,14 @@ class WriteBatchScheduler:
                             f"\n(timed out after {timeout}s: termination attempted, "
                             f"but no signal was sent — verdict {verdict})"
                         )
+                    elif verdict == "unresolved":
+                        # Something still ran in its group that could not be
+                        # identified as the command's, so nothing reached it.
+                        note = (
+                            f"\n(timed out after {timeout}s: not every process could "
+                            f"be confirmed stopped; what could not be identified as "
+                            f"the command's was not signalled — verdict {verdict})"
+                        )
                     else:
                         note = (
                             f"\n(killed after {timeout}s: SIGTERM then SIGKILL to the "

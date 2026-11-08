@@ -411,11 +411,15 @@ That holds only under a lifecycle contract, and the caller keeps it, not the kil
 - nothing in the process reaps children it does not name: no `os.wait()`, `os.waitpid(-1, …)`,
   `waitpid(0, …)` or `waitpid(-pgid, …)`, `wait3`, `wait4`, `waitid(P_ALL | P_PGID, …)`;
 - children become zombies: SIGCHLD is neither `SIG_IGN` nor flagged `SA_NOCLDWAIT`, either of
-  which has the kernel reap every child at its exit.
+  which has the kernel reap every child at its exit. Every process entry (`multi_llm.main`, which
+  the detached worker runs too, `process_control.enter_detached_worker`, and each orchestrator run
+  as its own `__main__`) sets SIGCHLD back to `SIG_DFL` when it inherited `SIG_IGN`, which an
+  `exec` keeps (`process_control.restore_sigchld_default`); `subprocess` needs that anyway, since
+  under `SIG_IGN` every `Popen` reads its child's exit as 0.
 
 `tests/test_no_child_reaper.py` fails any plugin source (`skills/multi-llm/`, `packaging/`) that
-reaps an unnamed child or sets SIGCHLD's disposition: by name, alias, keyword, or by number to a
-call that sets one. It reads the syntax, so a signal held in a variable is outside it. The detach
+reaps an unnamed child or sets SIGCHLD's disposition, bar `signal.signal` back to `SIG_DFL`: by
+name, alias, keyword, or by number to a call that sets one. It reads the syntax, so a signal held in a variable is outside it. The detach
 double-fork's `waitpid(intermediate, 0)` names its own child and is allowed. The kill itself reads
 the contract right before each signal: the child with `waitid(…, WNOWAIT)`, the disposition with
 `sigaction(SIGCHLD, NULL, &old)`. `signal.getsignal` can only refuse: it sees a `SIG_IGN` set
@@ -463,14 +467,244 @@ read off disk) is known only by number, and `kill_tree` treats it by its identit
 | Platform | Kill of an owned child |
 |----------|------------------------|
 | Linux, glibc or musl, x86_64, i386 or aarch64 programs | the owned kill |
-| Linux, any other C library (Bionic, uClibc), a static program, or another ABI (32-bit Arm even on an aarch64 kernel, x32, MIPS, RISC-V, PowerPC, s390x, …) | by number |
+| Linux, any other C library (Bionic, uClibc), a static program, or another ABI (32-bit Arm even on an aarch64 kernel, x32, MIPS, RISC-V, PowerPC, s390x, …) | by number; with Python's own pidfd calls the identity kill, where the executor's timeout kill dates its child (below) and an undated one is `unresolved` and gets nothing |
 | macOS, FreeBSD and the other BSDs, glibc on another kernel | by number |
 | Windows | its Job Object (`kill_tree`'s Windows path) |
 
-By number, the `child` argument is ignored and the kill is the one it was before the owned path:
-the child's zombie still counts as running, so a timeout kill sits out the grace and the
-`_KILL_CONFIRM_S` (5 s) SIGKILL window, then reports `survived`. Slow and pessimistic, never
-aimed at a number the proof does not cover.
+By number, the `child` argument is ignored and the kill is the one below for a target known only
+by number. Without pidfds the child's zombie still counts as running, so a timeout kill sits out
+the grace and the `_KILL_CONFIRM_S` (5 s) SIGKILL window, then reports `survived`. Slow and
+pessimistic, never aimed at a number the proof does not cover. The executor's timeout kill then
+confirms the exit itself (`process_control.own_child_stopped`): the child has exited (its zombie,
+by `waitid(…, WNOWAIT)`, else its `Popen`'s own `poll`) and its group runs nothing, and only then
+is that `survived` its `killed`. With pidfds (the identity kill below) the zombie counts as
+exited, as everywhere else a process is known by its pidfd; there a child whose anchor cannot be
+read (an ABI `_sigaction_abi` does not name) is not held through it. The executor's timeout kill
+dates its runner instead (`process_control.dated_own_child`): the start time from the child's
+`/proc` row, read while that row names this process as its parent and the `Popen` has no exit
+status, so the pid is still reserved and the row is the child's; the kill holds it by that, no
+ABI needed. A child whose ownership cannot be established (another parent, already reaped,
+SIGCHLD known ignored, no row) goes undated: nothing is sent, and the verdict is `unresolved`.
+
+**A target known only by number.** Every other POSIX kill: `kill_tree` without an owned child
+(`status --abort`, the dead-run close-out, `util runs --sweep`, the failed-handshake teardown, the
+owned kill's hand-over, every kill off the platforms above) and the Lane A sweep of a CLI's
+snapshotted groups. A number names whoever holds it when the signal lands. A pid is handed out
+again once its process is reaped, and a group's number once no process uses it as a pid, a group
+or a session. A process can also leave its group and join another of the same number, made again
+inside its session, without ever being reaped, so no process proves what a group is across a read
+of it. Which kill runs depends on two things the process can read about itself:
+
+| Platform | Kill of a target known only by number |
+|----------|----------------------------------------|
+| Linux with working pidfds (5.3+) and a readable `/proc`: Python's own calls in any ABI, the `syscall()` route in an ABI `_sigaction_abi` names | the identity kill: only processes identified one by one are signalled, never a number |
+| macOS, the BSDs, a Linux without pidfds or `/proc`, a Python without its own pidfd calls in an ABI `_sigaction_abi` does not name | by number, as before (the residual risk below) |
+| Windows | its Job Object, unchanged |
+
+*The identity kill* (`process_control._identity_kill`, `_identity_sweep`) signals only processes
+identified before it, each by its pid and start time, and each through a pidfd verified to hold it:
+
+- **What is signalled.** The target pid with its recorded start time, and the *members* the caller
+  recorded the same way: for a detached run, every process its worker started (below); for the
+  Lane A sweep, the CLI's snapshotted descendants. Nothing else, and never a group: a process that
+  is in the target's group but was not recorded gets no signal, however it got there.
+- **A Lane A snapshot adopts only under a verified root.** The CLI's children are walked from its
+  pid, so only while its row, in the same scan, has the start time the CLI was registered with
+  (`LiveCliRegistry.snapshot_for`, `refresh`). `returncode is None` alone proves nothing once the
+  kernel reaps children itself: the pid may name another process by then, and its children are
+  not the CLI's. A root with another start time, no row, or none registered adopts nothing new
+  (what an earlier verified look snapshotted still counts), and its sweep reports
+  `-<pid>: unresolved` (the key of a member with no group): nothing found under it now was
+  signalled. Off the identity kill the same rule holds for the kill by number's sweep.
+- **No identity, no signal.** A pid alone is never held: whatever has it now may be another
+  process. A target with no recorded start time is held only through the owned child that anchors
+  its pid (`_hold_owned`: the `Popen` this process holds for it, under the anchor of "An owned
+  child's kill", read before the pidfd opens and again after), which needs an ABI whose SIGCHLD
+  disposition can be read (`_sigaction_abi`); a dated target needs none. With neither, the target gets nothing, its
+  recorded members are still held by their own identities, and the verdict is `unresolved` (`gone`
+  when no process has the pid at all). That covers the callers that had none: `status --abort
+  --force` keeps the recorded start time (it overrides a probe that could not read it; an identity
+  still unreadable at the kill is `skipped`, nothing sent), and the launcher's teardown of a failed
+  handshake kills the worker by the start time it read the moment the spawn reported the pid
+  (`process_control.detached_worker_start_time`): the intermediate spawn that made the worker's
+  session is still the launcher's unreaped child then, so no other session can have its number,
+  and a row in that session is the worker's (or a process it started). A worker whose start time
+  could not be read so is not signalled, and the launch error says it was not confirmed stopped.
+- **Holding a process** (`_hold_process`): open a pidfd on the pid, read its `/proc/<pid>/stat`
+  row, then ask the pidfd whether its process is still there (`pidfd_send_signal(fd, 0)`; a
+  zombie is). A pid is not handed out again until its process is reaped, so a "yes" after the read
+  means the row, start time and group included, was that process's. A "no" retires the target: its
+  pid may already name its replacement, and nothing is read from that row. A recorded start time
+  must match, or the target is gone. Every later signal goes through the pidfd, which reaches that
+  process or fails with `ESRCH`, and whether it has exited is the pidfd's answer too: it polls
+  readable once its process is a zombie or reaped (`_Pidfds.exited`, 5.3+ like the calls), so no
+  `/proc` row is needed for it. Python's own `os.pidfd_open` and `signal.pidfd_send_signal` are used
+  where they exist; the standalone builds `uv` installs are compiled without them, so on the ABIs
+  `_sigaction_abi` names the calls go through the C library's `syscall()` (434 and 424, the generic
+  table's numbers, which x86_64, i386 and aarch64 programs share). `_pidfd_api` opens one on this
+  process once, and a kernel or sandbox that refuses it leaves the kill by number.
+- **The kill**: SIGTERM to every held process, the grace, SIGKILL to every held process not known
+  to have exited, the confirmation window (`_KILL_CONFIRM_S`).
+- **Reading the groups, after** (`_IdentityUnit.report`). The recorded group, each member's
+  recorded group, and every group a held process was seen in during the kill (one it moved to
+  included) are read for processes that are none of the held or recorded ones (zombies aside),
+  until none is left or the confirmation window ends: what a held process's own end takes with it
+  (a CLI stopping its tool children on SIGTERM) gets that long to go. Anything still there makes the
+  verdict `unresolved`, never `killed` or `gone`. A group learned only from a record, with no held
+  process seen in it, is not read when its number is the pid of a live process that is none of the
+  recorded ones: a group's number is the pid of the process that made it and is not handed out
+  while the group has a member, so that group was made by that process. This keeps a long-gone
+  CLI's group, or a group from before a reboot, from reading as a false `unresolved`.
+- **Unknown is not gone.** A held process whose exit its pidfd cannot answer and whose row cannot
+  be read, a member whose identity cannot be read, a process table that cannot be listed for the
+  read, or a record that may miss a process (*members_complete* false): each makes the verdict
+  `unresolved`. A target whose own identity cannot be read is `skipped`, with nothing sent.
+
+*What a detached worker records* (`process_control.record_cli_identities`, from `begin_worker_run`):
+every process it starts through `popen_tree`, the one spawn every provider run goes through (Lane
+A's CLI in the worker's group; the executor's task in a session of its own), as JSON lines in
+`orchestrator-run.<run_id>.clis` in its phase dir. Each launch writes an intent before the spawn
+and the process's pid, start time and group after it (or `failed`). Only where the identity kill
+runs; elsewhere a spawn is what it was. Read back with `read_cli_record`.
+
+The identity comes from one `/proc` row, kept only while that row shows the process is still this
+one's child (`_record_spawned`). `popen_tree` returns before anything waits on the child, so its
+pid can name another process only once the child was reaped behind its `Popen` (SIGCHLD ignored,
+`SA_NOCLDWAIT`), and whatever took the pid then is another parent's. A row that is not this
+process's child, or that cannot be read, is written as unverified (`"start": null`): the intent
+stays unanswered, the record incomplete, and nothing is signalled by it. The launcher reads the
+detached worker's start time under the same rule (its session is the unreaped intermediate's).
+
+A record is its run's alone (`_open_record`), on write and on read: the phase dir is opened with
+`O_DIRECTORY|O_NOFOLLOW` and must be a directory this user owns; the record is opened relative to
+that descriptor with `O_NOFOLLOW` (`O_CREAT|O_APPEND` to write; an identity line never creates it)
+and must be a regular file of this user's with one link. Both opens are `O_NONBLOCK`, so a FIFO or
+device in the record's place is refused by that check instead of waited on; the descriptor is made
+blocking again once it passed. A symlink or hard link to another run's record, a FIFO, or a file
+another user planted, is refused: a launch then does not start, and a read is incomplete. Every line carries the
+run id (`"run"`); a reader ignores a line of another run (a warning on stderr names how many) and
+reads a line that names no run as a torn one.
+
+- an intent that cannot be written refuses the launch (`LaunchRefused`, an `OSError`; nothing
+  started);
+- an intent with no identity (the worker died between the spawn and the second line, or the line
+  could not be written), a short write (ended by a newline so later lines stay whole), a line that
+  does not parse, a file that cannot be read: the record is incomplete, and the kill's verdict
+  `unresolved`;
+- no file: nothing was started.
+
+The window this leaves: a process exists before its identity is written, and what it starts before
+the close-out reads the record is in its group, which the read covers but never signals. Execution
+is gated on the intent, which is cheap; gating it on the identity would need a handshake with the
+child before exec.
+
+*The launch gate* (`process_control.close_launch_gate`). Every teardown of a run's processes closes
+it before its kill, whether or not the worker still runs (`detach.stop_recorded_run`: an abort,
+the retry of a cleanup not confirmed, the dead-run close-out, `util runs --sweep`'s close-out and
+prune): a `gate: closed` line, written under an exclusive lock on the record (`wait_for_fd_lock`
+on the record's own descriptor); a phase dir that no longer exists reads as closed, with nothing
+recorded. `popen_tree` takes the same lock, reads the record and writes its
+intent in one hold, so a launch either got its intent in first, and the abort's read under that
+lock sees it, or finds the gate closed and is refused (`LaunchRefused`: "run … is being aborted",
+nothing started, no spend). Once the worker is stopped the teardown reads the record again
+(`detach._kill_after_the_gate`): an identity written since its first read (a launch past the gate
+whose process came up during the kill), or a first read that could not vouch for every launch,
+makes it kill again with every identity recorded by then. The second kill does not stand for what
+only the first saw: the teardown's verdict is the worst of the second kill's and of what the first
+still owes (`process_control.KillObligations`: each group it found running something
+unidentified, each identity it could not confirm stopped), each re-checked on its own, read-only,
+once the second kill is done. A group is cleared only once it runs nothing but zombies, an
+identity only once no process runs as it; a first verdict worse than anything it named (a kill
+that raised) stands. So a CLI that moved to a group of its own, left a tool there and exited keeps
+the teardown `unresolved`, though the second kill no longer sees that group. Only a reread after
+the gate closed can confirm the cleanup `complete`. `util runs --sweep`'s prune makes one kill:
+the close-out of the run's still-open record takes its verdict rather than killing again. An intent still
+without an identity, or a gate that could not be closed (the record refused as above, its lock not
+had in `DEFAULT_MUTEX_TIMEOUT_S`), leaves the verdict `unresolved` at best.
+
+The worker keeps refusing launches through its own teardown: from the start of `RunHandle.finish`
+and of its signal handler until it exits (`process_control.refuse_launches`), `popen_tree` raises
+`LaunchRefused` without touching the record ("run … is ending"), so an executor thread scheduled
+between the handler's `finish()` and `os._exit` starts nothing. The record stays named, so a
+launch already past its intent still writes its identity for the abort's reread.
+
+What it does not prove, and what the verdict says then:
+
+- Every process nobody recorded is outside it and gets no signal: a tool child of a provider CLI,
+  a process forked during the kill, everything left in a crashed worker's group when its record
+  names nothing alive. Anything of those still running in a group the kill reads makes the verdict
+  `unresolved`; one that moved to a group the kill never learned of is not seen at all. Before
+  this, the kill by number signalled the whole group and reached them.
+- A group whose number was made again by an unrelated program, and that a held process of the
+  target's joined, reads the same way: `unresolved`, a false alarm, never a signal.
+- Two processes given the same pid within one `/proc` clock tick have the same start time; a
+  process this one may not signal (another user's) is outside all of it.
+- What a teardown's first kill could not confirm is kept for that teardown's own second kill, not
+  past it: a later retry (`status --abort`, `util runs --sweep`) knows the run's recorded
+  identities and groups, not a group an earlier teardown saw a member move to. The earlier
+  teardown's `incomplete` cleanup is what says to check by hand.
+
+*By number* (`_posix_kill_tree`, `_posix_kill_group`, `_GroupTarget`) is the kill as it was before
+the identity kill, unchanged: the pid's start time read with `probe`, then `killpg` on the
+recorded group, or on the pid's own group, and `kill` on the pid alone; a recorded group whose
+leader is gone is signalled by its number alone. Every check precedes its signal by a read, so a
+process can exit and be reaped, and its pid or its group's number be handed to another program,
+between the two: that program gets the signal. It is a narrow window (a process must die and the
+kernel must hand its number out again in it), but it is not closed off Linux's pidfds. The
+`TestAProcessReplacedAfterTheLastCheckGetsNothing` and `TestAGroupMadeAgainDuringTheReadSignalsNothingInIt`
+scenarios in `tests/test_signal_identity_posix.py` pin both kills.
+
+**When not everything is confirmed stopped.** `skipped` (an identity that could not be read: no
+signal), `unresolved` and `survived` all mean some process of the run may still run. The callers
+say so rather than report the run cleanly stopped, and keep what they need to try again:
+
+- `run.cleanup` on the run's record: `{state, verdict, pid, pgid, checked_at}`, `state` one of
+  `pending` (an abort's kill under way), `incomplete`, `complete`.
+- The run's registry entry carries the same `cleanup` (`run_registry.mark_cleanup`), and it and the
+  CLI record are kept while it is not `complete`: a new run may claim the phase dir and replace its
+  record, and the entry still names the old run's pid, start time and group, and its record by run
+  id.
+- `status --abort` marks the record `pending` before its kill. A worker that finishes inside it (its
+  SIGTERM handler) sees that, and leaves its registry entry and CLI record to the abort, which
+  retires them once its kill is confirmed. `INCOMPLETE` (or `REFUSED TO DIE` for `survived`) and
+  exit 3 otherwise; the run is closed (`aborted`) either way.
+- The dead-run close-out (`detach.close_out_dead_run`, reached from `status`, an abort of a run
+  already gone, `status --sweep` and `util runs --sweep`) records the same `run.cleanup` beside
+  `failed`. `status` shows a `cleanup: INCOMPLETE` (or `PENDING`) line with the abort command that
+  tries again; `status --sweep` prints an `INCOMPLETE` line for each run whose cleanup is not
+  confirmed, now or from before, with that command, and exits 3 (`needs-human`).
+- Every close-out and retry is held to one run id: the record is read under the phase dir's
+  checkpoint lock (the one `claim_run` takes), its run id checked, and that record's pid, start
+  time and group are what the kill targets; a record that is another run's is neither signalled
+  nor written.
+- `util runs --sweep` closes out an entry whose worker is gone, or whose `cleanup` is not
+  `complete`, from the entry's own identities (`detach.close_out_entry`), never from the phase
+  dir's current record. A kill that was `survived`, `unresolved`, `skipped` or raised leaves the
+  entry `needs_attention` (the kill's verdict in the row), and the sweep exits 3. Another abort or
+  sweep tries again; one that confirms every process stopped writes `complete`, and the entry and
+  the CLI record go. A record that may miss a process stays incomplete for good: check by hand,
+  then delete the entry's `.multi-llm/runs/<run_id>.json`.
+
+- The executor's timeout kill of its runner (`subagent_executor._kill_timed_out`) returns its
+  verdict. Only `killed` and `gone` confirm the runner stopped (the kill by number's `survived`
+  over the child's own zombie becomes `killed` once its exit is confirmed, above). Every other
+  outcome is never classified as killed: `survived` (still running after the SIGKILL window), `unresolved` or
+  `skipped` (not everything identified, and what was not got nothing), a kill that raised
+  (`None`), any other word. The `timeout` error says it may still be running
+  and names its pid, a `WARNING` line names the pid and group, and in a detached worker
+  `detach.note_left_running` writes `run.cleanup` `incomplete` with that pid. `finish` then keeps the
+  CLI record, which holds the runner's verified identity, and the registry entry; `status` and
+  `status --sweep` report it, and an abort (or `util runs --sweep` once the worker is gone) stops the
+  runner by that identity. A foreground run records no launches, so the warning and the error are
+  all there is.
+
+These verdicts are the same everywhere, the kill by number's included: a kill that could not
+confirm the run's processes stopped is never reported as a clean stop, since a false `aborted`
+can leave a paid provider CLI running unseen. Off the identity kill only the *signalling* is the
+one it always was (the six by-number definitions are unchanged); its callers' verdicts changed with
+the rest. So an abort whose first probe reads the worker and whose kill then cannot (`skipped`) is
+`INCOMPLETE`, exit 3, with its record and registry entry kept, on macOS as on Linux, where before it
+was `aborted` with both gone.
 
 ## Advisory guards
 

@@ -171,6 +171,54 @@ def _age_days(entry: Dict[str, Any]) -> Optional[float]:
         return None
 
 
+#: ``cleanup.state`` words that leave a run's processes not confirmed stopped
+#: (``detach.CLEANUP_PENDING``, ``detach.CLEANUP_INCOMPLETE``), on a run record
+#: and on an entry kept for it.
+CLEANUP_OPEN_STATES = ("pending", "incomplete")
+
+
+def _cleanup_open(entry: Dict[str, Any]) -> bool:
+    cleanup = entry.get("cleanup") if isinstance(entry, dict) else None
+    return isinstance(cleanup, dict) and cleanup.get("state") in CLEANUP_OPEN_STATES
+
+
+def entry_cleanup_open(project_root: str, run_id: str) -> bool:
+    """Does run *run_id*'s entry carry a cleanup not confirmed? Never raises."""
+    try:
+        with open(entry_path(project_root, run_id), "r", encoding="utf-8") as f:
+            return _cleanup_open(json.load(f))
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def mark_cleanup(
+    project_root: str, run_id: str, cleanup: Dict[str, Any], identity: Dict[str, Any],
+    *, phase_dir: Optional[str] = None,
+) -> None:
+    """Keep run *run_id*'s entry, carrying *cleanup*: the recovery state of a
+    teardown that could not confirm every process stopped, held here rather
+    than only in the run's phase record, which a new run may claim and
+    replace. An entry already gone is written again from *identity* (the run
+    record). Best-effort, like :func:`write_entry`."""
+    entry: Dict[str, Any] = {}
+    try:
+        with open(entry_path(project_root, run_id), "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        if isinstance(loaded, dict):
+            entry = loaded
+    except (OSError, ValueError):
+        pass
+    if not entry:
+        entry = {key: identity.get(key) for key in (
+            "pid", "process_start_time", "pgid", "plan_file", "mode")}
+    entry.pop("_path", None)
+    entry["run_id"] = run_id
+    if phase_dir and not entry.get("phase_dir"):
+        entry["phase_dir"] = str(phase_dir)
+    entry["cleanup"] = dict(cleanup)
+    write_entry(project_root, entry)
+
+
 def sweep(
     project_root: str,
     *,
@@ -180,61 +228,106 @@ def sweep(
     """Close out what earlier sessions left behind. Returns one row per entry.
 
     Each row carries ``run_id``, the liveness ``verdict``, the ``action`` taken
-    (``kept`` / ``closed`` / ``pruned`` / ``killed``) and the entry itself, so the
-    CLI and a test can assert on the same data.
+    (``kept`` / ``closed`` / ``pruned`` / ``killed`` / ``needs_attention``), the
+    ``kill_verdict`` of the kill this sweep made for the entry (``None`` when
+    it made none) and the entry itself, so the CLI and a test can assert on
+    the same data.
+
+    An entry whose worker is gone, or that carries a cleanup not confirmed
+    (``cleanup``, :func:`mark_cleanup`), is closed out from its own
+    identities (``detach.close_out_entry``): never from its phase dir's
+    current record, which may be another run's by now.
+
+    ``needs_attention``: not every process of the run could be confirmed
+    stopped (its kill ``survived``, was ``unresolved`` or ``skipped``, or
+    raised). The entry is kept, carrying that outcome, so the next sweep tries
+    again, and ``util runs --sweep`` exits 3.
     """
     rows: List[Dict[str, Any]] = []
     for entry in list_entries(project_root):
         verdict = verdict_for(entry)
         age = _age_days(entry)
         action = "kept"
-        if verdict == process_control.DEAD:
+        kill_verdict: Optional[str] = None
+        if verdict == process_control.DEAD or _cleanup_open(entry):
             action = "closed"
-            _close_out_phase_dir(entry)
-            remove_entry(project_root, entry.get("run_id", ""))
+            outcome = _close_out_entry(entry, project_root, kill=kill)
+            if outcome is not None:
+                kill_verdict = outcome.get("verdict")
+                if outcome.get("state") in CLEANUP_OPEN_STATES:
+                    action = NEEDS_ATTENTION
+            if action != NEEDS_ATTENTION:
+                remove_entry(project_root, entry.get("run_id", ""))
         elif age is not None and age > prune_after_days:
             action = "pruned"
             if kill:
                 # `skipped` is a real outcome here: a week-old entry whose
                 # identity probe came back `unknown` (the /proc or ps read
                 # failed) is a pid we cannot corroborate, and signalling its
-                # process group would hit whatever recycled that pid. The entry
-                # is still pruned; it is just not reported as killed. On
-                # Windows the run's named job is the kill when it opens
+                # process group would hit whatever recycled that pid. It is
+                # not reported as killed, nor as stopped. On Windows the run's
+                # named job is the kill when it opens
                 # (`process_control.kill_run_tree`).
-                kill_verdict = process_control.kill_run_tree(
-                    entry.get("run_id"),
-                    entry.get("pid") or 0,
-                    start_time=entry.get("process_start_time"),
-                    pgid=entry.get("pgid"),
-                )
-                if kill_verdict in ("killed", "survived"):
+                kill_verdict = _kill_entry(entry)
+                if kill_verdict == "killed":
                     action = "killed"
-            _close_out_phase_dir(entry)
-            remove_entry(project_root, entry.get("run_id", ""))
+            # Then the close-out, with what the prune's kill found: of the run's
+            # own open record, as it always was, else kept in the entry while
+            # it is unconfirmed. One kill: a second one's verdict would stand
+            # for what only this one saw (`detach.close_out_entry`).
+            outcome = _close_out_entry(entry, project_root, kill=False,
+                                       **({"killed": kill_verdict} if kill else {}))
+            if outcome is not None and outcome.get("state") in CLEANUP_OPEN_STATES:
+                action = NEEDS_ATTENTION
+            else:
+                remove_entry(project_root, entry.get("run_id", ""))
         rows.append(
             {"run_id": entry.get("run_id"), "verdict": verdict, "action": action,
-             "age_days": age, "entry": entry}
+             "kill_verdict": kill_verdict, "age_days": age, "entry": entry}
         )
     return rows
 
 
-def _close_out_phase_dir(entry: Dict[str, Any]) -> None:
-    """Ask the run-lifecycle owner to write the terminal record for this entry.
+#: :func:`sweep`'s action for a run whose processes are not all confirmed stopped.
+NEEDS_ATTENTION = "needs_attention"
+
+def _kill_entry(entry: Dict[str, Any]) -> Optional[str]:
+    """The prune's kill: the entry's recorded pid and group, and the processes
+    its worker recorded starting, each by its identity, after the run's launch
+    gate closed (``detach.stop_recorded_run``: its worker may still run).
+    ``None`` when the kill raised.
+
+    Imported lazily, like :func:`_close_out_entry`.
+    """
+    try:
+        from . import detach
+
+        return detach.stop_recorded_run(
+            str(entry.get("phase_dir") or ""), entry,
+            start_time=entry.get("process_start_time"))
+    except Exception:
+        return None
+
+
+def _close_out_entry(entry: Dict[str, Any], project_root: str, *, kill: bool,
+                     **killed: Any) -> Optional[Dict[str, Any]]:
+    """Ask the run-lifecycle owner to close this entry's run out, or to try
+    again a cleanup it left unconfirmed (``detach.close_out_entry``, which
+    *kill* and a *killed* verdict go to); the outcome of its kill
+    (``run.cleanup``'s shape), ``None`` when it made none.
 
     Imported lazily: the registry is also read by the launcher's pre-flight, and
     a cycle there would be gratuitous.
     """
-    phase_dir = entry.get("phase_dir")
-    run_id = entry.get("run_id")
-    if not phase_dir or not run_id:
-        return
+    if not entry.get("run_id"):
+        return None
     try:
         from . import detach
 
-        detach.close_out_dead_run(str(phase_dir), reason="heartbeat_timeout")
+        return detach.close_out_entry(entry, reason="heartbeat_timeout",
+                                      project_root=project_root, kill=kill, **killed)
     except Exception:
-        pass
+        return {"state": "incomplete", "verdict": None}
 
 
 # ---------------------------------------------------------------------------
@@ -276,7 +369,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         action="store_true",
         help="Close out entries whose identity probe fails, kill surviving "
              "process-group members, delete their registry files and prune "
-             f"entries older than {PRUNE_AFTER_DAYS} days",
+             f"entries older than {PRUNE_AFTER_DAYS} days; exit 3 when a run's "
+             "processes could not all be confirmed stopped (its entry is kept)",
     )
     parser.add_argument("--json", action="store_true", help="Machine-readable output")
     args = parser.parse_args(argv)
@@ -301,6 +395,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(_render_row(row))
         if not args.sweep:
             print("\nRun with --sweep to close out and remove dead entries.")
+        elif any(row["action"] == NEEDS_ATTENTION for row in rows):
+            print("\nneeds_attention: not every process of these runs could be "
+                  "confirmed stopped, and what could not be identified as theirs "
+                  "was not signalled; their entries are kept for the next sweep. "
+                  "Check each one's process group by hand.")
+    if args.sweep and any(row["action"] == NEEDS_ATTENTION for row in rows):
+        return 3
     return 0
 
 
