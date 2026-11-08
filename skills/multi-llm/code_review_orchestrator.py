@@ -154,6 +154,7 @@ from utils.review_orchestrator_base import (
     spawn_fanout_slot,
     unexpected_writes,
     update_status,
+    write_model_result,
     write_status,
 )
 # The read side is named from the module that owns it rather than through the
@@ -386,15 +387,19 @@ def save_model_result(
     error: Optional[str],
     phase_dir: Path
 ) -> bool:
-    """Save per-model code review result to file."""
+    """Save per-model code review result to file.
+
+    The issues were parsed and checked by :func:`run_single_review`; entries
+    that are not objects are kept here and dropped when the round is
+    aggregated (``schema_validator.drop_non_record_entries``). The file is
+    written whole or not at all (``review_orchestrator_base.write_model_result``):
+    issues the encoder cannot write back out fail the model, and nothing ends
+    the round's save loop.
+    """
     sanitized_model = sanitize_model_name(model)
 
     if success and issues is not None:
-        result_path = phase_dir / f"{sanitized_model}.json"
-        with open(result_path, 'w', encoding='utf-8') as f:
-            json.dump(issues, f, indent=2)
-        print(f"[{model}] Saved {len(issues)} issues to: {result_path}")
-        return True
+        return write_model_result(model, issues, phase_dir, noun="issues")
     elif error:
         error_path = phase_dir / f"error_{sanitized_model}.log"
         with open(error_path, 'w', encoding='utf-8') as f:
@@ -6530,9 +6535,13 @@ async def main(argv: Optional[List[str]] = None) -> int:
 
         # Save per-model results
         failed_models: Dict[str, str] = {}
-        for model_spec, (success, issues, error) in results.items():
+        for model_spec, (success, issues, error) in list(results.items()):
             if not save_model_result(prefix, model_spec, success, issues, error, phase_dir):
                 failed_models[model_spec] = error or "Unknown error"
+                # The round is aggregated from `results`, not from the files:
+                # issues that could not be saved are failed there too, or the
+                # report would count a failed model's issues.
+                results[model_spec] = (False, None, failed_models[model_spec])
 
         # F11: a model `run_all_reviews`'s deadline cancelled has no result
         # and, so far, no failure entry either — in the report *or* in the map.

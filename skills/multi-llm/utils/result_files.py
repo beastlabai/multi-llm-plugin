@@ -61,6 +61,11 @@ SET_ASIDE_SUFFIX = "set-aside"
 #: the salvage recovery loop's ``exists(<stem>.json)``, nor a resume's skip.
 STALE_RESULT_SUFFIX = "stale-earlier-run"
 
+#: Suffix a model's ``<stem>.json`` is renamed with when the round refuses the
+#: result in it (:func:`set_aside_rejected_result`). Outside every reader of a
+#: phase dir's results, as :data:`STALE_RESULT_SUFFIX` is.
+REJECTED_RESULT_SUFFIX = "rejected"
+
 #: ``.status.json`` key holding the phase's notes about its result files.
 RESULT_NOTES_KEY = "result_notes"
 
@@ -184,6 +189,42 @@ def set_aside_stale_result(path: os.PathLike | str, *, reason: Optional[str] = N
         f"[RESULT_STALE] {source.name} {detail}: set aside as {target.name} so "
         f"nothing reads it as this run's (nothing was deleted)"
     )
+    return target
+
+
+def set_aside_rejected_result(path: os.PathLike | str, *, reason: str) -> Optional[Path]:
+    """Rename a refused ``<stem>.json`` to ``<stem>.json.rejected`` and note it.
+
+    For a result the round will not save or read; *reason* is the clause
+    after the file name in the note. A file-capable provider writes
+    ``<stem>.json`` itself, before the round saves the reply, and a file left
+    there is read as the model's result by every later step (``--reaggregate``,
+    the salvage recovery's ``exists()``, a resume's skip). Renamed like
+    :func:`set_aside_stale_result`, never deleted, ``.<stamp>`` appended when
+    the target exists; the note goes to ``result_notes``
+    (``**Result files:**``). No file to rename returns ``None`` quietly; a
+    failed rename warns on stderr and returns ``None``.
+    """
+    source = Path(path)
+    if not os.path.lexists(source):
+        return None
+    target = source.with_name(f"{source.name}.{REJECTED_RESULT_SUFFIX}")
+    if os.path.lexists(target):
+        target = target.with_name(
+            f"{target.name}.{datetime.now().strftime('%Y%m%dT%H%M%S%f')}"
+        )
+    try:
+        os.replace(source, target)
+    except OSError as exc:
+        print(
+            f"Warning: could not set {source.name} aside ({exc}); it {reason}, "
+            f"and it is still in {source.parent}",
+            file=sys.stderr,
+        )
+        return None
+    note = f"{source.name} {reason}; set aside as {target.name} (nothing was deleted)"
+    print(note)
+    append_result_note(source.parent, note)
     return target
 
 
@@ -382,7 +423,8 @@ def _is_result_list(path: str) -> bool:
         return False
     try:
         return isinstance(json.loads(read[0]), list)
-    except ValueError:
+    except (ValueError, RecursionError):
+        # Nested deeper than the decoder's stack: not a list it can read.
         return False
 
 

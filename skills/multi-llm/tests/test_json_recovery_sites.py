@@ -219,11 +219,9 @@ class TestExtractJsonArrayMatchesItsRegexes:
                 _old_extract_json_array, text), f"text={text!r}"
 
     def test_cursor_agent_wrappers(self):
-        """A ``{"result": ...}`` wrapper is unwrapped first; a result that is
-        not a string raised ``TypeError`` from the search and still does."""
+        """A ``{"result": "<text>"}`` wrapper is unwrapped first."""
         texts = [json.dumps(value) for value in (
-            {"result": 5}, {"result": None}, {"result": ["x"]}, {"result": {"a": [1]}},
-            {"result": True}, {"type": "result"}, {"result": ""},
+            {"type": "result"}, {"result": ""},
         )]
         for text in _random_strings(77, count=600) + _mixes(78, count=200):
             texts.append(json.dumps({"result": text}))
@@ -231,6 +229,15 @@ class TestExtractJsonArrayMatchesItsRegexes:
         for text in texts:
             assert _outcome(extract_json_array, text) == _outcome(
                 _old_extract_json_array, text), f"text={text!r}"
+
+    @pytest.mark.parametrize("value, found", [
+        (5, None), (None, None), (True, None), (["x"], '["x"]'), ({"a": [1]}, "[1]"),
+    ])
+    def test_a_result_that_is_not_text_is_part_of_the_reply(self, value, found):
+        """It raised ``TypeError`` from the search, which ended the round's save
+        loop; the whole reply is searched instead, as for an array under
+        any other key."""
+        assert extract_json_array(json.dumps({"result": value})) == found
 
     def test_review_arrays(self):
         rng = random.Random(5150)
@@ -329,28 +336,24 @@ class TestSaveModelResultNamesAnEncoderFailure:
         assert "Parse error" not in log and "No JSON in response" not in log
         assert "nested too deep to save" in capsys.readouterr().out
 
-    def test_a_reply_this_python_parses_is_saved_whole_or_not_at_all(self, tmp_path, capsys):
+    def test_a_reply_this_python_parses_is_not_saved(self, tmp_path, capsys):
         """The real encoders on the reviewer's shape (an extra field 1,100
         arrays deep): every Python since 3.12 parses it, and ``json.dump``'s
-        encoder could not write it on any of them."""
+        encoder could not write it on any of them. Python 3.14's ``json.dumps``
+        can, but the round's later ``json.dump`` of ``grouped.json`` could not,
+        so it is refused by depth on every Python
+        (``review_orchestrator_base.MAX_RESULT_DEPTH``)."""
         output = _deep_suggestion(1100)
         try:
-            parsed = json.loads(output)
+            json.loads(output)
         except RecursionError:
             pytest.skip("this Python's decoder stops short of 1,100 levels")
         saved, phase_dir = self._save(tmp_path, output)
 
-        result = phase_dir / "m_x.json"
-        try:
-            json.dumps(parsed, indent=2)
-        except RecursionError:
-            assert saved is False and not result.exists()
-            log = (phase_dir / "error_m_x.log").read_text(encoding="utf-8")
-            assert "Encode error: the reply parsed" in log
-        else:
-            assert saved is True
-            parsed[0]["importance"] = "HIGH"
-            assert json.loads(result.read_text(encoding="utf-8")) == parsed
+        assert saved is False
+        assert sorted(p.name for p in phase_dir.iterdir()) == ["error_m_x.log"]
+        log = (phase_dir / "error_m_x.log").read_text(encoding="utf-8")
+        assert "Encode error: the reply parsed" in log
 
 
 # --- The two readers no review path reaches (see the module docstrings). ----------

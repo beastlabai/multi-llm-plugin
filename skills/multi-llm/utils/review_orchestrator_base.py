@@ -2296,8 +2296,18 @@ def slot_launch(
     )
 
 
-def validate_suggestion(suggestion: dict) -> Tuple[bool, Optional[str]]:
-    """Validate that a suggestion has all required fields with valid values."""
+def validate_suggestion(suggestion: Any) -> Tuple[bool, Optional[str]]:
+    """Validate that a suggestion has all required fields with valid values.
+
+    An entry is whatever the reviewer wrote. One that is not an object, or
+    whose ``type`` is not a string, is an invalid suggestion like one missing a
+    field: :func:`save_model_result` drops it with a warning, as
+    ``schema_validator.drop_non_record_entries`` drops such an entry on the
+    review-code lane, and the rest of the reply is kept.
+    """
+    if not isinstance(suggestion, dict):
+        return (False, f"expected object, got {type(suggestion).__name__}")
+
     for field in REQUIRED_FIELDS:
         if field not in suggestion:
             return (False, f"Missing required field: {field}")
@@ -2306,8 +2316,10 @@ def validate_suggestion(suggestion: dict) -> Tuple[bool, Optional[str]]:
     if _importance.canonical(importance) is None:
         return (False, f"Invalid importance: {importance}")
 
-    stype = suggestion.get("type", "").lower()
-    if stype not in VALID_TYPES:
+    stype = suggestion.get("type", "")
+    if isinstance(stype, str):
+        stype = stype.lower()
+    if not isinstance(stype, str) or stype not in VALID_TYPES:
         return (False, f"Invalid type: {stype}")
 
     return (True, None)
@@ -2320,10 +2332,15 @@ def extract_json_array(text: str) -> Optional[str]:
     last ``]``. Both readers are linear (:mod:`utils.json_extractor`): this runs
     on a model's reply while its result is saved, after the provider's
     deadline, so a quadratic search here could stall the round.
+
+    A CLI envelope (``{"result": "<answer text>"}``) is read as its answer
+    text. Any other value under ``result`` is part of the reply itself, read
+    like an array under any other key: the readers look for one in the whole
+    text, and a reply holding none is one that does not parse.
     """
     try:
         wrapper = json.loads(text)
-        if isinstance(wrapper, dict) and 'result' in wrapper:
+        if isinstance(wrapper, dict) and isinstance(wrapper.get('result'), str):
             text = wrapper['result']
     except (json.JSONDecodeError, TypeError):
         pass
@@ -6333,6 +6350,117 @@ def _write_salvage_request(
     return salvage_path
 
 
+#: The deepest nesting of lists and objects a saved model result may have,
+#: counting the result's own list as 1 (an issue's ``line_range`` is 3).
+#: The round encodes the records again, inside ``grouped.json``, the issues
+#: file and the report data, with ``json.dump``'s pure-Python encoder, which
+#: stops at the interpreter's recursion limit (1,000 frames by default) less
+#: the stack it is called from. A reply deeper than this would be saved and
+#: then end the round there, so :func:`write_model_result` refuses it
+#: (docs/development/review-results.md#malformed-result-entries).
+MAX_RESULT_DEPTH = 100
+
+
+def _deeper_than(value: Any, limit: int) -> bool:
+    """Whether *value* nests lists and dicts more than *limit* levels deep.
+
+    Iterative, because the values it is asked about are the ones too deep to
+    walk recursively.
+    """
+    stack = [(value, 1)]
+    while stack:
+        item, level = stack.pop()
+        if isinstance(item, (list, dict)):
+            if level > limit:
+                return True
+            children = item.values() if isinstance(item, dict) else item
+            stack.extend((child, level + 1) for child in children)
+    return False
+
+
+def write_model_result(
+    model: str,
+    records: List[Any],
+    phase_dir: Union[str, Path],
+    *,
+    noun: str,
+    raw_output: Optional[str] = None,
+) -> bool:
+    """Write one model's parsed records to ``{model}.json``, whole or not at all.
+
+    Both review lanes' ``save_model_result`` end here: this one for review-plan
+    and review-tasks, ``code_review_orchestrator``'s for review-code.
+
+    A reply that parsed but nests deeper than :data:`MAX_RESULT_DEPTH` is not
+    written: the round's later writers could not encode it again. The records
+    are encoded before the file is opened, so an encoder that fails anyway
+    (``RecursionError``) leaves no partial ``{model}.json`` either. Either way
+    the reply did parse, so it is not one to salvage: the model fails, and
+    ``error_{model}.log`` says why. A ``{model}.json`` already there (a
+    file-capable provider writes it before the reply is saved) is set aside as
+    ``{model}.json.rejected``
+    (:func:`utils.result_files.set_aside_rejected_result`), or a later
+    ``--reaggregate`` would read it as the model's result.
+
+    Args:
+        model: The model spec, as the operator typed it.
+        records: The parsed reply: suggestions or issues.
+        phase_dir: Where the result file, or the error log, lands.
+        noun: What the records are called on the "Saved" line.
+        raw_output: The reply text, copied into the error log when there is
+            one; review-code's reply was parsed upstream and its text is in
+            ``log_{model}.txt``.
+
+    Returns:
+        True when the file was written, False when the records were not.
+    """
+    sanitized_model = sanitize_model_name(model)
+    too_deep: Optional[str] = None
+    if _deeper_than(records, MAX_RESULT_DEPTH):
+        too_deep = f"more than {MAX_RESULT_DEPTH} levels of lists and objects"
+    else:
+        try:
+            encoded = json.dumps(records, indent=2)
+        except RecursionError as e:
+            too_deep = str(e)
+
+    if too_deep is not None:
+        set_aside = _result_files.set_aside_rejected_result(
+            os.path.join(phase_dir, f"{sanitized_model}.json"),
+            reason=(
+                f"is not {model}'s result: the reply is nested too deep "
+                f"to write back out ({too_deep})"
+            ),
+        )
+        error_path = os.path.join(phase_dir, f"error_{sanitized_model}.log")
+        with open(error_path, 'w', encoding='utf-8') as f:
+            f.write(f"Model: {model}\n")
+            f.write(f"Timestamp: {datetime.now().isoformat()}\n")
+            f.write(
+                "Encode error: the reply parsed, but it is nested too deep "
+                f"to write back out as {sanitized_model}.json: {too_deep}\n"
+            )
+            if set_aside is not None:
+                f.write(
+                    f"The {sanitized_model}.json already in the phase dir is "
+                    f"set aside as {set_aside.name}.\n"
+                )
+            if raw_output is not None:
+                f.write(f"\nRaw output:\n{raw_output}\n")
+        logged = "raw output saved" if raw_output is not None else "error logged"
+        print(
+            f"[{model}] Reply parsed but is nested too deep to save, "
+            f"{logged} to: {error_path}"
+        )
+        return False
+
+    result_path = os.path.join(phase_dir, f"{sanitized_model}.json")
+    with open(result_path, 'w', encoding='utf-8') as f:
+        f.write(encoded)
+    print(f"[{model}] Saved {len(records)} {noun} to: {result_path}")
+    return True
+
+
 def save_model_result(
     prefix: str,
     model: str,
@@ -6480,39 +6608,10 @@ def save_model_result(
         elif len(validated_suggestions) == 0:
             print(f"[{model}] Warning: All suggestions were invalid")
 
-        result_path = os.path.join(phase_dir, f"{sanitized_model}.json")
-        # Encoded before the file is opened, so a reply the encoder cannot write
-        # back out leaves no partial `{model}.json`: the encoder's stack can be
-        # shallower than the decoder's (about 1,000 levels against 10,000 on
-        # Python 3.12). Such a reply did parse, so it is not one to salvage: the
-        # model fails and the log names the encoder.
-        try:
-            encoded = json.dumps(validated_suggestions, indent=2)
-        except RecursionError as e:
-            error_path = os.path.join(phase_dir, f"error_{sanitized_model}.log")
-            with open(error_path, 'w', encoding='utf-8') as f:
-                f.write(f"Model: {model}\n")
-                f.write(f"Timestamp: {datetime.now().isoformat()}\n")
-                f.write(
-                    "Encode error: the reply parsed, but it is nested too deep "
-                    f"to write back out as {sanitized_model}.json: {e}\n"
-                )
-                f.write(f"\nRaw output:\n{output}\n")
-            print(
-                f"[{model}] Reply parsed but is nested too deep to save, "
-                f"raw output saved to: {error_path}"
-            )
-            return False
-        with open(result_path, 'w', encoding='utf-8') as f:
-            f.write(encoded)
-
-        print(f"[{model}] Saved {len(validated_suggestions)} suggestions to: {result_path}")
-        return True
-
     # A reply nested deeper than the JSON decoder's stack (RecursionError: about
     # 1,000 brackets on Python 3.10 and 3.11, 10,000 or more later) is a reply
     # that does not parse, not an error that ends the round's save loop. The
-    # encoder's RecursionError never reaches here: it is caught above.
+    # encoder's RecursionError is write_model_result's, after this block.
     except (json.JSONDecodeError, ValueError, RecursionError) as e:
         # The fan-out's sibling of code_review_orchestrator's two salvage sites,
         # and it holds the same rule: salvage only when the reply still holds an
@@ -6554,6 +6653,11 @@ def save_model_result(
                 f"raw output saved to: {error_path}"
             )
         return False
+
+    return write_model_result(
+        model, validated_suggestions, phase_dir,
+        noun="suggestions", raw_output=output,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -7098,7 +7202,9 @@ def resolve_result_files_by_model(
     Returns:
         ``[(model, chosen_path, payload)]`` ordered by model, exactly one entry
         per logical model. Unreadable files are warned about and dropped, as
-        before.
+        before. A file nested deeper than :data:`MAX_RESULT_DEPTH` is dropped
+        too, and set aside as ``<name>.rejected``
+        (:func:`utils.result_files.set_aside_rejected_result`).
 
     Raises:
         SystemExit: exit 3 when one legacy stem matches two or more recorded
@@ -7145,11 +7251,28 @@ def resolve_result_files_by_model(
     # identity -> [(is_anchored, path, payload)]
     files_by_model: Dict[str, List[Tuple[bool, str, Any]]] = {}
     for result_path in sorted(result_files):
+        too_deep: Optional[str] = None
         try:
             with open(result_path, 'r', encoding='utf-8') as f:
                 payload = json.load(f)
+        except RecursionError:
+            too_deep = "deeper than the JSON decoder's stack"
         except (json.JSONDecodeError, IOError) as e:
             print(f"  Warning: Could not read {result_path}: {e}")
+            continue
+        else:
+            if _deeper_than(payload, MAX_RESULT_DEPTH):
+                too_deep = f"more than {MAX_RESULT_DEPTH} levels of lists and objects"
+        if too_deep is not None:
+            # The round refuses to save such a result (`write_model_result`),
+            # so a file like this is one a provider wrote that was never set
+            # aside, or an older run's. Grouping it would end this reaggregate
+            # in `json.dump`, mid-`grouped.json`.
+            print(f"  Warning: {result_path} is nested too deep to aggregate; not read")
+            _result_files.set_aside_rejected_result(
+                result_path,
+                reason=f"is not read as a result: it is nested too deep to write back out ({too_deep})",
+            )
             continue
         stem = os.path.basename(result_path)[: -len(".json")]
         model, is_anchored = resolve_recorded_identity(stem)

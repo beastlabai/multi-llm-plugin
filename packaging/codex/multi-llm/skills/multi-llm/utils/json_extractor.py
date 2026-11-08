@@ -1322,11 +1322,14 @@ def parse_file_content(content: str, prefer_arrays: bool = True) -> Dict[str, An
             "data": None,
         }
 
-    # Try direct JSON parse first
+    # Try direct JSON parse first. A file nested deeper than the parser's
+    # stack is not usable JSON either (`_UNPARSED`): it falls back to
+    # extraction like any other, instead of raising out of the reader and
+    # ending the slot as an exception.
     try:
         data = json.loads(content)
         return {"success": True, "data": data, "source": "file"}
-    except json.JSONDecodeError:
+    except _UNPARSED:
         pass
 
     # Fall back to extraction (handles code blocks, etc.)

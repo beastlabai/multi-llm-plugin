@@ -313,6 +313,26 @@ really wrote. Candidates parse with `strict=False` (`_loads_reply`, 2026-10-05):
 raw control character inside a string no longer fails the document and serves a fragment from inside
 it.
 
+**Saving a model's result never ends the round's save loop.** On the plan and tasks lane,
+`validate_suggestion` treats an entry that is not an object, or a `type` that is not a string, as an
+invalid suggestion: `save_model_result` drops it with a warning and saves the rest, `[]` when nothing
+is left. `extract_json_array` unwraps `{"result": ...}` only when the value is text (a CLI envelope);
+any other value is searched like an array under any other key. Both lanes write through
+`review_orchestrator_base.write_model_result`. It refuses a result nested deeper than
+`MAX_RESULT_DEPTH` (100) levels, because the round re-encodes the records later with `json.dump`'s
+pure-Python encoder (`grouped.json`, the issues file), which stops near the recursion limit. It also
+encodes before opening `{model}.json`, so an encoder failure leaves no partial file. Either way the
+model fails, nothing is salvaged (the reply parsed), and `error_{model}.log` names the encoder.
+A `{model}.json` already in the phase dir (a file-capable provider writes it before the reply is
+saved) is renamed `{model}.json.rejected` (`result_files.set_aside_rejected_result`, never
+deleted, noted on the `**Result files:**` line), outside every `*.json` reader, or `--reaggregate`
+would read it back, move the model to `models_completed` and stop writing `grouped.json`. Both
+reaggregates refuse such a file too (`resolve_result_files_by_model`: deeper than
+`MAX_RESULT_DEPTH`, or than the decoder's stack), and set it aside the same way.
+review-code aggregates from memory, so its loop also marks such a model failed in `results`. A
+result file nested deeper than the decoder's stack is read as one that does not parse
+(`json_extractor.parse_file_content`).
+
 ## Report regeneration
 
 `generate_html_report` persists `{phase_dir}/report_data.json` (the assembled report data) so the apply
