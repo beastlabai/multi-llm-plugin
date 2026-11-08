@@ -659,7 +659,7 @@ class AiderProvider(LLMProvider):
     #:
     #: But aider prints that failure to **stdout** (stderr stays empty) and the
     #: text ends in ``Name or service not known``, which is a literal entry in
-    #: :data:`base.CONNECTION_ERROR_MARKERS`. So on any host that cannot reach
+    #: :data:`failure_classifier.CONNECTION_ERROR_MARKERS`. So on any host that cannot reach
     #: raw.githubusercontent.com — an air-gapped build box, a corporate proxy, a
     #: container with an egress allowlist — a *successful* aider run was
     #: classified ``connection_error``: the model answered, the JSON parsed, the
@@ -734,7 +734,7 @@ class AiderProvider(LLMProvider):
     #:
     #: **Residual, recorded rather than fixed here.** ``exit-zero-failure``
     #: lands on ``runner_error`` and not on the more specific ``server_error``,
-    #: because :data:`base.SERVER_ERROR_MARKERS` spells the phrase with
+    #: because :data:`failure_classifier.SERVER_ERROR_MARKERS` spells the phrase with
     #: separators (``internal server error``) while litellm prints the class name
     #: ``InternalServerError``, and the run carries no bare ``500``. Lane A maps
     #: both to rung 4, so only the ``Reason:`` line differs — and it is right
@@ -750,7 +750,7 @@ class AiderProvider(LLMProvider):
         """Remove aider's own gloss, keeping every word the vendor wrote.
 
         Degrades to its input rather than to ``""``: an empty haystack
-        classifies as ``None`` (:func:`base.classify_streams`), so an excision
+        classifies as ``None`` (:func:`failure_classifier.classify_streams`), so an excision
         that consumed a whole capture would launder a failure into a
         transport-shaped retry — the same rule :meth:`base.LLMProvider.
         vendor_text` states for the hook this narrowing sits beside.

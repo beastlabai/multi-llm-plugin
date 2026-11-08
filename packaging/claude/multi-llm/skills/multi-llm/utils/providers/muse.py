@@ -138,7 +138,7 @@ class MuseProvider(LLMProvider):
     # A THIRD MEASURED SHAPE, recorded rather than fixed, and it is a base-table
     # ORDERING fact rather than a missing pattern here. muse prefixes every
     # vendor error it does not gloss with `API error <status>: <vendor text>`,
-    # and `\bapi error\b` is a member of `base.SERVER_ERROR_MARKERS`, which
+    # and `\bapi error\b` is a member of `failure_classifier.SERVER_ERROR_MARKERS`, which
     # `classify_streams` consults BEFORE `INVALID_MODEL_MARKERS`. So muse's 404
     # — which is otherwise ideal, keeping the vendor sentence verbatim and
     # NAMING the model ("API error 404: The model `muse-spark-9.9-nonexistent`

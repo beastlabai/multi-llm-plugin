@@ -1268,7 +1268,7 @@ class CodexProvider(LLMProvider):
 
     #: :attr:`~.base.LLMProvider.LAUNCH_DIAGNOSTICS`, from the captures: tool output
     #: (``command_execution``) and the model's prose ride the stdout JSONL, never stderr; the
-    #: ``codex sandbox`` probe's stderr is bubblewrap's own (:data:`~.base.SANDBOX_MARKERS`).
+    #: ``codex sandbox`` probe's stderr is bubblewrap's own (:data:`~.failure_classifier.SANDBOX_MARKERS`).
     LAUNCH_DIAGNOSTICS = LAUNCH_DIAGNOSTICS_STDERR
 
     @property

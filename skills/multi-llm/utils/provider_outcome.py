@@ -511,7 +511,7 @@ def generic_answer_text(
     **Rule 3's exit-zero check.** Rule 3 cannot tell a prose answer from a
     prose error, and every exit-0 ``PARSE_ERROR`` may reach it (D3.1). So when
     one of the adapter's own ``exit_zero_markers`` matches the lowercased
-    stdout (:func:`~utils.providers.base._matches_marker`, as step 6 of
+    stdout (:func:`~utils.providers.failure_classifier._matches_marker`, as step 6 of
     ``classify_streams`` does), rule 3 gives ``""`` — on every path, success
     included, under both framings. Only the adapter's markers: the shared
     auth, rate-limit and context tables match words an answer *about* auth or

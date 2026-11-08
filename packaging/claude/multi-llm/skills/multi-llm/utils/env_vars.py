@@ -187,7 +187,7 @@ ENV_VARS: Tuple[EnvVar, ...] = (
        "modes under a read-only or unreadable session posture. It never "
        "changes which sandbox the runners use. Set it in the environment that "
        "starts Codex."),
-    _v(CODEX_SKIP_RUNG, SETTING, "utils/providers/base.py", False,
+    _v(CODEX_SKIP_RUNG, SETTING, "utils/providers/sandbox_rungs.py", False,
        "`plugin-landlock` skips that sandbox rung alone for the process; any "
        "other value is rejected at start-up. Use it to tell a jail denial from "
        "a codex fault."),
@@ -208,7 +208,7 @@ ENV_VARS: Tuple[EnvVar, ...] = (
        "The model the host session runs on, as `provider/model`, exported per "
        "call by a host shim or plugin. A fact about the session, consulted "
        "below any operator config."),
-    _v(HOST_SANDBOX_POSTURE, HOST_INPUT, "utils/providers/base.py", False,
+    _v(HOST_SANDBOX_POSTURE, HOST_INPUT, "utils/providers/sandbox_rungs.py", False,
        "The chat's own sandbox posture, set by the Codex tool server per call "
        "and never inherited. Only `danger-full-access` can let a write job run "
        "uncontained, and only after the plugin's jail could not take it."),

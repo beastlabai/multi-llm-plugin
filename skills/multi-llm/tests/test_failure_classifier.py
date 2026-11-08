@@ -4,8 +4,8 @@ Every raw-substring classifier this repo grew independently decides something
 expensive: a re-dispatch at a fresh full timeout, a batch-fatal ``auth_failed``,
 or a persisted ``recoverable`` flag that buys a whole revalidation pass. The
 point of M19 is that there is exactly **one** implementation of "what is this
-failure", living in ``utils/providers/base.py`` beside the boundary-aware
-matcher, and that Lane A stops carrying its own copies of it.
+failure", living in ``utils/providers/failure_classifier.py`` beside the
+boundary-aware matcher, and that Lane A stops carrying its own copies of it.
 
 The tests are grouped by the thing that can regress:
 
@@ -901,15 +901,15 @@ class TestPerAdapterPatternOverrides:
 # ---------------------------------------------------------------------------
 
 #: The four tokens §14.2 names. A classifier spelled as a raw Python substring
-#: test on any of these is a duplicate of ``providers/base.py``'s declared
-#: pattern sets, and duplicates drift: the whole L2 defect was ``'429' in
+#: test on any of these is a duplicate of ``providers/failure_classifier.py``'s
+#: declared pattern sets, and duplicates drift: the whole L2 defect was ``'429' in
 #: str(error)`` disagreeing with a list that had already been made safe.
 BANNED_CLASSIFIER_PREFIXES = ("429", "rate limit", "rate-limit", "ratelimit",
                               "context", "connection")
 
 #: The one module allowed to declare them: it owns the boundary-aware matcher
 #: (``stream_pattern``/``matches_any``) that makes them safe.
-GUARD_EXEMPT = {"utils/providers/base.py"}
+GUARD_EXEMPT = {"utils/providers/failure_classifier.py"}
 
 
 def _runtime_modules():
@@ -1001,18 +1001,21 @@ class TestNoDuplicateSubstringClassifiers:
             found.extend(_substring_classifier_sites(rel, tree))
         return sorted(set(found))
 
-    def test_no_raw_substring_classifier_survives_outside_base_py(self):
+    def test_no_raw_substring_classifier_survives_outside_the_classifier(self):
         sites = self._sites()
         rendered = "\n".join(f"  {rel}:{line}  {what}" for rel, line, what in sites)
         assert not sites, (
             "raw substring classifiers still live outside "
-            "utils/providers/base.py's declared pattern sets:\n" + rendered
+            "utils/providers/failure_classifier.py's declared pattern sets:\n" + rendered
         )
 
     def test_the_exempt_module_really_does_declare_them(self):
         """The guard must be exempting a real owner, not an empty file."""
-        assert "429" in pbase.LLMProvider.rate_limit_patterns
-        assert "rate limit" in pbase.LLMProvider.rate_limit_patterns
+        from utils.providers import failure_classifier
+
+        assert "429" in failure_classifier.RATE_LIMIT_PATTERNS
+        assert "rate limit" in failure_classifier.RATE_LIMIT_PATTERNS
+        assert pbase.LLMProvider.rate_limit_patterns is failure_classifier.RATE_LIMIT_PATTERNS
 
 
 # ---------------------------------------------------------------------------

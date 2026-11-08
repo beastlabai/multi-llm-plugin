@@ -506,10 +506,10 @@ nothing) is `runner_error`, connection and server errors are rung 4 through
 `review_orchestrator_base._LADDER_STATUS_BY_CATEGORY`, and every other category reaches the ladder
 under its own name. `spawn_failed` (an install or argv refusal, such as omp's unknown `--tools`
 name) stops both lanes on a non-zero exit and fails the executor's batch, so it is read only off
-exit 127, stderr (`base.STDERR_LAUNCH_FAILURE_MARKERS`: a shell's `command not found`, omp's
+exit 127, stderr (`failure_classifier.STDERR_LAUNCH_FAILURE_MARKERS`: a shell's `command not found`, omp's
 refusals) and an adapter's own refusal shape (vibe's config refusal opening stdout), never off a
 model's answer or a tool's output on stdout. `sandbox_unavailable` fails the batch too, so its
-bubblewrap refusals (`base.SANDBOX_MARKERS`) are whole measured lines read off stderr alone: an
+bubblewrap refusals (`failure_classifier.SANDBOX_MARKERS`) are whole measured lines read off stderr alone: an
 answer that explains bubblewrap is not a broken sandbox. Both read only the stderr of an adapter
 whose CLI writes it alone, never one that relays a model's or a tool's words there
 ([launch diagnostics](providers.md#launch-diagnostics)). One verdict stops on the
@@ -526,7 +526,7 @@ sets no key, and that slot falls back to its error line, below.
 On an **exit-0 failure** (an answer that did not parse, and no result file) stdout is usually the
 model's own answer, prose quoting whatever the plan says about 429s and 401s, and **no answer may
 decide a retry, a backoff or a stop on either lane**. Both lanes read such a run through one gate,
-`providers/base.exit_zero_failure_category`. It gives a verdict only for an adapter that declares
+`providers/failure_classifier.exit_zero_failure_category`. It gives a verdict only for an adapter that declares
 `EXIT0_CLASSIFIABLE = True`, a reviewed claim that its `classify_exit_zero` never reads the answer,
 in a complete envelope or an interrupted one: claude-code, cursor-agent, gemini and grok read their
 envelope without the answer field (and a cut or ambiguous stdout not at all), the one the parser

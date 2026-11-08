@@ -78,6 +78,9 @@ search the copies deliberately.
   provider binaries come from built-in adapters. The adapter roster is discovered
   from `utils/providers/`, never typed; to add an adapter, follow
   [Adding a provider adapter](../../docs/development/providers.md#adding-a-provider-adapter).
+  `utils/providers/base.py` is the `LLMProvider` class; the failure classifier,
+  child environment, version gate, sandbox rungs and shared types are modules
+  beside it ([the provider base modules](../../docs/development/providers.md#the-provider-base-modules)).
 - **`utils/subagent_executor.py`** invokes materialized tasks;
   **`utils/write_batch_scheduler.py`** owns write scheduling and continuation.
   Both host-native and executor paths must preserve the same task and result

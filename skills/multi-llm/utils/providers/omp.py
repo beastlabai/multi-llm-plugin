@@ -781,7 +781,7 @@ class OmpProvider(LLMProvider):
     #: reads moved) and every class held. What moved: ``invalid-tool`` is exit 2
     #: with a plain ``Error: Unknown tool in --tools: …`` and no ``CliUsageError``
     #: word, which the shared launch-failure table now names
-    #: (``base.LAUNCH_FAILURE_MARKERS``); ``invalid-model``'s hint names no path;
+    #: (``failure_classifier.LAUNCH_FAILURE_MARKERS``); ``invalid-model``'s hint names no path;
     #: and the completions client's retry counts (``rate-limit`` 16 → 12,
     #: ``empty`` 21 → 12, ``truncated`` 20 → 12). The Responses chain production
     #: dispatches on is still 6 requests, so :attr:`internal_retries` holds.

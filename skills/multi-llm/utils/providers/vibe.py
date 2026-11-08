@@ -555,7 +555,7 @@ class VibeProvider(LLMProvider):
         A rejected config is a property of the install (the seed, or the user's
         own vibe config), identical for every sibling slot, and it made zero
         requests: the disposition omp's ``Config overlay not found`` gets in
-        ``base.STDERR_LAUNCH_FAILURE_MARKERS``, where a transport retry would
+        ``failure_classifier.STDERR_LAUNCH_FAILURE_MARKERS``, where a transport retry would
         only repeat it. Read on a nonzero exit only: at the start of any
         stderr line, and on stdout only where it opens stdout, since this
         verdict fails the executor's whole batch.

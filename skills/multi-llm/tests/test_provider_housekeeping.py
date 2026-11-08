@@ -35,6 +35,7 @@ from unittest import mock
 import pytest
 
 import utils.providers.base as base_module
+import utils.providers.version_gate as version_gate
 import utils.providers.cursor_agent as cursor_agent_module
 from utils.provider_registry import _PROVIDERS
 from tests.roster_check import RECIPE, assert_covers_registry, assert_pinned_subset, row_for
@@ -554,7 +555,7 @@ def _argv_for(name, *, sandbox_fallback=False):
 
     if name == "cursor-agent":
         with mock.patch.object(
-            base_module,
+            version_gate,
             "read_help_tokens",
             lambda _b, **_kw: frozenset({"--trust", "--mode"}),
         ), mock.patch.object(
@@ -927,7 +928,7 @@ def _generate_argv(name):
     if answer is None:
         return _argv_for(name)
     with mock.patch.object(
-        base_module, "read_help_tokens", lambda _b, **_kw: answer
+        version_gate, "read_help_tokens", lambda _b, **_kw: answer
     ), mock.patch.object(base_module.shutil, "which", lambda _n: sys.executable):
         return _PROVIDERS[name].build_command(PROMPT, _model(name))
 

@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.providers.base import LLMProvider
 from utils.providers import base as base_module, omp as omp_module
+from utils.providers import child_env, version_gate
 from utils.providers.omp import (
     OMP_APPROVAL_MODE,
     OMP_MIN_MAX_TIME_S,
@@ -483,7 +484,7 @@ class TestOmpProvider:
         return (
             patch.object(LLMProvider, "gate_binary", lambda self, **_kw: sys.executable),
             patch.object(
-                base_module, "read_help_tokens", lambda _b, **_kw: frozenset(tokens)
+                version_gate, "read_help_tokens", lambda _b, **_kw: frozenset(tokens)
             ),
         )
 
@@ -571,7 +572,7 @@ class TestOmpProvider:
             raise AssertionError("an unresolvable binary must not be probed")
 
         with patch.object(LLMProvider, "gate_binary", lambda self, **_kw: None), \
-                patch.object(base_module, "read_help_tokens", boom):
+                patch.object(version_gate, "read_help_tokens", boom):
             argv = provider.build_command(self.PROMPT, self.MODEL)
 
         assert argv[0] == "omp"
@@ -697,7 +698,7 @@ class TestOmpProvider:
         out = []
         for enabled in (True, False):
             with patch.object(
-                base_module, "env_allowlist_enabled", return_value=enabled
+                child_env, "env_allowlist_enabled", return_value=enabled
             ):
                 out.append(
                     base_module.build_child_env(

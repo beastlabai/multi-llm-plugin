@@ -363,7 +363,7 @@ def parse_result_envelope(
     **The answer comes from an envelope's ``result`` field alone.** A
     ``type: "result"`` envelope with no ``result`` field is a failure, not its
     bookkeeping served as data; another JSON object is the answer itself.
-    stdout is read by :func:`~.base.read_stdout` first, with ``signature``
+    stdout is read by :func:`~.stdout_shape.read_stdout` first, with ``signature``
     (:data:`RESULT_ENVELOPE_SIGNATURE`): the envelope where the CLI writes it,
     JSON log lines or trailing text around it, is read as above; a cut one,
     or the envelope's opening anywhere else, is a parse failure before any

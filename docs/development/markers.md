@@ -73,7 +73,7 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 | `[CHECK_FINDINGS]` | `utils/check_records.py` `CHECK_FINDINGS_MARKER` | not for the host: unnamed-handler | The line an implement run prints per check task that reported problems (`WriteBatchScheduler._check_findings_lines`, racing re-run 4) |
 | `[CHECK_NOT_RECORDED]` | `utils/batch_done.py` `CHECK_NOT_RECORDED_MARKER` | `instructions/implement.md` | — |
 | `[CHECK_NOT_RERUN]` | `implement_orchestrator.py` | `instructions/implement.md` | — |
-| `[CODEX_HOME_CHECK]` | `utils/providers/base.py` `CODEX_HOME_CHECK_MARKER` | not for the host: runner-diagnostic | — |
+| `[CODEX_HOME_CHECK]` | `utils/providers/sandbox_rungs.py` `CODEX_HOME_CHECK_MARKER` | not for the host: runner-diagnostic | — |
 | `[COMMIT_BRIEF]` | `utils/commit_front_door.py` `COMMIT_BRIEF`<br>`utils/improve_steps.py` | `SKILL.md`<br>`hosts/codex/shim.md.tmpl`<br>`hosts/opencode/shim.md.tmpl`<br>`instructions/apply-commit-fixes.md`<br>`instructions/improve-commits.md`<br>`instructions/review-commits.md` | Markers this core prints (the commit block's own are commit_range's) |
 | `[COMMIT_DECISIONS_DROPPED]` | `utils/commit_front_door.py` `COMMIT_DECISIONS_DROPPED` | `instructions/improve-commits.md`<br>`instructions/review-commits.md` | — |
 | `[COMMIT_FIXES]` | `utils/commit_range.py` `COMMIT_FIXES` | `instructions/apply-commit-fixes.md`<br>`instructions/improve-commits.md` | — |
@@ -124,7 +124,7 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 | `[INSTALL_CHECK]` | `utils/host_install.py` | not for the host: operator-cli | — |
 | `[INSTALL_CHECK_FAILED]` | `utils/host_install.py` | not for the host: operator-cli | — |
 | `[INTERRUPT_SWEEP]` | `multi_llm.py` `sweep_live_clis()`<br>`utils/detach.py` `sweep_live_clis()`<br>`utils/process_control.py` `sweep_live_clis()` | not for the host: runner-diagnostic | — |
-| `[JAIL_DENIED]` | `utils/providers/base.py` `JAIL_DENIED_MARKER` | not for the host: runner-diagnostic | — |
+| `[JAIL_DENIED]` | `utils/providers/sandbox_rungs.py` `JAIL_DENIED_MARKER` | not for the host: runner-diagnostic | — |
 | `[LEGACY_INSTRUCTIONS]` | `multi_llm.py` | not for the host: operator-cli | — |
 | `[MANUAL_GATE]` | `implement_orchestrator.py` | `instructions/implement.md` | — |
 | `[MANUAL_TASK]` | `utils/next_phase.py` `MANUAL_TASK_MARKER` | `instructions/implement.md`<br>`references/summary-format.md` | One line per deferred implement task under `[WORKFLOW_COMPLETE]`: the id, then the title when `state.json` recorded one |
@@ -135,7 +135,7 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 | `[METRICS_INDEX_MISMATCH]` | `utils/metrics.py` | not for the host: metrics-note | — |
 | `[METRICS_NO_TASK_ID]` | `utils/metrics.py` `NO_TASK_ID_MARKER` | not for the host: metrics-note | — |
 | `[MODEL_FAILED]` | `utils/review_orchestrator_base.py` `MODEL_FAILED_MARKER` | `instructions/review-code.md`<br>`instructions/review-plan.md`<br>`instructions/review-tasks.md`<br>`references/summary-format.md` | The stdout line a reaggregate prints per model that is still failed, right after `record_models_present`: the model and its stored reason… |
-| `[MODE_CHECK]` | `utils/providers/base.py` `MODE_CHECK_MARKER` | not for the host: runner-diagnostic | The after-the-fact checks of a slot on the incidental rung (F1 "What it fixes", Limits): a flipped executable bit on a tracked file… |
+| `[MODE_CHECK]` | `utils/providers/sandbox_rungs.py` `MODE_CHECK_MARKER` | not for the host: runner-diagnostic | The after-the-fact checks of a slot on the incidental rung (F1 "What it fixes", Limits): a flipped executable bit on a tracked file… |
 | `[NEXT_COMMAND]` | `utils/next_phase.py` `NEXT_COMMAND_MARKER` | `SKILL.md`<br>`instructions/improve-code.md`<br>`instructions/improve-commits.md`<br>`instructions/improve-plan.md`<br>`instructions/review-code.md`<br>`instructions/review-plan.md`<br>+2 more | The four line kinds of the block (§2.2(2)) |
 | `[NEXT_COMMAND_ANSWERS]` | `utils/next_phase.py` `NEXT_COMMAND_ANSWERS_MARKER` | `references/summary-format.md` | — |
 | `[NEXT_COMMAND_ANSWERS_WHY]` | `utils/next_phase.py` `NEXT_COMMAND_ANSWERS_WHY_MARKER` | `references/summary-format.md` | The answers line pair `util next-command` prints under a resume of a stopped native implement (fix round 14): the why on its own line, then… |
@@ -183,11 +183,11 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 | `[SALVAGE_RETIRED]` | `utils/review_orchestrator_base.py` | not for the host: run-notice | — |
 | `[SALVAGE_TASK]` | `code_review_orchestrator.py`<br>`utils/review_orchestrator_base.py` | `references/salvage-handling.md` | — |
 | `[SALVAGE_UNRECOVERABLE]` | `utils/review_orchestrator_base.py` | `references/salvage-handling.md` | — |
-| `[SANDBOX_BYPASSED]` | `utils/providers/base.py` `SANDBOX_BYPASSED_MARKER` | not for the host: runner-diagnostic | What every artifact of a bypassed slot says, verbatim — the fan-out's stdout line, the executor's preflight line, `models_served` in… |
-| `[SANDBOX_FALLBACK]` | `utils/providers/base.py` `SANDBOX_FALLBACK_MARKER` | not for the host: runner-diagnostic | The marker for a slot that ran on a **contained** fallback rung — a real OS boundary that is not the adapter's default one |
-| `[SANDBOX_INCIDENTAL]` | `utils/providers/base.py` `SANDBOX_INCIDENTAL_MARKER` | not for the host: runner-diagnostic | The marker for a slot on an `incidental`-grade rung |
+| `[SANDBOX_BYPASSED]` | `utils/providers/sandbox_rungs.py` `SANDBOX_BYPASSED_MARKER` | not for the host: runner-diagnostic | What every artifact of a bypassed slot says, verbatim — the fan-out's stdout line, the executor's preflight line, `models_served` in… |
+| `[SANDBOX_FALLBACK]` | `utils/providers/sandbox_rungs.py` `SANDBOX_FALLBACK_MARKER` | not for the host: runner-diagnostic | The marker for a slot that ran on a **contained** fallback rung — a real OS boundary that is not the adapter's default one |
+| `[SANDBOX_INCIDENTAL]` | `utils/providers/sandbox_rungs.py` `SANDBOX_INCIDENTAL_MARKER` | not for the host: runner-diagnostic | The marker for a slot on an `incidental`-grade rung |
 | `[SANDBOX_RUNG_CHANGED]` | `utils/review_orchestrator_base.py` `SANDBOX_RUNG_CHANGED_MARKER` | not for the host: runner-diagnostic | The once-per-run line for specs that ran on the plugin's jail last run and without any sandbox this one |
-| `[SANDBOX_RUNG_RETIRED]` | `utils/providers/base.py` `SANDBOX_RUNG_RETIRED_MARKER` | not for the host: runner-diagnostic | The marker for the once-only line saying a contained rung the previous run took is no longer usable (`sandbox_rung_retired_notice`) |
+| `[SANDBOX_RUNG_RETIRED]` | `utils/providers/sandbox_rungs.py` `SANDBOX_RUNG_RETIRED_MARKER` | not for the host: runner-diagnostic | The marker for the once-only line saying a contained rung the previous run took is no longer usable (`sandbox_rung_retired_notice`) |
 | `[SANDBOX_UNAVAILABLE]` | `utils/review_orchestrator_base.py` | not for the host: runner-diagnostic | — |
 | `[SCOPE_BASELINE_MOVED]` | `utils/review_orchestrator_base.py` | not for the host: run-notice | — |
 | `[SCOPE_BLOCKER]` | `utils/scope_apply.py` `BLOCKER_MARKER` | `instructions/apply-code-fixes.md`<br>`instructions/apply-suggestions.md`<br>`instructions/apply-task-suggestions.md` | — |

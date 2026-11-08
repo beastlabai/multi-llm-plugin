@@ -91,7 +91,7 @@ class GooseProvider(LLMProvider):
     Gotcha 2, and it is the parser's own: the envelope ECHOES the user
     prompt, so anything reading raw stdout is reading our prompt too.
     prompts/plan_review.txt contains the word "timeout", which alone makes
-    base.classify_streams answer `timeout` on a completely successful run
+    failure_classifier.classify_streams answer `timeout` on a completely successful run
     (the `prompt-echo` fixture row pins it).
     """
 
@@ -280,7 +280,7 @@ class GooseProvider(LLMProvider):
         return {}
 
     def vendor_text(self, stdout: str, stderr: str) -> Tuple[str, str]:
-        """:func:`base.diagnostic_streams`, with :meth:`envelope_diagnostics`."""
+        """:func:`stdout_shape.diagnostic_streams`, with :meth:`envelope_diagnostics`."""
         return diagnostic_streams(stdout, stderr, self)
 
     def envelope_diagnostics(self, envelope: Dict[str, Any]) -> Dict[str, Any]:

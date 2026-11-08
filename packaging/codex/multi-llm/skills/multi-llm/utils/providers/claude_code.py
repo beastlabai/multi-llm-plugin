@@ -544,7 +544,7 @@ USAGE_LIMIT_MARKERS = (
 # set that used to live here are **gone** — M14 (§5.4) absorbed them into the one
 # shared gate in `base.py`. What is left below is what is genuinely this
 # adapter's: which flags it gates, and what the one WARN says about the
-# capability a declined flag costs. `base.reset_flag_gate_cache` is the reset,
+# capability a declined flag costs. `version_gate.reset_flag_gate_cache` is the reset,
 # for the whole gate rather than for one adapter's copy of it.
 
 
@@ -818,7 +818,7 @@ class ClaudeCodeProvider(LLMProvider):
     #: :attr:`~.base.LLMProvider.EXIT0_CLASSIFIABLE`, reviewed: claude-code's
     #: answer is one envelope field, ``result``. :meth:`vendor_text` reads the
     #: envelope without it unless the API call failed, and a cut or ambiguous
-    #: stdout not at all (:func:`base.diagnostic_streams`); the status rung
+    #: stdout not at all (:func:`stdout_shape.diagnostic_streams`); the status rung
     #: reads ``api_error_status`` as before.
     EXIT0_CLASSIFIABLE = True
 
@@ -1492,7 +1492,7 @@ class ClaudeCodeProvider(LLMProvider):
         dispatch is actually taking away, and it means the probe never spawns for
         a run that has no vendor credential to decide about.
 
-        This is called by :func:`base.build_child_env`, the one builder both
+        This is called by :func:`child_env.build_child_env`, the one builder both
         lanes go through, so Lane A and Lane B consume the same verdict and a
         decline re-admits the same names on both — and it is called with **that
         dispatch's** context. Both parameters are load-bearing here, which is why
@@ -1622,7 +1622,7 @@ class ClaudeCodeProvider(LLMProvider):
         return super().classify_failure(stdout, stderr, exit_code)
 
     def vendor_text(self, stdout: str, stderr: str) -> Tuple[str, str]:
-        """:func:`base.diagnostic_streams`: the envelope without the model's words.
+        """:func:`stdout_shape.diagnostic_streams`: the envelope without the model's words.
 
         On every exit code (:meth:`classify_failure`). Living here rather than
         inline in :meth:`classify_failure` is what keeps the verdict and its

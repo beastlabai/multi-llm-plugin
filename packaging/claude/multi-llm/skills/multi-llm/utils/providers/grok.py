@@ -376,7 +376,7 @@ class GrokProvider(LLMProvider):
         return cmd
 
     def vendor_text(self, stdout: str, stderr: str) -> Tuple[str, str]:
-        """:func:`base.diagnostic_streams`: the envelope without ``text``.
+        """:func:`stdout_shape.diagnostic_streams`: the envelope without ``text``.
 
         Measured on the committed rows: every failure is one
         ``{"type": "error", "message": …}`` object (exit 1), read whole, and a

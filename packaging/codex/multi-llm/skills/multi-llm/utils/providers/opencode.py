@@ -731,7 +731,7 @@ def _read_help_tokens(binary: str) -> frozenset:
 
     **The last local copy.** This was a near-twin of the claude-code adapter's
     own sniff; M14 has since landed the shared gate
-    (``base.read_help_tokens`` / ``LLMProvider.supports_flag``) and deleted the
+    (``version_gate.read_help_tokens`` / ``LLMProvider.supports_flag``) and deleted the
     copies in ``claude_code.py`` and ``cursor_agent.py``, together with codex's
     prose exemption (now ``flags_verified_at_floor``). This one was outside that
     task's file set and so still stands. Folding it in is a two-line change —

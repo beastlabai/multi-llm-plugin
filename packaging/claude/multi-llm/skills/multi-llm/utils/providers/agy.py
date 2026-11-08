@@ -276,7 +276,7 @@ class AgyProvider(LLMProvider):
         return cmd
 
     def vendor_text(self, stdout: str, stderr: str) -> Tuple[str, str]:
-        """:func:`base.diagnostic_streams`: the envelope without ``response``."""
+        """:func:`stdout_shape.diagnostic_streams`: the envelope without ``response``."""
         return diagnostic_streams(stdout, stderr, self)
 
     def parse_output(self, stdout: str, stderr: str) -> Dict[str, Any]:

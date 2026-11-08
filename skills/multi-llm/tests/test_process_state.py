@@ -93,7 +93,7 @@ NOT_REGISTERED: Dict[str, str] = {
     "utils.process_state._ENTRIES": "the registry itself",
     "utils.prompt_files._WINDOWS_FILES":
         "the lazily bound Windows file API, fixed for the process",
-    "utils.providers.base.ENV_ALLOWLIST_MEASURED":
+    "utils.providers.child_env.ENV_ALLOWLIST_MEASURED":
         "a measurement table, empty on purpose until a parity run fills it",
     "utils.providers.cursor_agent._PROFILE_DIRS":
         "profile directories this process created, removed at exit "

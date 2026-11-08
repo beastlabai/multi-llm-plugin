@@ -7,6 +7,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 ## Contents
 
 - [Adding a provider adapter](#adding-a-provider-adapter)
+- [The provider base modules](#the-provider-base-modules)
 - [Configuration and runner resolution](#configuration-and-runner-resolution)
 - [Read-only provider contracts](#read-only-provider-contracts)
 - [Model catalog snapshots](#model-catalog-snapshots)
@@ -49,7 +50,7 @@ Then work through the steps in order. Each test named fails until its step is do
 | 1 | `utils/providers/<name>.py` | One concrete `LLMProvider` subclass with the four abstract members: `name`, `is_available` (`shutil.which` of the binary), `build_command`, `parse_output`. Do not override `default_timeout`: the timeout is the `providers.yaml` row of step 2, and every adapter inherits the one fallback, `DEFAULT_TIMEOUT_S`. Add `EFFORT_LADDER = ReasoningLadder(provider=..., rungs=...)` and `REASONING_EFFORTS = EFFORT_LADDER.accepted`; a CLI with no effort control declares `ReasoningLadder(provider=..., declined="<the measurement>")` and no `REASONING_EFFORTS`. Decide each declaration the argv shows: `prompt_argv_index`, `supported_prompt_transports`, `agent_profiles`, `supports_file_output`, `runs_shell_in_generate`, `internal_retries`; and from the captures, `LAUNCH_DIAGNOSTICS` ([launch diagnostics](#launch-diagnostics)) and, for a JSON envelope, `ENVELOPE_SIGNATURE`. Copy the closest sibling: `grok.py` for a JSON envelope, `kilocode.py` for plain stdout. | `test_reasoning_effort_ladder.py`; `test_provider_registry.py` (no `default_timeout` override); `test_provider_housekeeping.py`: the prompt index against the argv, a `STOPS_FILE_WRITES` or `REVIEWED_STILL_WRITES` row for each restriction-shaped argv atom, a `SHELL_EVIDENCE` row for a non-`None` shell declaration |
 | 2 | `providers.yaml`, `tests/read_only_modes.yaml` | A `providers.<name>` block (`default_timeout`, `max_concurrent`, `models`, the first being the default) in `providers.yaml`, inserted where it should sit in `--init`'s order; and a `read_only_modes.<name>` row in `tests/read_only_modes.yaml`: `mechanism: null` and `probed: null` until probed ([read-only contracts](#read-only-provider-contracts)). If the CLI lists its models, add a catalog route ([model catalog snapshots](#model-catalog-snapshots)); otherwise an `UNCHECKED` row naming why. | `test_provider_roster.py`, `test_read_only_modes.py`, `test_model_catalogs.py` |
 | 3 | `templates/config/providers.override.yaml` | Regenerate it: from `skills/multi-llm/`, `uv run --project . -- python -c "import init_config as c; c.TEMPLATE_PATH.write_text(c.build_template_text())"`. | `test_provider_registry.py::TestTemplateBaseParity` |
-| 4 | `ENV_ALLOWLIST_PROFILES` in `utils/providers/base.py` | A `RunnerEnvProfile`: CA family (`node` or `native`), the env prefixes the CLI owns, its home and config variable names. | `test_env_allowlist.py` |
+| 4 | `ENV_ALLOWLIST_PROFILES` in `utils/providers/child_env.py` | A `RunnerEnvProfile`: CA family (`node` or `native`), the env prefixes the CLI owns, its home and config variable names. | `test_env_allowlist.py` |
 | 5 | Test tables | `MODELS` in `test_provider_housekeeping.py`; `PRE_L5_ARGV` and `PRE_L5_ARGV_MODELS` in `test_provider_timeouts.py` (also read by `test_structured_output.py`); `TRANSPORT_CASES` in `test_provider_contract.py`; a `ROWS` entry in `test_answer_text.py`. Each holds a real model id from step 2, never a placeholder. The `ROWS` entry passes only when the answer is readable: a clean `{"type": "result"}` or `{"response": ...}` envelope, plain stdout (`answer_framing = "plain"`), or a `salvage_text` hook. | those files |
 | 6 | `TestDeclaredOutputChannel.CANNOT_WRITE_FILES` in `test_provider_contract.py`; `NO_WRITE_TOOL_AT_ALL` in `test_provider_housekeeping.py` | **Only for an adapter declaring `supports_file_output = False`** (it answers on stdout): its name in `CANNOT_WRITE_FILES`. **Also, only when no argv atom causes the declaration** (step 1 added no `STOPS_FILE_WRITES` row, because the CLI ships no write tool): a `NO_WRITE_TOOL_AT_ALL` row naming the probe that measured it ([output channels](#provider-output-channels)). | `test_provider_contract.py::TestDeclaredOutputChannel`; `test_provider_housekeeping.py::TestReadOnlyArgvMatchesTheDeclaration` |
 | 7 | `tests/fixtures/<name>/` | `manifest.yaml` and the captured streams, one cell per canonical row (`success`, `truncated`, ... `context-overflow`; a measured `not_applicable` counts), each graded row with its `expect.lane_status` ([reading a capture](#reading-a-capture); the failing test prints the values). Until they are captured, a `FIXTURES_PENDING` row in `test_provider_fixture_rows.py` with the measured reason. | `test_provider_fixture_rows.py` |
@@ -75,6 +76,35 @@ uv run --project skills/multi-llm -- pytest -q -p no:cacheprovider -n 4 --dist l
   skills/multi-llm/tests/test_answer_text.py skills/multi-llm/tests/test_provider_fixture_rows.py \
   skills/multi-llm/tests/test_provider_registry.py
 ```
+
+## The provider base modules
+
+`utils/providers/base.py` is `LLMProvider` and its fallback timeout, `DEFAULT_TIMEOUT_S`.
+What adapters and callers share besides the class lives in seven modules beside it, one job
+each, listed lowest first: a module imports only the ones above it in this table, and none
+imports `base` at run time.
+
+| Module | What it holds |
+| --- | --- |
+| `types.py` | The three invocation profiles, the structured-output retry budget, the usage and config-auth words, `InternalRetryEnvelope`, `StructuredSchema` and its refusals, `SetupHints`, `Availability` and `AvailabilityReport`. |
+| `reasoning.py` | The reasoning-effort ladder and `ReasoningLadder`, plus `split_reasoning_effort`. |
+| `failure_classifier.py` | The marker tables, `classify_streams` and `match_streams`, `exit_zero_failure_category`, and `LLMProvider`'s two default pattern sets (`AUTH_ERROR_PATTERNS`, `RATE_LIMIT_PATTERNS`). |
+| `stdout_shape.py` | `envelope_signature`, `read_stdout`, `structural_stdout` and `diagnostic_streams` ([reading a capture](#reading-a-capture)). |
+| `child_env.py` | Git's non-interactive environment, the strip and backend policies, the env allowlist and its matrix, and `build_child_env`. |
+| `version_gate.py` | `version_tuple`, `version_verdict` and the help-token gate (`read_help_tokens`). |
+| `sandbox_rungs.py` | The sandbox fallback's policies and rungs, the write posture, and the `[SANDBOX_*]` notices. |
+
+The classifier is pure: it imports no provider module, and no `utils` module but
+`retry_ladder` (the status vocabulary) and `process_state` (the cache registry), both
+standard-library only, so it can be read and tested alone. `stdout_shape` stays out of it
+because it needs `json_extractor`'s ANSI pattern.
+
+`base` re-exports every name of the seven modules, **for reading only** (its `_MOVED`
+table): `base.X` and `from .base import X` return the owner's current object, so no importer
+changed. A patch or assignment of a moved name on `base` reaches no code, because `LLMProvider`
+and the owners read each name through its owner (`failure_classifier.classify_streams`).
+Patch a moved name where it lives; `tests/test_provider_base_moved_names.py` fails any test
+that patches one on `base`, and pins the table, the layering and the classifier's purity.
 
 ## Configuration and runner resolution
 
@@ -735,8 +765,8 @@ to `outcome_from_capture`.
 - **An envelope is read by where it sits, in one place.** An adapter whose JSON mode prints one
   envelope around its answer (claude-code, cursor-agent, gemini, grok, agy, goose) declares how it
   opens (`ENVELOPE_SIGNATURE`, the opening keys of its captured envelopes,
-  `base.envelope_signature`). `base.read_stdout` is the one rule, read by the parser and by
-  `base.diagnostic_streams`. Provenance is position, not keys: a model writes inside the answer
+  `stdout_shape.envelope_signature`). `stdout_shape.read_stdout` is the one rule, read by the parser and by
+  `stdout_shape.diagnostic_streams`. Provenance is position, not keys: a model writes inside the answer
   string, never the start of stdout, and every committed capture is exactly one envelope. After ANSI
   colour and leading whitespace, stdout opens with a run of complete JSON values, one per line
   (`raw_decode` where each starts, so one linear pass), then any trailing text. One of those values
@@ -749,7 +779,7 @@ to `outcome_from_capture`.
   opening goes to the adapter's ordinary extraction, unchanged. A whole envelope without its answer
   field fails too.
 - **One reduction for failure verdicts and their quotes.** The six adapters' `vendor_text` is
-  `base.diagnostic_streams`, so the classifier on exit 0 and on any other exit, and the executor's
+  `stdout_shape.diagnostic_streams`, so the classifier on exit 0 and on any other exit, and the executor's
   failure quote, read one text: for an envelope, each signature record as the adapter's
   `envelope_diagnostics` keeps it (its `ENVELOPE_ANSWER_FIELDS` out, the vendor's refusal fields
   such as `is_error`, `subtype` and `error` in; claude-code keeps a `result` beside `terminal_reason:
@@ -782,7 +812,7 @@ whose two statuses retry differently carries `open: <unit>` until that unit sett
 ### Launch diagnostics
 
 Two verdicts fail the executor's whole batch from text alone: `sandbox_unavailable`
-(`base.SANDBOX_MARKERS`) and `spawn_failed`'s stderr rows (`base.STDERR_LAUNCH_FAILURE_MARKERS`).
+(`failure_classifier.SANDBOX_MARKERS`) and `spawn_failed`'s stderr rows (`failure_classifier.STDERR_LAUNCH_FAILURE_MARKERS`).
 So they are read only from text that a model or a tool cannot write:
 
 - **Anchored lines.** `SANDBOX_MARKERS` is bubblewrap's measured refusals, each anchored at a line
@@ -821,7 +851,7 @@ and records duration only; a batch mixing the two reports the partial sum plus
 
 **A runner never inherits the skill's own Python environment** (fix round 8). `uv run --project <skill dir>`
 exports `VIRTUAL_ENV` naming the skill's venv, and a forwarded or image-wide
-`UV_PROJECT_ENVIRONMENT` can name it too; `providers.base.build_child_env` (both lanes, the codex jail, the
+`UV_PROJECT_ENVIRONMENT` can name it too; `providers.child_env.build_child_env` (both lanes, the codex jail, the
 verification command) drops either when it resolves to the running interpreter's
 `sys.prefix` (`skill_environment_names`), so a subagent's
 `uv run`/`uv pip`/`poetry` in the user's repository uses

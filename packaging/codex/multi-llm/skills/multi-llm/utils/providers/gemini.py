@@ -496,7 +496,7 @@ class GeminiProvider(LLMProvider):
         return f"{sentence} (code {code})"
 
     def vendor_text(self, stdout: str, stderr: str) -> Tuple[str, str]:
-        """:func:`base.diagnostic_streams`: the envelope without ``response``.
+        """:func:`stdout_shape.diagnostic_streams`: the envelope without ``response``.
 
         Measured on the committed rows: gemini puts every failure's diagnosis on
         stderr (stdout empty), or in the envelope's ``error`` object when it
@@ -557,7 +557,7 @@ class GeminiProvider(LLMProvider):
         return result
 
     def _parse_stdout(self, stdout: str) -> Dict[str, Any]:
-        """The answer channel, read on its own (:func:`base.read_stdout`)."""
+        """The answer channel, read on its own (:func:`stdout_shape.read_stdout`)."""
         shape = read_stdout(stdout, self.ENVELOPE_SIGNATURE)
         if shape.kind == STDOUT_ENVELOPE:
             wrapper = shape.value

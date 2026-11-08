@@ -164,13 +164,16 @@ class TestVendorTextContract:
         """
         import ast
 
+        from utils.providers import failure_classifier
+
         text, tree = self._c1_base_source()
+        classifier_tree = source_tree(failure_classifier.__file__)
 
         assert text.count("self.vendor_text(") == 1, (
             "the hook is applied in more than one place"
         )
-        assert "'vendor_text'" not in self._c1_body_of(tree, "classify_streams")
-        assert "'vendor_text'" not in self._c1_body_of(tree, "match_streams")
+        assert "'vendor_text'" not in self._c1_body_of(classifier_tree, "classify_streams")
+        assert "'vendor_text'" not in self._c1_body_of(classifier_tree, "match_streams")
         assert "'vendor_text'" not in self._c1_body_of(
             tree, "classify_auth_probe", cls="LLMProvider"
         )

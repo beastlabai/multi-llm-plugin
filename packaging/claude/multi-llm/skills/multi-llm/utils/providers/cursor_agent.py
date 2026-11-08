@@ -48,7 +48,7 @@ _MAX_DESCRIBED_STDERR_CHARS = 400
 #: (``gpt-5.5-extra-high``, ``claude-opus-5-thinking-high-fast``) — so the
 #: effort a run uses is chosen by picking a model name, and a ``:effort`` suffix
 #: would only corrupt that name. Declaring no ``REASONING_EFFORTS`` is what keeps
-#: every cursor slug intact through :func:`~.base.split_reasoning_effort`.
+#: every cursor slug intact through :func:`~.reasoning.split_reasoning_effort`.
 EFFORT_LADDER = ReasoningLadder(
     provider="cursor-agent",
     declined=(
@@ -1298,7 +1298,7 @@ class CursorAgentProvider(LLMProvider):
     #: refusal), and the answer is its ``result``, also when ``is_error`` is
     #: set (the ``exit-zero-failure`` row). :meth:`vendor_text` reads the
     #: envelope without ``result``, a cut or ambiguous stdout not at all
-    #: (:func:`base.diagnostic_streams`).
+    #: (:func:`stdout_shape.diagnostic_streams`).
     EXIT0_CLASSIFIABLE = True
 
     #: :attr:`~.base.LLMProvider.LAUNCH_DIAGNOSTICS`, from the captures: the turn rides the
@@ -1504,7 +1504,7 @@ class CursorAgentProvider(LLMProvider):
         return super().classify_failure(stdout, stderr, exit_code)
 
     def vendor_text(self, stdout: str, stderr: str) -> Tuple[str, str]:
-        """:func:`base.diagnostic_streams`: the envelope without ``result``.
+        """:func:`stdout_shape.diagnostic_streams`: the envelope without ``result``.
 
         cursor-agent exits 0 on every outcome, and an ``is_error`` envelope's
         ``result`` is still the model's answer (the ``exit-zero-failure``

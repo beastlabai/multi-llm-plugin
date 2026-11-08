@@ -119,7 +119,7 @@ with `Popen` in its own process group and a timeout kills that whole group throu
 `/bin/sh` and left the real `pnpm`/`node` running while
 the phase reported `exited 124` (F4/F3b, 2026-09-17), and its capture goes to a temp file
 read back to the last `VERIFY_OUTPUT_CAP_BYTES` rather than buffering a whole build in memory, under
-the environment `providers.base.build_child_env` composes for a spawn rather than a bare
+the environment `providers.child_env.build_child_env` composes for a spawn rather than a bare
 `os.environ` — before it, seven code fixes were applied to one file and the phase
 completed without any check, the runners' volunteered `node --check` being their initiative
 and not the phase's guarantee) + `metrics.finish` + `mark_phase_completed` +

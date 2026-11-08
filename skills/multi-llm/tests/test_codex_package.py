@@ -356,9 +356,9 @@ DYNAMIC_READ_SITES = {
         "the session-model variable's name, read from dist/cli-surface.json",
     "skills/multi-llm/utils/host_routes/npm.py::_config_files":
         "the host's `<HOST>_CONFIG` and `<HOST>_CONFIG_DIR`, built from its id",
-    "skills/multi-llm/utils/providers/base.py::_skill_environment_on_path":
+    "skills/multi-llm/utils/providers/child_env.py::_skill_environment_on_path":
         "the PATH spellings the mapping carries",
-    "skills/multi-llm/utils/providers/base.py::build_child_env":
+    "skills/multi-llm/utils/providers/child_env.py::build_child_env":
         "a runner's removals, the skill's own environment names and the PATH "
         "spellings, computed per dispatch",
     "skills/multi-llm/utils/providers/opencode.py::_api_key_resolves.<lambda>":
@@ -639,7 +639,9 @@ class TestEnvironmentGuarantee:
     """The guarantee :func:`environment_problems` gives, each case injected
     into an in-memory copy of a shipped module (nothing on disk changes)."""
 
-    BASE = "skills/multi-llm/utils/providers/base.py"
+    #: The modules holding the two functions the cases inject into.
+    SANDBOX_RUNGS = "skills/multi-llm/utils/providers/sandbox_rungs.py"
+    CHILD_ENV = "skills/multi-llm/utils/providers/child_env.py"
 
     def test_the_shipped_tree_is_clean(self):
         assert environment_problems() == []
@@ -653,19 +655,19 @@ class TestEnvironmentGuarantee:
         """A key built from constants (an f-string, a ``+``) is read like the
         literal it spells, so the name needs a row."""
         problems = environment_problems(
-            _with_injection(self.BASE, "skip_rung_requested", statement))
+            _with_injection(self.SANDBOX_RUNGS, "skip_rung_requested", statement))
         assert len(problems) == 1
         assert "MULTI_LLM_UNLISTED_REVIEW" in problems[0] and "no row" in problems[0]
 
-    @pytest.mark.parametrize("function, statement", [
+    @pytest.mark.parametrize("module, function, statement", [
         # a local bound to ``os.environ if environ is None else environ``
-        ("skip_rung_requested", "env.get('MULTI_LLM_X')"),
+        (SANDBOX_RUNGS, "skip_rung_requested", "env.get('MULTI_LLM_X')"),
         # an ``env`` parameter
-        ("skill_environment_names", "env['MULTI_LLM_X']"),
+        (CHILD_ENV, "skill_environment_names", "env['MULTI_LLM_X']"),
         # a membership test is a read too
-        ("skip_rung_requested", "'MULTI_LLM_X' in env"),
+        (SANDBOX_RUNGS, "skip_rung_requested", "'MULTI_LLM_X' in env"),
     ])
-    def test_a_read_of_a_reserved_row_fails(self, function, statement):
+    def test_a_read_of_a_reserved_row_fails(self, module, function, statement):
         """A read of a ``reserved`` row fails, through any receiver. The table
         has no reserved row today, so the test adds a made-up one."""
         rows = env_vars.ENV_VARS + (env_vars.EnvVar(
@@ -673,7 +675,7 @@ class TestEnvironmentGuarantee:
             "a made-up reserved name"),)
         assert environment_problems(rows=rows) == []
         problems = environment_problems(
-            _with_injection(self.BASE, function, statement), rows=rows)
+            _with_injection(module, function, statement), rows=rows)
         assert len(problems) == 1
         assert "['MULTI_LLM_X'] became real environment reads" in problems[0]
 
@@ -706,17 +708,17 @@ class TestEnvironmentGuarantee:
     def test_an_unresolvable_key_of_ours_fails(self, statement):
         """A ``MULTI_LLM_*`` key built at run time names a variable no row can
         list; it fails by location, whatever DYNAMIC_READ_SITES says."""
-        problems = environment_problems(_with_injection(self.BASE, "skip_rung_requested", statement))
+        problems = environment_problems(_with_injection(self.SANDBOX_RUNGS, "skip_rung_requested", statement))
         assert len(problems) == 1
-        assert problems[0].startswith(self.BASE + ":") and "no rule resolves" in problems[0]
+        assert problems[0].startswith(self.SANDBOX_RUNGS + ":") and "no rule resolves" in problems[0]
 
     def test_a_dynamic_key_elsewhere_needs_a_reason(self):
         """A key that is neither ours nor resolvable is held to
         DYNAMIC_READ_SITES by function, so the file's other sites excuse nothing."""
         problems = environment_problems(
-            _with_injection(self.BASE, "skip_rung_requested", "env.get(value)"))
+            _with_injection(self.SANDBOX_RUNGS, "skip_rung_requested", "env.get(value)"))
         assert problems == [
-            f"unresolvable environment reads in ['{self.BASE}::skip_rung_requested']; "
+            f"unresolvable environment reads in ['{self.SANDBOX_RUNGS}::skip_rung_requested']; "
             "read a literal or a module constant, or record the site in "
             "DYNAMIC_READ_SITES with its reason"
         ]
@@ -939,7 +941,9 @@ _ALLOWED_ABSOLUTE = {
     f"{PAYLOAD}/utils/landlock_dispatch.py": {
         "/dev/null", "/dev/ptmx", "/dev/pts", "/dev/tty", "/tmp/multi-llm-slot-",
         "/tmp", "/dev/shm", "/bin/bash"},
-    f"{PAYLOAD}/utils/providers/base.py": {"/usr/bin/bwrap", "/dev/tty", "/tmp"},
+    f"{PAYLOAD}/utils/providers/base.py": {"/tmp"},
+    f"{PAYLOAD}/utils/providers/child_env.py": {"/dev/tty"},
+    f"{PAYLOAD}/utils/providers/failure_classifier.py": {"/usr/bin/bwrap"},
     # (5) the container image's paths, in provider docstrings.
     f"{PAYLOAD}/hosts/capabilities.yaml": {"/opt/mllm/opencode-plugin"},
     f"{PAYLOAD}/utils/providers/aider.py": {"/opt/mllm/real/aider", "C:\\Users"},

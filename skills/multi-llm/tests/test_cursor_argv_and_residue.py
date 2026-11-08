@@ -60,6 +60,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tests.mock_launchers import launcher_file, write_launcher
 from utils.providers import base as base_module
+from utils.providers import version_gate
 from utils.providers import cursor_agent as cursor_agent_module
 from utils.providers.base import PROFILE_GENERATE
 from utils.providers.cursor_agent import (
@@ -111,7 +112,7 @@ def _clean_module_state():
 def confirmed(monkeypatch):
     """Both tokens confirmed, with no binary and no spawn."""
     monkeypatch.setattr(cursor_agent_module.shutil, "which", lambda _n: _RUNNABLE)
-    monkeypatch.setattr(base_module, "read_help_tokens", lambda _b, **_kw: CONFIRMED)
+    monkeypatch.setattr(version_gate, "read_help_tokens", lambda _b, **_kw: CONFIRMED)
 
 
 def _write_help_binary(
@@ -183,7 +184,7 @@ class TestFlagGate:
     def test_missing_mode_refuses_the_slot(self, provider, monkeypatch):
         monkeypatch.setattr(cursor_agent_module.shutil, "which", lambda _n: _RUNNABLE)
         monkeypatch.setattr(
-            base_module, "read_help_tokens",
+            version_gate, "read_help_tokens",
             lambda _b, **_kw: frozenset({"--print", "--trust"}),
         )
         with pytest.raises(CursorFlagsUnconfirmed) as excinfo:
@@ -196,7 +197,7 @@ class TestFlagGate:
     def test_missing_trust_refuses_the_slot(self, provider, monkeypatch):
         monkeypatch.setattr(cursor_agent_module.shutil, "which", lambda _n: _RUNNABLE)
         monkeypatch.setattr(
-            base_module, "read_help_tokens",
+            version_gate, "read_help_tokens",
             lambda _b, **_kw: frozenset({"--print", "--mode"}),
         )
         with pytest.raises(CursorFlagsUnconfirmed) as excinfo:
@@ -205,7 +206,7 @@ class TestFlagGate:
 
     def test_undecidable_help_refuses_rather_than_degrading(self, provider, monkeypatch):
         monkeypatch.setattr(cursor_agent_module.shutil, "which", lambda _n: _RUNNABLE)
-        monkeypatch.setattr(base_module, "read_help_tokens", lambda _b, **_kw: frozenset())
+        monkeypatch.setattr(version_gate, "read_help_tokens", lambda _b, **_kw: frozenset())
         with pytest.raises(CursorFlagsUnconfirmed) as excinfo:
             provider.build_command("p", "m")
         assert set(excinfo.value.missing) == set(CURSOR_REQUIRED_FLAGS)
@@ -213,7 +214,7 @@ class TestFlagGate:
     def test_a_refusal_never_emits_a_partial_argv(self, provider, monkeypatch):
         """The refusal must not be reachable *around*: no argv comes back at all."""
         monkeypatch.setattr(cursor_agent_module.shutil, "which", lambda _n: _RUNNABLE)
-        monkeypatch.setattr(base_module, "read_help_tokens", lambda _b, **_kw: frozenset({"--trust"}))
+        monkeypatch.setattr(version_gate, "read_help_tokens", lambda _b, **_kw: frozenset({"--trust"}))
         try:
             cmd = provider.build_command("p", "m")
         except CursorFlagsUnconfirmed:
@@ -261,7 +262,7 @@ class TestFlagGate:
         """
         monkeypatch.setattr(cursor_agent_module.shutil, "which", lambda _n: None)
         monkeypatch.setattr(
-            base_module,
+            version_gate,
             "read_help_tokens",
             lambda _b, **_kw: pytest.fail("no help probe may run without a binary"),
         )
@@ -272,7 +273,7 @@ class TestFlagGate:
         ghost = tmp_path / "cursor-agent"  # never created
         monkeypatch.setattr(cursor_agent_module.shutil, "which", lambda _n: str(ghost))
         monkeypatch.setattr(
-            base_module,
+            version_gate,
             "read_help_tokens",
             lambda _b, **_kw: pytest.fail("no help probe may run without a runnable binary"),
         )

@@ -259,7 +259,7 @@ def lane(tmp_path, monkeypatch):
         "shutil.which", side_effect=lambda name, *a, **k: f"/usr/bin/{name}"
     ), patch(
         # M14: the gate has one implementation, so the sniff is pinned there.
-        "utils.providers.base.read_help_tokens",
+        "utils.providers.version_gate.read_help_tokens",
         lambda binary, **_kwargs: frozenset({JSON_SCHEMA_FLAG}),
     ):
         yield _Lane(tmp_path)

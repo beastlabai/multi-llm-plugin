@@ -794,10 +794,10 @@ def _assert_the_tag_only_names_itself(untagged, category):
 
 def _category_vocabulary():
     from utils import retry_ladder
-    from utils.providers import base
+    from utils.providers import failure_classifier
 
     names = {
-        value for name, value in vars(base).items()
+        value for name, value in vars(failure_classifier).items()
         if name.startswith("CATEGORY_") and isinstance(value, str)
     }
     names |= {

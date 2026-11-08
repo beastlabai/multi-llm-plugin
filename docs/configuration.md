@@ -457,7 +457,7 @@ program runs.
 last colon against that provider's accepted names; any other suffix stays part
 of the model name, so `:free` ids and Bedrock `...-v1:0` ids pass through
 whole. The accepted names come from one canonical ladder (none, minimal, low,
-medium, high, xhigh, max) in `utils/providers/base.py`, of which each adapter
+medium, high, xhigh, max) in `utils/providers/reasoning.py`, of which each adapter
 declares its subset as `EFFORT_LADDER`; `off` is a CLI's spelling of `none`
 (goose, pi, vibe), `ultra` of `max` (muse; codex accepts it and sends `max`),
 and `thinking` / `instant` (kilocode, opencode) are a mode rather than an
@@ -485,7 +485,7 @@ amount and pass through uncompared. Where a provider differs:
 ### Version ceilings
 
 Every supported build of every CLI is decided by one gate in
-`utils/providers/base.py`. The floor (`min_version`) and the build the
+`utils/providers/version_gate.py`. The floor (`min_version`) and the build the
 fixtures came from (`verified_version`) are declared on the adapter, next to
 the parser they protect. The ceiling, `max_version_exclusive`, is declared on
 the adapter too and can be overridden per provider in config, because a

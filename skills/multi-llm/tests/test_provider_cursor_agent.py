@@ -12,7 +12,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from utils.providers import base as base_module, cursor_agent as cursor_agent_module
+from utils.providers import cursor_agent as cursor_agent_module
+from utils.providers import version_gate
 from utils.providers.cursor_agent import CursorAgentProvider
 
 
@@ -155,7 +156,7 @@ This concludes the review."""
         model = "gpt-4"
 
         with patch.object(
-            base_module, "read_help_tokens", lambda _b, **_kw: frozenset({"--trust", "--mode"})
+            version_gate, "read_help_tokens", lambda _b, **_kw: frozenset({"--trust", "--mode"})
         ), patch.object(cursor_agent_module.shutil, "which", lambda _n: sys.executable):
             cmd = provider.build_command(prompt, model)
 

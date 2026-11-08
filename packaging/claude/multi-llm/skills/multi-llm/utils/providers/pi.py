@@ -276,7 +276,7 @@ def _is_overflow(final: Dict[str, Any], events: List[Dict[str, Any]]) -> bool:
     """True for a real context overflow — never for a truncated-response recovery.
 
     Either the terminal ``error``'s own ``errorMessage`` carries a shared
-    :data:`~utils.providers.base.CONTEXT_OVERFLOW_MARKERS` row (measured: the
+    :data:`~utils.providers.failure_classifier.CONTEXT_OVERFLOW_MARKERS` row (measured: the
     vendor's ``400: … maximum context length …`` arrives verbatim), or the stream
     holds a failed overflow ``compaction_end`` whose sentence is **not** pi's
     truncated-recovery one (§7.3 step 5's pre-flight correction: both share

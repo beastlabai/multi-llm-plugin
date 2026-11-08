@@ -17,6 +17,7 @@ from utils.providers.aider import AiderProvider
 from utils.providers.base import LLMProvider, split_reasoning_effort
 from tests.roster_check import assert_covers_registry, assert_pinned_subset
 from utils.providers import base as base_module, cursor_agent as cursor_agent_module
+from utils.providers import version_gate
 from utils.providers.claude_code import ClaudeCodeProvider
 from utils.providers.cline import ClineProvider
 from utils.providers.codex import CodexProvider
@@ -722,7 +723,7 @@ class TestDeclaredOutputChannel:
         from utils.provider_registry import get_provider
 
         with patch.object(
-            base_module,
+            version_gate,
             "read_help_tokens",
             lambda _b, **_kw: frozenset({"--trust", "--mode"}),
         ), patch.object(

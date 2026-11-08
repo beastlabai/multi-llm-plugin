@@ -190,7 +190,7 @@ This concludes the review."""
         try:
             with patch("shutil.which", return_value="/usr/bin/claude"), patch(
                 # M14: one gate, one implementation — so one patch target.
-                "utils.providers.base.read_help_tokens",
+                "utils.providers.version_gate.read_help_tokens",
                 lambda binary, **_kwargs: frozenset({"--json-schema"}),
             ):
                 cmd = provider.build_command("Review this code", "sonnet",

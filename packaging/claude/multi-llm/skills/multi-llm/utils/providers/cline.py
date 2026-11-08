@@ -221,7 +221,7 @@ class ClineProvider(LLMProvider):
     #: truncated body, a zero-byte response, a 200 carrying an error object and
     #: an empty completion — ``tests/fixtures/cline/manifest.yaml`` records the
     #: nine captures and why `exit-zero-failure` is not-applicable there). The
-    #: markers stay declared: :func:`base.classify_streams` consults them
+    #: markers stay declared: :func:`failure_classifier.classify_streams` consults them
     #: regardless of exit code and they are the last-resort verdict on five of
     #: the committed rows. That is what makes ``verified_version`` worth
     #: re-confirming on every bump.

@@ -41,6 +41,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.providers import base  # noqa: E402
+from utils.providers import child_env  # noqa: E402
 from utils.providers import claude_code as cc  # noqa: E402
 from utils.providers.claude_code import ClaudeCodeProvider  # noqa: E402
 from utils.provider_registry import _PROVIDERS  # noqa: E402
@@ -174,7 +175,7 @@ class TestThePinnedNames:
         with patch.dict(
             os.environ, {"CLAUDE_CODE_USE_BEDROCK": "1"}, clear=False
         ), patch.object(
-            base,
+            child_env,
             "_provider_block",
             return_value={"env": {"CLAUDE_CODE_USE_BEDROCK": "1", "NOT_A_BACKEND": "x"}},
         ):
@@ -833,7 +834,7 @@ class TestThePolicyKeys:
             assert policy == base.STRIP_VENDOR_KEYS_NEVER
 
     def test_an_unknown_value_warns_once_and_falls_back(self, capsys):
-        with patch.object(base, "_provider_block", return_value={"strip_vendor_keys": "yes"}):
+        with patch.object(child_env, "_provider_block", return_value={"strip_vendor_keys": "yes"}):
             for _ in range(3):
                 assert base.strip_vendor_keys_policy("claude-code") == "auto"
         err = capsys.readouterr().err

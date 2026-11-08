@@ -28,7 +28,8 @@ What counts, decided here and nowhere else:
   line" mentions a marker and emits none. Docstrings, comments and bare string
   statements are never produced.
 * A string is **resolved** through f-strings, ``+``, ``%`` and ``.format``, and
-  through names: module constants (imported ones too), local assignments and
+  through names: module constants (imported ones too, and the names a split
+  module re-exports through its ``_MOVED`` table), local assignments and
   loop variables, and a function parameter, from the arguments its callers pass
   (``sweep_live_clis("DEADLINE_SWEEP")`` emits ``[DEADLINE_SWEEP]`` through the
   helper's ``f"[{tag}] …"``). An argument to a function the scan can find is
@@ -46,7 +47,7 @@ What counts, decided here and nowhere else:
   ``[PREREQUISITE_*]`` is not a citation of any one marker.
 * The **emitter column names a file and, where the marker's text comes from a
   module constant or a helper's argument, that constant or ``helper()``**
-  (``base.py`` ``SANDBOX_BYPASSED_MARKER``), never a line number. Line numbers
+  (``sandbox_rungs.py`` ``SANDBOX_BYPASSED_MARKER``), never a line number. Line numbers
   would make the table stale after any edit above the line; the name is what a
   reader greps for, and an inline literal is found by grepping the marker
   itself.
@@ -491,6 +492,21 @@ class _Module:
                             if isinstance(target, ast.Name):
                                 self.class_constants.setdefault(node.name, {}).setdefault(
                                     target.id, []).append(item.value)
+        #: name -> the module that defines it, for a split module's read-only
+        #: re-exports: a module-level ``_MOVED`` table of sibling owner -> names
+        #: (``utils.providers.base``, ``utils.git_utils``, ``utils.run_status``).
+        self.reexports: Dict[str, str] = {}
+        package = self.dotted if self.is_package else self.dotted.rpartition(".")[0]
+        for _statement, value in self.constants.get("_MOVED", ()):
+            if not isinstance(value, ast.Dict):
+                continue
+            for key, names in zip(value.keys, value.values):
+                if not (isinstance(key, ast.Constant) and isinstance(names, (ast.Tuple, ast.List))):
+                    continue
+                for element in names.elts:
+                    if isinstance(element, ast.Constant) and isinstance(element.value, str):
+                        self.reexports[element.value] = (
+                            f"{package}.{key.value}" if package else key.value)
         #: local name -> (module, attribute) of ``from module import attribute``
         self.from_imports: Dict[str, Tuple[str, str]] = {}
         #: local name -> module of ``import module [as name]``
@@ -617,6 +633,17 @@ class _Scanner:
 
     # -- names -----------------------------------------------------------
 
+    def defining(self, target: Optional[_Module], attr: str) -> Optional[_Module]:
+        """*target*, or the module that defines *attr* when *target* only
+        re-exports it (:attr:`_Module.reexports`)."""
+        seen: Set[str] = set()
+        while (target is not None and attr not in target.constants
+               and attr not in target.functions and attr in target.reexports
+               and target.dotted not in seen):
+            seen.add(target.dotted)
+            target = self.by_dotted.get(target.reexports[attr])
+        return target
+
     def module_named(self, module: _Module, local: str) -> Optional[_Module]:
         if local in module.module_imports:
             return self.by_dotted.get(module.module_imports[local])
@@ -660,7 +687,7 @@ class _Scanner:
                 return module, module.functions[func.id]
             if func.id in module.from_imports:
                 base, attr = module.from_imports[func.id]
-                target = self.by_dotted.get(base)
+                target = self.defining(self.by_dotted.get(base), attr)
                 if target is not None and attr in target.functions:
                     return target, target.functions[attr]
             return None
@@ -672,7 +699,7 @@ class _Scanner:
                     if method is not None:
                         return module, method
                 return None
-            target = self._module_of_chain(module, func.value)
+            target = self.defining(self._module_of_chain(module, func.value), func.attr)
             if target is not None and func.attr in target.functions:
                 return target, target.functions[func.attr]
         return None
@@ -712,7 +739,7 @@ class _Scanner:
             )
         if name in module.from_imports:
             base, attr = module.from_imports[name]
-            target = self.by_dotted.get(base)
+            target = self.defining(self.by_dotted.get(base), attr)
             if target is not None and target is not module:
                 return self.resolve_name(target, attr, None)
         return [_HOLE_TEMPLATE]
@@ -785,7 +812,7 @@ class _Scanner:
         if isinstance(node, ast.Name):
             return self.resolve_name(module, node.id, scope)
         if isinstance(node, ast.Attribute):
-            target = self._module_of_chain(module, node.value)
+            target = self.defining(self._module_of_chain(module, node.value), node.attr)
             if target is not None:
                 return self.resolve_name(target, node.attr, None)
             owner = module.class_of(node)
