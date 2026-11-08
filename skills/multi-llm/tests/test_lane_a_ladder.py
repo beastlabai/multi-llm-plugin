@@ -1042,7 +1042,7 @@ def test_an_exit_zero_failure_row_gets_the_executors_call(
     and both lanes' real paths dispatch it the same number of times. An
     adapter that is not ``EXIT0_CLASSIFIABLE`` gives no verdict: the fan-out
     stops on its error line and the executor keeps its parse failure's one
-    retry, the difference its rows mark ``open``."""
+    retry, the permanent difference its rows mark ``by_design``."""
     from utils.providers.base import exit_zero_failure_category
 
     stdout, stderr = _row_streams(provider_name, row)
@@ -1062,7 +1062,7 @@ def test_an_exit_zero_failure_row_gets_the_executors_call(
     if classified:
         _assert_lanes_agree(verdict, lane_a, lane_b)
     else:
-        assert "open" in row["expect"]["lane_status"]
+        assert "by_design" in row["expect"]["lane_status"]
         assert (lane_a, lane_b) == (1, 1 + _ROW_RETRIES)
 
 

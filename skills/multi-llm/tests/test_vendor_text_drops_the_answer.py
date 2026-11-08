@@ -125,10 +125,14 @@ def test_the_answer_is_dropped_and_nothing_is_added(provider):
     reduced, stderr = adapter.vendor_text(stdout, "kept")
     assert stderr == "kept"
     assert PROSE not in reduced
-    source_lines = set(stdout.split("\n"))
-    assert all(line in source_lines for line in reduced.split("\n") if line), (
-        "vendor_text may only remove lines"
-    )
+    if adapter.ENVELOPE_SIGNATURE:
+        # The envelope without its answer fields (`base.diagnostic_streams`).
+        assert json.loads(reduced) == adapter.envelope_diagnostics(json.loads(stdout))
+    else:
+        source_lines = set(stdout.split("\n"))
+        assert all(line in source_lines for line in reduced.split("\n") if line), (
+            "vendor_text may only remove lines"
+        )
     assert adapter.classify_failure(stdout, "", 0) is None
 
 

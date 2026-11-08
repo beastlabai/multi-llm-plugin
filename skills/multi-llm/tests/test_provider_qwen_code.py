@@ -450,12 +450,19 @@ class TestQwenCodeProvider:
         assert refused["success"] is False
         assert "is_error: true" in refused["error"]
 
-        # the same record minus that one field: no `result` key, no verdict the
-        # helper reads, and the bookkeeping comes back as the model's answer
+        # the same record minus that one field: no `result` key and no verdict
+        # the helper reads; it refuses only because a result envelope without
+        # a `result` field carries no answer
         blind = dict(record)
         del blind["is_error"]
         naive = parse_result_envelope(json.dumps(blind))
-        assert naive["success"] is True and naive["data"]["type"] == "result"
+        assert naive["success"] is False and naive["data"] is None
+        assert "no result field" in naive["error"]
+
+        # what still needs qwen's rule first: a `subtype` the helper never reads
+        answered = dict(blind, result='[{"id": 1}]')
+        assert parse_result_envelope(json.dumps(answered))["success"] is True
+        assert provider.parse_output(json.dumps([answered]), "")["success"] is False
 
         # what the adapter does, because it classifies FIRST
         result = provider.parse_output(raw, "")

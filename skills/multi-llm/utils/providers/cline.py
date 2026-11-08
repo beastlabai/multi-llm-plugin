@@ -6,6 +6,7 @@ from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from ..json_extractor import extract_json_from_text
 from .base import (
+    LAUNCH_DIAGNOSTICS_STDERR,
     InternalRetryEnvelope,
     LLMProvider,
     ReasoningLadder,
@@ -346,6 +347,11 @@ class ClineProvider(LLMProvider):
     #: ``error`` events and an error ``run_result``, whose ``text`` is the
     #: upstream sentence.
     EXIT0_CLASSIFIABLE = True
+
+    #: :attr:`~.base.LLMProvider.LAUNCH_DIAGNOSTICS`, from the captures: cline's stderr is its
+    #: own JSON log records (``{"ts", "type": "error", "message"}``, tests/fixtures/cline),
+    #: each one line with its newlines escaped; tool turns ride the stdout events.
+    LAUNCH_DIAGNOSTICS = LAUNCH_DIAGNOSTICS_STDERR
 
     @property
     def name(self) -> str:

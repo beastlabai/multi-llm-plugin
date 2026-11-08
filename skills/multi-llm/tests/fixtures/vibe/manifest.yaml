@@ -181,7 +181,7 @@ rows:
       to be called rate-limited was our own plan text is precisely the live
       hazard, and this is the row that pins it.
     expect:
-      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U83 (PROV-1: exit-0 parity, adapter not EXIT0_CLASSIFIABLE)"}
+      lane_status: {lane_a: null, lane_b: unparseable_result, by_design: "not EXIT0_CLASSIFIABLE: every measured vibe failure exits non-zero, and its exit-0 stdout is the message list holding the answer, with no field only the CLI writes; the fan-out stops on it, the executor keeps its one parse-failure retry"}
       salvage: none
       success: false
       error_contains: ["no assistant message in vibe's transcript"]
@@ -649,7 +649,7 @@ rows:
       because this capture's echoed prompt is a two-word test prompt rather
       than a plan.
     expect:
-      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U83 (PROV-1: exit-0 parity, adapter not EXIT0_CLASSIFIABLE)"}
+      lane_status: {lane_a: null, lane_b: unparseable_result, by_design: "not EXIT0_CLASSIFIABLE: every measured vibe failure exits non-zero, and its exit-0 stdout is the message list holding the answer, with no field only the CLI writes; the fan-out stops on it, the executor keeps its one parse-failure retry"}
       salvage: none
       success: false
       error_contains: ["vibe produced non-JSON output on stdout"]
@@ -670,7 +670,7 @@ rows:
       what ships, and graded as the failure it is through the shipped adapter
       rather than left as an untested cell.
     expect:
-      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U83 (PROV-1: exit-0 parity, adapter not EXIT0_CLASSIFIABLE)"}
+      lane_status: {lane_a: null, lane_b: unparseable_result, by_design: "not EXIT0_CLASSIFIABLE: every measured vibe failure exits non-zero, and its exit-0 stdout is the message list holding the answer, with no field only the CLI writes; the fan-out stops on it, the executor keeps its one parse-failure retry"}
       salvage: none
       success: false
       error_contains: ["vibe produced non-JSON output on stdout"]

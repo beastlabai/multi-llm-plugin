@@ -5,6 +5,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from ..json_extractor import extract_json_from_text
 from .base import (
+    LAUNCH_DIAGNOSTICS_STDERR,
     InternalRetryEnvelope,
     LLMProvider,
     ReasoningLadder,
@@ -251,6 +252,11 @@ class MuseProvider(LLMProvider):
     #: quoting a rate limit, a 401 or a context limit classifies as one. Its
     #: one exit-0 failure row classifies ``None``.
     EXIT0_CLASSIFIABLE = False
+
+    #: :attr:`~.base.LLMProvider.LAUNCH_DIAGNOSTICS`, from the captures: muse's stderr is its
+    #: own ``muse: …`` notices and its ``run ended with Failed: …`` line (tests/fixtures/muse);
+    #: tool output rides the stdout JSONL.
+    LAUNCH_DIAGNOSTICS = LAUNCH_DIAGNOSTICS_STDERR
 
     @property
     def name(self) -> str:

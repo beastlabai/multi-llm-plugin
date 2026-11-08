@@ -9247,6 +9247,7 @@ def _quote_verdict(
 
     match = None
     try:
+        launch = getattr(provider, "launch_diagnostics", None)
         match = match_streams(
             stdout or "",
             stderr or "",
@@ -9254,6 +9255,7 @@ def _quote_verdict(
             auth_patterns=getattr(provider, "auth_error_patterns", None),
             rate_limit_patterns=getattr(provider, "rate_limit_patterns", None),
             exit_zero_markers=getattr(provider, "exit_zero_failure_markers", ()),
+            launch_stderr=launch(stderr or "") if launch is not None else None,
         )
     except Exception:  # noqa: BLE001 - the quote must never raise
         match = None

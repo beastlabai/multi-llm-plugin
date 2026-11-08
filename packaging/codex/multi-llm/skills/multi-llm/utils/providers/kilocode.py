@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..json_extractor import _ANSI_ESCAPE, extract_json_from_text
 from .base import (
+    LAUNCH_DIAGNOSTICS_NONE,
     REASONING_LADDER,
     LLMProvider,
     ReasoningLadder,
@@ -213,6 +214,13 @@ class KiloCodeProvider(LLMProvider):
     #: stdout is the model's answer as plain text, so nothing on it can be told
     #: apart from what kilocode wrote.
     EXIT0_CLASSIFIABLE = False
+
+    #: :attr:`~.base.LLMProvider.LAUNCH_DIAGNOSTICS`, from the captures: ``kilocode run``
+    #: prints its banner and its tool trace on stderr (tests/test_container_live_provider.py
+    #: ``MODEL_ECHO_ON_STDERR``), the trace naming what the model chose to read or run; no
+    #: capture shows the trace's format or where a tool's output ends, so none of stderr is
+    #: read for a batch-fatal verdict.
+    LAUNCH_DIAGNOSTICS = LAUNCH_DIAGNOSTICS_NONE
 
     @property
     def name(self) -> str:

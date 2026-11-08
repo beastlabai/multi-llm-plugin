@@ -184,7 +184,7 @@ rows:
       Note what is NOT here — no `user.message` — which makes this the row where
       `vendor_text` is a no-op, and the classification `None` before and after.
     expect:
-      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U83 (PROV-1: exit-0 parity, adapter not EXIT0_CLASSIFIABLE)"}
+      lane_status: {lane_a: null, lane_b: unparseable_result, by_design: "not EXIT0_CLASSIFIABLE: every measured copilot failure exits 1 with a session.error record and no exit-0 capture carries one, so an exit 0 holds no verdict of the CLI's own; the fan-out stops on it, the executor keeps its one parse-failure retry"}
       success: false
       error_contains: ["no assistant.message record in copilot output"]
       classify_failure: null
@@ -246,7 +246,7 @@ rows:
       detection is structural in `parse_output`. The classification is therefore
       `None`, correctly: nothing in the capture says what went wrong.
     expect:
-      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U83 (PROV-1: exit-0 parity, adapter not EXIT0_CLASSIFIABLE)"}
+      lane_status: {lane_a: null, lane_b: unparseable_result, by_design: "not EXIT0_CLASSIFIABLE: every measured copilot failure exits 1 with a session.error record and no exit-0 capture carries one, so an exit 0 holds no verdict of the CLI's own; the fan-out stops on it, the executor keeps its one parse-failure retry"}
       success: false
       error_contains: ["copilot returned an empty assistant message"]
       raw_contains: ['"exitCode":0']
@@ -436,7 +436,7 @@ rows:
       from a `session.error`. The row exists to keep that trade-off measured
       rather than remembered.
     expect:
-      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U83 (PROV-1: exit-0 parity, adapter not EXIT0_CLASSIFIABLE)"}
+      lane_status: {lane_a: null, lane_b: unparseable_result, by_design: "not EXIT0_CLASSIFIABLE: every measured copilot failure exits 1 with a session.error record and no exit-0 capture carries one, so an exit 0 holds no verdict of the CLI's own; the fan-out stops on it, the executor keeps its one parse-failure retry"}
       success: false
       error_contains: ["no assistant.message record in copilot output"]
       raw_contains: ["S001"]

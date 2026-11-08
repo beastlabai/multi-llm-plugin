@@ -7,6 +7,7 @@ from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from ..json_extractor import _loads_reply, extract_json_from_text
 from .base import (
+    LAUNCH_DIAGNOSTICS_STDERR,
     PROFILE_AGENT_READONLY,
     PROFILE_AGENT_WRITE,
     PROFILE_GENERATE,
@@ -1264,6 +1265,11 @@ class CodexProvider(LLMProvider):
     #: line cut inside one included; an unfinished turn (no ``turn.completed``)
     #: keeps only codex's own events.
     EXIT0_CLASSIFIABLE = True
+
+    #: :attr:`~.base.LLMProvider.LAUNCH_DIAGNOSTICS`, from the captures: tool output
+    #: (``command_execution``) and the model's prose ride the stdout JSONL, never stderr; the
+    #: ``codex sandbox`` probe's stderr is bubblewrap's own (:data:`~.base.SANDBOX_MARKERS`).
+    LAUNCH_DIAGNOSTICS = LAUNCH_DIAGNOSTICS_STDERR
 
     @property
     def name(self) -> str:

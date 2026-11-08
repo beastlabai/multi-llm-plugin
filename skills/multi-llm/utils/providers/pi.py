@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..json_extractor import extract_json_from_text
 from .base import (
+    LAUNCH_DIAGNOSTICS_NONE,
     CATEGORY_SERVER_ERROR,
     STATUS_AUTH_FAILED,
     STATUS_CONTEXT_LENGTH_EXCEEDED,
@@ -624,6 +625,12 @@ class PiProvider(LLMProvider):
     #: message; ``generate`` always renders ``--mode json``, so the answer is
     #: never plain stdout.
     EXIT0_CLASSIFIABLE = True
+
+    #: :attr:`~.base.LLMProvider.LAUNCH_DIAGNOSTICS`, from the captures: pi's OpenAI SDK dumps
+    #: a chunk it could not parse on stderr after ``Could not parse message into JSON:`` /
+    #: ``From chunk:`` (tests/fixtures/pi/truncated), and a chunk is the model's streamed
+    #: tokens, so none of stderr is read for a batch-fatal verdict.
+    LAUNCH_DIAGNOSTICS = LAUNCH_DIAGNOSTICS_NONE
 
     @property
     def name(self) -> str:

@@ -52,6 +52,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import (
+    LAUNCH_DIAGNOSTICS_STDERR,
     PROFILE_GENERATE,
     CATEGORY_PERMISSION_DENIED,
     CATEGORY_SERVER_ERROR,
@@ -962,6 +963,11 @@ class OmpProvider(LLMProvider):
     #: message yet), never a message's content; a line cut inside an event is
     #: not an event.
     EXIT0_CLASSIFIABLE = True
+
+    #: :attr:`~.base.LLMProvider.LAUNCH_DIAGNOSTICS`, from the captures: omp's stderr is its
+    #: own refusals and Bun's stack frames (tests/fixtures/omp: invalid-tool, invalid-model,
+    #: auth-error-preflight); tool results ride the stdout JSONL.
+    LAUNCH_DIAGNOSTICS = LAUNCH_DIAGNOSTICS_STDERR
 
     @property
     def name(self) -> str:

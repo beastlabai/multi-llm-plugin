@@ -28,6 +28,7 @@ from typing import (
 from ..json_extractor import extract_json_from_text, strip_jsonc
 from ..process_state import process_cache
 from .base import (
+    LAUNCH_DIAGNOSTICS_NONE,
     PROFILE_AGENT_READONLY,
     PROFILE_AGENT_WRITE,
     PROFILE_GENERATE,
@@ -1899,6 +1900,13 @@ class OpenCodeProvider(LLMProvider):
     #: opencode's ``error`` events and plain lines; in ``--format json`` the
     #: answer is never a plain line.
     EXIT0_CLASSIFIABLE = True
+
+    #: :attr:`~.base.LLMProvider.LAUNCH_DIAGNOSTICS`, from the captures: ``run`` prints each
+    #: auto-rejected permission on stderr with the model's own tool argument inside it (``!
+    #: permission requested: external_directory (/rig/outside/*); auto-rejecting``,
+    #: tests/fixtures/opencode/capture/1.19.5), and that argument can carry a newline or the
+    #: line's own closing words, so none of stderr is read for a batch-fatal verdict.
+    LAUNCH_DIAGNOSTICS = LAUNCH_DIAGNOSTICS_NONE
 
     @property
     def name(self) -> str:

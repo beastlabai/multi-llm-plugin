@@ -125,6 +125,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..json_extractor import extract_json_from_text
 from .base import (
+    LAUNCH_DIAGNOSTICS_STDERR,
     STATUS_SPAWN_FAILED,
     InternalRetryEnvelope,
     LLMProvider,
@@ -441,6 +442,11 @@ class VibeProvider(LLMProvider):
     #: limit, a 401 or a context limit classifies as one. Its exit-0 failure
     #: rows classify ``None``.
     EXIT0_CLASSIFIABLE = False
+
+    #: :attr:`~.base.LLMProvider.LAUNCH_DIAGNOSTICS`, from the captures: vibe's stderr is its
+    #: own ``Error: …`` / ``Stopped: …`` line (tests/fixtures/vibe); the transcript rides
+    #: stdout.
+    LAUNCH_DIAGNOSTICS = LAUNCH_DIAGNOSTICS_STDERR
 
     @property
     def name(self) -> str:

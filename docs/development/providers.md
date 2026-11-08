@@ -13,6 +13,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [Provider output channels](#provider-output-channels)
 - [Capturing a CLI's streams](#capturing-a-clis-streams)
 - [Reading a capture](#reading-a-capture)
+  - [Launch diagnostics](#launch-diagnostics)
 - [Usage reporting](#usage-reporting)
 - [Child Python environments](#child-python-environments)
 - [Provider outcome logs](#provider-outcome-logs)
@@ -45,7 +46,7 @@ Then work through the steps in order. Each test named fails until its step is do
 
 | Step | Where | What to add | Fails until then |
 | --- | --- | --- | --- |
-| 1 | `utils/providers/<name>.py` | One concrete `LLMProvider` subclass with the four abstract members: `name`, `is_available` (`shutil.which` of the binary), `build_command`, `parse_output`. Do not override `default_timeout`: the timeout is the `providers.yaml` row of step 2, and every adapter inherits the one fallback, `DEFAULT_TIMEOUT_S`. Add `EFFORT_LADDER = ReasoningLadder(provider=..., rungs=...)` and `REASONING_EFFORTS = EFFORT_LADDER.accepted`; a CLI with no effort control declares `ReasoningLadder(provider=..., declined="<the measurement>")` and no `REASONING_EFFORTS`. Decide each declaration the argv shows: `prompt_argv_index`, `supported_prompt_transports`, `agent_profiles`, `supports_file_output`, `runs_shell_in_generate`, `internal_retries`. Copy the closest sibling: `grok.py` for a JSON envelope, `kilocode.py` for plain stdout. | `test_reasoning_effort_ladder.py`; `test_provider_registry.py` (no `default_timeout` override); `test_provider_housekeeping.py`: the prompt index against the argv, a `STOPS_FILE_WRITES` or `REVIEWED_STILL_WRITES` row for each restriction-shaped argv atom, a `SHELL_EVIDENCE` row for a non-`None` shell declaration |
+| 1 | `utils/providers/<name>.py` | One concrete `LLMProvider` subclass with the four abstract members: `name`, `is_available` (`shutil.which` of the binary), `build_command`, `parse_output`. Do not override `default_timeout`: the timeout is the `providers.yaml` row of step 2, and every adapter inherits the one fallback, `DEFAULT_TIMEOUT_S`. Add `EFFORT_LADDER = ReasoningLadder(provider=..., rungs=...)` and `REASONING_EFFORTS = EFFORT_LADDER.accepted`; a CLI with no effort control declares `ReasoningLadder(provider=..., declined="<the measurement>")` and no `REASONING_EFFORTS`. Decide each declaration the argv shows: `prompt_argv_index`, `supported_prompt_transports`, `agent_profiles`, `supports_file_output`, `runs_shell_in_generate`, `internal_retries`; and from the captures, `LAUNCH_DIAGNOSTICS` ([launch diagnostics](#launch-diagnostics)) and, for a JSON envelope, `ENVELOPE_SIGNATURE`. Copy the closest sibling: `grok.py` for a JSON envelope, `kilocode.py` for plain stdout. | `test_reasoning_effort_ladder.py`; `test_provider_registry.py` (no `default_timeout` override); `test_provider_housekeeping.py`: the prompt index against the argv, a `STOPS_FILE_WRITES` or `REVIEWED_STILL_WRITES` row for each restriction-shaped argv atom, a `SHELL_EVIDENCE` row for a non-`None` shell declaration |
 | 2 | `providers.yaml`, `tests/read_only_modes.yaml` | A `providers.<name>` block (`default_timeout`, `max_concurrent`, `models`, the first being the default) in `providers.yaml`, inserted where it should sit in `--init`'s order; and a `read_only_modes.<name>` row in `tests/read_only_modes.yaml`: `mechanism: null` and `probed: null` until probed ([read-only contracts](#read-only-provider-contracts)). If the CLI lists its models, add a catalog route ([model catalog snapshots](#model-catalog-snapshots)); otherwise an `UNCHECKED` row naming why. | `test_provider_roster.py`, `test_read_only_modes.py`, `test_model_catalogs.py` |
 | 3 | `templates/config/providers.override.yaml` | Regenerate it: from `skills/multi-llm/`, `uv run --project . -- python -c "import init_config as c; c.TEMPLATE_PATH.write_text(c.build_template_text())"`. | `test_provider_registry.py::TestTemplateBaseParity` |
 | 4 | `ENV_ALLOWLIST_PROFILES` in `utils/providers/base.py` | A `RunnerEnvProfile`: CA family (`node` or `native`), the env prefixes the CLI owns, its home and config variable names. | `test_env_allowlist.py` |
@@ -731,6 +732,31 @@ to `outcome_from_capture`.
   (its keys still land after `sandbox`), a timeout and an exit 0 after it.
 - **Full stream first, redacted before bounded.** The audit, the salvage and answer hooks and
   usage read the whole stream; any stream text that leaves is redacted, then cut.
+- **An envelope is read by where it sits, in one place.** An adapter whose JSON mode prints one
+  envelope around its answer (claude-code, cursor-agent, gemini, grok, agy, goose) declares how it
+  opens (`ENVELOPE_SIGNATURE`, the opening keys of its captured envelopes,
+  `base.envelope_signature`). `base.read_stdout` is the one rule, read by the parser and by
+  `base.diagnostic_streams`. Provenance is position, not keys: a model writes inside the answer
+  string, never the start of stdout, and every committed capture is exactly one envelope. After ANSI
+  colour and leading whitespace, stdout opens with a run of complete JSON values, one per line
+  (`raw_decode` where each starts, so one linear pass), then any trailing text. One of those values
+  opening on the signature is the **envelope** (the last such; JSON log lines and trailing text are
+  the CLI's), unwrapped from its answer fields as a whole stdout would be. The signature opening
+  there with no complete value is **cut**: a parse failure marked `incomplete`, before any text
+  extraction could serve its bookkeeping or goose's echoed user turn. The opening **anywhere else**,
+  found by a plain regex so no quote or bracket can hide it (a banner ahead of the envelope, an
+  answer quoting one), is **ambiguous**: a parse failure, one bounded retry. A stdout with no
+  opening goes to the adapter's ordinary extraction, unchanged. A whole envelope without its answer
+  field fails too.
+- **One reduction for failure verdicts and their quotes.** The six adapters' `vendor_text` is
+  `base.diagnostic_streams`, so the classifier on exit 0 and on any other exit, and the executor's
+  failure quote, read one text: for an envelope, each signature record as the adapter's
+  `envelope_diagnostics` keeps it (its `ENVELOPE_ANSWER_FIELDS` out, the vendor's refusal fields
+  such as `is_error`, `subtype` and `error` in; claude-code keeps a `result` beside `terminal_reason:
+  "api_error"`, the CLI's own `API Error:` sentence; goose drops its echoed user turns), plus the
+  other JSON lines and the trailing text; for a cut or ambiguous stdout, nothing of stdout, so only
+  stderr is read, under the adapter's [launch diagnostics](#launch-diagnostics); for a plain stdout
+  (a CLI's plain-text refusal), all of it.
 - **The jail stays the caller's.** Its read-back needs the attempt's live context, so it comes in
   as a callable (`JailReadBack`); a jail denial replaces the error line, carries no category tag
   and wins over any category.
@@ -749,7 +775,38 @@ status, not this result, so it shares the fields and its readers accept a `Captu
 (`tests/test_provider_outcome.py`). Every graded fixture row pins both lanes' ladder status as
 `expect.lane_status` (`tests/test_provider_fixture_rows.py`): `lane_a` from `outcome_from_capture`
 as the review fan-out reads it with no result file, `lane_b` from the executor's readers. A row
-whose two statuses retry differently carries `open: <unit>` until that unit settles it.
+whose two statuses retry differently carries `open: <unit>` until that unit settles it, or
+`by_design: <reason>` for the one permanent difference: an exit 0 of an adapter that is not
+`EXIT0_CLASSIFIABLE`, which the fan-out stops on and the executor retries once.
+
+### Launch diagnostics
+
+Two verdicts fail the executor's whole batch from text alone: `sandbox_unavailable`
+(`base.SANDBOX_MARKERS`) and `spawn_failed`'s stderr rows (`base.STDERR_LAUNCH_FAILURE_MARKERS`).
+So they are read only from text that a model or a tool cannot write:
+
+- **Anchored lines.** `SANDBOX_MARKERS` is bubblewrap's measured refusals, each anchored at a line
+  start on its exact prefix and listed beside the capture it came from. A line that only mentions
+  bubblewrap, or an unmeasured refusal, is no sandbox verdict and keeps its bounded retry.
+- **stderr, where the CLI wrote it.** Each adapter declares `LAUNCH_DIAGNOSTICS` with the captures
+  it rests on. `stderr`: everything there is the CLI's, its launcher's or the OS's own. `none`:
+  stderr also relays a model's or a tool's words on lines that cannot be told apart, so neither
+  row reads it (`LLMProvider.launch_diagnostics` hands `classify_streams` an empty
+  `launch_stderr`). Exit 127 stays `spawn_failed` everywhere. Today `none` is kilocode (its tool
+  trace), fx (its shell tool's command and output), gemini (`Error executing tool …`), opencode
+  (an auto-rejected permission quoting the model's tool argument) and pi (its SDK's dump of an
+  unparsed chunk). `tests/test_launch_diagnostics.py` checks that every adapter declares it.
+- **stdout is never read for them.** No provider run merges stderr into stdout: Lane A captures
+  the two pipes apart, the executor and the sandbox probes give each its own pipe, and the
+  `2>&1` in the code is the orchestrator's own detach log. The write lane's verify command merges
+  them, but no classifier reads it. A vendor refusal that reached us only on stdout would be a
+  bounded retry: at most one extra dispatch per lane, and a sandbox that refused spends no model
+  tokens. Matching it there would hand a model's answer the power to stop the batch.
+- **The plugin's own refusals are structural.** The plugin's jail refuses with an exit code
+  (`landlock_exec`'s 125 and 126 with its `landlock_exec:` note, read by
+  `landlock_dispatch.wrapper_evidence` before any output is parsed), a spawn that fails is a
+  launch error, and the sandbox ladder judges its probes by exit code. None of them, and no
+  `sandbox_fallback` decision, reads these markers.
 
 ## Usage reporting
 

@@ -15,6 +15,7 @@ import json
 
 import pytest
 
+from utils.json_extractor import extract_json_from_text
 from utils.providers.result_envelope import parse_result_envelope
 from tests.source_cache import source_tree
 
@@ -90,16 +91,6 @@ ENVELOPE_SHAPES = [
 # text extractor rather than raising.
 FALLTHROUGH_SHAPES = [
     (
-        "truncated-object",
-        '{"type": "result", ',
-        {
-            "success": False,
-            "error": "No valid JSON found in text",
-            "raw": '{"type": "result",',
-            "data": None,
-        },
-    ),
-    (
         "prose-stdout",
         "plain prose, no json",
         {
@@ -115,6 +106,62 @@ FALLTHROUGH_SHAPES = [
         {"success": True, "data": {"id": 3}},
     ),
 ]
+
+
+_CUT = (
+    "the runner's JSON envelope is incomplete: stdout ends inside it, so it "
+    "holds no finished answer"
+)
+_USAGE = '"usage": {"input_tokens": 1, "output_tokens": 1}'
+_WHOLE = json.dumps({"type": "result", "result": '[{"id": 1}]'})
+
+#: Stdout whose envelope (recognised by ``RESULT_ENVELOPE_SIGNATURE`` where
+#: the CLI writes it, ``base.read_stdout``) never closes: refused as
+#: incomplete, never handed to the text extractor, which returns the
+#: envelope's own bookkeeping.
+CUT_SHAPES = [
+    ("truncated-object", '{"type": "result", '),
+    # Cut inside its answer, after the bookkeeping that extraction would serve.
+    ("cut-after-bookkeeping", '{"type": "result", ' + _USAGE + ', "result": "[{\\"id\\": 1}'),
+    # claude-code 2.1.319's key order (tests/fixtures/claude-code/).
+    ("captured-order", '{"duration_api_ms": 1, ' + _USAGE + ', "result": "x'),
+    ("ansi-then-cut", '\x1b[32m{"type": "result", ' + _USAGE + ', "result": "x'),
+    ("json-log-then-cut", '{"level": "info"}\n{"type": "result", ' + _USAGE + ', "result": "x'),
+]
+
+#: The envelope's opening behind plain text, cut or whole: ambiguous, refused.
+AMBIGUOUS_SHAPES = [
+    ("leading-line-then-cut", 'notice\n{"type": "result", ' + _USAGE + ', "result": "x'),
+    ("log-line-then-cut", '[INFO] starting\n{"type": "result", ' + _USAGE + ', "result": "x'),
+    ("inline-then-cut", 'notice: {"type": "result", ' + _USAGE + ', "result": "x'),
+    ("leading-line", "notice\n" + _WHOLE),
+    ("log-lines", "[INFO] starting\n" + _WHOLE + "\n[INFO] done"),
+]
+
+#: A whole envelope where the CLI writes it, with text around it: read from
+#: its ``result`` field.
+SURROUNDED_SHAPES = [
+    ("trailing-line", _WHOLE + "\nwarning: x"),
+    ("trailing-log", _WHOLE + "\n[INFO] done"),
+    ("ansi", "\x1b[32m" + _WHOLE + "\x1b[0m"),
+    ("json-logs", '{"level": "info"}\n' + _WHOLE + '\n{"level": "done"}'),
+]
+
+#: No envelope signature: the shared text extractor, unchanged. An object
+#: that opens on another key is an answer, even one holding ``usage``.
+ORDINARY_SHAPES = [
+    ("fenced-object", '```json\n{"findings": []}\n```'),
+    ("prose-then-object", 'Here is the result:\n{"findings": []}'),
+    ("object-then-prose", '{"findings": []}\nDone.'),
+    ("unsigned-object-then-prose", '{"usage": {"input_tokens": 1}}\nDone.'),
+]
+
+
+def _cut(stdout: str) -> dict:
+    return {
+        "success": False, "error": _CUT, "raw": stdout.strip(), "data": None,
+        "incomplete": True,
+    }
 
 
 def _adapters():
@@ -144,6 +191,42 @@ class TestSharedEnvelopeParser:
     def test_non_envelope_stdout_falls_through(self, shape, stdout, expected):
         assert parse_result_envelope(stdout) == expected
 
+    @pytest.mark.parametrize("shape,stdout", CUT_SHAPES, ids=[s for s, _ in CUT_SHAPES])
+    def test_a_cut_envelope_is_refused_as_incomplete(self, shape, stdout):
+        assert parse_result_envelope(stdout) == _cut(stdout)
+
+    @pytest.mark.parametrize(
+        "shape,stdout", AMBIGUOUS_SHAPES, ids=[s for s, _ in AMBIGUOUS_SHAPES]
+    )
+    def test_an_envelope_behind_plain_text_is_refused(self, shape, stdout):
+        parsed = parse_result_envelope(stdout)
+        assert parsed["success"] is False and parsed["data"] is None
+        assert "incomplete" not in parsed
+
+    @pytest.mark.parametrize(
+        "shape,stdout", SURROUNDED_SHAPES, ids=[s for s, _ in SURROUNDED_SHAPES]
+    )
+    def test_a_whole_envelope_amid_other_text_is_unwrapped(self, shape, stdout):
+        assert parse_result_envelope(stdout) == {"success": True, "data": [{"id": 1}]}
+
+    @pytest.mark.parametrize(
+        "shape,stdout", ORDINARY_SHAPES, ids=[s for s, _ in ORDINARY_SHAPES]
+    )
+    def test_an_answer_without_the_signature_goes_to_text_extraction(self, shape, stdout):
+        assert parse_result_envelope(stdout) == extract_json_from_text(
+            stdout.strip(), prefer_arrays=True
+        )
+        assert parse_result_envelope(stdout)["success"] is True
+
+    def test_an_envelope_without_its_result_field_is_no_answer(self):
+        stdout = json.dumps({"type": "result", "subtype": "success", "usage": {"a": 1}})
+        assert parse_result_envelope(stdout) == {
+            "success": False,
+            "error": "the result envelope carries no result field",
+            "raw": stdout,
+            "data": None,
+        }
+
     def test_leading_and_trailing_whitespace_is_stripped(self):
         payload = json.dumps({"type": "result", "result": '[{"id": 1}]'})
         assert parse_result_envelope(f"\n  {payload}  \n") == {
@@ -167,6 +250,15 @@ class TestBothAdaptersDelegate:
         }
         assert results["cursor-agent"] == expected
         assert results["claude-code"] == expected
+
+    @pytest.mark.parametrize(
+        "shape,stdout",
+        CUT_SHAPES + AMBIGUOUS_SHAPES + SURROUNDED_SHAPES + ORDINARY_SHAPES,
+        ids=[s for s, _ in CUT_SHAPES + AMBIGUOUS_SHAPES + SURROUNDED_SHAPES + ORDINARY_SHAPES],
+    )
+    def test_both_read_a_non_whole_stdout_as_the_shared_parser(self, shape, stdout):
+        for provider in _adapters().values():
+            assert provider.parse_output(stdout, "") == parse_result_envelope(stdout)
 
     def test_neither_adapter_keeps_its_own_copy(self):
         """Both `parse_output` bodies are the shared call, not 34 lines each.

@@ -105,7 +105,7 @@ rows:
       base.CONNECTION_ERROR_MARKERS, so the classification is None. Recorded, not
       fixed — see the README.
     expect:
-      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U83 (PROV-1: exit-0 parity, adapter not EXIT0_CLASSIFIABLE)"}
+      lane_status: {lane_a: null, lane_b: unparseable_result, by_design: "not EXIT0_CLASSIFIABLE: goose writes its exit-0 diagnoses as assistant text, indistinguishable from a model turn it did not stamp; only its exit-1 401 has a structured error part; the fan-out stops on it, the executor keeps its one parse-failure retry"}
       salvage: none
       success: false
       error_contains: ["No valid JSON found in text"]
@@ -136,7 +136,7 @@ rows:
       byte-shape identical to `error-envelope` below, which is itself the
       finding recorded there.
     expect:
-      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U83 (PROV-1: exit-0 parity, adapter not EXIT0_CLASSIFIABLE)"}
+      lane_status: {lane_a: null, lane_b: unparseable_result, by_design: "not EXIT0_CLASSIFIABLE: goose writes its exit-0 diagnoses as assistant text, indistinguishable from a model turn it did not stamp; only its exit-1 401 has a structured error part; the fan-out stops on it, the executor keeps its one parse-failure retry"}
       salvage: none
       success: false
       error_contains: ["No valid JSON found in text"]
@@ -195,7 +195,7 @@ rows:
       Nothing distinguishes a 200-carrying-an-error from a model that said
       nothing, and no vendor text reaches any pattern table.
     expect:
-      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U83 (PROV-1: exit-0 parity, adapter not EXIT0_CLASSIFIABLE)"}
+      lane_status: {lane_a: null, lane_b: unparseable_result, by_design: "not EXIT0_CLASSIFIABLE: goose writes its exit-0 diagnoses as assistant text, indistinguishable from a model turn it did not stamp; only its exit-1 401 has a structured error part; the fan-out stops on it, the executor keeps its one parse-failure retry"}
       salvage: none
       success: false
       error_contains: ["No valid JSON found in text"]
@@ -224,7 +224,7 @@ rows:
       (`500 Internal Server Error`), which base.SERVER_ERROR_MARKERS matches, and
       the exit-0 marker is consulted last by construction (§7.2 step 6).
     expect:
-      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U83 (PROV-1: exit-0 parity, adapter not EXIT0_CLASSIFIABLE)"}
+      lane_status: {lane_a: null, lane_b: unparseable_result, by_design: "not EXIT0_CLASSIFIABLE: goose writes its exit-0 diagnoses as assistant text, indistinguishable from a model turn it did not stamp; only its exit-1 401 has a structured error part; the fan-out stops on it, the executor keeps its one parse-failure retry"}
       salvage: none
       success: false
       error_contains: ["Ran into this error:"]
@@ -306,7 +306,7 @@ rows:
       an executor-level re-dispatch of a rate-limited goose slot doubles a wait
       the CLI already served (§7.6(b)'s rule 6b).
     expect:
-      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U83 (PROV-1: exit-0 parity, adapter not EXIT0_CLASSIFIABLE)"}
+      lane_status: {lane_a: null, lane_b: unparseable_result, by_design: "not EXIT0_CLASSIFIABLE: goose writes its exit-0 diagnoses as assistant text, indistinguishable from a model turn it did not stamp; only its exit-1 401 has a structured error part; the fan-out stops on it, the executor keeps its one parse-failure retry"}
       salvage: none
       success: false
       error_contains: ["Rate limit exceeded"]
@@ -330,7 +330,7 @@ rows:
       makes a stray `:effort` suffix findable; the retry ladder above it is the
       cost, and it is recorded in `requests: 10`.
     expect:
-      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U83 (PROV-1: exit-0 parity, adapter not EXIT0_CLASSIFIABLE)"}
+      lane_status: {lane_a: null, lane_b: unparseable_result, by_design: "not EXIT0_CLASSIFIABLE: goose writes its exit-0 diagnoses as assistant text, indistinguishable from a model turn it did not stamp; only its exit-1 401 has a structured error part; the fan-out stops on it, the executor keeps its one parse-failure retry"}
       salvage: none
       success: false
       raw_contains:
@@ -364,7 +364,7 @@ rows:
       compaction attempt is inside the capture (request 4; 1.41.0 made five in
       0.26 s).
     expect:
-      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U83 (PROV-1: exit-0 parity, adapter not EXIT0_CLASSIFIABLE)"}
+      lane_status: {lane_a: null, lane_b: unparseable_result, by_design: "not EXIT0_CLASSIFIABLE: goose writes its exit-0 diagnoses as assistant text, indistinguishable from a model turn it did not stamp; only its exit-1 401 has a structured error part; the fan-out stops on it, the executor keeps its one parse-failure retry"}
       salvage: none
       success: false
       error_contains: ["No valid JSON found in text"]
@@ -394,7 +394,7 @@ rows:
       an extraction failure, and `Network error` matches nothing in
       base.CONNECTION_ERROR_MARKERS, so the classification is None.
     expect:
-      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U83 (PROV-1: exit-0 parity, adapter not EXIT0_CLASSIFIABLE)"}
+      lane_status: {lane_a: null, lane_b: unparseable_result, by_design: "not EXIT0_CLASSIFIABLE: goose writes its exit-0 diagnoses as assistant text, indistinguishable from a model turn it did not stamp; only its exit-1 401 has a structured error part; the fan-out stops on it, the executor keeps its one parse-failure retry"}
       salvage: none
       success: false
       error_contains: ["No valid JSON found in text"]

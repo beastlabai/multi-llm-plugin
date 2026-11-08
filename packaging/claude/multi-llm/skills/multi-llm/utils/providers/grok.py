@@ -6,12 +6,17 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..json_extractor import extract_json_from_text
 from .base import (
+    LAUNCH_DIAGNOSTICS_STDERR,
     REASONING_LADDER,
     InternalRetryEnvelope,
     LLMProvider,
     ReasoningLadder,
+    STDOUT_ENVELOPE,
+    STDOUT_PLAIN,
     StructuredSchema,
-    envelope_without_answer,
+    diagnostic_streams,
+    envelope_signature,
+    read_stdout,
     split_reasoning_effort,
 )
 
@@ -283,9 +288,21 @@ class GrokProvider(LLMProvider):
 
     #: :attr:`~.base.LLMProvider.EXIT0_CLASSIFIABLE`, reviewed: grok prints one
     #: envelope whose ``text`` is the answer, or its own ``{"type": "error"}``
-    #: object. :meth:`classify_exit_zero` reads the envelope without ``text``,
-    #: and a stdout cut inside the envelope not at all.
+    #: object. :meth:`vendor_text` reads the envelope without ``text``, and a
+    #: cut or ambiguous stdout not at all.
     EXIT0_CLASSIFIABLE = True
+
+    #: :attr:`~.base.LLMProvider.LAUNCH_DIAGNOSTICS`, from the captures: grok's stderr is its
+    #: own ``Error: …`` line (tests/fixtures/grok); the turn rides the stdout envelope.
+    LAUNCH_DIAGNOSTICS = LAUNCH_DIAGNOSTICS_STDERR
+
+    #: :attr:`~.base.LLMProvider.ENVELOPE_SIGNATURE`, from the captures: grok's answer envelope
+    #: opens on ``text`` and its error record on ``"type": "error"`` (tests/fixtures/grok/).
+    ENVELOPE_SIGNATURE = envelope_signature("text", ("type", "error"))
+
+    #: :attr:`~.base.LLMProvider.ENVELOPE_ANSWER_FIELDS`: the answer, whatever
+    #: ``stopReason`` says; grok's error record has none.
+    ENVELOPE_ANSWER_FIELDS = ("text",)
 
     @property
     def name(self) -> str:
@@ -359,81 +376,70 @@ class GrokProvider(LLMProvider):
         return cmd
 
     def vendor_text(self, stdout: str, stderr: str) -> Tuple[str, str]:
-        """``("", stderr)`` for a finished turn's envelope; else the capture.
+        """:func:`base.diagnostic_streams`: the envelope without ``text``.
 
         Measured on the committed rows: every failure is one
-        ``{"type": "error", "message": …}`` object (exit 1), and a finished
-        turn is ``{"text", "stopReason", "sessionId", "requestId"}``, whose
-        ``text`` is the model's own answer and so never the vendor's verdict.
-        Any other stdout, including one that is not one JSON object, is
-        returned unchanged; stderr is never reduced.
+        ``{"type": "error", "message": …}`` object (exit 1), read whole, and a
+        finished turn is ``{"text", "stopReason", "sessionId", "requestId"}``,
+        whose ``text`` is the model's own answer and so never the vendor's
+        verdict. stderr is never reduced.
         """
-        try:
-            envelope = json.loads(stdout) if stdout and stdout.strip() else None
-            if (
-                isinstance(envelope, dict) and isinstance(envelope.get("text"), str)
-                and envelope.get("type") != "error"
-            ):
-                return "", stderr
-        except Exception:  # noqa: BLE001 - a failed reduction returns its input
-            pass
-        return stdout, stderr
-
-    def classify_exit_zero(self, stdout: str, stderr: str) -> Optional[str]:
-        """:meth:`classify_failure` over the envelope without ``text``.
-
-        ``text`` is the model's answer whatever ``stopReason`` says, so it is
-        taken out and a stdout cut inside the envelope is dropped
-        (:func:`base.envelope_without_answer`); grok's own ``{"type":
-        "error"}`` object has no ``text`` and is read whole
-        (``EXIT0_CLASSIFIABLE``).
-        """
-        return self.classify_failure(
-            envelope_without_answer(stdout, ("text",)), stderr, 0,
-        )
+        return diagnostic_streams(stdout, stderr, self)
 
     def parse_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
         """Parse JSON wrapper output from Grok Build CLI."""
         stdout = stdout.strip()
-        try:
-            wrapper = json.loads(stdout)
-            if isinstance(wrapper, dict) and "text" in wrapper:
-                text = wrapper["text"]
-                if isinstance(text, str):
-                    text = text.strip()
-                    if not text:
-                        return {"success": False, "error": "Empty text response", "raw": stdout, "data": None}
-                    if text.startswith(("[", "{")):
-                        try:
-                            return {"success": True, "data": json.loads(text)}
-                        except json.JSONDecodeError:
-                            pass
-                    return extract_json_from_text(text, prefer_arrays=True)
-                return {"success": True, "data": text}
-            # GROK'S ERROR ENVELOPE IS A DICT WITHOUT `text`, and the catch-all
-            # below used to hand it back as the ANSWER. Measured 2026-08-19 on the
-            # fixture capture: ten distinct injected failures — 401, 404, 400
-            # context-length, 500, a cut stream, a zero-byte body, an HTTP-200
-            # error document — every one of them arrives as
-            # `{"type":"error","message":"Internal error: …"}`, and every one of
-            # them returned `success: True` with that envelope as `data`. Only the
-            # nonzero exit code stood between a fan-out slot and an error string
-            # recorded as a model's review. `type == "error"` is grok's own
-            # discriminator; `message` carries the upstream text the classifier
-            # then reads.
-            if isinstance(wrapper, dict) and wrapper.get("type") == "error":
-                message = wrapper.get("message")
-                if not isinstance(message, str) or not message.strip():
-                    message = json.dumps(wrapper)
-                return {"success": False, "error": message.strip(),
+        shape = read_stdout(stdout, self.ENVELOPE_SIGNATURE)
+        if shape.kind == STDOUT_ENVELOPE:
+            wrapper = shape.value
+        elif shape.kind != STDOUT_PLAIN:
+            return shape.failure("grok", stdout)
+        else:
+            try:
+                wrapper = json.loads(stdout)
+            except json.JSONDecodeError as e:
+                # Try fallback extraction on raw stdout
+                fallback = extract_json_from_text(stdout, prefer_arrays=True)
+                if fallback.get("success"):
+                    return fallback
+                return {"success": False, "error": f"JSON parse error: {e}",
                         "raw": stdout, "data": None}
-            return {"success": True, "data": wrapper}
-        except json.JSONDecodeError as e:
-            # Try fallback extraction on raw stdout
-            fallback = extract_json_from_text(stdout, prefer_arrays=True)
-            if fallback.get("success"):
-                return fallback
-            return {"success": False, "error": f"JSON parse error: {e}", "raw": stdout, "data": None}
+        if isinstance(wrapper, dict) and "text" in wrapper:
+            text = wrapper["text"]
+            if isinstance(text, str):
+                text = text.strip()
+                if not text:
+                    return {"success": False, "error": "Empty text response", "raw": stdout, "data": None}
+                if text.startswith(("[", "{")):
+                    try:
+                        return {"success": True, "data": json.loads(text)}
+                    except json.JSONDecodeError:
+                        pass
+                return extract_json_from_text(text, prefer_arrays=True)
+            return {"success": True, "data": text}
+        # GROK'S ERROR ENVELOPE IS A DICT WITHOUT `text`, and the catch-all
+        # below used to hand it back as the ANSWER. Measured 2026-08-19 on the
+        # fixture capture: ten distinct injected failures — 401, 404, 400
+        # context-length, 500, a cut stream, a zero-byte body, an HTTP-200
+        # error document — every one of them arrives as
+        # `{"type":"error","message":"Internal error: …"}`, and every one of
+        # them returned `success: True` with that envelope as `data`. Only the
+        # nonzero exit code stood between a fan-out slot and an error string
+        # recorded as a model's review. `type == "error"` is grok's own
+        # discriminator; `message` carries the upstream text the classifier
+        # then reads.
+        if isinstance(wrapper, dict) and wrapper.get("type") == "error":
+            message = wrapper.get("message")
+            if not isinstance(message, str) or not message.strip():
+                message = json.dumps(wrapper)
+            return {"success": False, "error": message.strip(),
+                    "raw": stdout, "data": None}
+        if isinstance(wrapper, dict) and "sessionId" in wrapper:
+            # grok's envelope without its answer field: the bookkeeping is
+            # not an answer. Another JSON object is the answer itself.
+            return {"success": False, "error": "grok's envelope carries no text field",
+                    "raw": stdout, "data": None}
+        return {"success": True, "data": wrapper}
 
     def salvage_text(self, stdout: str) -> Optional[str]:
         """The wrapper's ``text``, never the wrapper or grok's error body (D2.5).

@@ -1120,10 +1120,22 @@ class TestLaneANetworkRetryReadsTheSharedClassifier:
 class TestSandboxMarkers:
     """`bwrap:` lines are the machine's fault, fatal, and never `permission_denied`."""
 
+    #: The measured refusals (`base.SANDBOX_MARKERS` names each capture).
     BWRAP_LINES = [
         "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted",
         "bwrap: setting up uid map: Permission denied",
+        "bwrap: No permissions to create a new namespace",
+    ]
+
+    #: Bubblewrap words on stderr that are no measured refusal: an unmeasured
+    #: line (no capture prints it), a tool's or a log's mention, a refusal
+    #: quoted mid-line. None decides the batch-fatal verdict.
+    NOT_A_REFUSAL = [
         "error: bubblewrap failed to start the sandbox",
+        "| Read docs/bubblewrap.md",
+        "warning: bubblewrap is not installed; tools run unsandboxed",
+        "> bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted",
+        "  bwrap: setting up uid map: Permission denied",
     ]
 
     @pytest.mark.parametrize("stream", BWRAP_LINES)
@@ -1133,10 +1145,23 @@ class TestSandboxMarkers:
         assert pbase.classify_streams("", stream, exit_code=1) == (
             pbase.CATEGORY_SANDBOX_UNAVAILABLE
         )
-        # Wherever the line sits — this haystack is `stdout\nstderr`.
+        # Whatever stdout holds beside it.
         assert pbase.classify_streams("event: started\n", stream + "\n", exit_code=1) == (
             pbase.CATEGORY_SANDBOX_UNAVAILABLE
         )
+
+    @pytest.mark.parametrize("stream", BWRAP_LINES)
+    def test_the_line_on_stdout_never_fails_the_batch(self, stream):
+        """Read off stderr alone: the verdict fails the executor's batch, and a
+        failed run's stdout is often an answer quoting the line. (A quoted
+        "Permission denied" still reads as the per-task ``permission_denied``.)"""
+        from utils.providers import base as pbase
+        from utils.retry_ladder import FATAL_STATUSES
+
+        for stdout in (stream, f"The plan quotes:\n{stream}\n"):
+            for stderr in ("", "Connection reset by peer"):
+                verdict = pbase.classify_streams(stdout, stderr, exit_code=1)
+                assert verdict not in FATAL_STATUSES, (stdout, stderr, verdict)
 
     def test_the_category_is_the_ladder_status_at_rung_1(self):
         from utils import review_orchestrator_base as rob
@@ -1150,6 +1175,14 @@ class TestSandboxMarkers:
         assert rob._LADDER_STATUS_BY_CATEGORY.get(category, category) in FATAL_STATUSES
         assert RUNG_BY_STATUS[STATUS_SANDBOX_UNAVAILABLE] == 1
         assert category not in pbase.RETRYABLE_FAILURE_CATEGORIES
+
+    @pytest.mark.parametrize("stream", NOT_A_REFUSAL)
+    def test_only_a_whole_measured_line_is_the_sandbox_category(self, stream):
+        from utils.providers import base as pbase
+
+        assert pbase.classify_streams("", stream, exit_code=1) != (
+            pbase.CATEGORY_SANDBOX_UNAVAILABLE
+        )
 
     def test_a_bwrap_word_inside_prose_is_not_a_sandbox_failure(self):
         """`^bwrap: ` is anchored to a line start; a review quoting the word

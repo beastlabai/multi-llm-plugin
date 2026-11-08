@@ -25,6 +25,7 @@ import warnings
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Tuple
 
 from .base import (
+    LAUNCH_DIAGNOSTICS_NONE,
     CATEGORY_INVALID_MODEL,
     CATEGORY_PERMISSION_DENIED,
     CATEGORY_SERVER_ERROR,
@@ -293,6 +294,12 @@ class FxProvider(LLMProvider):
     #: ``error`` and ``auth_failure`` fields; neither is ever the model's
     #: ``final_output``, and a cut envelope parses to none.
     EXIT0_CLASSIFIABLE = True
+
+    #: :attr:`~.base.LLMProvider.LAUNCH_DIAGNOSTICS`, from the captures: fx relays its shell
+    #: tool on stderr, the command and then its output unmarked (``Running pwd; …`` then the
+    #: directory it printed, tests/fixtures/fx/shell-reviewed), so no line there can be told
+    #: apart from a tool's. fx classifies from its envelope anyway (:meth:`classify_failure`).
+    LAUNCH_DIAGNOSTICS = LAUNCH_DIAGNOSTICS_NONE
 
     @property
     def name(self) -> str:

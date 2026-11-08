@@ -454,7 +454,11 @@ under its own name. `spawn_failed` (an install or argv refusal, such as omp's un
 name) stops both lanes on a non-zero exit and fails the executor's batch, so it is read only off
 exit 127, stderr (`base.STDERR_LAUNCH_FAILURE_MARKERS`: a shell's `command not found`, omp's
 refusals) and an adapter's own refusal shape (vibe's config refusal opening stdout), never off a
-model's answer or a tool's output on stdout. One verdict stops on the
+model's answer or a tool's output on stdout. `sandbox_unavailable` fails the batch too, so its
+bubblewrap refusals (`base.SANDBOX_MARKERS`) are whole measured lines read off stderr alone: an
+answer that explains bubblewrap is not a broken sandbox. Both read only the stderr of an adapter
+whose CLI writes it alone, never one that relays a model's or a tool's words there
+([launch diagnostics](providers.md#launch-diagnostics)). One verdict stops on the
 fan-out and is retried once by the executor, which does not forward it: `permission_denied` (a 403
 or a denied tool), which can fail one task and not its neighbour, so the difference is deliberate.
 On both lanes a run killed at its deadline is `timeout` whatever
@@ -471,7 +475,10 @@ decide a retry, a backoff or a stop on either lane**. Both lanes read such a run
 `providers/base.exit_zero_failure_category`. It gives a verdict only for an adapter that declares
 `EXIT0_CLASSIFIABLE = True`, a reviewed claim that its `classify_exit_zero` never reads the answer,
 in a complete envelope or an interrupted one: claude-code, cursor-agent, gemini and grok read their
-envelope without the answer field (and a cut envelope not at all), and codex, opencode, omp, pi,
+envelope without the answer field (and a cut or ambiguous stdout not at all), the one the parser
+reads, through one reduction on every exit code ([reading a capture](providers.md#reading-a-capture));
+the executor's failure reason quotes the same reduced streams, so an answer that quotes a diagnostic
+is never the quote of the CLI's own; and codex, opencode, omp, pi,
 cline, kimi and fx through `vendor_text` reductions that keep only the CLI's own events. Each
 adapter's declaration carries its reason. agy, aider, goose, kilocode, copilot, muse, qwen-code and
 vibe declare `False`: their answer cannot be told apart from what the CLI wrote (aider's answer cut

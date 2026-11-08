@@ -48,12 +48,22 @@ from tests.test_provider_fixture_rows import (  # noqa: E402
 )
 from utils.provider_outcome import Capture  # noqa: E402
 from utils.provider_registry import _PROVIDERS  # noqa: E402
-from utils.providers.base import classify_streams  # noqa: E402
+from utils.json_extractor import extract_json_from_text  # noqa: E402
+from utils.providers.base import (  # noqa: E402
+    LAUNCH_DIAGNOSTICS_NONE,
+    LAUNCH_DIAGNOSTICS_STDERR,
+    STDOUT_ENVELOPE,
+    classify_streams,
+    read_stdout,
+)
 from utils.retry_ladder import (  # noqa: E402
     BACKOFF_STATUSES,
+    RetryLadder,
     FATAL_STATUSES,
     STATUS_BUDGET_EXHAUSTED,
     STATUS_CONTEXT_LENGTH_EXCEEDED,
+    STATUS_OK,
+    STATUS_SANDBOX_UNAVAILABLE,
     STATUS_SPAWN_FAILED,
     STATUS_UNPARSEABLE,
 )
@@ -62,6 +72,16 @@ FIXTURES = Path(__file__).parent / "fixtures"
 
 #: One answer per kind. ``neutral`` is the baseline every other kind must
 #: match; each other one would decide a verdict if the tables read it.
+#: Sandbox words an answer may use. ``sandbox_unavailable`` fails the
+#: executor's whole batch, so it is read off stderr alone, as whole measured
+#: lines (``base.SANDBOX_MARKERS``): none of these is one, on either stream.
+SANDBOX_PROSE = {
+    "bubblewrap": "The plan should explain bubblewrap.",
+    "bwrap-line": "bwrap: loopback: Failed RTM_NEWADDR",
+    "landlock": "The jail applies a Landlock ruleset before the exec.",
+    "seccomp": "The container's seccomp profile blocks unshare.",
+    "sandbox-unavailable": "doctor reports sandbox unavailable on Ubuntu 24.04.",
+}
 PROSE = {
     "neutral": "The implementation needs a focused regression test.",
     "number": "I reviewed 429 files.",
@@ -69,6 +89,7 @@ PROSE = {
     "auth": "The plan says 401 Unauthorized means an invalid api key.",
     "context": "The plan documents the maximum context length of 128000 tokens.",
     "launch": "The plan documents command not found failures.",
+    **SANDBOX_PROSE,
 }
 KINDS = [kind for kind in PROSE if kind != "neutral"]
 SHAPES = ("complete", "unfinished", "cut")
@@ -163,7 +184,8 @@ def _opencode(prose: str) -> str:
 
 #: The complete success shape, per adapter, with the answer as ``prose``.
 COMPLETE = {
-    "agy": lambda p: json.dumps({"status": "SUCCESS", "response": p}),
+    # agy's envelope opens on `conversation_id` (tests/fixtures/agy/auth-error).
+    "agy": lambda p: json.dumps({"conversation_id": "conv-1", "status": "SUCCESS", "response": p}),
     "aider": lambda p: _swap_answer("aider", _success("aider"), p),
     "claude-code": lambda p: _envelope("claude-code", "success.stdout.txt", ["result"], p),
     "cline": _cline,
@@ -187,7 +209,9 @@ COMPLETE = {
 #: A single envelope has no record to stop after, so its unfinished shape is
 #: the envelope flagging the run as failed with the answer still in it.
 FLAGGED = {
-    "agy": lambda p: json.dumps({"status": "ERROR", "error": "Request failed.", "response": p}),
+    "agy": lambda p: json.dumps(
+        {"conversation_id": "", "status": "ERROR", "error": "Request failed.", "response": p}
+    ),
     "claude-code": lambda p: _envelope(
         "claude-code", "success.stdout.txt", ["result"], p,
         is_error=True, subtype="error_during_execution", terminal_reason="aborted",
@@ -265,6 +289,12 @@ def test_each_kind_would_decide_a_verdict_unreduced(kind):
         assert classify_streams("", PROSE[kind], 1) == STATUS_SPAWN_FAILED
         assert classify_streams(PROSE[kind], "", 1) is None
         return
+    if kind in SANDBOX_PROSE:
+        # A sandbox verdict is a whole measured line on stderr; these words
+        # are none, on either stream.
+        assert classify_streams(PROSE[kind], "", 1) is None
+        assert classify_streams("", PROSE[kind], 1) is None
+        return
     assert classify_streams(PROSE[kind], "", 1) is not None
 
 
@@ -275,11 +305,12 @@ def test_no_answer_decides_either_lane(provider, shape):
     baseline = BUILD[shape](provider, PROSE["neutral"])
     lane_a, lane_b = _lanes(provider, baseline)
     assert lane_a not in FORBIDDEN and lane_b not in FORBIDDEN, (provider, shape, lane_a, lane_b)
-    # A cut envelope can parse (goose's echoed prompt, claude-code's
-    # bookkeeping hold JSON of their own): then nothing is classified at all,
-    # and the equality below still holds.
-    failed = adapter.parse_output(baseline, "").get("success") is not True
-    if failed and not adapter.EXIT0_CLASSIFIABLE:
+    # A prose answer is no answer in any shape. A cut envelope's nested JSON
+    # (goose's echoed prompt, claude-code's bookkeeping) is never served as
+    # one: the envelope is incomplete, so the parse fails.
+    parsed = adapter.parse_output(baseline, "")
+    assert parsed.get("success") is not True, (provider, shape, parsed.get("data"))
+    if not adapter.EXIT0_CLASSIFIABLE:
         assert (lane_a, lane_b) == (None, STATUS_UNPARSEABLE), (
             f"{provider}/{shape}: an adapter that cannot isolate its diagnostics "
             f"is never classified on an exit 0"
@@ -414,6 +445,287 @@ def test_a_quoted_launch_failure_on_a_failed_exit_keeps_its_retry(provider):
     )
 
 
+@pytest.mark.parametrize("shape", SHAPES)
+@pytest.mark.parametrize("provider", sorted(COMPLETE))
+def test_sandbox_words_on_a_failed_exit_keep_the_transport_verdict(provider, shape):
+    """Codex's case on every adapter and shape: an answer that explains
+    bubblewrap (or Landlock, seccomp, an unavailable sandbox), a non-zero
+    exit, stderr naming a dropped connection. The answer's words move
+    neither lane, and nothing is batch-fatal: ``sandbox_unavailable`` is
+    read off stderr alone."""
+    stderr = "Connection reset by peer"
+    baseline = _lanes(provider, BUILD[shape](provider, PROSE["neutral"]), 1, stderr)
+    assert not set(baseline) & FATAL_STATUSES, (provider, shape, baseline)
+    for kind in ("launch", *SANDBOX_PROSE):
+        found = _lanes(provider, BUILD[shape](provider, PROSE[kind]), 1, stderr)
+        assert found == baseline, (
+            f"{provider}/{shape}/{kind} at exit 1: the answer moved the lanes "
+            f"from {baseline} to {found}"
+        )
+
+
+#: bubblewrap's measured refusals, as it prints them (``base.SANDBOX_MARKERS``
+#: names the capture of each).
+MEASURED_BWRAP_LINES = (
+    "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted\n",
+    "bwrap: setting up uid map: Permission denied\n",
+    "bwrap: No permissions to create a new namespace\n",
+)
+
+#: The adapters whose stderr is the CLI's own, and the ones whose stderr also
+#: relays a model's or a tool's words (``LLMProvider.LAUNCH_DIAGNOSTICS``).
+CLI_STDERR = sorted(
+    p for p in COMPLETE if _PROVIDERS[p].LAUNCH_DIAGNOSTICS == LAUNCH_DIAGNOSTICS_STDERR
+)
+RELAYED_STDERR = sorted(
+    p for p in COMPLETE if _PROVIDERS[p].LAUNCH_DIAGNOSTICS == LAUNCH_DIAGNOSTICS_NONE
+)
+
+#: stderr a relaying CLI can print: kilocode's banner and tool trace naming
+#: what the model read or ran, then the tool's own output.
+RELAYED_TRACES = (
+    "> code · stub-model\n| Read docs/bubblewrap.md\nConnection reset by peer",
+    "> code · stub-model\n| Bash cat missing\nbash: command not found\nConnection reset by peer",
+    "| Bash ./probe.sh\nbwrap: loopback: Failed RTM_NEWADDR: Operation not permitted\n",
+)
+
+
+def _extra_dispatches(provider: str, status: object) -> int:
+    """How many more times one lane dispatches a run that keeps ending on
+    ``status``: the ladder both lanes use, with this adapter's envelope."""
+    ladder = RetryLadder(
+        timeout=100000, retries=1,
+        envelope=getattr(_PROVIDERS[provider], "internal_retries", None),
+        now=lambda: 0, jitter=lambda: 0,
+    )
+    for extra in range(30):
+        if ladder.next_attempt() is None or not ladder.record(status).retry:
+            return extra
+    raise AssertionError(f"{provider}: {status} retries without bound")
+
+
+@pytest.mark.parametrize("stderr", MEASURED_BWRAP_LINES)
+@pytest.mark.parametrize("provider", CLI_STDERR)
+def test_bubblewraps_own_refusal_on_stderr_still_fails_the_batch(provider, stderr):
+    """The measured lines, on the stream bubblewrap writes them to, under any
+    answer of an adapter whose stderr is the CLI's own:
+    ``sandbox_unavailable`` on both lanes."""
+    stdout = COMPLETE[provider](PROSE["neutral"])
+    assert _lanes(provider, stdout, 1, stderr) == (
+        STATUS_SANDBOX_UNAVAILABLE, STATUS_SANDBOX_UNAVAILABLE,
+    )
+
+
+@pytest.mark.parametrize("stderr", MEASURED_BWRAP_LINES + RELAYED_TRACES)
+@pytest.mark.parametrize("provider", RELAYED_STDERR)
+def test_a_relaying_adapters_stderr_never_fails_the_batch(provider, stderr):
+    """On every adapter whose stderr also carries a
+    model's or a tool's words: a tool's ``bubblewrap``, its ``command not
+    found``, even a whole bwrap line, are no batch-fatal verdict. The run
+    keeps its bounded retry, at most one extra dispatch per lane."""
+    stdout = BUILD["cut"](provider, PROSE["neutral"])
+    lanes = _lanes(provider, stdout, 1, stderr)
+    assert not set(lanes) & FATAL_STATUSES, (provider, stderr, lanes)
+    assert all(_extra_dispatches(provider, status) <= 1 for status in lanes), lanes
+
+
+@pytest.mark.parametrize("line", MEASURED_BWRAP_LINES)
+@pytest.mark.parametrize("provider", sorted(COMPLETE))
+def test_a_refusal_merged_into_stdout_is_a_bounded_retry(provider, line):
+    """No provider run merges stderr into stdout (providers.md#launch-
+    diagnostics), and this pins what such a capture would be: a refusal on
+    stdout is model-bearing text, never a batch-fatal verdict, so it costs at
+    most one extra dispatch per lane."""
+    for stdout in (line, line + BUILD["cut"](provider, PROSE["neutral"])):
+        lanes = _lanes(provider, stdout, 1, "")
+        assert not set(lanes) & FATAL_STATUSES, (provider, stdout[:60], lanes)
+        assert all(_extra_dispatches(provider, status) <= 1 for status in lanes), lanes
+
+
+# ---------------------------------------------------------------------------
+# A cut envelope is no answer
+# ---------------------------------------------------------------------------
+
+#: A review's answer as JSON: its nested objects are what a text extraction
+#: over a cut capture would otherwise return.
+JSON_ANSWER = json.dumps([
+    {"severity": "HIGH", "title": "first", "detail": {"file": "a.py", "line": 3}},
+    {"severity": "LOW", "title": "second", "detail": {"file": "b.py", "line": 9}},
+])
+
+#: The adapters whose JSON mode prints one envelope (or one array of records)
+#: around the answer. kilocode's stdout is the answer itself, not an envelope.
+SINGLE_DOCUMENT = (
+    "agy", "claude-code", "cursor-agent", "fx", "gemini", "goose", "grok",
+    "qwen-code", "vibe",
+)
+
+
+@pytest.mark.parametrize("provider", SINGLE_DOCUMENT)
+def test_every_cut_of_an_envelope_is_a_parse_failure(provider):
+    """Wherever the capture stops, inside the answer or after it, an envelope
+    that does not close is refused: never its bookkeeping, goose's echoed
+    user turn or a piece of the answer served as the answer."""
+    adapter = _PROVIDERS[provider]
+    stdout = COMPLETE[provider](JSON_ANSWER)
+    assert json.loads(stdout) is not None
+    assert adapter.parse_output(stdout, "")["data"] == json.loads(JSON_ANSWER)
+    served = {
+        end: adapter.parse_output(stdout[:end], "").get("data")
+        for end in range(1, len(stdout))
+        if stdout[:end].strip() != stdout.strip()
+        and adapter.parse_output(stdout[:end], "").get("success") is True
+    }
+    assert not served, (provider, {end: str(data)[:80] for end, data in list(served.items())[:3]})
+
+
+#: The adapters that read their stdout by its envelope's signature
+#: (``ENVELOPE_SIGNATURE``, ``base.read_stdout``).
+PARTIAL_ENVELOPE_READERS = ("agy", "claude-code", "cursor-agent", "gemini", "goose", "grok")
+
+#: What can come ahead of the envelope. ANSI colour and a JSON log line leave
+#: it where the CLI writes it; a ``[``-led log line, an inline prefix and a
+#: banner make the capture ambiguous (``base.STDOUT_AMBIGUOUS``).
+PREFIXES = {
+    "bare": "",
+    "ansi": "\x1b[32m",
+    "json-log": '{"level":"info"}\n',
+    "log": "[INFO] starting\n",
+    "inline": "notice: ",
+    "banner": "Loaded 3 extensions\n",
+}
+#: The prefixes that keep the envelope where the CLI writes it.
+IN_PLACE = ("bare", "ansi", "json-log")
+
+#: Every shape of these adapters that stops inside the envelope (the others'
+#: unfinished shape is a whole envelope flagged as failed).
+_CUT_ENVELOPES = [(provider, "cut") for provider in PARTIAL_ENVELOPE_READERS] + [
+    ("goose", "unfinished"),
+]
+
+
+@pytest.mark.parametrize("prefix", PREFIXES)
+@pytest.mark.parametrize("provider,shape", _CUT_ENVELOPES,
+                         ids=[f"{p}-{s}" for p, s in _CUT_ENVELOPES])
+def test_a_cut_envelope_is_an_incomplete_parse_failure_on_both_lanes(provider, shape, prefix):
+    """A success capture cut inside its envelope, after any
+    banner, log line, inline prefix or colour. The parse fails, as
+    ``incomplete`` where the envelope sits where the CLI writes it (the ask
+    lane keeps any text as partial), and neither lane reads it as ``ok``:
+    the executor keeps its parse failure's one retry."""
+    stdout = PREFIXES[prefix] + BUILD[shape](provider, JSON_ANSWER)
+    with pytest.raises(ValueError):
+        json.loads(stdout)
+    parsed = _PROVIDERS[provider].parse_output(stdout, "")
+    assert parsed["success"] is False and parsed["data"] is None
+    assert bool(parsed.get("incomplete")) is (prefix in IN_PLACE)
+    lane_a, lane_b = _lanes(provider, stdout)
+    assert STATUS_OK not in (lane_a, lane_b)
+    assert (lane_a, lane_b) == _lanes(provider, BUILD[shape](provider, PROSE["neutral"]))
+    assert lane_b == STATUS_UNPARSEABLE and _retried(provider, lane_b)
+
+
+@pytest.mark.parametrize("shape", SHAPES)
+@pytest.mark.parametrize("prefix", PREFIXES)
+@pytest.mark.parametrize("provider", PARTIAL_ENVELOPE_READERS)
+def test_no_answer_decides_either_lane_behind_any_prefix(provider, prefix, shape):
+    """The classifier reads stdout by the parser's rule
+    (``base.diagnostic_streams``), so a prefix or colour ahead of the
+    envelope never hands the model's answer to it: every kind of answer
+    leaves both lanes where the neutral one does."""
+    baseline = _lanes(provider, PREFIXES[prefix] + BUILD[shape](provider, PROSE["neutral"]))
+    for kind in KINDS:
+        found = _lanes(provider, PREFIXES[prefix] + BUILD[shape](provider, PROSE[kind]))
+        assert found == baseline, (provider, prefix, shape, kind, found, baseline)
+
+
+#: Text around a whole envelope that leaves it where the CLI writes it:
+#: trailing text, colour, JSON log lines.
+SURROUNDINGS = {
+    "trailing-line": ("", "\nnotice"),
+    "trailing-log": ("", "\n[INFO] done in 3.2s"),
+    "ansi": ("\x1b[32m", "\x1b[0m"),
+    "json-logs": ('{"level":"info"}\n', '\n{"level":"info","msg":"done"}'),
+}
+
+#: Text ahead of a whole envelope that does not.
+LEADING_TEXT = {
+    "leading-line": "notice\n",
+    "log-line": "[INFO] starting\n",
+    "inline": "notice: ",
+}
+
+
+@pytest.mark.parametrize("surround", SURROUNDINGS)
+@pytest.mark.parametrize("provider", PARTIAL_ENVELOPE_READERS)
+def test_a_whole_envelope_amid_other_text_is_unwrapped(provider, surround):
+    """A complete envelope where the CLI writes it, with text around it, is
+    read as the whole stdout would be: its answer field, never the envelope
+    or its bookkeeping."""
+    adapter = _PROVIDERS[provider]
+    envelope = COMPLETE[provider](JSON_ANSWER)
+    before, after = SURROUNDINGS[surround]
+    parsed = adapter.parse_output(before + envelope + after, "")
+    assert parsed["success"] is True, (provider, surround, parsed.get("error"))
+    assert parsed["data"] == adapter.parse_output(envelope, "")["data"] == json.loads(JSON_ANSWER)
+
+
+@pytest.mark.parametrize("lead", LEADING_TEXT)
+@pytest.mark.parametrize("provider", PARTIAL_ENVELOPE_READERS)
+def test_a_whole_envelope_behind_plain_text_is_refused(provider, lead):
+    """Plain text ahead of the envelope could be a model's answer quoting
+    one, so the capture is ambiguous: no answer, a bounded retry."""
+    stdout = LEADING_TEXT[lead] + COMPLETE[provider](JSON_ANSWER)
+    parsed = _PROVIDERS[provider].parse_output(stdout, "")
+    assert parsed["success"] is False and parsed["data"] is None, (provider, lead)
+    lane_a, lane_b = _lanes(provider, stdout)
+    assert STATUS_OK not in (lane_a, lane_b) and _retried(provider, lane_b)
+
+
+#: Stdout with no envelope in it: a fenced or prose-wrapped answer.
+ORDINARY_ANSWERS = {
+    "fenced-object": '```json\n{"findings": []}\n```',
+    "prose-then-object": 'Here is the result:\n{"findings": []}',
+    "object-then-prose": '{"findings": []}\nDone.',
+    "fenced-array": "```json\n" + JSON_ANSWER + "\n```",
+    "prose-then-array": "Review:\n" + JSON_ANSWER,
+}
+
+
+@pytest.mark.parametrize("answer", ORDINARY_ANSWERS)
+@pytest.mark.parametrize("provider", PARTIAL_ENVELOPE_READERS)
+def test_an_answer_with_no_envelope_signature_goes_to_text_extraction(provider, answer):
+    """On all six fallback readers: without the adapter's
+    envelope signature, stdout gets the ordinary text extraction, unchanged."""
+    stdout = ORDINARY_ANSWERS[answer]
+    parsed = _PROVIDERS[provider].parse_output(stdout, "")
+    assert parsed == extract_json_from_text(stdout.strip(), prefer_arrays=True)
+    assert parsed["success"] is True and parsed["data"] in (
+        {"findings": []}, json.loads(JSON_ANSWER),
+    ), (provider, answer, parsed)
+
+
+@pytest.mark.parametrize("provider", PARTIAL_ENVELOPE_READERS)
+def test_the_signature_recognises_every_captured_envelope(provider):
+    """Each signature is the opening of the adapter's captured envelopes, so
+    every committed JSON envelope is read whole, behind a JSON log line too."""
+    adapter = _PROVIDERS[provider]
+    assert "ENVELOPE_SIGNATURE" in vars(type(adapter)), provider
+    envelopes = []
+    for path in sorted((FIXTURES / provider).glob("*.stdout*")):
+        try:
+            envelope = json.loads(path.read_text())
+        except ValueError:
+            continue
+        if isinstance(envelope, dict):
+            envelopes.append((path.name, envelope, path.read_text()))
+    assert envelopes, provider
+    for name, envelope, text in envelopes:
+        for before in ("", '{"level":"info"}\n'):
+            shape = read_stdout(before + text, adapter.ENVELOPE_SIGNATURE)
+            assert shape.kind == STDOUT_ENVELOPE and shape.value == envelope, name
+
+
 @pytest.mark.parametrize("stderr,exit_code", [
     ("bash: copilot: command not found", 127),
     ("bash: copilot: command not found", 1),
@@ -423,21 +735,3 @@ def test_the_launchers_own_refusal_is_still_spawn_failed(stderr, exit_code):
     assert _lanes("copilot", "", exit_code, stderr) == (
         STATUS_SPAWN_FAILED, STATUS_SPAWN_FAILED,
     )
-
-
-@pytest.mark.parametrize("stdout,expected", [
-    # The CLI's own plain text, with no envelope: kept as written.
-    ("Error: Authentication required. Please run 'agent login' first.",
-     "Error: Authentication required. Please run 'agent login' first."),
-    # An envelope: the answer field goes, everything else stays.
-    ('{"is_error": true, "result": "HTTP 429"}', '{"is_error": true}'),
-    # Plain lines before and after an envelope are the CLI's and stay.
-    ('Loaded cached credentials.\n{"result": "x", "stats": 1}\ntrailer',
-     'Loaded cached credentials.\n{"stats": 1}\ntrailer'),
-    # An envelope that never closes holds the answer somewhere: dropped.
-    ('note\n{"is_error": true, "result": "The plan says HTTP 429', "note\n"),
-])
-def test_envelope_without_answer(stdout, expected):
-    from utils.providers.base import envelope_without_answer
-
-    assert envelope_without_answer(stdout, ("result",)) == expected

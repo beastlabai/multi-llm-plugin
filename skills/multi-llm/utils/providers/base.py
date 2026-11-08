@@ -52,6 +52,13 @@ except ImportError:  # pragma: no cover - direct-script import shim
         STATUS_TIMEOUT,
     )
 
+# The one ANSI/OSC pattern (`utils.json_extractor` sits below the provider
+# layer, so the import closes no cycle).
+try:  # pragma: no cover - import shim mirrors the rest of utils/
+    from ..json_extractor import _ANSI_ESCAPE
+except ImportError:  # pragma: no cover - direct-script import shim
+    from utils.json_extractor import _ANSI_ESCAPE
+
 #: The three invocation profiles (D3e). ``generate`` is today's callee path (no
 #: tools, no workspace); ``agent-readonly`` is an agentic invocation with writes
 #: denied by the runner's own sandbox/permission mechanism and is what every
@@ -2467,23 +2474,32 @@ def _matches_marker(markers: Collection["Pattern[str]"], haystack: str) -> bool:
 #: The markers are deliberately specific phrases rather than the bare
 #: ``'not found'`` Lane A used: that one called **every** provider's failure
 #: "cursor-agent command not found", and it swallowed "model not found" too.
-#: bubblewrap's own words when it cannot start (D6). Measured on a stock Ubuntu
-#: 24.04 (``kernel.apparmor_restrict_unprivileged_userns=1``, no AppArmor
-#: profile granting ``/usr/bin/bwrap`` the ``userns`` right):
-#: ``bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`` under
-#: ``--unshare-net``, ``bwrap: setting up uid map: Permission denied`` without.
-#: codex and muse both sandbox through bubblewrap, so both die on these lines
-#: before any model is reached. The table is consulted **first** of the launch
-#: tuple, because the same lines also say "permission denied" / "operation not
-#: permitted" and would otherwise land on ``permission_denied`` — a per-task
-#: verdict, where this one is fatal to the batch and names a machine repair
-#: (``multi_llm.py doctor``). The haystack is lowercased before matching and is
-#: ``stdout\nstderr``, so the anchor is multiline and the words are lowercase.
+#: bubblewrap's own refusals when it cannot start (D6): whole lines, each
+#: anchored at a line start on the exact prefix of one measured refusal, so a
+#: line that only mentions bubblewrap is never one. The table is consulted
+#: **first** of the launch tuple, because the same lines also say "permission
+#: denied" / "operation not permitted" and would otherwise land on
+#: ``permission_denied`` — a per-task verdict, where this one is fatal to the
+#: batch and names a machine repair (``multi_llm.py doctor``). Read on
+#: **stderr only** (:data:`STDERR_LAUNCH_FAILURE_MARKERS`), and only the part
+#: of it the adapter's :attr:`LLMProvider.LAUNCH_DIAGNOSTICS` says the CLI
+#: wrote: a failed run's stdout is often a model's answer, and an answer or a
+#: tool's output that quotes these lines must not fail the batch. A vendor
+#: refusal that reaches us only on stdout is therefore a bounded retry (one
+#: extra dispatch per lane); see docs/development/providers.md#launch-diagnostics.
+#: The haystack is lowercased, so the anchors are multiline and the words
+#: lowercase. An unmeasured bubblewrap line is one transport retry, not fatal.
 SANDBOX_MARKERS = _markers(
-    r"(?m)^bwrap: ",
-    r"bubblewrap",
-    r"failed rtm_newaddr",
-    r"setting up uid map: permission denied",
+    # Stock Ubuntu 24.04 (`kernel.apparmor_restrict_unprivileged_userns=1`, no
+    # AppArmor profile granting /usr/bin/bwrap `userns`), under --unshare-net:
+    # doctor's `BWRAP_SELF_TEST` and the `codex sandbox` probe
+    # (`CodexProvider.sandbox_probe_command`), exit 1.
+    r"(?m)^bwrap: loopback: failed rtm_newaddr: ",
+    # The same host without --unshare-net (docs/hosts.md).
+    r"(?m)^bwrap: setting up uid map: ",
+    # Docker's default seccomp profile, codex 0.146.0 in the e2e image
+    # (2026-08-20, tests/test_container_live_provider.py INNER_USERNS_HISTORY).
+    r"(?m)^bwrap: no permissions to create a new namespace\b",
 )
 
 #: A non-zero exit from a ``sandbox_probe_command`` that says nothing about the
@@ -2508,10 +2524,10 @@ def sandbox_probe_inconclusive(text: str) -> bool:
 
 
 LAUNCH_FAILURE_MARKERS: Tuple[Tuple[str, Tuple["Pattern[str]", ...]], ...] = (
-    (CATEGORY_SANDBOX_UNAVAILABLE, SANDBOX_MARKERS),
-    # Read on stderr only: :data:`STDERR_LAUNCH_FAILURE_MARKERS` below. The row
-    # stays here for its place in the order (after the sandbox, before a
-    # permission denial).
+    # These two rows are read on stderr only: :data:`STDERR_LAUNCH_FAILURE_MARKERS`
+    # below. They stay here for their place in the order (the sandbox first,
+    # then a launch refusal, both before a permission denial).
+    (CATEGORY_SANDBOX_UNAVAILABLE, ()),
     (STATUS_SPAWN_FAILED, ()),
     (CATEGORY_PERMISSION_DENIED, _markers(
         r"permission denied",
@@ -2532,11 +2548,15 @@ LAUNCH_FAILURE_MARKERS: Tuple[Tuple[str, Tuple["Pattern[str]", ...]], ...] = (
 #: trace and no ``CliUsageError`` word, so that row is anchored at a line start
 #: (review 24, pins #5).
 STDERR_LAUNCH_FAILURE_MARKERS: Dict[str, Tuple["Pattern[str]", ...]] = {
+    # Batch-fatal like ``spawn_failed`` below, for the same reason
+    # (:data:`SANDBOX_MARKERS`).
+    CATEGORY_SANDBOX_UNAVAILABLE: SANDBOX_MARKERS,
     # **Every ``spawn_failed`` marker is read here, on stderr, and nowhere
     # else.** The verdict fails the executor's whole batch, so it must come
     # from the launcher or the CLI's own refusal, never from a model's answer
     # or a tool's output the CLI relays on stdout ("command not found" in a
-    # review of a plan, a shell tool's ``npx: command not found``). A shell,
+    # review of a plan, a shell tool's ``npx: command not found``), or on
+    # stderr (:attr:`LLMProvider.LAUNCH_DIAGNOSTICS`). A shell,
     # ``env`` and cmd.exe all write their refusal on stderr; exit 127 needs no
     # text at all (:data:`MISSING_BINARY_EXIT_CODE`), and an adapter whose CLI
     # refuses on stdout says so in its own ``classify_failure`` (vibe's
@@ -2566,6 +2586,18 @@ STDERR_LAUNCH_FAILURE_MARKERS: Dict[str, Tuple["Pattern[str]", ...]] = {
         r"(?m)^error: unknown tools? in --tools\b",
     ),
 }
+
+#: Where an adapter's launch diagnostics live: the values of
+#: :attr:`LLMProvider.LAUNCH_DIAGNOSTICS`, which decide what text the two
+#: batch-fatal rows of :data:`STDERR_LAUNCH_FAILURE_MARKERS` may read.
+#: ``stderr``: everything there was written by the CLI, its launcher or the OS.
+#: ``none``: stderr also relays a model's or a tool's words, on lines that
+#: cannot be told apart from the CLI's own, so no batch-fatal verdict is read
+#: from text at all (exit 127 still is) and the run keeps its bounded retry.
+#: See docs/development/providers.md#launch-diagnostics.
+LAUNCH_DIAGNOSTICS_STDERR = "stderr"
+LAUNCH_DIAGNOSTICS_NONE = "none"
+LAUNCH_DIAGNOSTICS_VALUES = frozenset({LAUNCH_DIAGNOSTICS_STDERR, LAUNCH_DIAGNOSTICS_NONE})
 
 #: Per-vendor context-overflow shapes (§7.2). These are the *only* thing that
 #: may produce :data:`STATUS_CONTEXT_LENGTH_EXCEEDED`, because that status is
@@ -2745,6 +2777,7 @@ def classify_streams(
     auth_patterns: Optional[Collection[str]] = None,
     rate_limit_patterns: Optional[Collection[str]] = None,
     exit_zero_markers: Collection["Pattern[str]"] = (),
+    launch_stderr: Optional[str] = None,
 ) -> Optional[str]:
     """Classify one captured run. **The** implementation, for both lanes (§7.2).
 
@@ -2756,7 +2789,11 @@ def classify_streams(
 
     1. ``exit_code == 127`` — the shell's own "I could not run that".
     2. :data:`LAUNCH_FAILURE_MARKERS` — root cause **before** auth (§7.2), since
-       a refused exec prints text that reads like a credential problem.
+       a refused exec prints text that reads like a credential problem. Its
+       two batch-fatal rows (a sandbox that cannot start, a launch refusal)
+       read stderr alone (:data:`STDERR_LAUNCH_FAILURE_MARKERS`), or
+       ``launch_stderr`` when given: the part of stderr the adapter's CLI
+       wrote (:meth:`LLMProvider.launch_diagnostics`).
     3. :data:`CONTEXT_OVERFLOW_MARKERS` — terminal and unambiguous, and it must
        not be laundered into a retryable category by a later table.
     4. auth, then rate limit — the existing order, pinned by
@@ -2788,7 +2825,8 @@ def classify_streams(
     if not haystack.strip():
         return None
 
-    stderr_lower = (stderr or "").lower()
+    launch_text = stderr if launch_stderr is None else launch_stderr
+    stderr_lower = (launch_text or "").lower()
     for category, markers in LAUNCH_FAILURE_MARKERS:
         if _matches_marker(markers, haystack) or _matches_marker(
             STDERR_LAUNCH_FAILURE_MARKERS.get(category, ()), stderr_lower
@@ -2894,6 +2932,7 @@ def match_streams(
     auth_patterns: Optional[Collection[str]] = None,
     rate_limit_patterns: Optional[Collection[str]] = None,
     exit_zero_markers: Collection["Pattern[str]"] = (),
+    launch_stderr: Optional[str] = None,
 ) -> Optional[StreamMatch]:
     """:func:`classify_streams`'s verdict **plus where it matched**. Quote-only.
 
@@ -2937,7 +2976,10 @@ def match_streams(
             status, pattern, "stderr", max(0, offset - len(out_lower) - 1)
         )
 
-    err_lower = (stderr or "").lower()
+    # `launch_stderr` blanks, never removes (:meth:`LLMProvider.launch_diagnostics`),
+    # so an offset into it is an offset into stderr.
+    launch_text = stderr if launch_stderr is None else launch_stderr
+    err_lower = (launch_text or "").lower()
     for category, markers in LAUNCH_FAILURE_MARKERS:
         hit = _first_marker_match(markers, haystack)
         if hit is not None:
@@ -2986,36 +3028,204 @@ def match_streams(
     return None
 
 
-#: Where a JSON envelope opens: a ``{`` starting a line, after any plain lines
-#: the CLI printed first.
-_ENVELOPE_OPENER = re.compile(r"(?m)^[ \t]*\{")
+def envelope_signature(*openers: Any) -> Tuple["Pattern[str]", ...]:
+    """Compile one adapter's envelope signature: how its JSON envelope opens.
 
-
-def envelope_without_answer(stdout: str, answer_fields: Collection[str]) -> str:
-    """``stdout`` with its JSON envelope's answer fields taken out.
-
-    For a CLI that prints one envelope holding the model's answer in named
-    fields (claude-code's ``result``, gemini's ``response``): the envelope is
-    re-serialised without them, whatever its flags say, and any plain lines
-    around it are kept as the CLI wrote them. An envelope that opens and does
-    not close (a stdout cut inside it) is dropped whole, since the answer can
-    be anywhere in it; a stdout with no envelope at all is the CLI's own plain
-    text and is returned unchanged. Removal only. Used by the adapters'
-    :meth:`LLMProvider.classify_exit_zero`, never by :meth:`vendor_text`: a
-    non-zero exit's refusing envelope carries the vendor's sentence in the
-    same field.
+    Each opener is the envelope's first key, or a ``(key, value)`` pair where
+    the key alone is too common to tell an envelope from an answer object
+    (``("type", "result")``). Taken from the adapter's captured envelopes;
+    JSON whitespace between the tokens is tolerated (gemini and goose print
+    theirs indented). :func:`read_stdout` matches each pattern at the opening
+    brace of a JSON value where the CLI writes its envelope, and searches for
+    it as plain text everywhere else.
     """
-    text = stdout or ""
-    opener = _ENVELOPE_OPENER.search(text)
-    if opener is None:
-        return text
-    start = opener.end() - 1
-    try:
-        envelope, end = json.JSONDecoder().raw_decode(text, start)
-    except ValueError:
-        return text[:start]
-    kept = {key: value for key, value in envelope.items() if key not in answer_fields}
-    return text[:start] + json.dumps(kept) + text[end:]
+    patterns = []
+    for opener in openers:
+        if isinstance(opener, tuple):
+            key, value = opener
+            patterns.append(re.compile(
+                r"\{[ \t\n\r]*" + re.escape(json.dumps(key)) + r"[ \t\n\r]*:[ \t\n\r]*"
+                + re.escape(json.dumps(value))
+            ))
+        else:
+            patterns.append(re.compile(
+                r"\{[ \t\n\r]*" + re.escape(json.dumps(opener)) + r"[ \t\n\r]*:"
+            ))
+    return tuple(patterns)
+
+
+#: :func:`read_stdout`'s four readings of an envelope adapter's stdout: the
+#: envelope where the CLI writes it; its opening there with no complete value
+#: after it (a kill or the capture bound cut it); its opening anywhere else, so
+#: no text can be told to be the CLI's; no opening at all.
+STDOUT_ENVELOPE = "envelope"
+STDOUT_CUT = "cut"
+STDOUT_AMBIGUOUS = "ambiguous"
+STDOUT_PLAIN = "plain"
+
+_JSON_SPACE = re.compile(r"[ \t\n\r]*")
+_LINE_SPACE = re.compile(r"[ \t]*")
+
+
+def _opens_on(signature: Collection["Pattern[str]"], text: str, at: int) -> bool:
+    return any(pattern.match(text, at) for pattern in signature)
+
+
+@dataclass(frozen=True)
+class StdoutShape:
+    """:func:`read_stdout`'s answer.
+
+    For :data:`STDOUT_ENVELOPE` only: ``records`` are the complete JSON values
+    stdout opens with, one per line, as ``(start, end, value)`` into ``text``
+    (stdout less its ANSI colour), and ``envelope`` indexes the one the
+    adapter reads.
+    """
+
+    kind: str
+    text: str = ""
+    records: Tuple[Tuple[int, int, Any], ...] = ()
+    envelope: int = -1
+
+    @property
+    def value(self) -> Any:
+        """The envelope's decoded object."""
+        return self.records[self.envelope][2]
+
+    def failure(self, cli: str, stdout: str) -> Dict[str, Any]:
+        """The parse failure for a cut or an ambiguous stdout: no answer.
+
+        ``incomplete`` marks an envelope that did not finish, so the ask lane
+        keeps any text as partial evidence.
+        """
+        if self.kind == STDOUT_CUT:
+            return {
+                "success": False,
+                "error": (
+                    f"{cli}'s JSON envelope is incomplete: stdout ends inside it, "
+                    f"so it holds no finished answer"
+                ),
+                "raw": stdout, "data": None, "incomplete": True,
+            }
+        return {
+            "success": False,
+            "error": (
+                f"{cli}'s stdout holds its JSON envelope's opening away from where "
+                f"the CLI writes the envelope, so no answer in it can be trusted"
+            ),
+            "raw": stdout, "data": None,
+        }
+
+
+def read_stdout(stdout: str, signature: Collection["Pattern[str]"]) -> StdoutShape:
+    """**The** rule for where an adapter's JSON envelope sits in its stdout.
+
+    For the adapters whose JSON mode prints one envelope holding the answer in
+    named fields (claude-code, cursor-agent, gemini, grok, agy, goose), each
+    with its ``ENVELOPE_SIGNATURE``: their parsers and :func:`diagnostic_streams`
+    read this and nothing else. Provenance is position, never keys: a model
+    writes inside the envelope's answer string, never the start of stdout, and
+    every committed capture of the six is exactly one envelope.
+
+    After ANSI colour and leading whitespace, stdout opens with a run of
+    complete JSON values, one per line (JSON log lines), each decoded where it
+    starts (``raw_decode``, so one linear pass); any other text after them, on
+    the last one's line or below, is trailing text. Then:
+
+    * :data:`STDOUT_ENVELOPE`: one of those values opens on the signature. The
+      last such is the envelope; the rest is the CLI's.
+    * :data:`STDOUT_CUT`: the run stops at a signature opening with no complete
+      value there. The envelope was cut.
+    * :data:`STDOUT_AMBIGUOUS`: neither, but a signature opening appears
+      anywhere, matched as plain text so that no quote or bracket can hide
+      it: a banner ahead of the envelope, or an answer quoting one. Refused.
+    * :data:`STDOUT_PLAIN`: no opening at all, or no signature. The adapter's
+      ordinary extraction, unchanged.
+
+    See docs/development/providers.md#reading-a-capture.
+    """
+    if not signature:
+        return StdoutShape(STDOUT_PLAIN)
+    raw = stdout or ""
+    text = _ANSI_ESCAPE.sub("", raw)
+    decoder = json.JSONDecoder()
+    records: List[Tuple[int, int, Any]] = []
+    envelope = -1
+    at = _JSON_SPACE.match(text).end()
+    while at < len(text) and text[at] in "{[":
+        opens = _opens_on(signature, text, at)
+        try:
+            value, end = decoder.raw_decode(text, at)
+        except (ValueError, RecursionError):
+            if opens:
+                return StdoutShape(STDOUT_CUT, text)
+            break
+        if opens:
+            envelope = len(records)
+        records.append((at, end, value))
+        line_end = _LINE_SPACE.match(text, end).end()
+        if line_end < len(text) and text[line_end] not in "\r\n":
+            break
+        at = _JSON_SPACE.match(text, end).end()
+    if envelope >= 0:
+        return StdoutShape(STDOUT_ENVELOPE, text, tuple(records), envelope)
+    if any(pattern.search(text) or pattern.search(raw) for pattern in signature):
+        return StdoutShape(STDOUT_AMBIGUOUS, text)
+    return StdoutShape(STDOUT_PLAIN, text)
+
+
+def structural_stdout(stdout: str, provider: Any) -> str:
+    """*stdout* for an adapter's structural failure check (a status field, an
+    error part), or ``""`` when :func:`read_stdout` finds it cut or ambiguous:
+    the same stdout decision :func:`diagnostic_streams` makes, so no check reads
+    a capture the verdict was told to ignore. An envelope or plain capture is
+    returned whole, as those checks read it before."""
+    shape = read_stdout(stdout, provider.ENVELOPE_SIGNATURE)
+    if shape.kind in (STDOUT_CUT, STDOUT_AMBIGUOUS):
+        return ""
+    return stdout
+
+
+def diagnostic_streams(stdout: str, stderr: str, provider: Any) -> Tuple[str, str]:
+    """**The** capture a failure verdict and its quote read, for an envelope adapter.
+
+    The six envelope adapters' :meth:`LLMProvider.vendor_text`, so
+    :meth:`LLMProvider.classify_failure` (on an exit 0, through
+    :meth:`LLMProvider.classify_exit_zero`, and on any other) and the
+    executor's failure quote read one text. By :func:`read_stdout`:
+
+    * an envelope: each record that opens on the signature as
+      :meth:`LLMProvider.envelope_diagnostics` keeps it (the model's answer
+      out, the vendor's refusal fields in), the other JSON lines and the
+      trailing text as the CLI wrote them;
+    * cut or ambiguous: nothing of stdout, as no text in it can be told to be
+      the CLI's; stderr is read as always, under the adapter's
+      ``LAUNCH_DIAGNOSTICS``;
+    * plain: the capture unchanged (a CLI's plain-text refusal).
+
+    A record is re-serialised, compactly, only when something was taken out
+    of it, so the result is a deletion from stdout. stderr is never reduced.
+    """
+    signature = provider.ENVELOPE_SIGNATURE
+    shape = read_stdout(stdout, signature)
+    if shape.kind == STDOUT_PLAIN:
+        return stdout, stderr
+    if shape.kind != STDOUT_ENVELOPE:
+        return "", stderr
+    pieces: List[str] = []
+    last = 0
+    for start, end, value in shape.records:
+        kept = (
+            provider.envelope_diagnostics(value)
+            if _opens_on(signature, shape.text, start) else value
+        )
+        pieces.append(shape.text[last:start])
+        pieces.append(
+            shape.text[start:end] if kept == value
+            else json.dumps(kept, ensure_ascii=False, separators=(",", ":"))
+        )
+        last = end
+    pieces.append(shape.text[last:])
+    return "".join(pieces), stderr
 
 
 def exit_zero_failure_category(
@@ -3972,6 +4182,48 @@ class LLMProvider(ABC):
     #: (docs/development/delegation.md#read-and-analyze-executor).
     EXIT0_CLASSIFIABLE: bool = False
 
+    #: Where this CLI's launch diagnostics live, one of the
+    #: ``LAUNCH_DIAGNOSTICS_*`` values: the text the batch-fatal
+    #: ``sandbox_unavailable`` and ``spawn_failed`` rows may read
+    #: (:meth:`launch_diagnostics`). Every shipped adapter declares it in its
+    #: own class with the captures it rests on
+    #: (``tests/test_launch_diagnostics.py``); the base value is for test doubles.
+    #: See docs/development/providers.md#launch-diagnostics.
+    LAUNCH_DIAGNOSTICS: str = LAUNCH_DIAGNOSTICS_STDERR
+
+    #: How this CLI's one JSON envelope opens (:func:`envelope_signature`),
+    #: for an adapter whose JSON mode prints the answer inside one; empty for
+    #: every other. Its :meth:`parse_output` and :meth:`vendor_text` read
+    #: stdout through :func:`read_stdout` (:func:`diagnostic_streams`).
+    ENVELOPE_SIGNATURE: Tuple["Pattern[str]", ...] = ()
+
+    #: The fields of that envelope that hold the model's words, which
+    #: :meth:`envelope_diagnostics` takes out.
+    ENVELOPE_ANSWER_FIELDS: Tuple[str, ...] = ()
+
+    def envelope_diagnostics(self, envelope: Dict[str, Any]) -> Dict[str, Any]:
+        """One envelope record as a failure verdict may read it.
+
+        Base: without :attr:`ENVELOPE_ANSWER_FIELDS`, whatever the envelope's
+        flags say, so the vendor's own refusal fields stay. Removal only, into
+        a new dict (:func:`diagnostic_streams` compares it with the record).
+        """
+        return {
+            key: value for key, value in envelope.items()
+            if key not in self.ENVELOPE_ANSWER_FIELDS
+        }
+
+    def launch_diagnostics(self, stderr: str) -> str:
+        """The part of ``stderr`` the batch-fatal launch rows may read.
+
+        ``stderr`` unchanged under ``stderr``, ``""`` under ``none``. An
+        override may only remove, and blanks what it drops (spaces of the same
+        length) so a match offset still indexes ``stderr`` (:func:`match_streams`).
+        """
+        if self.LAUNCH_DIAGNOSTICS == LAUNCH_DIAGNOSTICS_NONE:
+            return ""
+        return stderr or ""
+
     def supports_prompt_transport(self, transport: str) -> bool:
         """Whether this adapter can deliver a prompt over ``transport``."""
         return transport in self.supported_prompt_transports
@@ -4000,18 +4252,18 @@ class LLMProvider(ABC):
         recorded ``rate_limited`` (run b38de8bb). The adapters that reduce for
         that reason are omp and pi (whose json streams echo the prompt *and*
         carry tool results), opencode (``tool_use``/``text`` events) and codex
-        (``command_execution`` output and ``agent_message`` prose), and
-        claude-code (a clean envelope's ``result`` is the model's own prose);
-        each keeps only what the vendor itself wrote.
+        (``command_execution`` output and ``agent_message`` prose); each keeps
+        only what the vendor itself wrote.
 
         **And it is narrower again on an exit 0 that left no answer**: stdout
         is then usually the model's own answer, prose instead of the JSON
         asked for. So aider (the span between its banner and its trailing
         accounting line), cline (content events, ``done`` and a finished
-        ``run_result``), cursor-agent (a clean envelope, as claude-code),
-        gemini (an envelope with no ``error``), grok (a finished turn's
-        envelope) and kimi (``assistant`` and ``tool`` records) drop it here
-        too. What an exit 0 is classified on at all is
+        ``run_result``) and kimi (``assistant`` and ``tool`` records) drop it
+        here too. The six adapters whose JSON mode prints one envelope
+        (claude-code, cursor-agent, gemini, grok, agy, goose) drop its answer
+        fields on every exit code, through one reduction,
+        :func:`diagnostic_streams`. What an exit 0 is classified on at all is
         :meth:`classify_exit_zero`'s, behind :attr:`EXIT0_CLASSIFIABLE`.
 
         A caller-supplied ``vendor_text=`` argument could not fix it: every
@@ -4031,7 +4283,11 @@ class LLMProvider(ABC):
           so a hook that swallowed a genuine 401 on a parse error would launder
           a credential failure into a transport-shaped retry — a worse bug than
           the one this fixes. Every override is a ``try``/``except`` around a
-          parse of an envelope the adapter does not control.
+          parse of an envelope the adapter does not control. The one stdout
+          dropped on purpose is :func:`diagnostic_streams`' cut or ambiguous
+          envelope, where no text can be told to be the CLI's: a refusal that
+          reached us only there is a bounded retry, never a verdict a model
+          could write.
         * **stderr is not reduced** by any shipped override: the echo lives in
           the structured stdout envelope, and the diagnosis a real failure
           carries must reach the tables untouched. The one exception is
@@ -4088,7 +4344,8 @@ class LLMProvider(ABC):
         capture to the part the *vendor* wrote, so an adapter that echoes our
         prompt back into its envelope stops classifying our own words. The base
         implementation is identity, so an adapter that does not override it is
-        byte-for-byte what it was.
+        byte-for-byte what it was. The two batch-fatal launch rows then read
+        only :meth:`launch_diagnostics` of the reduced stderr.
         """
         stdout, stderr = self.vendor_text(stdout, stderr)
         return classify_streams(
@@ -4098,20 +4355,20 @@ class LLMProvider(ABC):
             auth_patterns=self.auth_error_patterns,
             rate_limit_patterns=self.rate_limit_patterns,
             exit_zero_markers=self.exit_zero_failure_markers,
+            launch_stderr=self.launch_diagnostics(stderr),
         )
 
     def classify_exit_zero(self, stdout: str, stderr: str) -> Optional[str]:
         """The verdict on an exit-0 capture whose answer did not parse.
 
         Asked only when :attr:`EXIT0_CLASSIFIABLE` is ``True``, through
-        :func:`exit_zero_failure_category`. Base: :meth:`classify_failure` at
-        exit 0, which is sound only where :meth:`vendor_text` already drops the
-        model's answer from every exit-0 shape the CLI prints. An adapter whose
-        envelope can carry the answer next to its own diagnostics (an
-        ``is_error`` envelope, a cut one) overrides this to hand
-        :meth:`classify_failure` the envelope without the answer field, or to
-        read its structural fields alone; ``None`` means nothing the CLI wrote
-        was recognised, one transport retry on both lanes.
+        :func:`exit_zero_failure_category`. :meth:`classify_failure` at exit 0,
+        which is sound only where :meth:`vendor_text` drops the model's answer
+        from every exit-0 shape the CLI prints. ``None`` means nothing the CLI
+        wrote was recognised, one transport retry on both lanes. No adapter
+        overrides it: what is read is :meth:`vendor_text`'s, so the failure
+        quote (``subagent_executor._classify_failed_run``) is cut from the
+        same text on every exit code.
         """
         return self.classify_failure(stdout, stderr, 0)
 

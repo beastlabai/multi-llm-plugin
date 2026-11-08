@@ -14,21 +14,24 @@ from dataclasses import dataclass
 from typing import Any, Dict, FrozenSet, Iterator, List, Optional, Tuple
 
 from .base import (
+    LAUNCH_DIAGNOSTICS_STDERR,
     PROFILE_GENERATE,
     USAGE_PARTIAL,
     VERSION_TOO_LOW as _VERSION_TOO_LOW,
     LLMProvider,
     ReasoningLadder,
     StructuredSchema,
-    envelope_without_answer,
+    diagnostic_streams,
+    structural_stdout,
     matches_any,
     reset_flag_gate_cache,  # noqa: F401 - M14: the one gate's reset, re-exported
 )
 from .result_envelope import (
     classify_api_error_status,
     describe_refused_envelope,
-    is_clean_envelope,
+    RESULT_ENVELOPE_SIGNATURE,
     parse_result_envelope,
+    result_envelope_diagnostics,
 )
 
 #: The most of stderr's last line :meth:`CursorAgentProvider.describe_failure`
@@ -1293,10 +1296,22 @@ class CursorAgentProvider(LLMProvider):
     #: :attr:`~.base.LLMProvider.EXIT0_CLASSIFIABLE`, reviewed: cursor-agent
     #: prints one envelope (or, before a session starts, its own plain-text
     #: refusal), and the answer is its ``result``, also when ``is_error`` is
-    #: set (the ``exit-zero-failure`` row). :meth:`classify_exit_zero` reads
-    #: the envelope without ``result``, a stdout cut inside the envelope not at
-    #: all (:func:`base.envelope_without_answer`).
+    #: set (the ``exit-zero-failure`` row). :meth:`vendor_text` reads the
+    #: envelope without ``result``, a cut or ambiguous stdout not at all
+    #: (:func:`base.diagnostic_streams`).
     EXIT0_CLASSIFIABLE = True
+
+    #: :attr:`~.base.LLMProvider.LAUNCH_DIAGNOSTICS`, from the captures: the turn rides the
+    #: stdout envelope; stderr is empty on every committed capture
+    #: (tests/fixtures/cursor-agent).
+    LAUNCH_DIAGNOSTICS = LAUNCH_DIAGNOSTICS_STDERR
+
+    #: :attr:`~.base.LLMProvider.ENVELOPE_SIGNATURE`: the result envelope's openers
+    #: (:data:`~.result_envelope.RESULT_ENVELOPE_SIGNATURE`).
+    ENVELOPE_SIGNATURE = RESULT_ENVELOPE_SIGNATURE
+
+    #: :attr:`~.base.LLMProvider.ENVELOPE_ANSWER_FIELDS`.
+    ENVELOPE_ANSWER_FIELDS = ("result",)
 
     @property
     def name(self) -> str:
@@ -1483,43 +1498,26 @@ class CursorAgentProvider(LLMProvider):
         rows, and this override exists so the field is not silently dropped if
         Cursor starts printing it.
         """
-        category = classify_api_error_status(stdout)
+        category = classify_api_error_status(structural_stdout(stdout, self))
         if category is not None:
             return category
         return super().classify_failure(stdout, stderr, exit_code)
 
     def vendor_text(self, stdout: str, stderr: str) -> Tuple[str, str]:
-        """``("", stderr)`` for a clean envelope; the capture unchanged otherwise.
-
-        The ``success`` capture is one clean result envelope whose ``result``
-        is the model's own answer, the shape claude-code prints, so this is
-        claude-code's reduction over the shared envelope reader
-        (:func:`result_envelope.is_clean_envelope`). An envelope flagged
-        ``is_error`` (the ``exit-zero-failure`` row), a stream that is not one
-        envelope, or a reduction that raises keeps the capture whole; stderr is
-        never reduced.
-        """
-        try:
-            if is_clean_envelope(stdout):
-                return "", stderr
-        except Exception:  # noqa: BLE001 - a failed reduction returns its input
-            pass
-        return stdout, stderr
-
-    def classify_exit_zero(self, stdout: str, stderr: str) -> Optional[str]:
-        """:meth:`classify_failure` over the envelope without ``result``.
+        """:func:`base.diagnostic_streams`: the envelope without ``result``.
 
         cursor-agent exits 0 on every outcome, and an ``is_error`` envelope's
         ``result`` is still the model's answer (the ``exit-zero-failure``
-        row), so it is taken out whatever the flags say and a stdout cut
-        inside the envelope is dropped (:func:`base.envelope_without_answer`).
+        row), so it is taken out whatever the flags say, on every exit code
+        (claude-code's rule, :func:`result_envelope.result_envelope_diagnostics`).
         The ``is_error`` marker, the status rung and a plain-text refusal
-        printed instead of the envelope are read as before
-        (``EXIT0_CLASSIFIABLE``).
+        printed instead of the envelope are read as before.
         """
-        return self.classify_failure(
-            envelope_without_answer(stdout, ("result",)), stderr, 0,
-        )
+        return diagnostic_streams(stdout, stderr, self)
+
+    def envelope_diagnostics(self, envelope: Dict[str, Any]) -> Dict[str, Any]:
+        """:func:`result_envelope.result_envelope_diagnostics`."""
+        return result_envelope_diagnostics(envelope, self.ENVELOPE_ANSWER_FIELDS)
 
     def describe_failure(self, stdout: str, stderr: str) -> Optional[str]:
         """The envelope's own line when there is one, else stderr's last line.
@@ -1547,7 +1545,7 @@ class CursorAgentProvider(LLMProvider):
         :meth:`classify_failure` for the verdict, and returning ``None`` stays
         safe.
         """
-        line = describe_refused_envelope(stdout)
+        line = describe_refused_envelope(structural_stdout(stdout, self))
         if line:
             return line
         for raw in reversed((stderr or "").splitlines()):
@@ -1658,4 +1656,4 @@ class CursorAgentProvider(LLMProvider):
         """
         # One shared implementation (§9.5): claude-code emits the same envelope
         # and used to carry a byte-identical copy of the unwrapping.
-        return parse_result_envelope(stdout)
+        return parse_result_envelope(stdout, self.ENVELOPE_SIGNATURE)

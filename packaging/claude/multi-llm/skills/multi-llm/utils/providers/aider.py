@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from .. import yaml_io
 from ..json_extractor import extract_json_from_text
 from .base import (
+    LAUNCH_DIAGNOSTICS_STDERR,
     LLMProvider,
     ReadOnlyInvocationRefused,
     ReasoningLadder,
@@ -824,6 +825,11 @@ class AiderProvider(LLMProvider):
     #: failures get the unclassified exit 0's handling
     #: (docs/development/delegation.md#read-and-analyze-executor).
     EXIT0_CLASSIFIABLE = False
+
+    #: :attr:`~.base.LLMProvider.LAUNCH_DIAGNOSTICS`, from the captures: aider writes the chat,
+    #: its shell commands' output and its own banner to stdout; stderr is empty on every
+    #: committed capture (tests/fixtures/aider).
+    LAUNCH_DIAGNOSTICS = LAUNCH_DIAGNOSTICS_STDERR
 
     @property
     def name(self) -> str:

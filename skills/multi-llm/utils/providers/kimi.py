@@ -78,6 +78,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..json_extractor import extract_json_from_text
 from .base import (
+    LAUNCH_DIAGNOSTICS_STDERR,
     InternalRetryEnvelope,
     LLMProvider,
     ReasoningLadder,
@@ -356,6 +357,11 @@ class KimiProvider(LLMProvider):
     #: remains is kimi's ``meta`` records, and stderr carries every failure it
     #: reports.
     EXIT0_CLASSIFIABLE = True
+
+    #: :attr:`~.base.LLMProvider.LAUNCH_DIAGNOSTICS`, from the captures: kimi's stderr is its
+    #: own ``error: failed to run prompt:``, ``See log:`` and resume lines
+    #: (tests/fixtures/kimi); tool turns ride the stdout records.
+    LAUNCH_DIAGNOSTICS = LAUNCH_DIAGNOSTICS_STDERR
 
     @property
     def name(self) -> str:

@@ -179,7 +179,7 @@ rows:
       record here, so the expectation moved with the bytes and the verdict did
       not.
     expect:
-      lane_status: {lane_a: null, lane_b: unparseable_result, open: "U83 (PROV-1: exit-0 parity, adapter not EXIT0_CLASSIFIABLE)"}
+      lane_status: {lane_a: null, lane_b: unparseable_result, by_design: "not EXIT0_CLASSIFIABLE: muse's diagnosis and its answer share the run.terminal record's text, and every measured failure exits 1 (run.terminal.failed); the fan-out stops on it, the executor keeps its one parse-failure retry"}
       success: false
       error_contains: ["No output events found in output"]
       raw_contains:

@@ -105,6 +105,7 @@ from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
 
 from ..json_extractor import extract_json_from_text
 from .base import (
+    LAUNCH_DIAGNOSTICS_STDERR,
     REASONING_LADDER,
     InternalRetryEnvelope,
     LLMProvider,
@@ -548,6 +549,11 @@ class CopilotProvider(LLMProvider):
     #: failure of copilot's own exits 0 with a verdict (its exit-0 rows
     #: classify ``None``).
     EXIT0_CLASSIFIABLE = False
+
+    #: :attr:`~.base.LLMProvider.LAUNCH_DIAGNOSTICS`, from the captures: the session, tool
+    #: calls and answer ride the stdout JSONL; stderr is empty on every committed capture
+    #: (tests/fixtures/copilot).
+    LAUNCH_DIAGNOSTICS = LAUNCH_DIAGNOSTICS_STDERR
 
     @property
     def name(self) -> str:

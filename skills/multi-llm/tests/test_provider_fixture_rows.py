@@ -66,9 +66,13 @@ line nothing recognises), ``lane_b`` the executor's (``_classify_pre_parse``,
 the extraction, then ``_classify_failed_run`` for a reclassifiable status; the
 task kind's own shape check is left out, since it judges the task, not the
 provider). A row whose two statuses lead the ladder to different retry-or-stop
-answers carries ``open: <unit>`` naming the unit that will settle it; the
-grader fails when the marker is missing and when it is left on a row whose
-lanes agree. ``permission_denied`` from the fan-out is the deliberate exception
+answers carries ``open: <unit>`` naming the unit that will settle it, or
+``by_design: <reason>`` for the one permanent difference: an exit 0 of an
+adapter that is not ``EXIT0_CLASSIFIABLE``, which the fan-out stops on
+(``null``) and the executor retries once (``unparseable_result``). The grader
+fails when a marker is missing, when one is left on a row whose lanes agree,
+and when ``by_design`` sits on any other shape. ``permission_denied`` from the
+fan-out is the deliberate exception
 (docs/development/delegation.md#read-and-analyze-executor).
 Every graded row carries it, so a parser or classifier change shows here first.
 
@@ -174,10 +178,17 @@ _ALLOWED_EXPECT = {"success", "data", "error_contains", "raw_contains",
                    "classify_failure", "salvage", "lane_status"}
 #: ``expect.salvage``'s whole vocabulary (see the module docstring).
 SALVAGE_LABELS = ("none", "partial", "answer")
-#: ``expect.lane_status``'s keys: the two statuses, and the marker of a row
-#: whose lanes still answer retry-or-stop differently.
+#: ``expect.lane_status``'s keys: the two statuses, and the markers of a row
+#: whose lanes answer retry-or-stop differently: ``open`` until a unit settles
+#: it, ``by_design`` where the difference is permanent.
 LANE_STATUS_KEYS = ("lane_a", "lane_b")
 LANE_STATUS_OPEN = "open"
+LANE_STATUS_BY_DESIGN = "by_design"
+LANE_STATUS_MARKERS = (LANE_STATUS_OPEN, LANE_STATUS_BY_DESIGN)
+#: The one lane pair ``by_design`` may mark, on an exit 0 of an adapter that is
+#: not ``EXIT0_CLASSIFIABLE``: no verdict, so the fan-out stops and the
+#: executor keeps its parse failure's one retry.
+BY_DESIGN_LANES = {"lane_a": None, "lane_b": "unparseable_result"}
 #: The fan-out stops on these where the executor retries once, on purpose
 #: (docs/development/delegation.md#read-and-analyze-executor).
 LANE_A_STOPS_BY_DESIGN = frozenset({"permission_denied"})
@@ -365,8 +376,8 @@ def test_row_is_well_formed(provider, row_name):
     assert isinstance(lane_status, dict), (
         "expect.lane_status is required: {lane_a: <status>, lane_b: <status>}"
     )
-    assert set(lane_status) <= {*LANE_STATUS_KEYS, LANE_STATUS_OPEN}, (
-        f"unknown lane_status keys: {sorted(set(lane_status) - {*LANE_STATUS_KEYS, LANE_STATUS_OPEN})}"
+    assert set(lane_status) <= {*LANE_STATUS_KEYS, *LANE_STATUS_MARKERS}, (
+        f"unknown lane_status keys: {sorted(set(lane_status) - {*LANE_STATUS_KEYS, *LANE_STATUS_MARKERS})}"
     )
     assert all(key in lane_status for key in LANE_STATUS_KEYS), (
         "expect.lane_status names both lanes, `null` included"
@@ -374,6 +385,13 @@ def test_row_is_well_formed(provider, row_name):
     if LANE_STATUS_OPEN in lane_status:
         assert re.search(r"\bU\d+[a-z]?\b", str(lane_status[LANE_STATUS_OPEN])), (
             "lane_status.open names the unit that will settle the row"
+        )
+    assert not all(key in lane_status for key in LANE_STATUS_MARKERS), (
+        "a row is open or by design, not both"
+    )
+    if LANE_STATUS_BY_DESIGN in lane_status:
+        assert len(str(lane_status[LANE_STATUS_BY_DESIGN])) > 40, (
+            "lane_status.by_design states why the difference is permanent"
         )
     for key in ("stdout", "stderr"):
         if row.get(key):
@@ -567,16 +585,26 @@ def test_row_reaches_its_lane_status(provider, row_name):
         _retried(provider, found["lane_a"]) != _retried(provider, found["lane_b"])
         and found["lane_a"] not in LANE_A_STOPS_BY_DESIGN
     )
+    marker = next((key for key in LANE_STATUS_MARKERS if key in pinned), None)
     if differs:
-        assert LANE_STATUS_OPEN in pinned, (
+        assert marker is not None, (
             f"{provider}/{row_name}: the fan-out "
             f"{'retries' if _retried(provider, found['lane_a']) else 'stops'} and "
             f"the executor does not; mark the row `open: <unit>` or fix a lane"
         )
     else:
-        assert LANE_STATUS_OPEN not in pinned, (
+        assert marker is None, (
             f"{provider}/{row_name}: both lanes now make the same call; delete "
-            f"the row's `open: {pinned[LANE_STATUS_OPEN]}` marker"
+            f"the row's `{marker}: {pinned.get(marker)}` marker"
+        )
+    if marker == LANE_STATUS_BY_DESIGN:
+        assert row["exit_code"] == 0 and found == BY_DESIGN_LANES, (
+            f"{provider}/{row_name}: `by_design` marks only an exit 0 the fan-out "
+            f"stops on and the executor retries once ({BY_DESIGN_LANES})"
+        )
+        assert _PROVIDERS[provider].EXIT0_CLASSIFIABLE is False, (
+            f"{provider} is EXIT0_CLASSIFIABLE now: re-pin {row_name} and delete "
+            f"its `by_design` marker"
         )
 
 

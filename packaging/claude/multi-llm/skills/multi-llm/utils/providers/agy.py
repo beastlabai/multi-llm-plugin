@@ -2,13 +2,19 @@
 import json
 import shutil
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..json_extractor import extract_json_from_text
 from .base import (
+    LAUNCH_DIAGNOSTICS_STDERR,
+    STDOUT_ENVELOPE,
+    STDOUT_PLAIN,
     LLMProvider,
     ReasoningLadder,
     StructuredSchema,
+    diagnostic_streams,
+    envelope_signature,
+    read_stdout,
     split_reasoning_effort,
 )
 
@@ -180,11 +186,24 @@ class AgyProvider(LLMProvider):
     verified_version = "1.3.1"
 
     #: :attr:`~.base.LLMProvider.EXIT0_CLASSIFIABLE`, reviewed: agy's envelope
-    #: is one JSON object whose ``response`` is the model's answer, and
-    #: :meth:`vendor_text` is identity, so an exit 0's stdout is that answer (a
-    #: review of "429 files" read as a rate limit). No failure shape of agy's
-    #: own exits 0 (its one row, ``auth-error``, exits 1).
+    #: is one JSON object whose ``response`` is the model's answer (a review of
+    #: "429 files" would read as a rate limit). :meth:`vendor_text` drops it,
+    #: but no failure shape of agy's own exits 0 (its one row, ``auth-error``,
+    #: exits 1), so none is reviewed.
     EXIT0_CLASSIFIABLE = False
+
+    #: :attr:`~.base.LLMProvider.LAUNCH_DIAGNOSTICS`, from the captures: agy's stderr is its
+    #: own: the login prompt and URL (tests/fixtures/agy/auth-error); the answer and tool turns
+    #: ride the stdout envelope.
+    LAUNCH_DIAGNOSTICS = LAUNCH_DIAGNOSTICS_STDERR
+
+    #: :attr:`~.base.LLMProvider.ENVELOPE_SIGNATURE`, from the captures: agy's envelope opens
+    #: on ``conversation_id`` (tests/fixtures/agy/auth-error).
+    ENVELOPE_SIGNATURE = envelope_signature("conversation_id")
+
+    #: :attr:`~.base.LLMProvider.ENVELOPE_ANSWER_FIELDS`: the answer; agy's own
+    #: ``status`` and ``error`` stay.
+    ENVELOPE_ANSWER_FIELDS = ("response",)
 
     @property
     def name(self) -> str:
@@ -256,6 +275,10 @@ class AgyProvider(LLMProvider):
         cmd += ["-p", prompt]
         return cmd
 
+    def vendor_text(self, stdout: str, stderr: str) -> Tuple[str, str]:
+        """:func:`base.diagnostic_streams`: the envelope without ``response``."""
+        return diagnostic_streams(stdout, stderr, self)
+
     def parse_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
         """Parse the single JSON envelope emitted by agy --output-format json.
 
@@ -267,14 +290,21 @@ class AgyProvider(LLMProvider):
            blocks and JSON embedded in prose
         """
         stdout = stdout.strip()
-        try:
-            envelope = json.loads(stdout)
-        except json.JSONDecodeError as e:
-            # Try fallback extraction on raw stdout
-            fallback = extract_json_from_text(stdout, prefer_arrays=True)
-            if fallback.get("success"):
-                return fallback
-            return {"success": False, "error": f"JSON parse error: {e}", "raw": stdout, "data": None}
+        shape = read_stdout(stdout, self.ENVELOPE_SIGNATURE)
+        if shape.kind == STDOUT_ENVELOPE:
+            envelope = shape.value
+        elif shape.kind != STDOUT_PLAIN:
+            return shape.failure("agy", stdout)
+        else:
+            try:
+                envelope = json.loads(stdout)
+            except json.JSONDecodeError as e:
+                # Try fallback extraction on raw stdout
+                fallback = extract_json_from_text(stdout, prefer_arrays=True)
+                if fallback.get("success"):
+                    return fallback
+                return {"success": False, "error": f"JSON parse error: {e}",
+                        "raw": stdout, "data": None}
 
         if isinstance(envelope, dict) and "status" in envelope:
             status = envelope.get("status")

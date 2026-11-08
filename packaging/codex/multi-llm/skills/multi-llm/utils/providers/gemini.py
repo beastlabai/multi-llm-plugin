@@ -6,11 +6,16 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..json_extractor import extract_json_from_text
 from .base import (
+    LAUNCH_DIAGNOSTICS_NONE,
+    STDOUT_ENVELOPE,
+    STDOUT_PLAIN,
     InternalRetryEnvelope,
     LLMProvider,
     ReasoningLadder,
     StructuredSchema,
-    envelope_without_answer,
+    diagnostic_streams,
+    envelope_signature,
+    read_stdout,
 )
 
 #: M12 (§6.1): gemini has no rung on the ladder, and the reason is written down
@@ -309,10 +314,24 @@ class GeminiProvider(LLMProvider):
 
     #: :attr:`~.base.LLMProvider.EXIT0_CLASSIFIABLE`, reviewed: gemini's answer
     #: is the envelope's ``response``, also beside an ``error`` object.
-    #: :meth:`classify_exit_zero` reads the envelope without it, and a stdout
-    #: cut inside the envelope not at all; stderr, where every gemini failure
-    #: is diagnosed, is read as it is.
+    #: :meth:`vendor_text` reads the envelope without it, and a cut or
+    #: ambiguous stdout not at all; stderr, where every gemini failure is
+    #: diagnosed, is read as it is.
     EXIT0_CLASSIFIABLE = True
+
+    #: :attr:`~.base.LLMProvider.LAUNCH_DIAGNOSTICS`, from the captures: gemini relays tool
+    #: failures on stderr (``Error executing tool write_file: …``, tests/fixtures/gemini/
+    #: exit-zero-failure), and a tool's message can run over several unmarked lines, so none of
+    #: stderr is read for a batch-fatal verdict.
+    LAUNCH_DIAGNOSTICS = LAUNCH_DIAGNOSTICS_NONE
+
+    #: :attr:`~.base.LLMProvider.ENVELOPE_SIGNATURE`, from the captures: gemini's envelope
+    #: opens on ``session_id`` (every JSON row under tests/fixtures/gemini/).
+    ENVELOPE_SIGNATURE = envelope_signature("session_id")
+
+    #: :attr:`~.base.LLMProvider.ENVELOPE_ANSWER_FIELDS`: the answer, also beside an
+    #: ``error`` object.
+    ENVELOPE_ANSWER_FIELDS = ("response",)
 
     @property
     def name(self) -> str:
@@ -477,39 +496,15 @@ class GeminiProvider(LLMProvider):
         return f"{sentence} (code {code})"
 
     def vendor_text(self, stdout: str, stderr: str) -> Tuple[str, str]:
-        """``("", stderr)`` for an envelope with no ``error``; else the capture.
+        """:func:`base.diagnostic_streams`: the envelope without ``response``.
 
         Measured on the committed rows: gemini puts every failure's diagnosis on
         stderr (stdout empty), or in the envelope's ``error`` object when it
-        exits 0 on an empty answer (``ephemeral-only``). An envelope without
-        ``error`` holds the model's ``response`` and bookkeeping ``stats``,
-        neither of them the vendor's verdict: ``exit-zero-failure``'s
-        ``response`` is the model's own "JSON written to …". Anything else, a
-        stdout that is not one JSON object included, is returned unchanged;
-        stderr is never reduced.
+        exits 0 on an empty answer (``ephemeral-only``). ``response`` is the
+        model's own answer, beside an ``error`` too: ``exit-zero-failure``'s is
+        the model's "JSON written to …". stderr is never reduced.
         """
-        try:
-            envelope = json.loads(stdout) if stdout and stdout.strip() else None
-            if (
-                isinstance(envelope, dict) and "response" in envelope
-                and "error" not in envelope
-            ):
-                return "", stderr
-        except Exception:  # noqa: BLE001 - a failed reduction returns its input
-            pass
-        return stdout, stderr
-
-    def classify_exit_zero(self, stdout: str, stderr: str) -> Optional[str]:
-        """:meth:`classify_failure` over the envelope without ``response``.
-
-        ``response`` is the model's answer, also beside an ``error`` object,
-        so it is taken out and a stdout cut inside the envelope is dropped
-        (:func:`base.envelope_without_answer`); the ``error`` object and
-        stderr are read as before (``EXIT0_CLASSIFIABLE``).
-        """
-        return self.classify_failure(
-            envelope_without_answer(stdout, ("response",)), stderr, 0,
-        )
+        return diagnostic_streams(stdout, stderr, self)
 
     def describe_failure(self, stdout: str, stderr: str) -> Optional[str]:
         """gemini's half of C4: the vendor's own words instead of an exit code.
@@ -562,27 +557,39 @@ class GeminiProvider(LLMProvider):
         return result
 
     def _parse_stdout(self, stdout: str) -> Dict[str, Any]:
-        """Today's parser, unchanged — the answer channel, read on its own."""
-        try:
-            wrapper = json.loads(stdout)
-            # Gemini returns: {"session_id": "...", "response": "...", "stats": {...}}
-            if isinstance(wrapper, dict) and "response" in wrapper:
-                response = wrapper["response"]
-                # Try to parse the response as JSON if it looks like JSON
-                if isinstance(response, str):
-                    response = response.strip()
-                    if response.startswith(('[', '{')):
-                        try:
-                            return {"success": True, "data": json.loads(response)}
-                        except json.JSONDecodeError:
-                            pass
-                    # Apply JSON extraction fallback for non-JSON starting responses
-                    return extract_json_from_text(response, prefer_arrays=True)
-                return {"success": True, "data": response}
-            return {"success": True, "data": wrapper}
-        except json.JSONDecodeError as e:
-            # Try fallback extraction on raw stdout
-            fallback = extract_json_from_text(stdout, prefer_arrays=True)
-            if fallback.get("success"):
-                return fallback
-            return {"success": False, "error": f"JSON parse error: {e}", "raw": stdout, "data": None}
+        """The answer channel, read on its own (:func:`base.read_stdout`)."""
+        shape = read_stdout(stdout, self.ENVELOPE_SIGNATURE)
+        if shape.kind == STDOUT_ENVELOPE:
+            wrapper = shape.value
+        elif shape.kind != STDOUT_PLAIN:
+            return shape.failure("gemini", stdout)
+        else:
+            try:
+                wrapper = json.loads(stdout)
+            except json.JSONDecodeError as e:
+                # Try fallback extraction on raw stdout
+                fallback = extract_json_from_text(stdout, prefer_arrays=True)
+                if fallback.get("success"):
+                    return fallback
+                return {"success": False, "error": f"JSON parse error: {e}",
+                        "raw": stdout, "data": None}
+        # Gemini returns: {"session_id": "...", "response": "...", "stats": {...}}
+        if isinstance(wrapper, dict) and "response" in wrapper:
+            response = wrapper["response"]
+            # Try to parse the response as JSON if it looks like JSON
+            if isinstance(response, str):
+                response = response.strip()
+                if response.startswith(('[', '{')):
+                    try:
+                        return {"success": True, "data": json.loads(response)}
+                    except json.JSONDecodeError:
+                        pass
+                # Apply JSON extraction fallback for non-JSON starting responses
+                return extract_json_from_text(response, prefer_arrays=True)
+            return {"success": True, "data": response}
+        if isinstance(wrapper, dict) and "session_id" in wrapper:
+            # gemini's envelope without its answer field: the bookkeeping
+            # is not an answer. Another JSON object is the answer itself.
+            return {"success": False, "error": "gemini's envelope carries no response field",
+                    "raw": stdout, "data": None}
+        return {"success": True, "data": wrapper}

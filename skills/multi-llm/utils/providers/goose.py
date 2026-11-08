@@ -6,13 +6,20 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..json_extractor import extract_json_from_text
 from .base import (
+    LAUNCH_DIAGNOSTICS_STDERR,
     STATUS_AUTH_FAILED,
     STATUS_CONTEXT_LENGTH_EXCEEDED,
     STATUS_RATE_LIMITED,
     InternalRetryEnvelope,
     LLMProvider,
     ReasoningLadder,
+    STDOUT_ENVELOPE,
+    STDOUT_PLAIN,
     StructuredSchema,
+    diagnostic_streams,
+    structural_stdout,
+    envelope_signature,
+    read_stdout,
     split_reasoning_effort,
 )
 
@@ -209,6 +216,15 @@ class GooseProvider(LLMProvider):
     #: (docs/development/delegation.md#read-and-analyze-executor).
     EXIT0_CLASSIFIABLE = False
 
+    #: :attr:`~.base.LLMProvider.LAUNCH_DIAGNOSTICS`, from the captures: goose's shell tool and
+    #: the whole turn ride the stdout envelope; stderr is empty on every capture but the 401's,
+    #: which repeats goose's own ``Error: Ran into this error`` (tests/fixtures/goose).
+    LAUNCH_DIAGNOSTICS = LAUNCH_DIAGNOSTICS_STDERR
+
+    #: :attr:`~.base.LLMProvider.ENVELOPE_SIGNATURE`, from the captures: goose's envelope opens
+    #: on ``messages`` (every row under tests/fixtures/goose/).
+    ENVELOPE_SIGNATURE = envelope_signature("messages")
+
     @property
     def name(self) -> str:
         return "goose"
@@ -264,6 +280,10 @@ class GooseProvider(LLMProvider):
         return {}
 
     def vendor_text(self, stdout: str, stderr: str) -> Tuple[str, str]:
+        """:func:`base.diagnostic_streams`, with :meth:`envelope_diagnostics`."""
+        return diagnostic_streams(stdout, stderr, self)
+
+    def envelope_diagnostics(self, envelope: Dict[str, Any]) -> Dict[str, Any]:
         """The envelope minus the turns goose echoed back at us.
 
         goose's ``{"messages": [...], "metadata": {...}}`` envelope opens with
@@ -281,29 +301,22 @@ class GooseProvider(LLMProvider):
         gloss and the ``Available models for this provider`` list are all on
         that side of the filter, and ``metadata`` is untouched.
 
-        Degrades to its input on anything unexpected: a non-JSON stdout (goose
-        prints one on no measured path, but a killed process leaves a partial
-        envelope), a non-list ``messages``, or an envelope with no user turn in
-        it at all. stderr is returned unchanged — goose writes 0 bytes there on
-        every capture but the 1.53.0 401, which carries only goose's own
-        diagnosis there, and a reduction of a stream that carries no echo could
-        only lose a diagnosis.
+        Returns its input on anything unexpected: a non-list ``messages``, or
+        an envelope with no user turn in it at all. stderr is never reduced —
+        goose writes 0 bytes there on every capture but the 1.53.0 401, which
+        carries only goose's own diagnosis there, and a reduction of a stream
+        that carries no echo could only lose a diagnosis.
         """
-        try:
-            envelope = json.loads(stdout)
-            messages = envelope["messages"]
-            if not isinstance(messages, list):
-                return stdout, stderr
-            kept = [
-                message for message in messages
-                if not (isinstance(message, dict) and message.get("role") == "user")
-            ]
-            if len(kept) == len(messages):
-                return stdout, stderr
-            envelope["messages"] = kept
-            return json.dumps(envelope, indent=2, ensure_ascii=False), stderr
-        except (AttributeError, KeyError, TypeError, ValueError):
-            return stdout, stderr
+        messages = envelope.get("messages")
+        if not isinstance(messages, list):
+            return envelope
+        kept = [
+            message for message in messages
+            if not (isinstance(message, dict) and message.get("role") == "user")
+        ]
+        if len(kept) == len(messages):
+            return envelope
+        return {**envelope, "messages": kept}
 
     def classify_failure(
         self, stdout: str, stderr: str, exit_code: int = 0
@@ -328,7 +341,7 @@ class GooseProvider(LLMProvider):
         that reduction keeps.
         """
         try:
-            envelope = json.loads(stdout)
+            envelope = json.loads(structural_stdout(stdout, self))
         except (TypeError, ValueError):
             envelope = None
         for kind in last_assistant_error_kinds(envelope):
@@ -348,14 +361,22 @@ class GooseProvider(LLMProvider):
            and JSON embedded in prose
         """
         stdout = stdout.strip()
-        try:
-            envelope = json.loads(stdout)
-        except json.JSONDecodeError as e:
-            # Try fallback extraction on raw stdout
-            fallback = extract_json_from_text(stdout, prefer_arrays=True)
-            if fallback.get("success"):
-                return fallback
-            return {"success": False, "error": f"JSON parse error: {e}", "raw": stdout, "data": None}
+        shape = read_stdout(stdout, self.ENVELOPE_SIGNATURE)
+        if shape.kind == STDOUT_ENVELOPE:
+            envelope = shape.value
+        elif shape.kind != STDOUT_PLAIN:
+            # A text extraction over it would find the echoed user turn.
+            return shape.failure("goose", stdout)
+        else:
+            try:
+                envelope = json.loads(stdout)
+            except json.JSONDecodeError as e:
+                # Try fallback extraction on raw stdout
+                fallback = extract_json_from_text(stdout, prefer_arrays=True)
+                if fallback.get("success"):
+                    return fallback
+                return {"success": False, "error": f"JSON parse error: {e}",
+                        "raw": stdout, "data": None}
 
         text = last_assistant_text(envelope)
 

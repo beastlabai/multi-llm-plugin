@@ -9,6 +9,7 @@ from typing import Any, Collection, Dict, List, Mapping, Optional, Sequence, Tup
 
 from ..process_state import process_cache
 from .base import (
+    LAUNCH_DIAGNOSTICS_STDERR,
     PROFILE_AGENT_READONLY,
     PROFILE_AGENT_WRITE,
     PROFILE_GENERATE,
@@ -25,7 +26,8 @@ from .base import (
     StructuredSchema,
     _warn_policy_once,
     declared_env_names,
-    envelope_without_answer,
+    diagnostic_streams,
+    structural_stdout,
     git_env,
     reset_flag_gate_cache,  # noqa: F401 - M14: re-exported for the gate's tests
     split_reasoning_effort,
@@ -36,8 +38,9 @@ from .base import (
 from .result_envelope import (
     classify_api_error_status,
     describe_refused_envelope,
-    is_clean_envelope,
+    RESULT_ENVELOPE_SIGNATURE,
     parse_result_envelope,
+    result_envelope_diagnostics,
 )
 
 # Reasoning effort values accepted by `claude --effort`
@@ -813,12 +816,24 @@ class ClaudeCodeProvider(LLMProvider):
     )
 
     #: :attr:`~.base.LLMProvider.EXIT0_CLASSIFIABLE`, reviewed: claude-code's
-    #: answer is one envelope field, ``result``. :meth:`classify_exit_zero`
-    #: reads the envelope without it, whatever its flags, and a stdout cut
-    #: inside the envelope not at all
-    #: (:func:`base.envelope_without_answer`); the status rung reads
-    #: ``api_error_status`` as before.
+    #: answer is one envelope field, ``result``. :meth:`vendor_text` reads the
+    #: envelope without it unless the API call failed, and a cut or ambiguous
+    #: stdout not at all (:func:`base.diagnostic_streams`); the status rung
+    #: reads ``api_error_status`` as before.
     EXIT0_CLASSIFIABLE = True
+
+    #: :attr:`~.base.LLMProvider.LAUNCH_DIAGNOSTICS`, from the captures: the whole turn, tool
+    #: results included, rides the stdout envelope; stderr is empty on every committed capture
+    #: (tests/fixtures/claude-code).
+    LAUNCH_DIAGNOSTICS = LAUNCH_DIAGNOSTICS_STDERR
+
+    #: :attr:`~.base.LLMProvider.ENVELOPE_SIGNATURE`: the result envelope's openers
+    #: (:data:`~.result_envelope.RESULT_ENVELOPE_SIGNATURE`).
+    ENVELOPE_SIGNATURE = RESULT_ENVELOPE_SIGNATURE
+
+    #: :attr:`~.base.LLMProvider.ENVELOPE_ANSWER_FIELDS`: the answer, and
+    #: ``permission_denials``, which quotes the model's tool input.
+    ENVELOPE_ANSWER_FIELDS = ("result", "permission_denials")
 
     @property
     def name(self) -> str:
@@ -1581,66 +1596,44 @@ class ClaudeCodeProvider(LLMProvider):
         selected model (X). It may not exist…"*, which no
         ``INVALID_MODEL_MARKERS`` entry matches at any ladder order.
 
-        **A clean envelope's ``result`` is never scanned** (plan
-        ``opencode-validator-false-rate-limit-and-denied-turn`` T3.2). When the
-        CLI reports the run clean — ``is_error`` false, ``terminal_reason``
-        completed, no ``api_error_status`` (:func:`result_envelope.
-        is_clean_envelope`) — ``result`` is the model's own prose, and a
-        validator that read a plan discussing rate limits or model names says
-        so there. Handed to the ladder whole, that prose classified a green
-        run ``rate_limited`` (a backoff for the batch) or ``invalid_model``
-        (fatal to it). So the ladder runs over stderr and the exit code alone;
-        the envelope's other fields are bookkeeping and ``permission_denials``,
-        which quotes tool input, so none of stdout is kept. The audit that set
-        this rule found no committed failure capture that needs the prose: all
-        eight refusing rows carry ``is_error: true`` and the real 429
-        (``rate-limit``) carries ``api_error_status: 429``, so every one of
-        them still reaches the ladder or the status rung exactly as before.
+        **The model's ``result`` is never scanned** (plan
+        ``opencode-validator-false-rate-limit-and-denied-turn`` T3.2). It is
+        the model's own prose, and a validator that read a plan discussing
+        rate limits or model names says so there. Handed to the ladder whole,
+        that prose classified a green run ``rate_limited`` (a backoff for the
+        batch) or ``invalid_model`` (fatal to it). So the ladder reads the
+        envelope without ``result`` and ``permission_denials`` (which quotes
+        tool input), except a ``result`` beside ``terminal_reason:
+        "api_error"``: the API call failed and ``result`` is the CLI's own
+        ``API Error: …`` sentence (:func:`result_envelope.
+        result_envelope_diagnostics`). All eight refusing rows carry that
+        reason, and the real 429 (``rate-limit``) carries
+        ``api_error_status: 429``, so every one of them still reaches the
+        ladder or the status rung exactly as before.
 
         The exclusion itself lives in :meth:`vendor_text`, so the failure
         reason's quote (``subagent_executor._classify_failed_run``) is cut from
         the same reduced capture the verdict was decided on; the status rung
         above still reads the raw stdout.
         """
-        category = classify_api_error_status(stdout)
+        category = classify_api_error_status(structural_stdout(stdout, self))
         if category is not None:
             return category
         return super().classify_failure(stdout, stderr, exit_code)
 
     def vendor_text(self, stdout: str, stderr: str) -> Tuple[str, str]:
-        """``("", stderr)`` for a clean envelope; the capture unchanged otherwise.
+        """:func:`base.diagnostic_streams`: the envelope without the model's words.
 
-        A clean envelope's ``result`` is the model's own prose (see
-        :meth:`classify_failure`), and the rest of stdout is bookkeeping and
-        ``permission_denials`` quoting tool input, so none of it is the
-        vendor's verdict. Living here rather than inline in
-        :meth:`classify_failure` is what keeps the verdict and its quote on one
-        haystack: ``_classify_failed_run`` re-reduces through this hook to cut
-        the quote, and an identity hook let it quote the prose the verdict
-        excluded (plan T2.5). Any other stdout, including one that fails to
-        parse, is returned unchanged, per the base contract; stderr is never
-        reduced.
+        On every exit code (:meth:`classify_failure`). Living here rather than
+        inline in :meth:`classify_failure` is what keeps the verdict and its
+        quote on one haystack: ``_classify_failed_run`` re-reduces through this
+        hook to cut the quote (plan T2.5).
         """
-        try:
-            if is_clean_envelope(stdout):
-                return "", stderr
-        except Exception:  # noqa: BLE001 - a failed reduction returns its input
-            pass
-        return stdout, stderr
+        return diagnostic_streams(stdout, stderr, self)
 
-    def classify_exit_zero(self, stdout: str, stderr: str) -> Optional[str]:
-        """:meth:`classify_failure` over the envelope without ``result``.
-
-        On an exit 0 that left no answer, ``result`` is the model's answer
-        whatever the envelope's flags say, and ``permission_denials`` quotes
-        its tool input; :func:`base.envelope_without_answer` takes both out
-        and drops a stdout cut inside the envelope. The status rung and the
-        flags this adapter reads are untouched (``EXIT0_CLASSIFIABLE``).
-        """
-        return self.classify_failure(
-            envelope_without_answer(stdout, ("result", "permission_denials")),
-            stderr, 0,
-        )
+    def envelope_diagnostics(self, envelope: Dict[str, Any]) -> Dict[str, Any]:
+        """:func:`result_envelope.result_envelope_diagnostics`."""
+        return result_envelope_diagnostics(envelope, self.ENVELOPE_ANSWER_FIELDS)
 
     def describe_failure(self, stdout: str, stderr: str) -> Optional[str]:
         """The refusing envelope's own line, tagged when it names a usage cap.
@@ -1665,7 +1658,7 @@ class ClaudeCodeProvider(LLMProvider):
         nothing here changes it. ``stderr`` is accepted for the signature and
         deliberately unread: it has been empty on every capture.
         """
-        line = describe_refused_envelope(stdout)
+        line = describe_refused_envelope(structural_stdout(stdout, self))
         if line is None:
             return None
         lowered = line.lower()
@@ -1697,4 +1690,4 @@ class ClaudeCodeProvider(LLMProvider):
         """
         # One shared implementation (§9.5): cursor-agent emits the same envelope
         # and used to carry a byte-identical copy of the unwrapping.
-        return parse_result_envelope(stdout)
+        return parse_result_envelope(stdout, self.ENVELOPE_SIGNATURE)

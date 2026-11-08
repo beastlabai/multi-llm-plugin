@@ -154,6 +154,7 @@ import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 from .base import (
+    LAUNCH_DIAGNOSTICS_STDERR,
     InternalRetryEnvelope,
     LLMProvider,
     ReasoningLadder,
@@ -458,6 +459,11 @@ class QwenCodeProvider(LLMProvider):
     #: quoting a rate limit, a 401 or a context limit classifies as one.
     EXIT0_CLASSIFIABLE = False
 
+    #: :attr:`~.base.LLMProvider.LAUNCH_DIAGNOSTICS`, from the captures: qwen's stderr is its
+    #: own error object, retry notices and ripgrep notice (tests/fixtures/qwen-code); tool
+    #: turns ride the stdout array.
+    LAUNCH_DIAGNOSTICS = LAUNCH_DIAGNOSTICS_STDERR
+
     @property
     def name(self) -> str:
         return "qwen-code"
@@ -565,12 +571,10 @@ class QwenCodeProvider(LLMProvider):
         whole point rather than a stylistic choice:
 
         * ``is_error`` true, or ``subtype`` other than ``"success"``, or no
-          ``result`` key at all ⇒ failure. That last condition is load-bearing:
-          the error-shaped ``result`` record carries ``error`` *instead of*
-          ``result``, so ``parse_result_envelope``'s ``if "result" in wrapper``
-          guard misses it and serves the record's own bookkeeping to
-          reaggregation as the model's answer. Verified against the committed
-          helper on the ``stdout-error`` fixture.
+          ``result`` key at all ⇒ failure. The error-shaped ``result`` record
+          carries ``error`` *instead of* ``result``; this rule names it by its
+          own text, where ``parse_result_envelope`` would only say the record
+          has no ``result`` field (the ``stdout-error`` fixture).
         * an ``[API Error: …]`` marker anywhere in the answer text ⇒ failure,
           **even though the exit code, ``subtype`` and ``is_error`` all say
           success** (see the module docstring). Searched, never prefix-matched,
