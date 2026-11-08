@@ -969,9 +969,12 @@ def target_module_paths(base: Optional[Path] = None) -> Tuple[str, ...]:
 #: A deliberate growth past one of these is a reviewed edit here, not a silent side
 #: effect. Claude Code's limit also stays under its 12,000,000-byte review target.
 DISTRIBUTION_BUDGETS: Dict[str, Tuple[int, int]] = {
-    "claude-code": (260, 11_500_000),  # measured 234 files, 10,350,754 bytes
-    "codex": (240, 11_300_000),        # measured 218 files, 10,215,610 bytes
-    "opencode": (240, 11_400_000),     # measured 218 files, 10,261,602 bytes, unpacked
+    # Raised 2026-11-08 for the code-health split (about 26 new runtime modules,
+    # references and schemas, none of them development files); measured then:
+    # claude-code 243 files / 10,527,413 bytes, codex 244 / 10,689,125.
+    "claude-code": (285, 11_500_000),
+    "codex": (270, 11_300_000),
+    "opencode": (270, 11_400_000),     # unpacked; tracks the codex tree
 }
 
 
