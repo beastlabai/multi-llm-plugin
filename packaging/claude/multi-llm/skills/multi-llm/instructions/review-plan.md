@@ -476,8 +476,6 @@ to bare `python`.
 
    **CRITICAL**: Do NOT report results to the user until reaggregation is complete.
 
-   **Legacy Mode**: To run validation inside the orchestrator (bypassing subagent delegation), add `--internal-validation` flag to the orchestrator command.
-
 8. **Report results** following `references/summary-format.md`, including all generated files in `{plan}/review-plan/`:
    - `report.md` - Consolidated review report
    - `grouped.json` - Grouped suggestions

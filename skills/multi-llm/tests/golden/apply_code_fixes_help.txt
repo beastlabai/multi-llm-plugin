@@ -26,7 +26,6 @@ usage: apply_code_fixes_orchestrator.py [-h] [--host ID] [--yes]
                                         [--base-ref BASE_REF]
                                         [--approve-validation-failed]
                                         [--revalidate-all-human]
-                                        [--internal-revalidation]
                                         [--mark-completed]
 
 Prepare validated code review fixes for application
@@ -132,9 +131,6 @@ options:
                         failures (e.g., parsing/timeout)
   --revalidate-all-human
                         Re-run validation on ALL needs-human-decision items
-  --internal-revalidation
-                        Run revalidation inside orchestrator (legacy mode)
-                        instead of delegating to Claude Code subagent
   --mark-completed      Mark the phase as completed (call after all batches
                         are processed)
 

@@ -207,10 +207,9 @@ executor's result check never ask for them, so a reply without them is still a r
 override, recorded review policy, `expand`) and, when the current document is not the round's
 baseline document, embeds the round's hash-verified `validation-snapshot.md` as a second labelled
 context so correctness is judged against the current text and scope against the original
-(`revalidation_scope_binding`). The legacy `--internal-validation` route renders the same block, its
-Output Format asks for each group's `group_id` verbatim, and it stamps only a verdict whose echoed
-`group_id` names one of its groups (that echo also sets the record's `group_index`); any other echo
-joins by the reported index, for validity only.
+(`revalidation_scope_binding`). The in-process validation lane is retired: `--internal-validation`
+and `--internal-revalidation` still parse, print one warning and change nothing, so validation and
+revalidation always run through these task files (`cli_common.RETIRED_FLAGS`).
 
 The reply template's `group_index` example is a placeholder, never a number (models copied
 `0`: 41 of 46 and 18 of 32 verdicts echoed batch-local ordinals), and

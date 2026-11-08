@@ -599,6 +599,51 @@ def build_parent_parser(
 
 
 # ---------------------------------------------------------------------------
+# Retired flags: still parsed, warned about, otherwise ignored
+# ---------------------------------------------------------------------------
+
+#: Flags whose feature is gone but whose spelling still parses, so an old command
+#: line completes rather than stops. Each maps to the one stderr line printed
+#: when it is passed. The flag stores nothing on the namespace and
+#: :func:`replay_flags` drops it, so a run carrying one behaves exactly as a run
+#: without it. Both retired the in-process validation lane
+#: (docs/development/delegation.md).
+RETIRED_FLAGS: Dict[str, str] = {
+    INTERNAL_FLAG_PREFIX + "validation": (
+        "WARNING: --internal-validation is retired and ignored; validation runs "
+        "through the delegated subagent route."
+    ),
+    INTERNAL_FLAG_PREFIX + "revalidation": (
+        "WARNING: --internal-revalidation is retired and ignored; revalidation "
+        "runs through the delegated subagent route."
+    ),
+}
+
+
+class _RetiredFlagAction(argparse.Action):
+    """Prints the flag's :data:`RETIRED_FLAGS` notice once and stores nothing."""
+
+    def __init__(self, option_strings: Sequence[str], dest: str, **_kwargs: Any) -> None:
+        super().__init__(
+            option_strings, argparse.SUPPRESS, nargs=0,
+            default=argparse.SUPPRESS, help=argparse.SUPPRESS,
+        )
+        self._warned = False
+
+    def __call__(self, parser, namespace, values, option_string=None) -> None:
+        if not self._warned:
+            self._warned = True
+            print(RETIRED_FLAGS[self.option_strings[0]], file=sys.stderr)
+
+
+def add_retired_flag(parser: argparse.ArgumentParser, flag: str) -> None:
+    """Accept *flag*, a :data:`RETIRED_FLAGS` key, hidden from ``--help``."""
+    if flag not in RETIRED_FLAGS:  # pragma: no cover - guarded by the callers' literals
+        raise ValueError(f"{flag} is not a retired flag")
+    parser.add_argument(flag, action=_RetiredFlagAction)
+
+
+# ---------------------------------------------------------------------------
 # --scope-policy: declared once, for every mode that takes it
 # ---------------------------------------------------------------------------
 
@@ -1592,6 +1637,8 @@ def replay_flags(mode: str, argv: Sequence[str]) -> List[str]:
 
     * the two re-entry flags (``--internal-run-id`` with its value), with
       ``--internal-worker`` replayed as the ``--detach`` it stands for;
+    * the :data:`RETIRED_FLAGS`, which change nothing and would otherwise make
+      :meth:`ResultContext.set_next` drop the whole command;
     * the positional-derived flags, which every replay re-emits from its own
       arguments (``--plan-file``, ``--question``, ``--question-file``, the
       commit modes' ``--revs``), and the hidden ``--commit-stage``;
@@ -1635,6 +1682,8 @@ def replay_flags(mode: str, argv: Sequence[str]) -> List[str]:
             index += 1
             continue
         takes_value = _matches_any(head, _REPLAY_DROP_ALWAYS)
+        if takes_value is None and any(_flag_matches(head, f) for f in RETIRED_FLAGS):
+            takes_value = False
         if takes_value is None:
             takes_value = _matches_any(head, _REPLAY_DROP_POSITIONAL)
         if takes_value is None:

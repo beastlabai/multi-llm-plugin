@@ -26,19 +26,12 @@ from utils.llm_client import (
     ERROR_TIMEOUT,
     invoke_with_provider,
     invoke_with_file_output,
-    parse_subagent_response,
-    _extract_json_from_text,
 )
+from utils.providers.result_envelope import parse_result_envelope
 from utils.json_extractor import (
     extract_json_from_text,
     find_json_candidates,
     read_json_from_file,
-)
-from utils.validation import (
-    ERROR_TYPE_PARSING,
-    ERROR_TYPE_RATE_LIMITED,
-    ERROR_TYPE_TIMEOUT,
-    _classify_validation_error,
 )
 
 
@@ -157,14 +150,6 @@ class TestMalformedJson:
         # Standard JSON doesn't support comments
         # The extractor may or may not handle this
         assert "success" in result
-
-    def test_malformed_json_in_provider_response(self):
-        """Test handling malformed JSON in provider response parsing."""
-        malformed = '{"type": "result", "result": "[{truncated'
-        result = parse_subagent_response(malformed)
-
-        # Should return raw wrapper on failure
-        assert isinstance(result, dict)
 
     def test_deeply_nested_unbalanced(self):
         """Handle deeply nested structures with unbalanced brackets."""
@@ -293,22 +278,6 @@ class TestEmptyResponses:
 
         assert not result["success"]
 
-    def test_null_result_in_wrapper(self):
-        """Handle null result in cursor-agent wrapper."""
-        null_wrapper = '{"type": "result", "result": null}'
-        result = parse_subagent_response(null_wrapper)
-
-        # Should handle gracefully
-        assert isinstance(result, dict)
-
-    def test_empty_string_result_in_wrapper(self):
-        """Handle empty string result in cursor-agent wrapper."""
-        empty_wrapper = '{"type": "result", "result": ""}'
-        result = parse_subagent_response(empty_wrapper)
-
-        # Should return raw wrapper for empty content
-        assert isinstance(result, dict)
-
     def test_empty_array_response(self):
         """Handle empty array (valid but empty)."""
         empty_array = "[]"
@@ -423,20 +392,6 @@ class TestTimeoutScenarios:
         assert not result["success"]
         assert result["error_code"] == ERROR_TIMEOUT
 
-    def test_timeout_error_classification(self):
-        """Classify timeout-related error messages correctly."""
-        test_cases = [
-            "Request timeout",
-            "Connection timed out",
-            "TIMEOUT after 600 seconds",
-            "deadline exceeded",
-            "request timed out waiting for response",
-        ]
-
-        for error_msg in test_cases:
-            error_type = _classify_validation_error(error_msg)
-            assert error_type == ERROR_TYPE_TIMEOUT, f"Failed for: {error_msg}"
-
     @patch("shutil.which")
     @patch("utils.llm_client.subprocess.run")
     def test_short_timeout_override(self, mock_run, mock_which):
@@ -464,51 +419,6 @@ class TestTimeoutScenarios:
 # =============================================================================
 # Rate Limiting Tests
 # =============================================================================
-
-@pytest.mark.robustness
-class TestRateLimiting:
-    """Tests for rate limit detection and handling."""
-
-    def test_detect_rate_limit_in_error_message(self):
-        """Detect rate limit patterns in error message."""
-        rate_limit_errors = [
-            "Rate limit exceeded",
-            "rate-limit reached",
-            "Too many requests",
-            "429 Too Many Requests",
-            "Quota exceeded for the day",
-            "Request was throttled",
-            "API rate limit",
-        ]
-
-        for error_msg in rate_limit_errors:
-            error_type = _classify_validation_error(error_msg)
-            assert error_type == ERROR_TYPE_RATE_LIMITED, f"Failed for: {error_msg}"
-
-    def test_detect_429_status_in_error(self):
-        """Detect 429 status code pattern in error."""
-        error_msg = "HTTP Error 429"
-        error_type = _classify_validation_error(error_msg)
-        assert error_type == ERROR_TYPE_RATE_LIMITED
-
-    def test_detect_quota_exceeded(self):
-        """Detect quota exceeded pattern."""
-        error_msg = "API quota exceeded. Please try again later."
-        error_type = _classify_validation_error(error_msg)
-        assert error_type == ERROR_TYPE_RATE_LIMITED
-
-    def test_detect_too_many_requests(self):
-        """Detect 'too many requests' pattern (case insensitive)."""
-        error_msg = "TOO MANY REQUESTS - please slow down"
-        error_type = _classify_validation_error(error_msg)
-        assert error_type == ERROR_TYPE_RATE_LIMITED
-
-    def test_http_429_status_takes_precedence(self):
-        """HTTP 429 status code takes precedence over error text."""
-        # Error text says timeout, but HTTP says rate limited
-        error_type = _classify_validation_error("Request timeout", http_status=429)
-        assert error_type == ERROR_TYPE_RATE_LIMITED
-
 
 @pytest.mark.robustness
 class TestLaneARateLimitIsBoundaryAware:
@@ -770,13 +680,10 @@ class TestEncodingIssues:
         """Handle mixed encoding in cursor-agent wrapper."""
         # Valid outer JSON with potentially problematic inner content
         wrapper = '{"type": "result", "result": "[{\\"title\\": \\"caf\\u00e9\\"}]"}'
-        result = parse_subagent_response(wrapper)
+        result = parse_result_envelope(wrapper)
 
-        # May return dict or list depending on successful parsing
-        assert isinstance(result, (dict, list))
-        # If list, it successfully parsed the inner JSON array
-        if isinstance(result, list):
-            assert len(result) > 0
+        assert result["success"]
+        assert result["data"] == [{"title": "caf\u00e9"}]
 
     def test_null_bytes_in_response(self):
         """Handle null bytes in response (should fail or clean)."""
@@ -1003,19 +910,19 @@ class TestMultipleJsonInOutput:
     def test_cursor_agent_wrapper_with_json_array_result(self):
         """Handle cursor-agent wrapper with JSON array in result."""
         wrapper = '{"type": "result", "result": "[{\\"title\\": \\"Test\\"}]"}'
-        result = parse_subagent_response(wrapper)
+        result = parse_result_envelope(wrapper)
 
-        assert isinstance(result, list)
-        assert result[0]["title"] == "Test"
+        assert result["success"]
+        assert result["data"][0]["title"] == "Test"
 
     def test_cursor_agent_wrapper_with_code_block_result(self):
         """Handle cursor-agent wrapper with code block in result."""
         inner = '```json\n[{"title": "In Block"}]\n```'
         wrapper = {"type": "result", "result": inner}
-        result = parse_subagent_response(json.dumps(wrapper))
+        result = parse_result_envelope(json.dumps(wrapper))
 
-        assert isinstance(result, list)
-        assert result[0]["title"] == "In Block"
+        assert result["success"]
+        assert result["data"][0]["title"] == "In Block"
 
     def test_duplicate_json_arrays(self):
         """Handle duplicate JSON arrays (real-world LLM behavior)."""
@@ -1163,28 +1070,6 @@ class TestCombinedRobustness:
             assert len(result["data"]) == 1  # Only complete item
         else:
             assert "error" in result or result["data"] is None
-
-    def test_error_classification_with_complex_message(self):
-        """Classify complex multi-part error messages.
-
-        The error classification uses pattern matching order, so
-        the first matching pattern wins.
-        """
-        complex_error = "Request failed: HTTP 429 - Rate limit exceeded after timeout"
-        error_type = _classify_validation_error(complex_error)
-
-        # The classifier checks patterns in a specific order:
-        # parsing > timeout > rate_limit > model_failure
-        # Since "timeout" appears in the message and timeout patterns are
-        # checked before rate limit patterns, timeout is detected first
-        assert error_type in (ERROR_TYPE_RATE_LIMITED, ERROR_TYPE_TIMEOUT)
-
-    def test_error_classification_rate_limit_only(self):
-        """Classify pure rate limit error without timeout mention."""
-        rate_error = "Request failed: HTTP 429 - Rate limit exceeded"
-        error_type = _classify_validation_error(rate_error)
-
-        assert error_type == ERROR_TYPE_RATE_LIMITED
 
     def test_json_extraction_preserves_data_integrity(self):
         """Verify JSON extraction preserves data integrity."""

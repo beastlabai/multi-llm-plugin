@@ -104,8 +104,9 @@ MAX_ARGV_QUESTION_CHARS = 4096
 #: prefix. Excluded from ``--help``, never rendered into a follow-up command or a
 #: ``MULTI_LLM_RESULT.next`` value (see ``ResultContext.set_next``), and not part
 #: of the compatibility surface. Targets own further ``--internal-*`` names of
-#: their own (e.g. ``--internal-revalidation``), which is why the dispatcher
-#: forwards the prefix rather than validating against this list.
+#: their own (e.g. the retired ``--internal-revalidation``, which must still
+#: reach its parser to warn), which is why the dispatcher forwards the prefix
+#: rather than validating against this list.
 INTERNAL_FLAGS: Tuple[str, ...] = tuple(
     INTERNAL_FLAG_PREFIX + name for name in ("reaggregate", "consolidate", "worker")
 )

@@ -36,7 +36,7 @@ from typing import Dict, List, Optional
 sys.path.insert(0, str(Path(__file__).parent))
 
 from utils.stream_bootstrap import bootstrap_streams
-from utils.cli_common import build_parent_parser, dispatcher_prefix
+from utils.cli_common import add_retired_flag, build_parent_parser, dispatcher_prefix
 from utils.output_handler import output_dir_path
 from utils.prompt_loader import load_prompt
 from utils.provider_registry import get_all_model_specs
@@ -158,11 +158,7 @@ Examples:
         help='Re-aggregate existing model results (use after salvage operations complete)'
     )
 
-    parser.add_argument(
-        '--internal-validation',
-        action='store_true',
-        help='Run validation inside orchestrator (legacy mode) instead of delegating to Claude Code subagent'
-    )
+    add_retired_flag(parser, '--internal-validation')
 
     parser.add_argument(
         '--force',

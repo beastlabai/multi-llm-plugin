@@ -16,7 +16,7 @@ The tests are grouped by the thing that can regress:
 * launch failures ordered root-cause-before-auth, with ``exit_code == 127``
 * the exit-0 CLIs, whose exit code carries no verdict at all
 * the six §7.1.a duplicate sites, asserted gone by a source-level guard
-* ``validation.py``'s delegation, and the persisted contract it may not move
+* ``validation.py``'s persisted contract, which it may not move
 """
 
 from __future__ import annotations
@@ -1058,59 +1058,11 @@ class TestNoDuplicateSubstringClassifiers:
 
 
 # ---------------------------------------------------------------------------
-# §7.1.a — validation.py delegates, and its persisted contract does not move
+# §7.1.a — validation.py's persisted contract does not move
 # ---------------------------------------------------------------------------
 
-class TestValidationErrorDelegation:
-    """``_classify_validation_error`` keeps its vocabulary and loses its body."""
-
-    def _classify(self, error, http_status=None):
-        from utils.validation import _classify_validation_error
-
-        return _classify_validation_error(error, http_status)
-
-    def test_the_http_fast_path_is_still_first(self):
-        from utils.validation import ERROR_TYPE_RATE_LIMITED
-
-        assert self._classify("Request timeout", 429) == ERROR_TYPE_RATE_LIMITED
-
-    @pytest.mark.parametrize("error,expected", [
-        ("Rate limit exceeded", "rate_limited"),
-        ("Request was throttled", "rate_limited"),
-        ("Connection timed out", "timeout"),
-        ("deadline exceeded", "timeout"),
-        ("Connection refused by server", "model_failure"),
-        ("Service unavailable", "model_failure"),
-        ("Binary not found in PATH", "model_failure"),
-        ("Error: unauthorized", "model_failure"),
-    ])
-    def test_the_four_transport_categories_map_onto_the_kept_vocabulary(
-        self, error, expected
-    ):
-        assert self._classify(error) == expected
-
-    def test_the_parse_half_stays_local(self):
-        from utils.validation import ERROR_TYPE_PARSING
-
-        assert self._classify("No valid JSON in response") == ERROR_TYPE_PARSING
-        assert self._classify("Expecting value: line 1 column 1") == ERROR_TYPE_PARSING
-
-    def test_an_error_naming_a_json_path_is_not_a_parsing_error(self):
-        """The bare ``"json"`` pattern bought a wasted revalidation pass.
-
-        An error that merely *names* the output file classified as
-        ``parsing_error`` — hence ``recoverable`` — so the phase spent a whole
-        revalidation dispatch on a condition no re-ask can fix.
-        """
-        from utils.validation import ERROR_TYPE_PARSING, RECOVERABLE_ERROR_TYPES
-
-        for error in (
-            "Output file /tmp/plan/review-plan/plan_review_codex.json was never written",
-            "Permission denied writing validation_batch_0.json",
-        ):
-            classified = self._classify(error)
-            assert classified != ERROR_TYPE_PARSING, error
-            assert classified not in RECOVERABLE_ERROR_TYPES, error
+class TestValidationErrorVocabulary:
+    """The persisted ``error_type``/``recoverable`` vocabulary does not move."""
 
     def test_the_persisted_contract_did_not_move(self):
         """`error_type`/`recoverable` are written into every group result."""

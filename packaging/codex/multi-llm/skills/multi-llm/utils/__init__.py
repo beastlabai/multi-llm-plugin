@@ -21,11 +21,6 @@ from .git_utils import (
 )
 
 from .llm_client import (
-    LLMClientError,
-    SubagentTimeoutError,
-    invoke_subagent,
-    parse_subagent_response,
-    invoke_for_json,
     invoke_with_provider,
     invoke_with_file_output,
 )
@@ -118,7 +113,6 @@ from .prompt_loader import (
 )
 
 from .validation import (
-    validate_groups,
     apply_validation_to_groups,
     save_validation_results,
 )
@@ -221,11 +215,6 @@ __all__ = [
     "get_diff_since_ref",
     "get_files_changed_since_ref",
     # llm_client
-    "LLMClientError",
-    "SubagentTimeoutError",
-    "invoke_subagent",
-    "parse_subagent_response",
-    "invoke_for_json",
     "invoke_with_provider",
     "invoke_with_file_output",
     # json_extractor
@@ -298,7 +287,6 @@ __all__ = [
     "load_prompt",
     "clear_cache",
     # validation
-    "validate_groups",
     "apply_validation_to_groups",
     "save_validation_results",
     # consolidation

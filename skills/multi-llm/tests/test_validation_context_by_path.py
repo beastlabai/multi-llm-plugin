@@ -799,7 +799,7 @@ class TestSecondaryBlock:
 
 def _args(**over):
     base = dict(skip_validation=False, validation_model="auto", timeout=None,
-                internal_validation=False, force=False, consolidation_threshold=None)
+                force=False, consolidation_threshold=None)
     base.update(over)
     return argparse.Namespace(**base)
 

@@ -1813,12 +1813,12 @@ class TestMachineParseableMarkers:
 
     M4. [REVALIDATION_PENDING] <path>   (single batch)
         Condition: --revalidate with supports_revalidation=True, 1 batch,
-                   not dry-run, not internal-revalidation
+                   not dry-run
         Source: handle_revalidation()
 
     M5. [REVALIDATION_BATCHES_PENDING] <path>   (multiple batches)
         Condition: --revalidate with supports_revalidation=True, >1 batch,
-                   not dry-run, not internal-revalidation
+                   not dry-run
         Source: handle_revalidation()
 
     M6. Full JSON output via emit_json_output()

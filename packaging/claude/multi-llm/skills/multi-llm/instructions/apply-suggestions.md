@@ -126,8 +126,6 @@ When validation failed due to parsing errors or timeouts, you can retry:
 - `--revalidate-model MODEL`: Use a different model for retry (e.g., `cursor-agent:opus`)
 - `--revalidate-all-human`: Also re-validate all `needs-human-decision` items
 
-**Note**: By default, revalidation is delegated to a subagent. Use `--internal-revalidation` to run revalidation inside the orchestrator (legacy mode).
-
 ### Resume/State Options
 
 - `--resume`: Resume from last checkpoint, skip already-processed items
@@ -751,7 +749,7 @@ uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.p
 
 ### Handling Revalidation Subagent
 
-When running with `--revalidate` (without `--internal-revalidation`), the orchestrator outputs a revalidation marker.
+When running with `--revalidate`, the orchestrator outputs a revalidation marker.
 
 #### The task file
 
@@ -822,8 +820,6 @@ Follow the wave-based spawning strategy in `references/wave-batching.md`.
 **Before you continue: verify every batch wrote its file, and do not end your turn before it has.** Confirm that each task's `output_path` exists and is not empty. Re-dispatch any task whose file is missing — exactly as the contract above says — and write its reply yourself; only a batch that comes back empty-handed a second time is a failed batch, and a batch nobody re-dispatched is not one. Spawn batches so their replies return inside this turn, and stay in the turn until the last file is on disk: **you** write these files, not the subagents, and a host that runs one headless turn has no second turn in which to write them — a reply that lands after the turn ends is a batch lost with nothing on disk to say so. Naming the batch you are waiting on is not waiting for it.
 
 3. After ALL batches complete, run the orchestrator again (without `--revalidate`) to merge and continue
-
-**Legacy Mode**: Add `--internal-revalidation` to run revalidation inside the orchestrator instead of delegating to a subagent.
 
 ### Resuming Interrupted Sessions
 

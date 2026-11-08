@@ -62,7 +62,7 @@ def _stamp_previous_round(phase_dir):
 def _reaggregate(plan, out_dir, phase_dir):
     args = argparse.Namespace(
         skip_validation=False, validation_model="auto", timeout=None,
-        internal_validation=False, force=False,
+        force=False,
     )
     return asyncio.run(rob.reaggregate_from_existing_files(
         prefix="plan", out_dir=str(out_dir), phase_dir=str(phase_dir),

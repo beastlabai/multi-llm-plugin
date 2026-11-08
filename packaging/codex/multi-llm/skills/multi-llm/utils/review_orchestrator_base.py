@@ -173,7 +173,6 @@ from .subagent_tasks import (
 from . import (
     group_similar_suggestions,
     export_groups_to_json,
-    validate_groups,
     apply_validation_to_groups,
     save_validation_results,
 )
@@ -607,26 +606,6 @@ def retire_scope_round_results(phase_dir: str, state_manager: Any, phase: str,
             sys.exit(_scope_round.EXIT_NEEDS_HUMAN)
 
 
-def scope_plan_document(plan_path: str) -> Optional[BoundDocument]:
-    """The plan as read now, bound to nothing (a baseline source for a path
-    that has no validation snapshot to name). ``None`` when unreadable."""
-    try:
-        data = Path(plan_path).read_bytes()
-        return BoundDocument(
-            label="plan", text=decode_document(data, plan_path),
-            sha256=_sha256_hex(data), size=len(data),
-            source_path=os.path.abspath(plan_path),
-        )
-    except (OSError, ValidationContextError):
-        return None
-
-
-def _sha256_hex(data: bytes) -> str:
-    import hashlib
-
-    return hashlib.sha256(data).hexdigest()
-
-
 def validation_scope_block(
     phase_name: str,
     round_policy: "_scope_round.RoundPolicy",
@@ -671,57 +650,6 @@ def validation_scope_block(
         _scope_round.guidance_phase(phase_name, commit_review=commit_review),
         source=round_policy.source, baseline=baseline, round_baseline_id=round_id,
     )
-
-
-async def internal_validation_with_scope(
-    grouped: Sequence[Any],
-    context: str,
-    args: Any,
-    timeout: int,
-    *,
-    phase_name: str,
-    phase_dir: str,
-    validation_path: str,
-    round_policy: "_scope_round.RoundPolicy",
-    baseline: Optional[Dict[str, Any]],
-    round_baseline_id: Optional[str],
-    commit_review: bool = False,
-) -> List[Dict[str, Any]]:
-    """The legacy in-process validation (``--internal-validation``), scope included.
-
-    Validates, joins the verdicts back (scope authority by echoed hash only),
-    derives a ``preserve`` round's decision and saves ``validation.json``.
-    """
-    block = _scope_round.scope_block(
-        round_policy.policy,
-        _scope_round.guidance_phase(phase_name, commit_review=commit_review),
-        source=round_policy.source, baseline=baseline,
-        round_baseline_id=round_baseline_id,
-    )
-    validation_results = await validate_groups(
-        [g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
-        context=context,
-        model=args.validation_model,
-        timeout=timeout,
-        scope_policy=block["policy"],
-        scope_phase=block["phase"],
-        scope_baseline_id=block.get("baseline_id"),
-    )
-    validated_groups = apply_validation_to_groups(
-        [g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
-        validation_results
-    )
-    decisions = scope_decisions_for(validated_groups, validation_results, block)
-    save_validation_results(
-        validation_results, Path(validation_path),
-        # §7.1a: merged from no batch files, so bound to none — an
-        # empty binding, not the legacy mtime fallback.
-        batch_sha256={},
-        scope=block,
-        scope_decisions=decisions,
-    )
-    _scope_round.record_decisions(phase_dir, decisions)
-    return validated_groups
 
 
 def with_reviewer_guidance(
@@ -7302,7 +7230,8 @@ async def reaggregate_from_existing_files(
             # hashes still match says nothing about the snapshots its prompts
             # named. Re-hash them (exit 3 on a missing or changed one) and
             # rebind a moved phase dir before the verdicts are reused. No task
-            # file (an internal validation) records no sources to verify.
+            # file (a round the retired in-process lane wrote) records no sources
+            # to verify.
             reused_round: Optional[Dict[str, Any]] = None
             if os.path.exists(validation_tasks_path):
                 try:
@@ -7437,129 +7366,111 @@ async def reaggregate_from_existing_files(
                 print(f"Warning: Could not process batch metadata: {e}")
                 validated_groups_for_report = None
 
-        # Run internal validation if requested
         elif not args.skip_validation:
-            internal_validation = getattr(args, 'internal_validation', False)
-            if internal_validation:
-                print("\nRunning internal validation...")
-                validation_timeout = args.timeout if args.timeout else 600
-                validated_groups_for_report = await internal_validation_with_scope(
-                    grouped, plan_content, args, validation_timeout,
-                    phase_name=phase_name, phase_dir=phase_dir,
-                    validation_path=validation_path,
-                    round_policy=scope_round_policy,
-                    baseline=_scope_round.validators_baseline(
-                        phase_name, scope_recorded_baseline,
-                        plan_document=scope_plan_document(plan_path),
-                    ),
-                    round_baseline_id=_sp.baseline_id_of(scope_recorded_baseline),
-                )
-                print(f"Validation results saved to: {validation_path}")
+            # Host-neutral: this print runs on every host that dispatches
+            # subagent validation (opencode, codex, claude-code, ...), and
+            # naming Claude Code here contradicted the runner the log names a
+            # few lines later (measured 2026-09-16: an opencode-driven run
+            # printed this beside 11 lines correctly naming opencode).
+            print("\nPreparing batched validation for subagent execution...")
+            extra_kwargs = {}
+            if extra_validation_metadata:
+                extra_kwargs = {k: v for k, v in extra_validation_metadata.items()
+                                if k in ("tasks_file",)}
+            # A re-materialized round is a new round with a new snapshot
+            # (§2.3 step 5), bound from one read of the plan as it is now.
+            plan_document = bind_plan_for_validation(str(plan_path), phase_dir)
+            context_kwargs = validation_context_kwargs(
+                phase_name, plan_content, extra_validation_metadata,
+                plan_document=plan_document, phase_dir=phase_dir,
+            )
+            batched_tasks = prepare_batched_validation_tasks(
+                groups=[g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
+                output_dir=phase_dir,
+                plan_file=str(plan_path),
+                model=args.validation_model,
+                orchestrator=orchestrator_script,
+                **context_kwargs,
+                runner_read_refusal=materialization_read_refusal(
+                    args, str(plan_path)
+                ),
+                phase=phase_name,
+                scope=validation_scope_block(
+                    phase_name, scope_round_policy, scope_state,
+                    scope_recorded_baseline,
+                    plan_document=plan_document,
+                    tasks_document=context_kwargs.get("secondary_document"),
+                ),
+                **extra_kwargs,
+            )
+            batched_tasks["format_version"] = CURRENT_FORMAT_VERSION
+
+            with open(validation_tasks_path, 'w', encoding='utf-8') as f:
+                json.dump(batched_tasks, f, indent=2)
+
+            # The phase machine's own word for this stretch. `status` printed
+            # `phase state: grouping_complete` beside `progress: validating` for
+            # the whole validation run (measured 2026-09-16) because
+            # `validation_pending` — documented in utils/status_file.py since D4
+            # — was never written by anything.
+            update_status(phase_dir, {"state": "validation_pending"})
+            # And the progress word, as the first run's hand-off writes it.
+            # The executor mirror still describes the PREVIOUS round's
+            # batches (16/16 done), and nothing of this round has been
+            # dispatched yet, so it is cleared rather than left beside the
+            # new step; a dispatch below rewrites it from scratch.
+            _detach.report_progress(
+                phase_dir, step="validation_pending", subagents=None
+            )
+
+            total_batches = batched_tasks["total_batches"]
+            stats = batched_tasks.get("batching_stats", {})
+
+            if total_batches == 1:
+                print(f"\n[VALIDATION_PENDING] {validation_tasks_path}")
             else:
-                # Host-neutral: this print runs on every host that dispatches
-                # subagent validation (opencode, codex, claude-code, ...), and
-                # naming Claude Code here contradicted the runner the log names a
-                # few lines later (measured 2026-09-16: an opencode-driven run
-                # printed this beside 11 lines correctly naming opencode).
-                print("\nPreparing batched validation for subagent execution...")
-                extra_kwargs = {}
-                if extra_validation_metadata:
-                    extra_kwargs = {k: v for k, v in extra_validation_metadata.items()
-                                    if k in ("tasks_file",)}
-                # A re-materialized round is a new round with a new snapshot
-                # (§2.3 step 5), bound from one read of the plan as it is now.
-                plan_document = bind_plan_for_validation(str(plan_path), phase_dir)
-                context_kwargs = validation_context_kwargs(
-                    phase_name, plan_content, extra_validation_metadata,
-                    plan_document=plan_document, phase_dir=phase_dir,
+                print(f"\n[VALIDATION_BATCHES_PENDING] {validation_tasks_path}")
+                print(f"Batches: {total_batches}")
+
+            print(f"\nValidation prepared for subagent execution.")
+            print(f"Groups to validate: {stats.get('total_groups', len(grouped))}")
+
+            # Resolved here, from the running skill dir, because the task file
+            # stores only the durable mode + plan pair (D1c).
+            reaggregate_cmd = resolved_reaggregate_command(batched_tasks)
+
+            # D3b: with --exec-subagents this process continues past the marker
+            # instead of exiting — dispatch the batch, then fall through to the
+            # merge below and finish the phase in one invocation. The marker is
+            # still printed above (logs and .status.json), but it is
+            # informational on this path.
+            if await asyncio.to_thread(
+                dispatch_subagent_tasks,
+                args,
+                task_file=validation_tasks_path,
+                phase_dir=phase_dir,
+                phase=phase_name,
+                document=batched_tasks,
+                plan_path=str(plan_path),
+                label="validation",
+                retry_command=reaggregate_cmd,
+            ):
+                validated_groups_for_report = merge_validation_batches(
+                    phase_dir, batched_tasks, grouped, validation_path
                 )
-                batched_tasks = prepare_batched_validation_tasks(
-                    groups=[g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
-                    output_dir=phase_dir,
-                    plan_file=str(plan_path),
-                    model=args.validation_model,
-                    orchestrator=orchestrator_script,
-                    **context_kwargs,
-                    runner_read_refusal=materialization_read_refusal(
-                        args, str(plan_path)
-                    ),
-                    phase=phase_name,
-                    scope=validation_scope_block(
-                        phase_name, scope_round_policy, scope_state,
-                        scope_recorded_baseline,
-                        plan_document=plan_document,
-                        tasks_document=context_kwargs.get("secondary_document"),
-                    ),
-                    **extra_kwargs,
+            else:
+                # The plan as the user typed it (fix round 14).
+                reaggregate_cmd = resolved_reaggregate_command(
+                    batched_tasks, typed_plan=True,
                 )
-                batched_tasks["format_version"] = CURRENT_FORMAT_VERSION
-
-                with open(validation_tasks_path, 'w', encoding='utf-8') as f:
-                    json.dump(batched_tasks, f, indent=2)
-
-                # The phase machine's own word for this stretch. `status` printed
-                # `phase state: grouping_complete` beside `progress: validating` for
-                # the whole validation run (measured 2026-09-16) because
-                # `validation_pending` — documented in utils/status_file.py since D4
-                # — was never written by anything.
-                update_status(phase_dir, {"state": "validation_pending"})
-                # And the progress word, as the first run's hand-off writes it.
-                # The executor mirror still describes the PREVIOUS round's
-                # batches (16/16 done), and nothing of this round has been
-                # dispatched yet, so it is cleared rather than left beside the
-                # new step; a dispatch below rewrites it from scratch.
-                _detach.report_progress(
-                    phase_dir, step="validation_pending", subagents=None
-                )
-
-                total_batches = batched_tasks["total_batches"]
-                stats = batched_tasks.get("batching_stats", {})
-
-                if total_batches == 1:
-                    print(f"\n[VALIDATION_PENDING] {validation_tasks_path}")
-                else:
-                    print(f"\n[VALIDATION_BATCHES_PENDING] {validation_tasks_path}")
-                    print(f"Batches: {total_batches}")
-
-                print(f"\nValidation prepared for subagent execution.")
-                print(f"Groups to validate: {stats.get('total_groups', len(grouped))}")
-
-                # Resolved here, from the running skill dir, because the task file
-                # stores only the durable mode + plan pair (D1c).
-                reaggregate_cmd = resolved_reaggregate_command(batched_tasks)
-
-                # D3b: with --exec-subagents this process continues past the marker
-                # instead of exiting — dispatch the batch, then fall through to the
-                # merge below and finish the phase in one invocation. The marker is
-                # still printed above (logs and .status.json), but it is
-                # informational on this path.
-                if await asyncio.to_thread(
-                    dispatch_subagent_tasks,
-                    args,
-                    task_file=validation_tasks_path,
-                    phase_dir=phase_dir,
-                    phase=phase_name,
-                    document=batched_tasks,
-                    plan_path=str(plan_path),
-                    label="validation",
-                    retry_command=reaggregate_cmd,
-                ):
-                    validated_groups_for_report = merge_validation_batches(
-                        phase_dir, batched_tasks, grouped, validation_path
-                    )
-                else:
-                    # The plan as the user typed it (fix round 14).
-                    reaggregate_cmd = resolved_reaggregate_command(
-                        batched_tasks, typed_plan=True,
-                    )
-                    print("\nAfter validation completes, run:")
-                    print(f"  {reaggregate_cmd or ''}")
-                    # The single follow-up a native-subagent host is owed, also
-                    # exposed on the dispatcher's MULTI_LLM_RESULT line so a host
-                    # that cannot parse prose does not have to regex-mine stdout.
-                    record_next(reaggregate_cmd or None)
-                    concluded = True
-                    return
+                print("\nAfter validation completes, run:")
+                print(f"  {reaggregate_cmd or ''}")
+                # The single follow-up a native-subagent host is owed, also
+                # exposed on the dispatcher's MULTI_LLM_RESULT line so a host
+                # that cannot parse prose does not have to regex-mine stdout.
+                record_next(reaggregate_cmd or None)
+                concluded = True
+                return
         else:
             print("\nSkipping validation (--skip-validation flag set)")
 
@@ -8417,141 +8328,124 @@ async def run_review_orchestration(
 
             # Validate grouped suggestions
             if not args.skip_validation:
-                internal_validation = getattr(args, 'internal_validation', False)
-                if internal_validation:
-                    print("\nRunning internal validation...")
-                    validation_timeout = args.timeout if args.timeout else 600
+                # Host-neutral: this print runs on every host that dispatches
+                # subagent validation (opencode, codex, claude-code, ...), and
+                # naming Claude Code here contradicted the runner the log
+                # names a few lines later (measured 2026-09-16: an
+                # opencode-driven run printed this beside 11 lines correctly
+                # naming opencode).
+                print("\nPreparing batched validation for subagent execution...")
+                extra_kwargs = {}
+                if extra_validation_metadata:
+                    extra_kwargs = {k: v for k, v in extra_validation_metadata.items()
+                                    if k in ("tasks_file",)}
+                context_kwargs = validation_context_kwargs(
+                    phase_name, plan_content, extra_validation_metadata,
+                    plan_document=plan_document, phase_dir=phase_dir,
+                )
+                batched_tasks = prepare_batched_validation_tasks(
+                    groups=[g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
+                    output_dir=phase_dir,
+                    plan_file=str(plan_path),
+                    model=args.validation_model,
+                    # The document's `reaggregate_mode` is what every later
+                    # retry hint is rebuilt from (`resolved_reaggregate_command`),
+                    # so it has to be THIS phase's script. Measured 2026-09-14
+                    # on a `review-tasks` fan-out: the kwarg was missing, the
+                    # helper defaulted to review-plan's script, and the exit-3
+                    # block told the session model to re-invoke `review-plan
+                    # --reaggregate` for a review-tasks run.
+                    orchestrator=orchestrator_script,
+                    **context_kwargs,
+                    runner_read_refusal=materialization_read_refusal(
+                        args, str(plan_path)
+                    ),
+                    phase=phase_name,
+                    # The same policy and baseline the reviewers were given
+                    # (plan §3.1), in the one task file both invokers run.
+                    scope=validation_scope_block(
+                        phase_name, scope_round_policy, scope_state,
+                        scope_recorded_baseline,
+                        plan_document=plan_document,
+                        tasks_document=context_kwargs.get("secondary_document"),
+                    ),
+                    **extra_kwargs,
+                )
+                batched_tasks["format_version"] = CURRENT_FORMAT_VERSION
+
+                validation_tasks_path = os.path.join(phase_dir, "validation_tasks.json")
+                with open(validation_tasks_path, 'w', encoding='utf-8') as f:
+                    json.dump(batched_tasks, f, indent=2)
+
+                # The phase machine's own word for this stretch — see the
+                # matching write on the reaggregate path.
+                update_status(phase_dir, {"state": "validation_pending"})
+
+                total_batches = batched_tasks["total_batches"]
+                stats = batched_tasks.get("batching_stats", {})
+
+                if total_batches == 1:
+                    print(f"\n[VALIDATION_PENDING] {validation_tasks_path}")
+                else:
+                    print(f"\n[VALIDATION_BATCHES_PENDING] {validation_tasks_path}")
+                    print(f"Batches: {total_batches}")
+                    if stats.get("efficiency_gain_percent", 0) > 0:
+                        print(f"Efficiency gain: {stats['efficiency_gain_percent']}%")
+
+                print(f"\nValidation prepared for subagent execution.")
+                print(f"Groups to validate: {stats.get('total_groups', len(grouped))}")
+                print(f"HIGH priority groups: {stats.get('high_count', 0)}")
+                print(f"Normal priority groups: {stats.get('normal_count', 0)}")
+
+                # Resolved here, from the running skill dir, because the task
+                # file stores only the durable mode + plan pair (D1c).
+                reaggregate_cmd = resolved_reaggregate_command(batched_tasks)
+
+                # D3b: self-contained mode continues past the marker in this same
+                # process — dispatch, merge, and finish the phase in one
+                # invocation. Host-driven mode (the default) is unchanged below.
+                if await asyncio.to_thread(
+                    dispatch_subagent_tasks,
+                    args,
+                    task_file=validation_tasks_path,
+                    phase_dir=phase_dir,
+                    phase=phase_name,
+                    document=batched_tasks,
+                    plan_path=str(plan_path),
+                    label="validation",
+                    retry_command=reaggregate_cmd,
+                ):
                     validation_path = os.path.join(phase_dir, "validation.json")
-                    validated_groups_for_report = await internal_validation_with_scope(
-                        grouped, plan_content, args, validation_timeout,
-                        phase_name=phase_name, phase_dir=phase_dir,
-                        validation_path=validation_path,
-                        round_policy=scope_round_policy,
-                        baseline=_scope_round.validators_baseline(
-                            phase_name, scope_recorded_baseline,
-                            plan_document=plan_document,
-                        ),
-                        round_baseline_id=_sp.baseline_id_of(scope_recorded_baseline),
+                    validated_groups_for_report = merge_validation_batches(
+                        phase_dir, batched_tasks, grouped, validation_path
                     )
                 else:
-                    # Host-neutral: this print runs on every host that dispatches
-                    # subagent validation (opencode, codex, claude-code, ...), and
-                    # naming Claude Code here contradicted the runner the log
-                    # names a few lines later (measured 2026-09-16: an
-                    # opencode-driven run printed this beside 11 lines correctly
-                    # naming opencode).
-                    print("\nPreparing batched validation for subagent execution...")
-                    extra_kwargs = {}
-                    if extra_validation_metadata:
-                        extra_kwargs = {k: v for k, v in extra_validation_metadata.items()
-                                        if k in ("tasks_file",)}
-                    context_kwargs = validation_context_kwargs(
-                        phase_name, plan_content, extra_validation_metadata,
-                        plan_document=plan_document, phase_dir=phase_dir,
+                    # The plan as the user typed it (fix round 14).
+                    reaggregate_cmd = resolved_reaggregate_command(
+                        batched_tasks, typed_plan=True,
                     )
-                    batched_tasks = prepare_batched_validation_tasks(
-                        groups=[g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
-                        output_dir=phase_dir,
-                        plan_file=str(plan_path),
-                        model=args.validation_model,
-                        # The document's `reaggregate_mode` is what every later
-                        # retry hint is rebuilt from (`resolved_reaggregate_command`),
-                        # so it has to be THIS phase's script. Measured 2026-09-14
-                        # on a `review-tasks` fan-out: the kwarg was missing, the
-                        # helper defaulted to review-plan's script, and the exit-3
-                        # block told the session model to re-invoke `review-plan
-                        # --reaggregate` for a review-tasks run.
-                        orchestrator=orchestrator_script,
-                        **context_kwargs,
-                        runner_read_refusal=materialization_read_refusal(
-                            args, str(plan_path)
-                        ),
-                        phase=phase_name,
-                        # The same policy and baseline the reviewers were given
-                        # (plan §3.1), in the one task file both invokers run.
-                        scope=validation_scope_block(
-                            phase_name, scope_round_policy, scope_state,
-                            scope_recorded_baseline,
-                            plan_document=plan_document,
-                            tasks_document=context_kwargs.get("secondary_document"),
-                        ),
-                        **extra_kwargs,
-                    )
-                    batched_tasks["format_version"] = CURRENT_FORMAT_VERSION
+                    print("\nAfter validation completes, run:")
+                    print(f"  {reaggregate_cmd or ''}")
+                    record_next(reaggregate_cmd or None)
 
-                    validation_tasks_path = os.path.join(phase_dir, "validation_tasks.json")
-                    with open(validation_tasks_path, 'w', encoding='utf-8') as f:
-                        json.dump(batched_tasks, f, indent=2)
+                    # The follow-up command is persisted in its **durable,
+                    # rebindable** form (mode word + plan path) — in the task
+                    # file above and here alike — never as the
+                    # resolved skill-dir-absolute string the same run prints: the
+                    # Claude plugin cache is keyed by commit hash, so a stored
+                    # absolute command points at a directory that no longer
+                    # exists after any plugin update. `status` (and
+                    # utils/detach.resolved_reaggregate_command) rebuild it at
+                    # read time from the *running* skill dir.
+                    update_status(phase_dir, {
+                        "state": "validation_pending",
+                        "stdout_markers": ["VALIDATION_BATCHES_PENDING"] if total_batches > 1 else ["VALIDATION_PENDING"],
+                        "validation_tasks_path": validation_tasks_path,
+                        **durable_reaggregate_fields(orchestrator_script, plan_path),
+                    })
+                    _detach.report_progress(phase_dir, step="validation_pending")
 
-                    # The phase machine's own word for this stretch — see the
-                    # matching write on the reaggregate path.
-                    update_status(phase_dir, {"state": "validation_pending"})
-
-                    total_batches = batched_tasks["total_batches"]
-                    stats = batched_tasks.get("batching_stats", {})
-
-                    if total_batches == 1:
-                        print(f"\n[VALIDATION_PENDING] {validation_tasks_path}")
-                    else:
-                        print(f"\n[VALIDATION_BATCHES_PENDING] {validation_tasks_path}")
-                        print(f"Batches: {total_batches}")
-                        if stats.get("efficiency_gain_percent", 0) > 0:
-                            print(f"Efficiency gain: {stats['efficiency_gain_percent']}%")
-
-                    print(f"\nValidation prepared for subagent execution.")
-                    print(f"Groups to validate: {stats.get('total_groups', len(grouped))}")
-                    print(f"HIGH priority groups: {stats.get('high_count', 0)}")
-                    print(f"Normal priority groups: {stats.get('normal_count', 0)}")
-
-                    # Resolved here, from the running skill dir, because the task
-                    # file stores only the durable mode + plan pair (D1c).
-                    reaggregate_cmd = resolved_reaggregate_command(batched_tasks)
-
-                    # D3b: self-contained mode continues past the marker in this same
-                    # process — dispatch, merge, and finish the phase in one
-                    # invocation. Host-driven mode (the default) is unchanged below.
-                    if await asyncio.to_thread(
-                        dispatch_subagent_tasks,
-                        args,
-                        task_file=validation_tasks_path,
-                        phase_dir=phase_dir,
-                        phase=phase_name,
-                        document=batched_tasks,
-                        plan_path=str(plan_path),
-                        label="validation",
-                        retry_command=reaggregate_cmd,
-                    ):
-                        validation_path = os.path.join(phase_dir, "validation.json")
-                        validated_groups_for_report = merge_validation_batches(
-                            phase_dir, batched_tasks, grouped, validation_path
-                        )
-                    else:
-                        # The plan as the user typed it (fix round 14).
-                        reaggregate_cmd = resolved_reaggregate_command(
-                            batched_tasks, typed_plan=True,
-                        )
-                        print("\nAfter validation completes, run:")
-                        print(f"  {reaggregate_cmd or ''}")
-                        record_next(reaggregate_cmd or None)
-
-                        # The follow-up command is persisted in its **durable,
-                        # rebindable** form (mode word + plan path) — in the task
-                        # file above and here alike — never as the
-                        # resolved skill-dir-absolute string the same run prints: the
-                        # Claude plugin cache is keyed by commit hash, so a stored
-                        # absolute command points at a directory that no longer
-                        # exists after any plugin update. `status` (and
-                        # utils/detach.resolved_reaggregate_command) rebuild it at
-                        # read time from the *running* skill dir.
-                        update_status(phase_dir, {
-                            "state": "validation_pending",
-                            "stdout_markers": ["VALIDATION_BATCHES_PENDING"] if total_batches > 1 else ["VALIDATION_PENDING"],
-                            "validation_tasks_path": validation_tasks_path,
-                            **durable_reaggregate_fields(orchestrator_script, plan_path),
-                        })
-                        _detach.report_progress(phase_dir, step="validation_pending")
-
-                        return  # Exit early - Claude Code handles validation
+                    return  # Exit early - Claude Code handles validation
             else:
                 print("\nSkipping validation (--skip-validation flag set)")
         else:

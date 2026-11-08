@@ -71,7 +71,6 @@ VALIDATOR_EXPAND = (
 )
 #: The existing definition of "valid", unchanged under every policy.
 VALID_DEFINITION = '- "valid": the issue is real and should be addressed'
-LEGACY_VALID_DEFINITION = '- "valid": The issue is real and should be addressed'
 
 
 def ns_with_policy(namespace: argparse.Namespace, policy: Any) -> argparse.Namespace:
@@ -430,27 +429,6 @@ class TestBatchedValidationPrompts:
         assert PLAN_VALIDATION_SCOPE_GUIDANCE not in prompt
 
 
-class TestLegacyValidationPrompt:
-    @pytest.mark.parametrize("policy", [None, "expand", "preserve"])
-    def test_validate_groups_renders_the_block_per_call(self, policy):
-        captured: List[str] = []
-
-        def fake(prompt, model, timeout):
-            captured.append(prompt)
-            return {"success": True, "data": []}
-
-        with patch.object(validation_mod, "invoke_for_json", fake):
-            asyncio.run(validation_mod.validate_groups(
-                _groups(), context="# Plan", scope_policy=policy,
-            ))
-        text = flat(captured[0])
-        assert LEGACY_VALID_DEFINITION in captured[0]
-        assert (VALIDATOR_PRESERVE in text) is (policy == "preserve")
-        assert (VALIDATOR_EXPAND in text) is (policy != "preserve")
-        assert '"scope_relation": "in_scope" | "scope_extension" | "unclear"' in captured[0]
-        assert "{scope_guidance}" in validation_mod.VALIDATION_PROMPT_TEMPLATE
-
-
 def _round_dir(tmp_path: Path, plan_text: str):
     """A plan whose review-plan round recorded its baseline from its snapshot."""
     plan = _plan(tmp_path, plan_text)
@@ -699,94 +677,6 @@ class TestAuthority:
         assert generate_group_id({"theme": "t", "suggestions": normalized}) == generate_group_id(
             {"theme": "t", "suggestions": [{k: v for k, v in LEAKED_FINDINGS[0].items()
                                             if not k.startswith("scope_")}]})
-
-    @staticmethod
-    def _legacy_input(prompt: str) -> List[Dict[str, Any]]:
-        """The groups JSON the legacy prompt hands the model."""
-        start = prompt.index("## Suggestions to Validate") + len("## Suggestions to Validate")
-        return json.loads(prompt[start:prompt.index("## Your Task")])
-
-    @staticmethod
-    def _legacy_verdict(entry: Dict[str, Any], **overrides) -> Dict[str, Any]:
-        """A reply entry exactly as the legacy Output Format asks for it."""
-        extension = "PDF" in entry["theme"]
-        verdict = {
-            "group_index": entry["index"], "group_id": entry["group_id"],
-            "status": "valid", "reason": "ok", "confidence": 0.9,
-            "scope_relation": "scope_extension" if extension else "in_scope",
-            "scope_reason": "adds PDF" if extension else "completes CSV",
-            "scope_reference": "## Output",
-        }
-        verdict.update(overrides)
-        return verdict
-
-    def _run_legacy(self, groups, reply, policy="preserve"):
-        with patch.object(validation_mod, "invoke_for_json", reply):
-            results = asyncio.run(validation_mod.validate_groups(
-                groups, context="# Plan", scope_policy=policy,
-                scope_baseline_id=BASELINE["baseline_id"],
-            ))
-        return results, validation_mod.apply_validation_to_groups(groups, results)
-
-    def test_legacy_reply_contract_asks_for_the_group_id(self):
-        captured: List[str] = []
-
-        def fake(prompt, model, timeout):
-            captured.append(prompt)
-            return {"success": True, "data": []}
-
-        groups = _groups()
-        self._run_legacy(groups, fake)
-        output_format = captured[0][captured[0].index("## Output Format"):]
-        assert '"group_id": "<the group\'s group_id value, copied verbatim>"' in output_format
-        assert "its \"group_id\" verbatim" in flat(output_format)
-        assert [e["group_id"] for e in self._legacy_input(captured[0])] == [
-            g["group_hash"] for g in groups]
-
-    @pytest.mark.parametrize("policy", ["expand", "preserve"])
-    def test_legacy_internal_validation_stamps_only_an_echoed_hash(self, policy):
-        """A reply that follows the production Output Format binds by its echoed
-        id; an entry whose echo names no group (here: the placeholder copied
-        literally) joins by position — validity yes, scope authority no."""
-        groups = _groups()
-
-        def fake(prompt, model, timeout):
-            first, second = self._legacy_input(prompt)
-            return {"success": True, "data": [
-                self._legacy_verdict(first),
-                self._legacy_verdict(
-                    second, group_id="<the group's group_id value, copied verbatim>"),
-            ]}
-
-        results, joined = self._run_legacy(groups, fake, policy)
-        assert sp.PROPOSAL_DIGEST_FIELD in results[0]
-        assert joined[0][sp.VERDICT_KEY]["relation"] == "scope_extension"
-        assert sp.authority(joined[0], BASELINE["baseline_id"]).relation == "scope_extension"
-        # Joined by position: validity yes, scope authority no.
-        assert sp.PROPOSAL_DIGEST_FIELD not in results[1]
-        assert joined[1]["validation_status"] == "valid"
-        assert sp.VERDICT_KEY not in joined[1]
-        if policy == "preserve":
-            counts = scope_round.annotate_decisions(joined, "preserve", BASELINE["baseline_id"])
-            assert joined[0][sp.DECISION_KEY]["label"] == "Scope extension"
-            assert counts["scope_extension"] == 1 and counts["unclear"] == 1
-
-    def test_legacy_echoed_id_is_authoritative_over_the_index(self):
-        """An echoed id outranks a missing or wrong index, and the fill-in for
-        unreported groups never overwrites a verdict its id already joined."""
-        groups = _groups()
-
-        def fake(prompt, model, timeout):
-            first, second = self._legacy_input(prompt)
-            return {"success": True, "data": [
-                self._legacy_verdict(second, group_index=None),
-                self._legacy_verdict(first, group_index=7, status="invalid"),
-            ]}
-
-        results, joined = self._run_legacy(groups, fake)
-        assert [r["group_index"] for r in results] == [0, 1]
-        assert [g["validation_status"] for g in joined] == ["invalid", "valid"]
-        assert [g[sp.VERDICT_KEY]["relation"] for g in joined] == ["scope_extension", "in_scope"]
 
 
 class TestSalvageKeepsTheScopeTags:

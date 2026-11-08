@@ -13,7 +13,6 @@ and ``OrchestratorError`` for structured error propagation with exit codes.
 from __future__ import annotations
 
 import argparse
-import asyncio
 import contextlib
 import json
 import logging
@@ -42,7 +41,7 @@ from .apply_output_helpers import (
     write_and_emit_output,
 )
 from .apply_path_helpers import load_json_file
-from .cli_common import build_parent_parser, record_artifacts
+from .cli_common import add_retired_flag, build_parent_parser, record_artifacts
 from .apply_selection_helpers import (
     merge_validation_with_groups,
     resolve_priority_args,
@@ -80,7 +79,6 @@ from .suggestion_batcher import (
 from .validation import (
     ERROR_TYPE_AMBIGUOUS,
     prepare_batched_revalidation_tasks,
-    revalidate_failed_items,
     save_validation_results,
 )
 from .human_decisions import (
@@ -231,7 +229,8 @@ def build_common_arg_parser(
         include_base_ref: Add --base-ref.
         include_approve_validation_failed: Add --approve-validation-failed.
         include_revalidate_all_human: Add --revalidate-all-human.
-        include_internal_revalidation: Add --internal-revalidation.
+        include_internal_revalidation: Accept the retired, hidden
+            --internal-revalidation (it warns and changes nothing).
         include_mark_completed: Add --mark-completed.
 
     Returns:
@@ -476,11 +475,7 @@ def build_common_arg_parser(
         )
 
     if include_internal_revalidation:
-        parser.add_argument(
-            "--internal-revalidation",
-            action="store_true",
-            help="Run revalidation inside orchestrator (legacy mode) instead of delegating to Claude Code subagent",
-        )
+        add_retired_flag(parser, "--internal-revalidation")
 
     if include_mark_completed:
         parser.add_argument(
@@ -5282,15 +5277,11 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         task_suggestions), this returns immediately.
 
         Checks the --revalidate, --revalidate-model, --revalidate-all-human,
-        --internal-revalidation, and --dry-run CLI flags to determine the
-        revalidation mode:
+        and --dry-run CLI flags to determine the revalidation mode:
 
         1. **dry-run**: Print which items *would* be revalidated, then return
            (the caller continues with the normal flow).
-        2. **internal-revalidation** (legacy): Run revalidation in-process via
-           ``asyncio.run(revalidate_failed_items(...))``, save updated
-           validation results, and continue.
-        3. **default** (subagent delegation): Prepare batched revalidation
+        2. **default** (subagent delegation): Prepare batched revalidation
            tasks, write them to ``revalidation_tasks.json``, emit the
            ``[REVALIDATION_PENDING]`` / ``[REVALIDATION_BATCHES_PENDING]``
            marker, and ``sys.exit(0)`` so that Claude Code picks up the
@@ -5357,30 +5348,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # Read context for revalidation prompts
         context = self.get_revalidation_context()
         model = revalidate_model or "auto"
-
-        # ----- internal-revalidation (legacy in-process mode) -----
-        if getattr(self.args, "internal_revalidation", False):
-            print("Running internal revalidation...", file=sys.stderr)
-
-            self.validation = asyncio.run(
-                revalidate_failed_items(
-                    groups=self.groups,
-                    validation_results=self.validation,
-                    context=context,
-                    model=model,
-                    include_all_human=include_all_human,
-                )
-            )
-
-            save_validation_results(
-                self.validation, validation_path, model=model
-            )
-            print(
-                f"Updated validation saved to: {validation_path}",
-                file=sys.stderr,
-            )
-            # Continue with the updated validation (no exit)
-            return
 
         # ----- default: prepare for Claude Code subagent revalidation -----
         print(

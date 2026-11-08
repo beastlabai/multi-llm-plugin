@@ -724,7 +724,7 @@ class TestTheBypassProvenanceRidesTheServedModelCarriage:
             phase_name="review-plan", plan_path=str(plan),
             args=argparse.Namespace(
                 skip_validation=True, validation_model="auto", timeout=None,
-                internal_validation=False, force=False,
+                force=False,
             ),
             orchestrator_script="review_plan_orchestrator.py",
         ))

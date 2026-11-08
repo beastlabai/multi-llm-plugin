@@ -435,11 +435,7 @@ Examples:
         help='Re-aggregate existing model results (use after salvage operations complete)'
     )
 
-    parser.add_argument(
-        '--internal-validation',
-        action='store_true',
-        help='Run validation inside orchestrator (legacy mode) instead of delegating to Claude Code subagent'
-    )
+    cli_common.add_retired_flag(parser, '--internal-validation')
 
     parser.add_argument(
         '--consolidate',

@@ -212,26 +212,30 @@ def _three_findings(model_spec: str) -> dict:
 def _run_with_validation(tmp_path: Path, threshold: int):
     """A run whose groups all validate, with the recommendation threshold given.
 
-    Two more seams than the runs above, both standing in for work a provider
-    would do: ``validate_groups`` (the LLM call) and
-    ``apply_validation_to_groups`` (which joins its verdicts back). Everything
-    the recommendation itself depends on — the fan-out, the grouping, the
-    count — is still the real thing.
+    Two more seams than the runs above, both standing in for work the
+    delegated validators would do: ``dispatch_subagent_tasks`` (running the
+    batches) and ``merge_validation_batches`` (which joins their verdicts
+    back). Everything the recommendation itself depends on — the fan-out, the
+    grouping, the count — is still the real thing.
     """
     plan = _plan(tmp_path)
     argv = [
         "--plan-file", str(plan),
         "--models", "cursor-agent:auto",
-        "--internal-validation",
+        "--exec-subagents",
         "--consolidation-threshold", str(threshold),
         "--timeout", "5",
     ]
 
-    async def _validate(groups, **kwargs):
-        return []
+    def _dispatch(_args, **kwargs):
+        return True
 
-    def _apply(groups, results):
-        return [dict(group, validation_status="valid") for group in groups]
+    def _merged(_phase_dir, _metadata, grouped, _validation_path):
+        return [
+            dict(g.to_dict() if hasattr(g, "to_dict") else g,
+                 validation_status="valid")
+            for g in grouped
+        ]
 
     context = cli_common.activate_result(cli_common.ResultContext())
     try:
@@ -239,8 +243,8 @@ def _run_with_validation(tmp_path: Path, threshold: int):
             base, "invoke_with_file_output",
             side_effect=lambda **kwargs: _three_findings(kwargs["model_spec"]),
         ), patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0), \
-                patch.object(base, "validate_groups", _validate), \
-                patch.object(base, "apply_validation_to_groups", _apply):
+                patch.object(base, "dispatch_subagent_tasks", new=_dispatch), \
+                patch.object(base, "merge_validation_batches", new=_merged):
             exit_code = asyncio.run(rpo.main(argv))
     finally:
         cli_common.deactivate_result()
@@ -321,6 +325,45 @@ class TestConsolidationRecommendationLeavesTheLog:
             f"consolidation recommended: {groups} valid groups >= 2 "
             "— run --consolidate"
         ) in out
+
+
+class TestTheRetiredInternalValidationFlag:
+    """``--internal-validation`` once validated in-process; it is retired and
+    now warns and takes the delegated route, exactly as a run without it."""
+
+    def _run(self, tmp_path, *extra):
+        plan = _plan(tmp_path)
+        argv = [
+            "--plan-file", str(plan), "--models", "cursor-agent:auto",
+            "--timeout", "5", *extra,
+        ]
+        context = cli_common.activate_result(cli_common.ResultContext())
+        try:
+            with patch.object(
+                base, "invoke_with_file_output",
+                side_effect=lambda **kwargs: _three_findings(kwargs["model_spec"]),
+            ), patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+                exit_code = asyncio.run(rpo.main(argv))
+        finally:
+            cli_common.deactivate_result()
+        return base.get_phase_dir(plan, "review-plan"), exit_code, context
+
+    def test_it_warns_once_and_stops_at_the_validation_marker(self, tmp_path, capsys):
+        phase_dir, exit_code, context = self._run(tmp_path, "--internal-validation")
+        out, err = capsys.readouterr()
+
+        assert exit_code == 0
+        assert err.count("--internal-validation is retired") == 1
+        assert "Running internal validation" not in out
+        assert "[VALIDATION_PENDING]" in out or "[VALIDATION_BATCHES_PENDING]" in out
+        assert (phase_dir / "validation_tasks.json").is_file()
+        # The host is still handed its follow-up: a replayed retired flag would
+        # have made `set_next` drop the whole command.
+        follow_up = context.payload(0)["next"]
+        assert follow_up and "--reaggregate" in follow_up
+        assert "--internal-" not in follow_up
+
+
 class TestTheFanOutReportsProgressWhileItRuns:
     """F5: `progress.models_done` was written `0` once, before the first launch,
     and recomputed only after the last model returned — so every poll during the
@@ -1545,7 +1588,7 @@ class TestThePhaseTickerOutlivesTheFanOut:
         it can be observed, by asking the blocking stub itself how many lines
         landed while it was blocking.
 
-        Its predecessor drove the `--internal-validation` path with an `async`
+        Its predecessor drove the retired `--internal-validation` path with an `async`
         stub that awaited, so `len(after) >= 2` was a statement about the stub
         rather than about the production dispatch path, and it passed both
         before and after the defect.

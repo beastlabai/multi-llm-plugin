@@ -46,7 +46,6 @@ from utils import (
     get_files_changed_since_ref,
     group_similar_suggestions,
     export_groups_to_json,
-    validate_groups,
     sanitize_prefix,
     intent_to_add_untracked,
     subtract_baseline,

@@ -203,12 +203,16 @@ class TestParseArgs:
                 args = parse_args()
         assert args.validation_model == "gemini:flash"
 
-    def test_parse_args_internal_validation(self):
-        """--internal-validation flag is recognized."""
-        with patch("sys.argv", ["prog", "--plan-file", "p.md", "--internal-validation"]):
-            with patch("review_tasks_orchestrator.get_all_model_specs", return_value=[]):
+    def test_parse_args_retired_internal_validation(self, capsys):
+        """The retired --internal-validation still parses, warns once and sets nothing."""
+        with patch("review_tasks_orchestrator.get_all_model_specs", return_value=[]):
+            with patch("sys.argv", ["prog", "--plan-file", "p.md", "--internal-validation"]):
                 args = parse_args()
-        assert args.internal_validation is True
+            with patch("sys.argv", ["prog", "--plan-file", "p.md"]):
+                default = parse_args()
+        assert vars(args) == vars(default)
+        err = capsys.readouterr().err
+        assert err.count("--internal-validation is retired") == 1
 
     def test_parse_args_providers_yaml_not_found(self):
         """Argument parsing succeeds even when providers.yaml is missing."""

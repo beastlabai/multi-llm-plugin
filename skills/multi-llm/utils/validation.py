@@ -2,8 +2,9 @@
 """
 Shared validation utility for plan review and code review orchestrators.
 
-Validates grouped suggestions/issues using an LLM to filter false positives
-and identify items needing human review.
+Prepares the validation of grouped suggestions/issues for delegated subagents,
+which filter false positives and identify items needing human review, then
+merges and records their verdicts.
 """
 
 import json
@@ -14,24 +15,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-# Import the invoke_for_json utility
 try:
-    from .llm_client import invoke_for_json
-    from .providers.base import (
-        CATEGORY_CONNECTION_ERROR,
-        CATEGORY_INVALID_MODEL,
-        CATEGORY_PERMISSION_DENIED,
-        CATEGORY_SERVER_ERROR,
-        classify_streams,
-    )
-    from .retry_ladder import (
-        STATUS_AUTH_FAILED,
-        STATUS_CONTEXT_LENGTH_EXCEEDED,
-        STATUS_RATE_LIMITED,
-        STATUS_RUNNER_ERROR,
-        STATUS_SPAWN_FAILED,
-        STATUS_TIMEOUT,
-    )
     from .state_manager import generate_group_id, CURRENT_FORMAT_VERSION
     from .cli_common import (
         current_replay_flags, durable_reaggregate_fields, retry_command,
@@ -53,22 +37,6 @@ try:
         tasks_of,
     )
 except ImportError:
-    from utils.llm_client import invoke_for_json
-    from utils.providers.base import (
-        CATEGORY_CONNECTION_ERROR,
-        CATEGORY_INVALID_MODEL,
-        CATEGORY_PERMISSION_DENIED,
-        CATEGORY_SERVER_ERROR,
-        classify_streams,
-    )
-    from utils.retry_ladder import (
-        STATUS_AUTH_FAILED,
-        STATUS_CONTEXT_LENGTH_EXCEEDED,
-        STATUS_RATE_LIMITED,
-        STATUS_RUNNER_ERROR,
-        STATUS_SPAWN_FAILED,
-        STATUS_TIMEOUT,
-    )
     from utils.state_manager import generate_group_id, CURRENT_FORMAT_VERSION
     from utils.cli_common import (
         current_replay_flags, durable_reaggregate_fields, retry_command,
@@ -1038,108 +1006,6 @@ RECOVERABLE_ERROR_TYPES = frozenset({
 })
 
 
-#: Our *own* extraction failing, which is not a transport category at all — the
-#: provider answered, and this codebase could not turn the answer into JSON.
-#: Lane B's equivalent is D3k rung 5 (``unparseable_result``), not anything
-#: ``classify_failure`` returns, which is why this half deliberately stays local
-#: while the four transport categories delegate (§7.1.a).
-#:
-#: The bare ``"json"`` this list used to open with is gone: it classified *any*
-#: error merely **naming** a ``.json`` path — "output file …/plan_review.json was
-#: never written" — as a parsing error, hence ``recoverable``, hence worth a
-#: whole revalidation dispatch on a condition no re-ask can fix. Every entry now
-#: names a parse *event*.
-_PARSING_PATTERNS = (
-    "json parse",
-    "parse json",
-    "json decode",
-    "jsondecodeerror",
-    "invalid json",
-    "no valid json",
-    "no json found",
-    "malformed json",
-    "parse error",
-    "parsing error",
-    "decode error",
-    "decodeerror",
-    "syntax error",
-    "unexpected token",
-    "expecting value",
-    "expecting property",
-)
-
-#: The shared classifier's categories, mapped onto the vocabulary this module
-#: **persists** (§7.1.a). The mapping is deliberately lossy in one direction
-#: only: several distinct infrastructure verdicts collapse onto
-#: ``ERROR_TYPE_MODEL_FAILURE``, which is correctly **not** in
-#: :data:`RECOVERABLE_ERROR_TYPES` — none of them is fixed by re-asking.
-_CATEGORY_TO_ERROR_TYPE = {
-    STATUS_RATE_LIMITED: ERROR_TYPE_RATE_LIMITED,
-    STATUS_TIMEOUT: ERROR_TYPE_TIMEOUT,
-    CATEGORY_CONNECTION_ERROR: ERROR_TYPE_MODEL_FAILURE,
-    CATEGORY_SERVER_ERROR: ERROR_TYPE_MODEL_FAILURE,
-    STATUS_AUTH_FAILED: ERROR_TYPE_MODEL_FAILURE,
-    STATUS_SPAWN_FAILED: ERROR_TYPE_MODEL_FAILURE,
-    CATEGORY_PERMISSION_DENIED: ERROR_TYPE_MODEL_FAILURE,
-    CATEGORY_INVALID_MODEL: ERROR_TYPE_MODEL_FAILURE,
-    # A broken OS sandbox (D6) is a property of the machine, never of the turn.
-    "sandbox_unavailable": ERROR_TYPE_MODEL_FAILURE,
-    STATUS_RUNNER_ERROR: ERROR_TYPE_MODEL_FAILURE,
-    # A prompt that does not fit is terminal (§7.6(a)) and must never be
-    # recorded recoverable: a revalidation pass would resend it unchanged.
-    STATUS_CONTEXT_LENGTH_EXCEEDED: ERROR_TYPE_MODEL_FAILURE,
-}
-
-
-def _classify_validation_error(error: str, http_status: Optional[int] = None) -> str:
-    """
-    Classify a validation error by type.
-
-    Note: This function is for FAILURES during validation (parsing, timeout, etc.).
-    For genuine ambiguity where the LLM returns needs-human-decision, use
-    ERROR_TYPE_AMBIGUOUS directly in the validation result handler.
-
-    **Signature, return vocabulary and the ``http_status`` fast path are frozen**
-    (§7.1.a): callers branch on the ``ERROR_TYPE_*`` constants, and
-    ``error_type``/``recoverable`` are written into every persisted group result
-    and read downstream by ``filtering.RECOVERABLE_ERROR_TYPES``. What changed is
-    the *body*: this used to be a second, complete classifier — five ordered
-    substring lists including a bare ``"429"`` with the same boundary flaw Lane A
-    had, and a bare ``"json"`` — living three modules away from the one in
-    ``providers/base.py`` and disagreeing with it. The four transport categories
-    now delegate, and only the parse half stays local, because that classifies
-    *our own* extraction failure rather than the provider's transport.
-
-    Args:
-        error: The error message string
-        http_status: Optional HTTP status code if available (e.g., 429 for rate limit)
-
-    Returns:
-        One of the ERROR_TYPE_* constants
-    """
-    error_lower = (error or "").lower()
-
-    # Check HTTP status codes first (most reliable). It stays *first* and stays
-    # local: it is the one input that needs no patterns at all.
-    if http_status:
-        if http_status == 429:
-            return ERROR_TYPE_RATE_LIMITED
-        elif http_status in (408, 504):
-            return ERROR_TYPE_TIMEOUT
-        elif http_status in (500, 502, 503):
-            return ERROR_TYPE_MODEL_FAILURE
-
-    if any(pattern in error_lower for pattern in _PARSING_PATTERNS):
-        return ERROR_TYPE_PARSING
-
-    # Also classify non-success-but-parsable responses (raw/malformed data) as parsing errors
-    if "raw" in error_lower and ("response" in error_lower or "output" in error_lower):
-        return ERROR_TYPE_PARSING
-
-    category = classify_streams(error or "", "")
-    return _CATEGORY_TO_ERROR_TYPE.get(category, ERROR_TYPE_UNKNOWN)
-
-
 def _reported_group_index(result: Dict[str, Any]) -> int:
     """The ``group_index`` a verdict echoed, as an int, or ``-1`` when it is not one.
 
@@ -1173,292 +1039,6 @@ def _reported_group_index(result: Dict[str, Any]) -> int:
     return -1
 
 
-VALIDATION_PROMPT_TEMPLATE = '''You are validating review suggestions/issues for accuracy.
-
-## Context
-{context}
-
-## Suggestions to Validate
-{suggestions_json}
-
-## Your Task
-For each suggestion, determine if it is:
-- "valid": The issue is real and should be addressed
-- "invalid": False positive, the suggestion is incorrect or not applicable
-- "needs-human-decision": Cannot be determined automatically, requires human judgment
-
-{scope_guidance}
-
-## Output Format
-Return ONLY a valid JSON array with one entry per suggestion group. Copy each
-group's "index" into "group_index" and its "group_id" verbatim into "group_id":
-[
-  {{
-    "group_index": 0,
-    "group_id": "<the group's group_id value, copied verbatim>",
-    "status": "valid" | "invalid" | "needs-human-decision",
-    "reason": "Brief explanation for the classification",
-    "confidence": 0.0-1.0,
-    "scope_relation": "in_scope" | "scope_extension" | "unclear",
-    "scope_reason": "One brief sentence saying why, against the scope baseline",
-    "scope_reference": "The baseline section it rests on, or empty"
-  }}
-]
-'''
-
-
-async def validate_groups(
-    groups: List[Dict[str, Any]],
-    context: str,
-    model: str = "auto",
-    timeout: int = 120,
-    *,
-    scope_policy: Optional[str] = None,
-    scope_phase: str = "review-plan",
-    scope_baseline_id: Optional[str] = None,
-    revalidation_baseline_differs: bool = False,
-) -> List[Dict[str, Any]]:
-    """
-    Validate grouped suggestions/issues using an LLM.
-
-    Args:
-        groups: List of suggestion groups (from group_similar_suggestions or similar)
-                Each group should have 'theme', 'suggestions', etc.
-        context: Context for validation (plan content or diff)
-        model: Model to use for validation (default: "auto")
-        timeout: Timeout in seconds
-        scope_policy: The round's effective scope policy; omitted is
-            ``expand``. Renders ``scope_policy.validator_guidance`` into the
-            prompt per call (the template caches no policy text).
-        scope_phase: The ``scope_policy`` prompt phase (``review-plan``,
-            ``review-tasks``, ``code-review``, ``commits``).
-        scope_baseline_id: The baseline the context above binds, stamped on
-            every verdict that joins its group by the stable hash it echoed
-            (the reply contract asks for each input group's ``group_id``).
-            A verdict joined by position only is never stamped (no scope
-            authority, plan §3).
-        revalidation_baseline_differs: Adds the validator note that scope is
-            judged against the original round's baseline.
-
-    Returns:
-        List of validation results:
-        [
-            {
-                "group_index": int,
-                "status": "valid" | "invalid" | "needs-human-decision",
-                "reason": str,
-                "confidence": float
-            }
-        ]
-    """
-    if not groups:
-        return []
-
-    # Pre-compute group_ids for stable matching after reaggregation
-    group_ids = []
-    group_by_id: Dict[str, Dict[str, Any]] = {}
-    for group in groups:
-        if hasattr(group, 'to_dict'):
-            group_dict = group.to_dict()
-        else:
-            group_dict = group
-        group_ids.append(generate_group_id(group_dict))
-        group_by_id.setdefault(group_ids[-1], group_dict)
-
-    # Prepare suggestions JSON for the prompt
-    # Extract key info from each group for validation
-    validation_input = []
-    for i, group in enumerate(groups):
-        # Handle both dict and SuggestionGroup objects
-        if hasattr(group, 'to_dict'):
-            group_dict = group.to_dict()
-        else:
-            group_dict = group
-
-        validation_input.append({
-            "index": i,
-            "group_id": group_ids[i],
-            "theme": group_dict.get("theme", "Unknown"),
-            "category": group_dict.get("category", "unknown"),
-            "models": group_dict.get("models", []),
-            "suggestions": [
-                {
-                    "title": s.get("title", ""),
-                    "desc": s.get("desc", ""),
-                    "importance": s.get("importance", "medium"),
-                    "type": s.get("type", "unknown")
-                }
-                for s in group_dict.get("suggestions", [])
-            ]
-        })
-
-    suggestions_json = json.dumps(validation_input, indent=2)
-
-    # Truncate context if too long
-    max_context_len = 30000
-    if len(context) > max_context_len:
-        context = context[:max_context_len] + "\n\n[... truncated ...]"
-
-    prompt = VALIDATION_PROMPT_TEMPLATE.format(
-        context=context,
-        suggestions_json=suggestions_json,
-        scope_guidance=_sp.validator_guidance(
-            scope_policy, scope_phase,
-            revalidation_baseline_differs=revalidation_baseline_differs,
-        ),
-    )
-
-    print(f"[validation] Starting validation of {len(groups)} groups with model '{model}'...")
-
-    result = invoke_for_json(
-        prompt=prompt,
-        model=model,
-        timeout=timeout
-    )
-
-    if not result.get("success"):
-        error = result.get("error", "Unknown error")
-        error_type = _classify_validation_error(error)
-        print(f"[validation] Failed: {error} (type: {error_type})")
-
-        # Use validation_failed status for recoverable errors
-        status = "validation_failed" if error_type in RECOVERABLE_ERROR_TYPES else "needs-human-decision"
-
-        # Return all as validation_failed or needs-human-decision on failure WITH error type
-        return [
-            {
-                "group_index": i,
-                "group_id": group_ids[i],
-                "status": status,
-                "reason": f"Validation failed: {error}",
-                "confidence": 0.0,
-                "error_type": error_type,
-                "recoverable": error_type in RECOVERABLE_ERROR_TYPES
-            }
-            for i in range(len(groups))
-        ]
-
-    data = result.get("data", [])
-
-    # Handle case where data is wrapped or malformed
-    if isinstance(data, dict) and "raw" in data:
-        print("[validation] Warning: Could not parse validation response")
-        return [
-            {
-                "group_index": i,
-                "group_id": group_ids[i],
-                "status": "validation_failed",
-                "reason": "Could not parse validation response",
-                "confidence": 0.0,
-                "error_type": ERROR_TYPE_PARSING,
-                "recoverable": True
-            }
-            for i in range(len(groups))
-        ]
-
-    if not isinstance(data, list):
-        print("[validation] Warning: Unexpected response format")
-        return [
-            {
-                "group_index": i,
-                "group_id": group_ids[i],
-                "status": "validation_failed",
-                "reason": "Unexpected validation response format",
-                "confidence": 0.0,
-                "error_type": ERROR_TYPE_PARSING,
-                "recoverable": True
-            }
-            for i in range(len(groups))
-        ]
-
-    # Validate and normalize results
-    validation_results = []
-    valid_statuses = {"valid", "invalid", "needs-human-decision"}
-
-    for item in data:
-        # Coerced, not read raw: an echo that is not an index (a copied reply
-        # placeholder, a null) must not reach the `0 <= group_index` comparison
-        # below or the sort at the end of this function as a string.
-        group_index = _reported_group_index(item)
-        status = item.get("status", "needs-human-decision")
-        reason = item.get("reason", "No reason provided")
-        # `.get(..., 0.5)`'s default only fires when the key is absent; an LLM
-        # that replies with an explicit `"confidence": null` would otherwise
-        # reach the clamp below as None and crash `float(None)`.
-        confidence = item.get("confidence", 0.5)
-        if confidence is None:
-            confidence = 0.5
-
-        # Normalize status
-        if status not in valid_statuses:
-            status = "needs-human-decision"
-
-        # Clamp confidence
-        confidence = max(0.0, min(1.0, float(confidence)))
-
-        result_entry = {
-            "group_index": group_index,
-            "status": status,
-            "reason": reason,
-            "confidence": confidence
-        }
-        # The scope fields ride along (normalized; malformed ones read
-        # `unclear` and never cost the verdict). Only a verdict whose echoed
-        # stable hash names one of these groups is stamped with the host's
-        # baseline and proposal digest: an index-derived id below is a
-        # position, and a position never carries scope authority.
-        for key in (_sp.RELATION_FIELD, _sp.REASON_FIELD, _sp.REFERENCE_FIELD,
-                    _sp.SELECTED_REMEDY_FIELD):
-            if key in item:
-                result_entry[key] = item[key]
-        # The reply contract asks for the group's `group_id` verbatim. An echo
-        # naming one of these groups is authoritative (its index follows it);
-        # anything else — no echo, a copied placeholder, a garbled id — joins
-        # by the reported index exactly as before the echo was asked for, so
-        # a bad echo never costs the verdict its validity.
-        echoed = next((value for value in (item.get("group_id"), item.get("group_hash"))
-                       if isinstance(value, str) and value in group_by_id), None)
-        if echoed is not None:
-            result_entry["group_id"] = echoed
-            result_entry["group_index"] = group_ids.index(echoed)
-            result_entry = _scope_round.stamp(
-                result_entry, group_by_id[echoed],
-                {"policy": scope_policy, "baseline_id": scope_baseline_id},
-            )
-        else:
-            if 0 <= group_index < len(group_ids):
-                result_entry["group_id"] = group_ids[group_index]
-            _scope_round.unbound_record(result_entry)
-        validation_results.append(result_entry)
-
-    # Fill in any missing groups
-    validated_indices = {r["group_index"] for r in validation_results}
-    for i in range(len(groups)):
-        if i not in validated_indices:
-            validation_results.append({
-                "group_index": i,
-                "group_id": group_ids[i],
-                "status": "needs-human-decision",
-                "reason": "Not included in validation response",
-                "confidence": 0.0
-            })
-
-    # Sort by group index
-    validation_results.sort(key=lambda x: x["group_index"])
-
-    # Summary
-    valid_count = sum(1 for r in validation_results if r["status"] == "valid")
-    invalid_count = sum(1 for r in validation_results if r["status"] == "invalid")
-    needs_human = sum(1 for r in validation_results if r["status"] == "needs-human-decision")
-    validation_failed = sum(1 for r in validation_results if r["status"] == "validation_failed")
-    summary_parts = [f"{valid_count} valid", f"{invalid_count} invalid", f"{needs_human} needs-human-decision"]
-    if validation_failed > 0:
-        summary_parts.append(f"{validation_failed} validation_failed")
-    print(f"[validation] Complete: {', '.join(summary_parts)}")
-
-    return validation_results
-
-
 def apply_validation_to_groups(
     groups: List[Dict[str, Any]],
     validation_results: List[Dict[str, Any]]
@@ -1486,7 +1066,7 @@ def apply_validation_to_groups(
 
     Args:
         groups: Original groups (list of dicts or SuggestionGroup objects)
-        validation_results: Results from validate_groups()
+        validation_results: The merged validation records (one per group)
 
     Returns:
         Groups with validation_status and validation_reason added
@@ -1666,7 +1246,7 @@ def validation_source_decision(
         recorded_manifest = metadata.get("batch_manifest")
         problems: List[str] = []
         # The round check needs both sides: a file that merged no batch round
-        # (an internal validation) records none, and a task file deleted by hand
+        # (one the retired in-process lane wrote) records none, and a task file deleted by hand
         # leaves no current mapping for the recorded hashes to disagree with.
         if isinstance(recorded_manifest, dict) and current_manifest is not None:
             if (
@@ -2253,108 +1833,6 @@ def load_validation_results(validation_path: Path) -> List[Dict[str, Any]]:
         print(f"[validation] Migrated {len(groups)} items from schema v1 to v2", file=sys.stderr)
 
     return groups
-
-
-async def revalidate_failed_items(
-    groups: List[Dict[str, Any]],
-    validation_results: List[Dict[str, Any]],
-    context: str,
-    model: str = "auto",
-    include_all_human: bool = False,
-    timeout: int = 180,
-    *,
-    scope_policy: Optional[str] = None,
-    scope_phase: str = "review-plan",
-    scope_baseline_id: Optional[str] = None,
-) -> List[Dict[str, Any]]:
-    """
-    Re-run validation only on items that previously failed.
-
-    Args:
-        groups: Original grouped suggestions/issues
-        validation_results: Previous validation results
-        context: Context for validation (plan content or diff)
-        model: Model to use for revalidation
-        include_all_human: If True, also revalidate needs-human-decision items
-        timeout: Timeout in seconds (default higher for retry)
-
-    Returns:
-        Updated validation results
-    """
-    # Identify items needing revalidation
-    items_to_revalidate = []
-    item_indices = []
-
-    for i, val in enumerate(validation_results):
-        status = val.get("status", "needs-human-decision")
-        error_type = val.get("error_type", ERROR_TYPE_UNKNOWN)
-
-        should_revalidate = (
-            status == "validation_failed" or
-            (include_all_human and status == "needs-human-decision" and
-             error_type != ERROR_TYPE_AMBIGUOUS)
-        )
-
-        if should_revalidate and i < len(groups):
-            items_to_revalidate.append(groups[i])
-            item_indices.append(i)
-
-    if not items_to_revalidate:
-        print("[revalidate] No items need revalidation")
-        return validation_results
-
-    print(f"[revalidate] Re-validating {len(items_to_revalidate)} items with model '{model}'...")
-
-    # Run validation on subset with error handling
-    try:
-        new_results = await validate_groups(
-            groups=items_to_revalidate,
-            context=context,
-            model=model,
-            timeout=timeout,
-            scope_policy=scope_policy,
-            scope_phase=scope_phase,
-            scope_baseline_id=scope_baseline_id,
-        )
-    except Exception as e:
-        # Revalidation itself failed - apply fallback strategy
-        print(f"[revalidate] ERROR: Revalidation failed: {e}", file=sys.stderr)
-        error_type = _classify_validation_error(str(e))
-
-        # Fallback strategies based on error type
-        if error_type == ERROR_TYPE_RATE_LIMITED:
-            print("[revalidate] Fallback: Rate limited. Try again later or use --revalidate-model with a different provider.", file=sys.stderr)
-        elif error_type == ERROR_TYPE_TIMEOUT:
-            print("[revalidate] Fallback: Timeout. Try --revalidate-model with a faster model.", file=sys.stderr)
-        else:
-            print(f"[revalidate] Fallback: Keeping original validation status for {len(items_to_revalidate)} items.", file=sys.stderr)
-
-        # Return original results unchanged on failure
-        return validation_results
-
-    # Check if revalidation produced more failures
-    revalidation_failures = sum(1 for r in new_results if r.get("status") == "validation_failed")
-    if revalidation_failures > 0:
-        print(f"[revalidate] Warning: {revalidation_failures} items still failed validation after retry.", file=sys.stderr)
-        print("[revalidate] Consider using --approve-validation-failed or trying a different model.", file=sys.stderr)
-
-    # Merge results back
-    updated_results = list(validation_results)
-    for j, original_idx in enumerate(item_indices):
-        new_result = new_results[j] if j < len(new_results) else validation_results[original_idx]
-        new_result["group_index"] = original_idx
-        new_result["revalidated"] = True
-        new_result["revalidation_model"] = model
-        updated_results[original_idx] = new_result
-
-    # Summary of changes
-    improved = sum(
-        1 for j, idx in enumerate(item_indices)
-        if j < len(new_results) and new_results[j].get("status") == "valid"
-    )
-    print(f"[revalidate] Complete: {improved} items now valid after revalidation")
-
-    return updated_results
 
 
 # --- Batched Validation Functions ---

@@ -10,14 +10,6 @@ both wrap the model's answer in the same envelope::
 behavioural differences measured over the envelope shapes in
 ``tests/test_result_envelope.py``. This module is that logic, once.
 
-Not folded in here: ``llm_client.parse_subagent_response``, the legacy third
-copy. It uses a weaker extractor and returns bare parsed JSON instead of a
-``{"success": ..., "data": ...}`` result, and it is **live** behind the shipped
-``--internal-validation`` flag (``review_orchestrator_base`` →
-``validation.validate_groups`` → ``invoke_for_json`` → ``invoke_subagent`` +
-``parse_subagent_response``). Unifying it would change what that flag returns,
-so it stays until the flag is retired.
-
 **The envelope also carries the CLI's own verdict, and this module reads it**
 (C5). Three machine-readable fields were printed and ignored: ``is_error`` and
 ``terminal_reason``, which say *whether* the run failed, and
