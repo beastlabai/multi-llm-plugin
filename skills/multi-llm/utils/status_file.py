@@ -33,9 +33,9 @@ writing a second file with a private shape — ``run`` only ever on a detached r
   ``resume with:`` command so a ``--quick`` run is retried as one. It is
   **not** process state — ``update_run``'s successor-state guard does not
   apply to it, and ``claim_run`` writes it once at start and never again.
-* ``progress``: ``{step, batch_index, batches_total, tasks_done, tasks_total,
-  tasks_generated, failed_task_ids, models, models_done, models_succeeded,
-  models_total, interval_s, notes}`` — reporting only; no external actor advances it, and nothing
+* ``progress``: ``{step, models, models_done, models_succeeded, models_total,
+  interval_s, tasks_generated, notes, subagents, write_subagents,
+  sandbox_bypassed, sandbox_fallback}`` — reporting only; no external actor advances it, and nothing
   resumes, reaggregates or branches on it. That is why it is the one reserved
   object a **foreground** run writes too, and why ``detach.report_progress``
   writes on *every* path: the run handle it consults picks the **door**, never
@@ -76,10 +76,17 @@ writing a second file with a private shape — ``run`` only ever on a detached r
   of plain lines a host must relay beside its counts — a consistency warning,
   the items left unapplied and why (fix round 14), or a review phase's notes
   on its result files (``utils/result_files.py``, fix round 24) — which
-  ``status`` renders and carries into a terminal poll's ``notice``. This enumeration is the in-code contract for
-  the object — a reader who finds a key missing from it concludes the key is not
-  part of the schema and writes a second file for it, so a new ``progress`` key
-  lands here in the same commit as its writer.
+  ``status`` renders and carries into a terminal poll's ``notice``. ``subagents``
+  and ``write_subagents`` are the executor's and the write scheduler's batch
+  mirrors, ``sandbox_bypassed`` the sorted specs whose runner sandbox was
+  bypassed and ``sandbox_fallback`` ``{spec: rung}`` for the contained rungs.
+  This enumeration is the prose contract for the object — a reader who finds a
+  key missing from it concludes the key is not part of the schema and writes a
+  second file for it, so a new ``progress`` key lands here in the same commit as
+  its writer. ``schemas/status_file.schema.json`` declares every key of the
+  file, ``run`` and ``progress`` included, and ``tests/test_result_contract.py``
+  fails on a key a writer adds without declaring it there
+  (docs/development/dispatcher.md, "Result schemas").
 
 ``run.state`` is **not** the top-level ``state``. The top-level field stays the
 *phase* machine (``models_running`` → ``models_complete``/``grouping_complete`` →

@@ -140,8 +140,9 @@ top-level `state`, except a refusal close-out's: a `runner_rejected` or `executo
 it (`status_file.REFUSAL_STATES`, `REFUSAL_KEYS`), since `status` reads them as the refusal
 of the run it is polling.
 
-Its reserved keys are `{step, batch_index, batches_total, tasks_done, tasks_total, tasks_generated, failed_task_ids, models, models_done, models_succeeded, models_total, interval_s}` (`status_file.py`'s module docstring is the
-contract): `models` is the fan-out's per-model map keyed by spec,
+Its reserved keys are `{step, models, models_done, models_succeeded, models_total, interval_s, tasks_generated, notes, subagents, write_subagents, sandbox_bypassed, sandbox_fallback}` (`status_file.py`'s module docstring is the
+prose contract, `schemas/status_file.schema.json` the declared one, held to every writer by
+`tests/test_result_contract.py`: see [Result schemas](dispatcher.md#result-schemas)): `models` is the fan-out's per-model map keyed by spec,
 `models_done` counts *finished* slots and `models_succeeded` the slots that produced a
 usable result, `interval_s` is the resolved ticker cadence. `run.state` is
 **not** the top-level `state` (the phase machine resume reads) — a crashed fan-out is

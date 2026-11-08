@@ -7,6 +7,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 ## Contents
 
 - [Entrypoint and result protocol](#entrypoint-and-result-protocol)
+- [Result schemas](#result-schemas)
 - [Mode registry](#mode-registry)
 - [Shared CLI parser](#shared-cli-parser)
 - [Repository-root path resolution](#repository-root-path-resolution)
@@ -46,7 +47,8 @@ prints `[HIGH_PRIORITY_ISSUES] <n>` and returns `0`; `--fail-on-high` is the
 opt-in for a standalone CI gate and is exit `3`, never `1`.
 Every invocation ends with exactly one machine-readable stdout line, `MULTI_LLM_RESULT: {"mode","phase","state","exit","artifacts":[…],"next":…}`, emitted
 even on a crash (`next` is `null` when no follow-up is owed).
-**Optional** keys join them.
+**Optional** keys join them. `schemas/result_line.schema.json` declares every key
+([Result schemas](#result-schemas)).
 
 **JSON output** (`--output-format json` on the three apply phases, `status --json`): the mode's
 own stdout is one JSON document, and through `multi_llm.py` the result line still follows it as
@@ -179,6 +181,54 @@ route auto-follows `next`, and following this would start a paid phase nobody as
 for. Beside the key, the emitter prints the `[NEXT_COMMAND]` block (see
 [runtime](runtime.md#detach-boundary-and-worker-lifecycle)) above the result line — on stderr when the invocation asked for JSON output
 (`--output-format json`, `status --json`).
+
+## Result schemas
+
+The three machine-readable outputs have draft-07 JSON Schemas under `skills/multi-llm/schemas/`:
+
+- `schemas/result_line.schema.json`: the `MULTI_LLM_RESULT` payload (`cli_common.ResultContext.payload`).
+- `schemas/status_file.schema.json`: `{phase}/.status.json` (`utils/status_file.py`). Its `definitions`
+  are shared: `run`, `progress`, one fan-out slot, and the objects that ride both the checkpoint and the
+  line (`consolidation_recommended`, `high_priority_groups`, `validation_counts`, `validation_context`,
+  `answer_origins`, `step_results`). The other two schemas `$ref` them by file name.
+- `schemas/status_json.schema.json`: the document `status --json` prints before its result line: an
+  `{error}` object, the workflow view alone (`--view workflow`), or `{workflow?, runs, …}` with one run
+  view per phase dir (`detach.classify_run`).
+
+**Strictness follows lifetime.** The result line and `status --json` are written and read by one
+plugin version within one invocation, so their top level is closed (`additionalProperties: false`)
+and an unknown key there is drift. `.status.json` outlives the version that wrote it: a plan dir keeps
+its checkpoints across plugin updates, and a legacy checkpoint can hold a `null` the current writer
+would remove instead. So every object in that file stays open. Nested objects are open everywhere,
+because their writers add keys over time; a reader ignores keys it does not know.
+
+**Nothing validates at run time.** A schema check in the dispatcher could only turn the line every host
+depends on into a crash, or into a warning no host reads. The tests hold the schemas to the code:
+
+- `tests/test_result_contract.py` produces each output from real code paths (a dispatcher refusal, a
+  crash, a missing plan, a range refusal, a detached launch, a live fan-out poll, partial, failed and
+  runner-refused runs, a finished review relaying its counts, `doctor`) and validates what comes out.
+  It also reads the emitters' source through `tests/contract_inventory.py`, an AST walk that follows
+  dict literals and `**` spreads, `dict(...)` (nested ones too), local dicts filled in place
+  (`d[k] = v`, `.update()`, `.setdefault()`, `|=`, also inside a skill function the dict is handed
+  to), module constants used as keys, helper functions' returns, and a parameter to what every call
+  of its function passes. Every key a writer can produce must be declared, and every declared key
+  must have a writer. Whatever the walk cannot follow is reported with its line, never skipped, and
+  the function it sits in (`status_file.update_status`, which merges into the document it read from
+  disk) must be on that test's `PASS_THROUGH` list, naming the enforced check that covers its keys.
+  `doctor --json`'s report is not one of the three outputs and has no schema; its result line does.
+- `tests/contract_audit.py` is an opt-in pytest plugin. It validates every result line, checkpoint write
+  and run view a test selection produces, and reports without failing, because several suites write
+  hostile checkpoints on purpose:
+  `PYTHONPATH=skills/multi-llm MULTI_LLM_CONTRACT_AUDIT=<file.jsonl> uv run --project skills/multi-llm -- pytest <tests> -p tests.contract_audit`.
+
+To add a key, declare it (type and meaning) in the schema in the same change as its writer; the
+inventory test names the file and line of an undeclared one. A new result `state` word, run state,
+fan-out slot state or run-view verdict also goes into the matching `enum`, which the tests compare
+with the code's constants. The prose contracts stay where they are: this page for the result line,
+and `utils/status_file.py`'s docstring with [runtime](runtime.md#status-file-schema) for the
+checkpoint. A host program (the opencode plugin's `src/index.mjs`, the Codex MCP server) may validate
+against these schemas; like any reader, it must ignore keys it does not know.
 
 ## Mode registry
 
