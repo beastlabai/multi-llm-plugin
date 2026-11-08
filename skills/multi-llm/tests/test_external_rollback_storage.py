@@ -13,6 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tests.test_plugin_landlock_write import Repo, FakeExecutor, RUNG, claim, edit_file, stream
+from utils import provider_registry as registry
 from utils import restore_batch, subagent_executor as executor
 from utils import write_batch_scheduler as wbs, write_safety as safety
 from utils.providers.base import PROFILE_AGENT_WRITE
@@ -74,6 +75,13 @@ def test_mixed_runners_protect_evidence_before_jailed_dispatch(repo, monkeypatch
         return outcome
 
     monkeypatch.setattr(wbs, "dispatch_task", dispatch)
+    if parallel:
+        # A batch is admitted under the phase's ceiling and the driver key as
+        # it reads now, so both say 2 (the host leg is pinned by the patch).
+        config = repo.tmp_path / "driver-config.yaml"
+        config.write_text(config.read_text() + "  max_concurrent_write_subagents: 2\n")
+        registry._config = None
+        registry._config_key = None
     scheduler = repo.scheduler(tasks, kind="implement", write_target=None, finalize=False)
     if parallel:
         monkeypatch.setattr(scheduler, "write_ceiling", lambda: 2)

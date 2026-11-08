@@ -94,7 +94,17 @@ because an automatic revert would destroy the state a human needs to inspect.
 `driver.max_concurrent_write_subagents` and `driver.write_paths` are `driver.*` keys like any other:
 closed set, fail-fast validation, typed accessors (`get_max_concurrent_write_subagents`, `get_write_paths`,
 which fills each half of the policy per key so setting only `deny` is never an
-accidental deny-all).
+accidental deny-all). The write ceiling (`WriteBatchScheduler.write_ceiling`, the minimum of that key, the
+runner providers' `max_concurrent` and the host's ceiling, pinned to 1 for a shared-artifact phase) is
+resolved once per scheduler over every task's runner (`_ceiling_legs`, beside `host_max`), because resolving
+a runner spawns git. That number is an upper bound only. Each batch resolves its own tasks' runners once
+(`_resolve_batch_runners`) and is admitted under the lowest of the phase's number, the driver key as it
+reads now and the current `max_concurrent` of the providers those runners name (`_batch_ceiling`). The
+rollback-storage preflight and the dispatch use that same resolution (`_runner_for`). So a config edit, or
+a CLI that went missing between batches, can lower a later batch's ceiling but never raise it, and a
+batch's ceiling always binds the runners it actually runs. The batch report and the dry-run record give
+the highest ceiling a batch was admitted under, with the tightest driver and provider values any read gave
+and every provider a batch ran on. The declared-file admission under the ceiling still runs every batch.
 
 The post-run sweep's "already declared, don't flag it" set is scoped to tasks still IN FLIGHT, not
 the whole phase (F13, 2026-09-16): `_begin_sweep` used to union every dispatch's declared

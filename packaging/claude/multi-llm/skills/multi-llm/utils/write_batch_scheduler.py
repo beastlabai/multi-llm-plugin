@@ -1126,6 +1126,15 @@ def _accepts_keyword(func: Any, name: str) -> bool:
     return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
+def _tighter_cap(first: Optional[int], second: Optional[int]) -> Optional[int]:
+    """The lower of two ``max_concurrent`` caps, ``None`` being "no cap"."""
+    if first is None:
+        return second
+    if second is None:
+        return first
+    return min(first, second)
+
+
 def _as_jail_denials(value: Any) -> Any:
     """``after_result``'s ``jail_denials`` as a ``landlock_dispatch.JailDenials``.
 
@@ -4764,6 +4773,17 @@ class WriteBatchScheduler:
         # per-call so `write_ceiling`, the batch report and the dry-run record
         # cannot disagree about which number bound the phase.
         self.host_max = _host_ceiling() if host_max is None else host_max
+        # The phase's driver and provider legs of the same minimum, filled on
+        # first use and kept as every batch's upper bound: see `_ceiling_legs`.
+        self._ceiling_legs_cache: Optional[
+            Tuple[int, Dict[str, Optional[int]]]
+        ] = None
+        # The runner each task of the batch being dispatched resolved to, and
+        # what the admitted batches read: see `_batch_ceiling`.
+        self._batch_runners: Dict[str, str] = {}
+        self._admitted_ceilings: List[int] = []
+        self._admitted_driver: Optional[int] = None
+        self._admitted_limits: Dict[str, Optional[int]] = {}
         self.forced_runner = runner
         self.resume = resume
         self.dry_run = dry_run
@@ -5066,7 +5086,7 @@ class WriteBatchScheduler:
                         and self._done_evidence(candidate) is not None):
                     continue
                 try:
-                    runner = self.forced_runner or resolve_task_runner(candidate, anchor=self.anchor)
+                    runner = self._runner_for(candidate)
                     candidate_profile = profile_for_kind(str(candidate.get("kind") or self.kind))
                     key = (runner, candidate_profile)
                     if key in seen:
@@ -5345,13 +5365,17 @@ class WriteBatchScheduler:
         ``__init__``'s lookup rather than through a caller: ``self.host_max`` is
         ``None`` only when the capability data could not be read at all, the same
         partial-install case ``_host_ceiling`` bounds nothing over.
+
+        This is the phase's number, over every task's runner, resolved once
+        (:meth:`_ceiling_legs`). Each batch is admitted under it or lower
+        (:meth:`_batch_ceiling`).
         """
-        configured = get_max_concurrent_write_subagents(anchor=self.anchor)
+        configured, provider_limits = self._ceiling_legs()
         candidates = [configured]
         if self.host_max is not None:
             candidates.append(int(self.host_max))
         limits = [
-            limit for limit in self.provider_write_limits().values()
+            limit for limit in provider_limits.values()
             if limit is not None
         ]
         if limits:
@@ -5370,18 +5394,36 @@ class WriteBatchScheduler:
     def provider_write_limits(self) -> Dict[str, Optional[int]]:
         """``max_concurrent`` per provider this phase's runners resolve to (D3i).
 
-        Resolution mirrors the dispatch path exactly (``--runner`` override, else
-        each task's own chain), and it is computed identically for both invokers
-        so the executor and the simulated native invoker admit the same groups. A
+        Resolution mirrors the dispatch path (``--runner`` override, else each
+        task's own chain), and it is computed identically for both invokers so
+        the executor and the simulated native invoker admit the same groups. A
         spec naming a provider with no configured cap contributes ``None``, which
-        is "no provider leg", never zero.
+        is "no provider leg", never zero. Read from :meth:`_ceiling_legs`, so it
+        is the map :meth:`write_ceiling` was computed from.
         """
-        specs: List[str] = []
-        if self.forced_runner:
-            specs.append(self.forced_runner)
-        else:
-            for task in self.tasks:
-                specs.append(resolve_task_runner(task, anchor=self.anchor))
+        return dict(self._ceiling_legs()[1])
+
+    def _ceiling_legs(self) -> Tuple[int, Dict[str, Optional[int]]]:
+        """``driver.max_concurrent_write_subagents`` and the provider caps, once.
+
+        Resolved on the first call and kept, as ``host_max`` is in ``__init__``:
+        resolving every task's runner spawns git per task, so it is not repeated
+        per batch. It is kept only as an upper bound. :meth:`_batch_ceiling`
+        reads the current values for each batch and binds to any lower one, so
+        a config change can lower a later batch's ceiling but never raise it
+        above this one (``docs/development/write-safety.md``). A failed
+        resolution caches nothing and raises again on the next call.
+        """
+        if self._ceiling_legs_cache is None:
+            configured = get_max_concurrent_write_subagents(anchor=self.anchor)
+            specs = [self.forced_runner] if self.forced_runner else [
+                resolve_task_runner(task, anchor=self.anchor) for task in self.tasks
+            ]
+            self._ceiling_legs_cache = (configured, self._provider_limits(specs))
+        return self._ceiling_legs_cache
+
+    def _provider_limits(self, specs: Iterable[str]) -> Dict[str, Optional[int]]:
+        """``max_concurrent`` of each provider ``specs`` name, read now."""
         limits: Dict[str, Optional[int]] = {}
         for spec in dict.fromkeys(specs):
             provider_name, _ = parse_model_spec(spec, anchor=self.anchor)
@@ -5389,6 +5431,84 @@ class WriteBatchScheduler:
                 provider_name, anchor=self.anchor
             )
         return limits
+
+    def _resolve_batch_runners(
+        self, tasks: Sequence[Dict[str, Any]],
+    ) -> Dict[str, str]:
+        """The runner spec of each of one batch's tasks, by task id, resolved once.
+
+        ``--runner``, else the task's own chain, read when the batch starts: the
+        configuration or the installed CLIs may have changed since an earlier
+        batch. The batch's ceiling, the rollback-storage preflight and the
+        dispatch all read this map (:meth:`_runner_for`), so they name one
+        runner per task and the ceiling binds the providers that really run.
+        """
+        return {
+            str(task.get("task_id", "")):
+                self.forced_runner or resolve_task_runner(task, anchor=self.anchor)
+            for task in tasks
+        }
+
+    def _runner_for(self, task: Dict[str, Any]) -> str:
+        """The runner ``task`` dispatches on: its batch's resolution
+        (:meth:`_resolve_batch_runners`), else resolved now (a task outside the
+        batch being dispatched)."""
+        if self.forced_runner:
+            return self.forced_runner
+        spec = self._batch_runners.get(str(task.get("task_id", "")))
+        if spec is None:
+            spec = resolve_task_runner(task, anchor=self.anchor)
+        return spec
+
+    def _batch_ceiling(self, runners: Mapping[str, str]) -> int:
+        """The ceiling one batch is admitted under: never above :meth:`write_ceiling`.
+
+        The phase's number is the upper bound. Under it the driver key and the
+        ``max_concurrent`` of each provider this batch's ``runners`` name (the
+        specs it dispatches on) are read again, so a lower value in the current
+        configuration, or a task that now resolves to a provider with a tighter
+        cap, binds this batch; a raised value leaves it at the phase's number.
+        These reads go through the registry's config cache and spawn nothing.
+        Called on the loop's thread before the batch's workers start; what it
+        read is kept for :meth:`_ceiling_record`.
+        """
+        phase = self.write_ceiling()
+        configured = get_max_concurrent_write_subagents(anchor=self.anchor)
+        limits = self._provider_limits(runners.values())
+        caps = [limit for limit in limits.values() if limit is not None]
+        ceiling = max(1, min([phase, configured, *caps]))
+        self._admitted_ceilings.append(ceiling)
+        self._admitted_driver = configured if self._admitted_driver is None else min(
+            self._admitted_driver, configured
+        )
+        for provider, limit in limits.items():
+            self._admitted_limits[provider] = _tighter_cap(
+                self._admitted_limits.get(provider), limit
+            )
+        return ceiling
+
+    def _ceiling_record(self) -> Tuple[int, int, Dict[str, Optional[int]]]:
+        """``(effective, driver, providers)`` for the batch report and the
+        dry-run record, from what the batches were admitted under.
+
+        ``effective`` is the highest ceiling a batch was admitted under, or
+        :meth:`write_ceiling` when none was. The driver value and each
+        provider's cap are the tightest the phase's resolution or any batch
+        read, and the providers include every one a batch's runners resolved
+        to. So when a config change lowered a later batch, the legs can sit
+        below ``effective``.
+        """
+        configured, phase_limits = self._ceiling_legs()
+        limits = dict(phase_limits)
+        for provider, limit in self._admitted_limits.items():
+            limits[provider] = _tighter_cap(limits.get(provider), limit)
+        if self._admitted_driver is not None:
+            configured = min(configured, self._admitted_driver)
+        effective = (
+            max(self._admitted_ceilings) if self._admitted_ceilings
+            else self.write_ceiling()
+        )
+        return effective, configured, limits
 
     # -- ordering -------------------------------------------------------
 
@@ -6613,7 +6733,10 @@ class WriteBatchScheduler:
         tasks: Sequence[Dict[str, Any]],
         result: SchedulerResult,
     ) -> List[TaskOutcome]:
-        ceiling = self.write_ceiling()
+        # One resolution of this batch's runners, read by its ceiling, its
+        # rollback-storage preflight and its dispatches (`_runner_for`).
+        self._batch_runners = self._resolve_batch_runners(tasks)
+        ceiling = self._batch_ceiling(self._batch_runners)
         clashes = overlapping_pairs(tasks, root=self.repo_root)
         groups = admit_disjoint_groups(tasks, ceiling=ceiling, root=self.repo_root)
         if ceiling > 1 and clashes:
@@ -8460,7 +8583,7 @@ class WriteBatchScheduler:
         is announced first with the stray-writes-only line.
         """
         task_id = str(task.get("task_id", ""))
-        runner = self.forced_runner or resolve_task_runner(task, anchor=self.anchor)
+        runner = self._runner_for(task)
         info = self._preflight(runner, profile)
         # F12: `subagent_batch_report.json.runner_versions` was empty on this
         # path — the read half fills it from its own batch-start preflight
@@ -14465,6 +14588,7 @@ class WriteBatchScheduler:
         _atomic_write_json(path, result.to_dict())
         # The executor's own per-dispatch report, so `--status` and the D3k rung
         # accounting look identical on both halves of the executor.
+        effective, configured, provider_limits = self._ceiling_record()
         report = BatchReport(
             phase=self.phase, kind=self.kind, phase_dir=self.phase_dir,
             # N9: the read path fills this from the `task_file` argument
@@ -14479,10 +14603,9 @@ class WriteBatchScheduler:
             # (`_preflight_batch_runners`) — every distinct runner this run
             # actually preflighted, with the version it reported.
             runner_versions=dict(self._runner_versions),
-            ceilings={"effective": self.write_ceiling(),
-                      "driver_max_concurrent_write_subagents":
-                          get_max_concurrent_write_subagents(anchor=self.anchor),
-                      "provider_max_concurrent": self.provider_write_limits(),
+            ceilings={"effective": effective,
+                      "driver_max_concurrent_write_subagents": configured,
+                      "provider_max_concurrent": provider_limits,
                       "host_max_concurrent_subagents": self.host_max,
                       "shared_artifact_phase":
                           self.kind in SHARED_ARTIFACT_WRITE_KINDS},
@@ -14806,11 +14929,14 @@ class WriteBatchScheduler:
         except ImportError:  # pragma: no cover
             from utils.subagent_tasks import preferred_prompt_transport, utf16_units
 
-        ceiling = self.write_ceiling()
         entries: List[Dict[str, Any]] = []
         for batch_index, batch_tasks in ordered:
+            # As `_run_batch`: one resolution per batch, for its ceiling and
+            # each entry's runner.
+            runners = self._resolve_batch_runners(batch_tasks)
             groups = admit_disjoint_groups(
-                batch_tasks, ceiling=ceiling, root=self.repo_root
+                batch_tasks, ceiling=self._batch_ceiling(runners),
+                root=self.repo_root,
             )
             group_of = {
                 str(task.get("task_id", "")): position
@@ -14850,9 +14976,7 @@ class WriteBatchScheduler:
                     entry["reason"] = exc.message
                     entries.append(entry)
                     continue
-                runner = self.forced_runner or resolve_task_runner(
-                    task, anchor=self.anchor
-                )
+                runner = runners[task_id]
                 entry["runner"] = runner
                 provider_name, _ = parse_model_spec(runner, anchor=self.anchor)
                 entry["prompt_transport"] = preferred_prompt_transport(provider_name)
@@ -14889,6 +15013,7 @@ class WriteBatchScheduler:
                 entries.append(entry)
 
         path = os.path.join(self.phase_dir, DRY_RUN_FILENAME)
+        effective, configured, provider_limits = self._ceiling_record()
         # Same containment as every other executor write (see ``_write_report``).
         _atomic_write_json(path, {
             "dry_run_version": 1,
@@ -14896,10 +15021,9 @@ class WriteBatchScheduler:
             "phase": self.phase,
             "repo_root": self.repo_root,
             "ceilings": {
-                "effective_write_parallelism": ceiling,
-                "driver_max_concurrent_write_subagents":
-                    get_max_concurrent_write_subagents(anchor=self.anchor),
-                "provider_max_concurrent": self.provider_write_limits(),
+                "effective_write_parallelism": effective,
+                "driver_max_concurrent_write_subagents": configured,
+                "provider_max_concurrent": provider_limits,
                 "host_max_concurrent_subagents": self.host_max,
                 "shared_artifact_phase": self.kind in SHARED_ARTIFACT_WRITE_KINDS,
             },

@@ -610,7 +610,9 @@ class TestARefusedTaskInAGroupThatRunsTogether:
         from utils.write_batch_scheduler import WriteBatchScheduler
 
         repo = make_repo(tmp_path, monkeypatch, PARALLEL)
-        _policy(repo, DENY)
+        # A batch is admitted under the phase's ceiling and the driver key as
+        # it reads now, so both say 3 (the host leg is pinned by the patch).
+        _policy(repo, DENY + "  max_concurrent_write_subagents: 3\n")
         monkeypatch.setattr(WriteBatchScheduler, "write_ceiling", lambda self: 3)
         code, text = _run(repo, capsys)
         assert code == 3, text
