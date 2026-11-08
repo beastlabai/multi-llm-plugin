@@ -68,6 +68,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.process_control",
         "utils.prompt_files",
         "utils.providers.result_envelope",
+        "utils.report_markdown",
         "utils.retry_ladder",
         "utils.schema_validator",
         "utils.scope_policy",
