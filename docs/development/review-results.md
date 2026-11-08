@@ -248,7 +248,7 @@ under-report.
   join (ids) and the pages (indices) show the same groups. What is left of a cluster sets its
   shape: nothing, a singleton, or a cluster. An error reply's `groups` list is not read: every
   group of the batch becomes a singleton. In 9 recorded rounds whose task files predate embedded
-  prompts, models invented ids (`group_3`, slugs); the merge showed those clusters by the model's
+  prompts, models invented ids ("group_3", slugs); the merge showed those clusters by the model's
   indices and the same groups again as missing singletons, and decisions on them reached no group.
 
 ## Reaggregation and result identity
