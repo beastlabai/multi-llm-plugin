@@ -22,7 +22,11 @@ through a symlink):
   returned call survives a power loss;
 * a failure closes the descriptor, gives the temp file back its owner write
   bit if the final mode had taken it away (Windows deletes no read-only
-  file), and removes it.
+  file), and removes it;
+* with *dir_fd*, the target is a name in a directory the caller holds open,
+  and every step (create, rename, removal, directory flush) is relative to
+  that descriptor, so a link swapped in for the directory, or for one above
+  it, is never followed (POSIX).
 
 See docs/development/runtime.md#atomic-file-writes. Stdlib only; layer L0
 (``tests/test_import_layers.py``).
@@ -48,6 +52,10 @@ _CREATE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0
 #: The temp file's bits while it holds bytes the final mode may not yet allow.
 _OWNER_ONLY = 0o600
 
+#: Whether a write can be made relative to a held directory (*dir_fd*):
+#: POSIX, not Windows. Read once, at import.
+DIR_FD_SUPPORTED = all(call in os.supports_dir_fd for call in (os.open, os.rename, os.unlink))
+
 
 def temp_path_for(target: str, prefix: Optional[str] = None) -> str:
     """The temp file name used for *target*: ``<prefix><pid>.<random>.tmp``
@@ -59,12 +67,19 @@ def temp_path_for(target: str, prefix: Optional[str] = None) -> str:
     return os.path.join(directory, name)
 
 
-def flush_directory(directory: PathLike) -> None:
-    """Flush *directory*'s entries (a rename into it) to disk, best-effort.
+def flush_directory(directory: PathLike, *, dir_fd: Optional[int] = None) -> None:
+    """Flush *directory*'s entries (a rename into it) to disk, best-effort;
+    with *dir_fd*, the directory that descriptor holds (*directory* unused).
 
     POSIX only: Windows cannot open a directory for this, and NTFS journals
     the rename itself."""
     if os.name == "nt":
+        return
+    if dir_fd is not None:
+        try:
+            os.fsync(dir_fd)
+        except OSError:
+            pass
         return
     try:
         descriptor = os.open(os.fspath(directory) or os.curdir,
@@ -79,29 +94,37 @@ def flush_directory(directory: PathLike) -> None:
         os.close(descriptor)
 
 
-def _existing_mode(target: str) -> Optional[int]:
+def _at(dir_fd: Optional[int]) -> dict:
+    """The keyword that makes a call relative to *dir_fd*; none by path, so
+    the call is the plain one."""
+    return {} if dir_fd is None else {"dir_fd": dir_fd}
+
+
+def _existing_mode(target: str, dir_fd: Optional[int] = None) -> Optional[int]:
     """The permission bits of the file a reader of *target* sees now (through
     a symlink), or ``None`` when there is none."""
     try:
-        return stat.S_IMODE(os.stat(target).st_mode)
+        return stat.S_IMODE(os.stat(target, **_at(dir_fd)).st_mode)
     except (FileNotFoundError, NotADirectoryError):
         return None
 
 
-def _apply_mode(descriptor: int, temporary: str, mode: int) -> None:
+def _apply_mode(descriptor: int, temporary: str, mode: int,
+                dir_fd: Optional[int] = None) -> None:
     if hasattr(os, "fchmod"):
         os.fchmod(descriptor, mode)
     else:  # Windows before 3.13: only the read-only bit exists
-        os.chmod(temporary, mode)
+        os.chmod(temporary, mode, **_at(dir_fd))
 
 
-def _narrow(descriptor: int, temporary: str, mode: int) -> bool:
+def _narrow(descriptor: int, temporary: str, mode: int,
+            dir_fd: Optional[int] = None) -> bool:
     """Narrow a new temp file to *mode* before its first byte; whether it
     was. A filesystem that keeps no modes (FAT, some network and FUSE
     mounts) refuses the change, and the file keeps the mode ``open()`` gave
     it: never wider than a plain write's."""
     try:
-        _apply_mode(descriptor, temporary, mode)
+        _apply_mode(descriptor, temporary, mode, dir_fd)
     except OSError:
         return False
     return True
@@ -126,19 +149,38 @@ def _close_owned(descriptor: int, identity: Optional[Tuple[int, int]]) -> None:
         pass
 
 
-def _discard(temporary: str, read_only: bool) -> None:
+#: Windows refuses to delete a read-only file; POSIX unlinks one as it is, and
+#: a chmod by name there could follow a link swapped in for the temp.
+_CLEAR_READ_ONLY_BEFORE_UNLINK = os.name == "nt"
+
+
+def _discard(temporary: str, read_only: bool, dir_fd: Optional[int] = None) -> None:
     """Remove this write's own temp file, best-effort. A read-only one gets
     its owner write bit back first: Windows refuses to delete a read-only
     file (a read-only target's mode was copied onto it)."""
-    if read_only:
+    if read_only and _CLEAR_READ_ONLY_BEFORE_UNLINK:
         try:
-            os.chmod(temporary, _OWNER_ONLY)
+            os.chmod(temporary, _OWNER_ONLY, **_at(dir_fd))
         except OSError:
             pass
     try:
-        os.unlink(temporary)
+        os.unlink(temporary, **_at(dir_fd))
     except OSError:
         pass
+
+
+def _name_in(target: str, dir_fd: Optional[int], follow_symlinks: bool) -> str:
+    """*target* checked for a write relative to *dir_fd*: one plain name,
+    never followed through a link. Raises ``ValueError``."""
+    if follow_symlinks:
+        raise ValueError("follow_symlinks cannot be combined with dir_fd")
+    if not DIR_FD_SUPPORTED:
+        raise ValueError("this platform writes by path only (no dir_fd)")
+    separators = {os.sep, os.altsep or os.sep}
+    if (not target or target in (os.curdir, os.pardir)
+            or any(sep in target for sep in separators)):
+        raise ValueError(f"{target!r} is not a single name in the held directory")
+    return target
 
 
 def atomic_write_bytes(
@@ -150,6 +192,7 @@ def atomic_write_bytes(
     mode: Optional[int] = None,
     follow_symlinks: bool = False,
     temp_prefix: Optional[str] = None,
+    dir_fd: Optional[int] = None,
 ) -> None:
     """Replace *path* with *data*, atomically.
 
@@ -166,19 +209,30 @@ def atomic_write_bytes(
       the mode through the link).
     - *temp_prefix*: the temp file's name before ``<pid>.<random>.tmp``, for a
       caller whose leftovers something matches by name.
+    - *dir_fd*: *path* is one name in the directory this descriptor holds
+      open, and the temp file is created, renamed, removed and its directory
+      flushed relative to it: a link swapped in for that directory, or for a
+      folder above it, after the caller opened it is never followed. POSIX
+      (``os.supports_dir_fd``); *follow_symlinks* stays off (``ValueError``).
 
     The directory must exist. Raises ``OSError`` (``FileExistsError`` if the
     temp name is taken); on any exception the temp file is removed and the
     old file is untouched.
     """
     target = os.fspath(path)
-    if follow_symlinks:
+    if dir_fd is not None:
+        target = _name_in(target, dir_fd, follow_symlinks)
+    elif follow_symlinks:
         target = os.path.realpath(target)
     final_mode = mode
     if final_mode is None and keep_mode:
-        final_mode = _existing_mode(target)
+        final_mode = _existing_mode(target, dir_fd)
     temporary = temp_path_for(target, temp_prefix)
-    descriptor = os.open(temporary, _CREATE_FLAGS, 0o666 if final_mode is None else 0o600)
+    if dir_fd is not None:
+        # The temp is created relative to the held folder too: one plain name.
+        _name_in(temporary, dir_fd, False)
+    descriptor = os.open(temporary, _CREATE_FLAGS, 0o666 if final_mode is None else 0o600,
+                         **_at(dir_fd))
     # Ours from here: on any failure the descriptor is closed and the file
     # removed.
     identity: Optional[Tuple[int, int]] = None
@@ -192,25 +246,28 @@ def atomic_write_bytes(
             # owner-only and the mode comes back before the fsync.
             final_mode = stat.S_IMODE(created.st_mode)
             if final_mode & ~_OWNER_ONLY:
-                apply_final = _narrow(descriptor, temporary, final_mode & _OWNER_ONLY)
+                apply_final = _narrow(descriptor, temporary, final_mode & _OWNER_ONLY, dir_fd)
         identity = (created.st_dev, created.st_ino)
         stream = os.fdopen(descriptor, "wb")
         with stream:
             stream.write(data)
             stream.flush()
             if apply_final:
-                _apply_mode(stream.fileno(), temporary, final_mode)
+                _apply_mode(stream.fileno(), temporary, final_mode, dir_fd)
             read_only = not final_mode & stat.S_IWUSR
             if fsync:
                 os.fsync(stream.fileno())
-        os.replace(temporary, target)
+        if dir_fd is None:
+            os.replace(temporary, target)
+        else:
+            os.replace(temporary, target, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
     except BaseException:
         if stream is None:
             _close_owned(descriptor, identity)
-        _discard(temporary, read_only)
+        _discard(temporary, read_only, dir_fd)
         raise
     if fsync:
-        flush_directory(os.path.dirname(target))
+        flush_directory(os.path.dirname(target), dir_fd=dir_fd)
 
 
 def atomic_write_text(
@@ -223,6 +280,7 @@ def atomic_write_text(
     mode: Optional[int] = None,
     follow_symlinks: bool = False,
     temp_prefix: Optional[str] = None,
+    dir_fd: Optional[int] = None,
 ) -> bytes:
     """:func:`atomic_write_bytes` of *text* as UTF-8; the bytes written.
 
@@ -235,6 +293,6 @@ def atomic_write_text(
     data = text.encode("utf-8")
     atomic_write_bytes(
         path, data, keep_mode=keep_mode, fsync=fsync, mode=mode,
-        follow_symlinks=follow_symlinks, temp_prefix=temp_prefix,
+        follow_symlinks=follow_symlinks, temp_prefix=temp_prefix, dir_fd=dir_fd,
     )
     return data

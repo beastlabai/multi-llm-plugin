@@ -31,6 +31,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from . import process_control
+from .atomic_io import atomic_write_text
 from .stream_bootstrap import bootstrap_streams
 
 #: Registry location, relative to the project root.
@@ -92,15 +93,17 @@ def entry_path(project_root: str, run_id: str) -> str:
 
 
 def write_entry(project_root: str, entry: Dict[str, Any]) -> Optional[str]:
-    """Record one live run. Best-effort: a read-only project must not fail a run."""
+    """Record one live run. Best-effort: a read-only project must not fail a run.
+
+    ``atomic_io``'s write, flushed to disk: the entry is what a sweep after a
+    reboot reconciles (docs/development/runtime.md#atomic-file-writes)."""
     directory = registry_dir(project_root)
     path = entry_path(project_root, entry["run_id"])
     try:
         os.makedirs(directory, exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(entry, f, indent=2)
-        os.replace(tmp, path)
+        # A fresh file each time, as base made one: the current umask, never
+        # an earlier entry's mode carried over.
+        atomic_write_text(path, json.dumps(entry, indent=2), keep_mode=False)
         return path
     except (OSError, IOError):
         return None

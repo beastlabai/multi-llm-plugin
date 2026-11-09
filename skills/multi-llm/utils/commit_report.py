@@ -54,6 +54,7 @@ from .commit_range import (
 )
 from .commit_paths import document_label
 from .text_clip import clip, plain_line
+from .text_fmt import plural as _plural
 
 #: The two review templates (``prompts/``).
 CODE_REVIEW_PROMPT = "code_review.txt"
@@ -126,10 +127,6 @@ def range_size(record: Mapping[str, Any], *, cwd: Optional[str] = None) -> Range
         except Exception:  # noqa: BLE001 - a size is presentation; never fail the slot
             pass
     return RangeSize.of(len(cr.commits), 0, 0, 0)
-
-
-def _plural(count: int, word: str) -> str:
-    return f"{count} {word}{'' if count == 1 else 's'}"
 
 
 # ---------------------------------------------------------------------------

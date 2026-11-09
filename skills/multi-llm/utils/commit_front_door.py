@@ -46,13 +46,14 @@ import shlex
 import sys
 import uuid
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .cli_common import EXIT_ERROR as _EXIT_ERROR
 from .cli_common import EXIT_NEEDS_HUMAN as _EXIT_NEEDS_HUMAN
 from .cli_common import EXIT_OK as _EXIT_OK
+from .clock import utc_iso_z
 from .git_utils import git_path
 from .provider_registry import ConfigError, get_commit_reviews_dir
 
@@ -185,9 +186,9 @@ def _brief_api():
     return commit_brief
 
 
-def _now_iso() -> str:
-    """``resolved_at``: now, in UTC, ISO-8601 with a ``Z``."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+#: ``resolved_at``/``created_at``: now, in UTC, ISO-8601 with a ``Z``
+#: (``utils/clock.py``).
+_now_iso = utc_iso_z
 
 
 def _shown_path(path: PathLike) -> str:

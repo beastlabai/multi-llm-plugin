@@ -34,7 +34,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple, TypedDict, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, TypedDict, Union
 
 try:
     from . import process_control
@@ -193,16 +193,27 @@ def write_document(path: PathLike, document: Dict[str, Any], *,
 
 
 @contextlib.contextmanager
-def update(path: PathLike, *, temp_prefix: str = STATE_TEMP_PREFIX) -> Iterator[Dict[str, Any]]:
+def update(
+    path: PathLike, *, temp_prefix: str = STATE_TEMP_PREFIX,
+    on_invalid: Optional[Callable[[StateDocumentError], BaseException]] = None,
+) -> Iterator[Dict[str, Any]]:
     """Read *path*'s document, hand it to the body to change, and write it
     back, all under :func:`locked`.
 
     The read is :func:`read_document_strict`, so a missing or malformed file
-    raises before the body runs. The document is written only when the body
-    returns normally and the document differs from what was read; an
-    exception, or a body that changed nothing, leaves the file as it was."""
+    raises before the body runs; *on_invalid* turns the read's
+    :class:`StateDocumentError` into the caller's own refusal (the exception
+    it returns is raised from it), and only the read's: one the body raises
+    passes through. The document is written only when the body returns
+    normally and the document differs from what was read; an exception, or a
+    body that changed nothing, leaves the file as it was."""
     with locked(path):
-        document = read_document_strict(path)
+        try:
+            document = read_document_strict(path)
+        except StateDocumentError as exc:
+            if on_invalid is None:
+                raise
+            raise on_invalid(exc) from exc
         before = copy.deepcopy(document)
         yield document
         if document != before:

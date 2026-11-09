@@ -61,6 +61,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     )
     from . import process_control
     from . import landlock_exec
+    from .atomic_io import atomic_write_bytes
     from . import git_utils as _git_utils
     from . import codex_trust as _codex_trust
 except ImportError:  # pragma: no cover - direct-script import shim
@@ -75,6 +76,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
     )
     from utils import process_control  # type: ignore[no-redef]
     from utils import landlock_exec  # type: ignore[no-redef]
+    from utils.atomic_io import atomic_write_bytes  # type: ignore[no-redef]
     from utils import git_utils as _git_utils  # type: ignore[no-redef]
     from utils import codex_trust as _codex_trust  # type: ignore[no-redef]
 
@@ -1674,9 +1676,6 @@ HOME_CHANGE_LIST_DIR = "codex-home-check"
 #: (fix round 8: nothing pruned it, and every render wrote another file).
 HOME_CHANGE_LIST_KEEP = 50
 
-_LIST_SEQ = {"n": 0}
-_LIST_LOCK = threading.Lock()
-
 
 def render_name(name: Any) -> str:
     """A changed name as one printable token: as found when every character
@@ -1725,7 +1724,8 @@ def _write_change_list(lines: Sequence[str]) -> Optional[str]:
 
     One file per record: rendering the same change again names the same file
     and does not rewrite it. The file is 0600 and the directory 0700 whatever
-    the umask, and the directory keeps the newest
+    the umask, the write is ``atomic_io``'s (a link at the name is replaced,
+    never written through), and the directory keeps the newest
     :data:`HOME_CHANGE_LIST_KEEP` lists."""
     try:
         from .write_safety import state_home
@@ -1735,10 +1735,6 @@ def _write_change_list(lines: Sequence[str]) -> Optional[str]:
     name = hashlib.sha256(body).hexdigest()[:24] + ".txt"
     directory = os.path.join(state_home(), HOME_CHANGE_LIST_DIR)
     path = os.path.join(directory, name)
-    with _LIST_LOCK:
-        _LIST_SEQ["n"] += 1
-        seq = _LIST_SEQ["n"]
-    temp = os.path.join(directory, f".{name}.{os.getpid()}-{seq}.tmp")
     try:
         if not _private_dir(directory):
             return None
@@ -1746,17 +1742,7 @@ def _write_change_list(lines: Sequence[str]) -> Optional[str]:
         if (status == "ok" and current == body
                 and stat.S_IMODE(os.lstat(path).st_mode) == 0o600):
             return path
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        for extra in ("O_NOFOLLOW", "O_CLOEXEC"):
-            flags |= getattr(os, extra, 0)
-        fd = os.open(temp, flags, 0o600)
-        try:
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(body)
-            os.replace(temp, path)
-        finally:
-            with contextlib.suppress(OSError):
-                os.unlink(temp)
+        atomic_write_bytes(path, body, mode=0o600)
     except OSError:
         return None
     _prune_lists(directory, name)

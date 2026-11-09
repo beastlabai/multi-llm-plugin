@@ -70,7 +70,8 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 
-from .atomic_io import atomic_write_bytes, temp_path_for
+from .atomic_io import atomic_write_bytes, atomic_write_text, temp_path_for
+from .clock import local_iso_seconds
 from .git_utils import pin_repo_root
 from .process_control import FileMutex, descriptor_owning_handle, handle_of_descriptor
 from .provider_registry import get_write_paths
@@ -3638,23 +3639,11 @@ def _safe_component(text: str) -> str:
 
 
 def _atomic_write(path: str, payload: str) -> None:
-    """Same-directory temp file, 0600, ``os.replace`` — as D3f requires."""
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
-    handle = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-    except BaseException:
-        try:
-            os.unlink(str(tmp))
-        except OSError:
-            pass
-        raise
-    os.replace(str(tmp), str(target))
+    """*payload* replaces *path* by ``atomic_io``'s write, 0600 and flushed,
+    its folder made first — as D3f requires (an exclusively created temp file
+    beside it: docs/development/runtime.md#atomic-file-writes)."""
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(path, payload, mode=0o600)
 
 
 # ---------------------------------------------------------------------------
@@ -4529,5 +4518,5 @@ def _sha256_text(text: str) -> str:
     return hashlib.sha256((text or "").encode("utf-8")).hexdigest()
 
 
-def _now() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%S")
+#: An audit record's timestamp: local time, whole seconds (``utils/clock.py``).
+_now = local_iso_seconds

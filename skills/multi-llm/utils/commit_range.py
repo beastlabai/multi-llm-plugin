@@ -43,6 +43,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from .cli_common import EXIT_NEEDS_HUMAN, EXIT_NOTHING_TO_DO
 from .git_utils import GitError, attribute_source_args, empty_tree_id, run_git
 from .text_clip import clip, plain_line
+from .text_fmt import plural as _plural
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -525,10 +526,6 @@ def full_list_command(base: Optional[str], head: str, *, skip: Optional[int] = N
         parts.append(f"--skip={skip}")
     parts.append(f"{base[:12]}..{head[:12]}" if base is not None else head[:12])
     return " ".join(parts)
-
-
-def _plural(count: int, singular: str, plural: Optional[str] = None) -> str:
-    return f"{count} {singular if count == 1 else (plural or singular + 's')}"
 
 
 def _shown(text: Any, limit: int = 200) -> str:

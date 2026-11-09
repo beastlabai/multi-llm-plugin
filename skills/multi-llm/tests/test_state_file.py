@@ -335,6 +335,44 @@ class TestUpdate:
             with state_file.update(tmp_path / "state.json"):
                 raise AssertionError("not reached")
 
+    @pytest.mark.parametrize("text", ["[]", "{not json", b"\xff\xfe"])
+    def test_on_invalid_turns_the_read_into_the_callers_refusal(self, tmp_path, text):
+        path = tmp_path / "state.json"
+        if isinstance(text, bytes):
+            path.write_bytes(text)
+        else:
+            path.write_text(text, encoding="utf-8")
+        before = path.read_bytes()
+
+        class Refused(Exception):
+            pass
+
+        with pytest.raises(Refused) as caught:
+            with state_file.update(path, on_invalid=lambda exc: Refused(exc.detail)):
+                raise AssertionError("not reached")
+        assert isinstance(caught.value.__cause__, state_file.StateDocumentError)
+        assert path.read_bytes() == before
+        assert not state_file._HELD_STATE_LOCKS
+
+    def test_on_invalid_leaves_the_bodys_own_errors_alone(self, tmp_path):
+        """Only the read's error is the caller's refusal: one the body
+        raises (a nested reader's, say) passes through as it was."""
+        path = self._seed(tmp_path, {"a": 1})
+        before = path.read_bytes()
+        raised = state_file.StateDocumentError(tmp_path / "other.json", "not an object")
+        with pytest.raises(state_file.StateDocumentError) as caught:
+            with state_file.update(path, on_invalid=lambda exc: AssertionError(exc)) as document:
+                document["a"] = 2
+                raise raised
+        assert caught.value is raised
+        assert path.read_bytes() == before
+
+    def test_on_invalid_is_not_called_for_a_missing_file(self, tmp_path):
+        with pytest.raises(FileNotFoundError):
+            with state_file.update(tmp_path / "state.json",
+                                   on_invalid=lambda exc: AssertionError(exc)):
+                raise AssertionError("not reached")
+
 
 def test_metrics_keeps_the_old_names_for_the_same_objects():
     assert metrics.state_file_lock is state_file.locked

@@ -36,8 +36,8 @@ the writer both legs share (:func:`write_record.record_batch_facts`):
   after each batch (:func:`_tracked_after_batch`).
 
 It edits ``state.json`` as a file (read, mutate through the state manager's
-module-level helpers, atomic replace) under ``metrics.state_file_lock`` —
-the host may record same-batch tasks in parallel — never through a
+module-level helpers, atomic replace) in one ``state_file.update``, under
+the state lock — the host may record same-batch tasks in parallel — never through a
 ``StateManager`` —
 which would read the plan the batch just edited as a human's mid-workflow
 edit — and preserves every other key: the host's closing ``--mark-completed``
@@ -130,11 +130,11 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from . import known_checks as _known_checks
 from . import prior_changes as _prior_changes
 from .metrics import (
-    _read_state, _write_state, mark_failed_in_progress,
-    restore_to_progress_in_state, state_file_lock,
+    METRICS_TEMP_PREFIX, mark_failed_in_progress, restore_to_progress_in_state,
     withdraw_from_progress_in_state,
 )
 from .state_file import StateDocumentError
+from .state_file import update as update_state
 from .state_manager import (
     PROCESSED_LEG_NATIVE,
     TASK_RESET_AT_KEY,
@@ -760,16 +760,12 @@ def record_batch(
     # One lock from the read to the write (fix round 8): the host may record
     # same-batch tasks in parallel, and the census below takes seconds, so an
     # unlocked pair read the same file and the second write dropped the
-    # first one's `task_status`.
-    with state_file_lock(target):
-        try:
-            state = _read_state(target)
-        except StateDocumentError as exc:
-            raise WritePromptError(
-                f"{target} is not a JSON object ({exc.detail})."
-            ) from exc
-        if not isinstance(state, dict):
-            raise WritePromptError(f"{target} is not a JSON object.")
+    # first one's `task_status`. `update` holds the state lock throughout.
+    def not_an_object(exc: StateDocumentError) -> WritePromptError:
+        return WritePromptError(f"{target} is not a JSON object ({exc.detail}).")
+
+    with update_state(target, temp_prefix=METRICS_TEMP_PREFIX,
+                      on_invalid=not_an_object) as state:
         if status == "completed":
             # plans/review-commits.md §2.7: a batch that wrote a protected
             # path, or whose repository root cannot be pinned for that
@@ -845,7 +841,6 @@ def record_batch(
         if tracked is not None:
             state["tracked_files"] = tracked
         state["updated_at"] = datetime.now().isoformat()
-        _write_state(target, state)
     if checking:
         # One record verifies one dispatch: a later record of this check
         # without a new `util write-prompt` has nothing to compare against.

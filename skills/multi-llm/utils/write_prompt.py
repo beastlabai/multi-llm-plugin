@@ -92,10 +92,11 @@ try:
         find_git_entry_root, pin_repo_root, worktree_file_stats, worktree_fingerprint,
     )
     from .metrics import (
-        _read_state, _write_state, mark_failed_in_progress, state_file_lock,
+        METRICS_TEMP_PREFIX, _read_state, mark_failed_in_progress, state_file_lock,
         withdraw_from_progress_in_state,
     )
     from .state_file import StateDocumentError
+    from .state_file import update as update_state
     from .state_manager import (
         PROCESSED_LEG_NATIVE, record_batch_items_in_state, update_task_status_in_state,
     )
@@ -147,10 +148,11 @@ except ImportError:  # pragma: no cover - direct script invocation
         find_git_entry_root, pin_repo_root, worktree_file_stats, worktree_fingerprint,
     )
     from utils.metrics import (  # type: ignore
-        _read_state, _write_state, mark_failed_in_progress, state_file_lock,
+        METRICS_TEMP_PREFIX, _read_state, mark_failed_in_progress, state_file_lock,
         withdraw_from_progress_in_state,
     )
     from utils.state_file import StateDocumentError  # type: ignore
+    from utils.state_file import update as update_state  # type: ignore
     from utils.state_manager import (  # type: ignore
         PROCESSED_LEG_NATIVE, record_batch_items_in_state, update_task_status_in_state,
     )
@@ -593,37 +595,38 @@ def commit_stale_check(phase_dir: Path, task_id: str) -> Optional[List[str]]:
     skipped, held = commit_stale_split(groups, failing)
     reason = commit_stale_reason(failing, guard, held=bool(held))
     phase = PHASE_BY_WRITE_KIND.get(kind, kind)
+    # One state lock across the guard's save and the batch's record.
     with state_file_lock(target):
         try:
             state = _read_state(target)
         except StateDocumentError:
             return None
-        guard = commit_guard_of(state, kind) if isinstance(state, dict) else None
+        guard = commit_guard_of(state, kind)
         if guard is None:
             return None
         commit_apply.mark_stale(guard, groups, failing, cwd=root)
         commit_apply.save_guard(target, guard)
         # What save_guard wrote, then this batch's record over it.
-        state = _read_state(target)
-        update_task_status_in_state(state, task_id, "failed", reason)
-        # Every item `failed`, as `util batch-done --status failed` records
-        # them: a native `--resume` hands them out again, and the guard's
-        # saved skips take the skipped ones out (and count them) there.
-        record_batch_items_in_state(
-            state, phase_dir.name, task, completed=False, leg=PROCESSED_LEG_NATIVE,
-        )
-        # No subagent ran: out of the `[ETA]` total, never "run stopped".
-        mark_failed_in_progress(state, phase, task_id, failed=False)
-        withdraw_from_progress_in_state(state, phase, [task_id], task_id)
-        # Any earlier record of this batch's own check no longer stands.
-        _known_checks.set_batch_check_report_in_state(
-            state, task_id,
-            prior_changes_id=str(task.get("prior_changes_id") or ""),
-            grouped_sha256=_known_checks.review_stamp(task),
-            findings=None, listed=None, note=None,
-        )
-        state["updated_at"] = datetime.now().isoformat()
-        _write_state(target, state)
+        with update_state(target, temp_prefix=METRICS_TEMP_PREFIX) as state:
+            update_task_status_in_state(state, task_id, "failed", reason)
+            # Every item `failed`, as `util batch-done --status failed`
+            # records them: a native `--resume` hands them out again, and the
+            # guard's saved skips take the skipped ones out (and count them)
+            # there.
+            record_batch_items_in_state(
+                state, phase_dir.name, task, completed=False, leg=PROCESSED_LEG_NATIVE,
+            )
+            # No subagent ran: out of the `[ETA]` total, never "run stopped".
+            mark_failed_in_progress(state, phase, task_id, failed=False)
+            withdraw_from_progress_in_state(state, phase, [task_id], task_id)
+            # Any earlier record of this batch's own check no longer stands.
+            _known_checks.set_batch_check_report_in_state(
+                state, task_id,
+                prior_changes_id=str(task.get("prior_changes_id") or ""),
+                grouped_sha256=_known_checks.review_stamp(task),
+                findings=None, listed=None, note=None,
+            )
+            state["updated_at"] = datetime.now().isoformat()
     line = commit_stale_line(
         task_id, failing, guard,
         marker=getattr(commit_apply, "STALE_MARKER", "[COMMIT_FIXES_STALE]"),
@@ -671,14 +674,12 @@ def commit_bind(phase_dir: Path, task_id: str) -> bool:
         if root is None or problem:
             return False
         commit_apply = load_commit_apply()
-        with state_file_lock(target):
-            state = _read_state(target)
-            guard = commit_guard_of(state, kind) if isinstance(state, dict) else None
+        with update_state(target, temp_prefix=METRICS_TEMP_PREFIX) as state:
+            guard = commit_guard_of(state, kind)
             # Nothing watched: the saved ids (none) are the same comparison.
             if guard is None or not commit_apply.watched_ids(guard):
                 return False
             commit_apply.bind_watched(guard, task_id, cwd=root)
-            _write_state(target, state)
         return True
     except Exception:  # noqa: BLE001 - batch-done then compares with the saved ids
         return False

@@ -101,8 +101,10 @@ from .git_utils import (
     run_git_for_paths,
     subtract_baseline,
 )
+from .clock import utc_iso_z as _now_utc
 from .state_file import update as update_state
 from .text_clip import clip, plain_line
+from .text_fmt import plural as _plural
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -173,14 +175,6 @@ _SPECIAL_PREFIX = "special:"
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
-
-
-def _now_utc() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _plural(count: int, singular: str, plural: Optional[str] = None) -> str:
-    return f"{count} {singular if count == 1 else (plural or singular + 's')}"
 
 
 def _inside(name: str) -> bool:

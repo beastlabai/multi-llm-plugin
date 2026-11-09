@@ -31,15 +31,16 @@ import json
 import os
 import sys
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 try:
     from . import scope_policy as sp
+    from .clock import local_iso_seconds
     from .human_decisions import group_id_of
     from .importance import get_highest_importance
 except ImportError:  # pragma: no cover - script-style import
     from utils import scope_policy as sp  # type: ignore
+    from utils.clock import local_iso_seconds  # type: ignore
     from utils.human_decisions import group_id_of  # type: ignore
     from utils.importance import get_highest_importance  # type: ignore
 
@@ -572,8 +573,8 @@ def unsettled_refusal(change: PolicyChange, *, mode_word: str) -> List[str]:
 # ---------------------------------------------------------------------------
 
 
-def _now() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+#: A record's timestamp: local time, whole seconds (``utils/clock.py``).
+_now = local_iso_seconds
 
 
 def blockers_from_processed(processed: Mapping[str, Any], review_stamp: str = "") -> List[Dict[str, Any]]:

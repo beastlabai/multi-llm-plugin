@@ -768,28 +768,43 @@ not a private temp-then-`os.replace` copy. The guarantees, each pinned by an inj
   included), gives a temp file made read-only by its final mode its owner write bit back (Windows
   deletes no read-only file, and refuses to replace a read-only target), removes it, and leaves the
   old bytes.
+- With `dir_fd` the target is one name in a directory the caller holds open, and the create, the
+  rename, a removal and the directory flush are all relative to that descriptor: a link swapped in
+  for the directory, or for a folder above it, after it was opened is never followed (POSIX only;
+  `atomic_io.DIR_FD_SUPPORTED`).
 
 A call site states only how it differs, through a parameter:
 
 | Parameter | Default | Who changes it |
 |-----------|---------|----------------|
 | `keep_mode` | on: an existing file's bits carry over | no caller turns it off |
-| `mode` | none | 0600: executor results, ask records, the version cache, `state.json`, shims; codex's and cursor's config keep the mode they had |
-| `fsync` | on | off for `state.json` (rewritten dozens of times a run, under its lock) and doctor's version cache (inside the startup budget) |
+| `mode` | none | 0600: executor results, ask records, the version cache, `state.json`, `.status.json`, the dispatched prompts, the write-safety records (`write_safety._atomic_write`), the Landlock change lists, shims; codex's and cursor's config keep the mode they had |
+| `fsync` | on | off for `state.json` (rewritten dozens of times a run, under its lock), `.status.json` (rewritten by every heartbeat, under the checkpoint lock), the dispatched prompts (`utils/prompt_files.py`) and doctor's version cache (inside the startup budget) |
 | `follow_symlinks` | off: a symlink is replaced by a file | `update_plan_tasks.replace_file`, for the plan alone: a plan kept elsewhere and linked in stays linked. The outputs beside it never follow a link ([plan output containment](write-safety.md#plan-output-containment)) |
 | `newline` (text) | `\n` | `os.linesep` where a writer has always written what `write_text` does (`update_plan_tasks`, `review_round`, the HTML report, ask's records) |
-| `temp_prefix` | `.<name>.` | where something matches leftovers by name (`.state_`, `.metrics_`, `.tracking_`, `.multi-llm-shim-`, `.multi-llm-trust-`) |
+| `temp_prefix` | `.<name>.` | where something matches leftovers by name (`.state_`, `.metrics_`, `.tracking_`, `.status_`, `.prompt-`, `.multi-llm-shim-`, `.multi-llm-trust-`) |
+| `dir_fd` | none: by path | `utils/prompt_files.py`, inside the prompt folder it reached without following a link |
 
 `state.json` itself goes through `utils/state_file.py`: `write_document` (the one writer),
 `read_document` / `read_document_strict` (the raw readers; a raw read migrates and writes
 nothing), `locked` (the state lock, still importable as `metrics.state_file_lock`) and `update`
 (read, change, write under the lock; nothing is written when the body raises or changes nothing).
+Every read-modify-write outside `StateManager` is an `update`: `util metrics`, `util batch-done`,
+`util write-prompt`'s commit re-check and bind, and `commit_apply.save_guard`.
 The strict reader raises `StateDocumentError` (a `ValueError`) for a file that is not UTF-8 JSON
 holding an object; each command turns it into its own refusal (`util batch-done` exits 3 with
-`... is not a JSON object`, `util metrics` exits 1 with `Error:`). `StateDoc` lists the top-level
+`... is not a JSON object`, through `update`'s `on_invalid`, `util metrics` exits 1 with
+`Error:`). `StateDoc` lists the top-level
 keys the skill writes and `schemas/state_file.schema.json` lists the same properties;
 `tests/test_state_file.py` compares them, and checks the keys `StateManager`'s writers put in a
 saved file against both.
+
+The writers that once kept their own timestamp helper name a format in `utils/clock.py` instead:
+`local_iso` (local, microseconds: `.status.json`, the scope policy's run records),
+`local_iso_seconds` (local, whole seconds: the scope policy's round and apply records, the
+write-safety audit) or `utc_iso_z` (UTC with `Z`: the commit range and its guard). The three
+formats are kept as they were, because records on disk and their readers compare the strings. The
+commit modules' `1 file` / `2 files` is `utils/text_fmt.py`'s `plural`.
 
 ## Durable retry commands
 

@@ -141,17 +141,20 @@ import contextlib
 import json
 import os
 import sys
-import tempfile
 import threading
-from datetime import datetime
 from typing import Any, Dict, Iterable, Iterator, Optional, Tuple
 
 from . import process_control
+from .atomic_io import atomic_write_text
+from .clock import local_iso
 
 #: The checkpoint file name. Dot-prefixed on purpose: reaggregation globs
 #: ``{phase_dir}/*.json`` and Python's ``glob`` skips leading-dot names, which is
 #: the only reason this file is not parsed as a model result.
 STATUS_FILENAME = ".status.json"
+
+#: The temp-file prefix of :func:`write_status` (``.status_<pid>.<random>.tmp``).
+STATUS_TEMP_PREFIX = ".status_"
 
 #: The interprocess mutex guarding every read-modify-write of the checkpoint.
 #: A *second* lock file next to ``{phase}/.lock`` on purpose — that one is
@@ -234,8 +237,10 @@ def status_lock_path(phase_dir: str) -> str:
     return os.path.join(str(phase_dir), STATUS_LOCK_FILENAME)
 
 
-def now_iso() -> str:
-    return datetime.now().isoformat()
+#: Every stamp in the checkpoint (``heartbeat_at``, ``updated_at``, ...): local
+#: time, to the microsecond (``utils/clock.py``); ``detach._elapsed_since``
+#: reads them.
+now_iso = local_iso
 
 
 class CheckpointLockUnavailable(Exception):
@@ -305,8 +310,11 @@ def write_status(phase_dir: str, data: dict) -> None:
     The carry-over read and the rename are one critical section (thread *and*
     process): a concurrent writer between them would either lose its own
     reserved objects or be reverted by this one.
+
+    The write is ``atomic_io``'s, owner-only (0600), without ``fsync``: the
+    heartbeat rewrites the file every few seconds under the checkpoint lock
+    (docs/development/runtime.md#atomic-file-writes).
     """
-    temp_path = None
     path = status_path(phase_dir)
     with checkpoint_lock(phase_dir):
         try:
@@ -319,18 +327,10 @@ def write_status(phase_dir: str, data: dict) -> None:
             pass
         try:
             data["updated_at"] = now_iso()
-            temp_fd, temp_path = tempfile.mkstemp(
-                dir=phase_dir, suffix='.tmp', prefix='.status_'
-            )
-            with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2)
-            os.replace(temp_path, path)
+            atomic_write_text(path, json.dumps(data, indent=2), mode=0o600,
+                              fsync=False, temp_prefix=STATUS_TEMP_PREFIX)
         except Exception:
-            try:
-                if temp_path and os.path.exists(temp_path):
-                    os.unlink(temp_path)
-            except Exception:
-                pass
+            pass
 
 
 def update_status(phase_dir: str, updates: dict) -> None:

@@ -382,6 +382,7 @@ class TestWindowsRefusals:
         target.chmod(0o444)
         try:
             unlinked = _windows_replace_and_unlink(monkeypatch)
+            monkeypatch.setattr(atomic_io, "_CLEAR_READ_ONLY_BEFORE_UNLINK", True)
             with pytest.raises(PermissionError):
                 atomic_write_bytes(target, b"new")
             monkeypatch.undo()
@@ -517,3 +518,116 @@ class TestText:
         atomic_write_text(tmp_path / "f.txt", "y")
         assert sources[0].startswith(".mine-") and sources[0].endswith(".tmp")
         assert sources[1].startswith(".f.txt.") and sources[1].endswith(".tmp")
+
+
+@pytest.mark.skipif(not atomic_io.DIR_FD_SUPPORTED, reason="writes relative to a held directory")
+class TestRelativeToAHeldDirectory:
+    """*dir_fd*: every step is relative to the directory the caller holds,
+    so a link swapped in for it after it was opened is never followed."""
+
+    @pytest.fixture
+    def held(self, tmp_path):
+        folder = tmp_path / "folder"
+        folder.mkdir()
+        descriptor = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            yield folder, descriptor
+        finally:
+            os.close(descriptor)
+
+    def test_the_file_lands_in_the_held_directory_whatever_is_at_its_path(
+            self, tmp_path, held):
+        folder, descriptor = held
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        moved = tmp_path / "moved"
+        os.rename(folder, moved)
+        folder.symlink_to(outside, target_is_directory=True)
+        atomic_write_bytes("f.txt", b"new", dir_fd=descriptor, mode=0o600)
+        assert (moved / "f.txt").read_bytes() == b"new"
+        assert _names(outside) == []
+        assert _names(moved) == ["f.txt"]
+
+    def test_a_link_at_the_name_is_replaced_and_its_target_left_alone(self, tmp_path, held):
+        folder, descriptor = held
+        victim = tmp_path / "victim"
+        victim.write_bytes(b"victim")
+        (folder / "f.txt").symlink_to(victim)
+        atomic_write_text("f.txt", "new", dir_fd=descriptor, mode=0o600)
+        assert not (folder / "f.txt").is_symlink()
+        assert (folder / "f.txt").read_bytes() == b"new"
+        assert victim.read_bytes() == b"victim"
+
+    @POSIX_ONLY
+    def test_an_existing_files_mode_carries_over(self, held, umask_022):
+        folder, descriptor = held
+        (folder / "f.txt").write_bytes(b"old")
+        (folder / "f.txt").chmod(0o640)
+        atomic_write_bytes("f.txt", b"new", dir_fd=descriptor)
+        assert _mode(folder / "f.txt") == 0o640
+
+    def test_the_held_directory_is_flushed_after_the_rename(self, held, monkeypatch):
+        folder, descriptor = held
+        flushed = []
+        real_fsync = os.fsync
+
+        def recording(fd):
+            flushed.append(fd)
+            return real_fsync(fd)
+
+        monkeypatch.setattr(os, "fsync", recording)
+        atomic_write_bytes("f.txt", b"new", dir_fd=descriptor)
+        assert flushed[-1] == descriptor
+        assert len(flushed) == 2  # the file, then the directory
+
+    def test_a_failure_leaves_the_old_bytes_and_no_temp(self, held, monkeypatch):
+        folder, descriptor = held
+        (folder / "f.txt").write_bytes(b"old")
+        monkeypatch.setattr(os, "replace", _fail_with(OSError("busy")))
+        with pytest.raises(OSError):
+            atomic_write_bytes("f.txt", b"new", dir_fd=descriptor)
+        monkeypatch.undo()
+        assert (folder / "f.txt").read_bytes() == b"old"
+        assert _names(folder) == ["f.txt"]
+
+    @pytest.mark.parametrize("name", ["", ".", "..", "sub/f.txt", "/abs/f.txt"])
+    def test_only_a_single_name_is_written(self, held, name):
+        folder, descriptor = held
+        with pytest.raises(ValueError):
+            atomic_write_bytes(name, b"x", dir_fd=descriptor)
+        assert _names(folder) == []
+
+    @pytest.mark.parametrize("prefix", ["../escaped-", "/tmp/escaped-", "sub/escaped-"])
+    def test_the_temp_name_is_one_name_too(self, tmp_path, held, prefix):
+        """A temp prefix may not carry the temp out of the held folder
+        (Codex's U40b review)."""
+        _folder, descriptor = held
+        with pytest.raises(ValueError):
+            atomic_write_bytes("f.txt", b"new", dir_fd=descriptor, temp_prefix=prefix)
+        assert not list(tmp_path.glob("escaped-*"))
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX unlinks a read-only file")
+    def test_a_failed_read_only_write_never_chmods_a_link_swapped_in(
+            self, tmp_path, held, monkeypatch):
+        folder, descriptor = held
+        outside = tmp_path / "outside"
+        outside.write_text("x", encoding="utf-8")
+        os.chmod(outside, 0o644)
+        real_replace = os.replace
+
+        def swap_then_fail(source, target, **kwargs):
+            os.unlink(source, dir_fd=descriptor)
+            os.symlink(outside, source, dir_fd=descriptor)
+            raise OSError("injected rename failure")
+
+        monkeypatch.setattr(os, "replace", swap_then_fail)
+        with pytest.raises(OSError):
+            atomic_write_bytes("f.txt", b"new", dir_fd=descriptor, mode=0o400)
+        monkeypatch.setattr(os, "replace", real_replace)
+        assert stat.S_IMODE(outside.stat().st_mode) == 0o644
+
+    def test_following_a_link_cannot_be_combined_with_it(self, held):
+        folder, descriptor = held
+        with pytest.raises(ValueError):
+            atomic_write_bytes("f.txt", b"x", dir_fd=descriptor, follow_symlinks=True)
+        assert _names(folder) == []

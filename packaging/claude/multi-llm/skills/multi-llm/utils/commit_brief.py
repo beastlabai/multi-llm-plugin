@@ -63,6 +63,7 @@ from .atomic_io import atomic_write_bytes
 from .commit_paths import BRIEF_END_MARKER, BRIEF_MARKER
 from .git_utils import GitError, attribute_source_args, git_path, run_git
 from .text_clip import clip, plain_line
+from .text_fmt import plural as _plural
 
 PathLike = Union[str, os.PathLike]
 
@@ -133,10 +134,6 @@ _MESSAGE_FORMAT = "%H%n%an%n%B"
 def _markers() -> Tuple[str, str]:
     """``(BRIEF_MARKER, BRIEF_END_MARKER)``, the path layer's markers."""
     return BRIEF_MARKER, BRIEF_END_MARKER
-
-
-def _plural(count: int, singular: str, plural: Optional[str] = None) -> str:
-    return f"{count} {singular if count == 1 else (plural or singular + 's')}"
 
 
 def _break_openers(text: str) -> str:

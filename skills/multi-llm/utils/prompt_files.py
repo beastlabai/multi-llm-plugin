@@ -20,18 +20,22 @@ a temporary name and renamed into place, unlinked or listed relative to the
 folder's descriptor. A component swapped for a link at any moment is refused,
 never followed, and a link or a hard link at a file's name is replaced, never
 written through. A platform without these calls (Windows, where no jail runs)
-writes by path, checking each component with ``lstat``.
+writes by path, checking each component with ``lstat``. Either way the write
+itself is ``atomic_io``'s (relative to the folder's descriptor where there is
+one: docs/development/runtime.md#atomic-file-writes).
 
-Standard library only, so both legs import it without a shim.
+Standard library and the stdlib-only ``atomic_io`` only, so both legs import
+it without a shim.
 """
 
 from __future__ import annotations
 
 import os
 import stat
-import tempfile
 from dataclasses import dataclass
 from typing import Any, Callable, List, Optional, Tuple
+
+from .atomic_io import atomic_write_bytes
 
 __all__ = [
     "FOLDER",
@@ -47,7 +51,8 @@ __all__ = [
 #: native leg and the scheduler keeps on the executor leg.
 FOLDER = "prompts"
 
-#: The temporary name prefix of a file being written.
+#: The temporary name prefix of a file being written
+#: (``.prompt-<pid>.<random>.tmp``, ``atomic_io``'s name after it).
 TEMP_PREFIX = ".prompt-"
 
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
@@ -390,44 +395,17 @@ class PromptFolder:
         self.write_bytes(name, text.encode("utf-8"))
 
     def write_bytes(self, name: str, data: bytes) -> None:
-        """:meth:`write` for bytes, written exactly as given."""
+        """:meth:`write` for bytes, written exactly as given: ``atomic_io``'s
+        write (an exclusively created temp file, renamed in), owner-only
+        (0600) and without ``fsync``, relative to the folder's descriptor
+        where there is one."""
         name = _check_name(name)
         if self._handle is None:
-            handle, temporary = tempfile.mkstemp(prefix=TEMP_PREFIX, dir=self.path)
-            try:
-                with os.fdopen(handle, "wb") as stream:
-                    stream.write(data)
-                os.replace(temporary, os.path.join(self.path, name))
-            except BaseException:
-                try:
-                    os.unlink(temporary)
-                except OSError:
-                    pass
-                raise
-            return
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | _CLOEXEC
-        for _ in range(100):
-            temporary = TEMP_PREFIX + os.urandom(6).hex()
-            try:
-                handle = os.open(temporary, flags, 0o600, dir_fd=self._handle)
-                break
-            except FileExistsError:
-                continue
-        else:  # pragma: no cover - 100 collisions of 48 random bits
-            raise FileExistsError(f"no free temporary name in {self.path}")
-        try:
-            with os.fdopen(handle, "wb") as stream:
-                stream.write(data)
-            os.replace(
-                temporary, name,
-                src_dir_fd=self._handle, dst_dir_fd=self._handle,
-            )
-        except BaseException:
-            try:
-                os.unlink(temporary, dir_fd=self._handle)
-            except OSError:
-                pass
-            raise
+            atomic_write_bytes(os.path.join(self.path, name), data, mode=0o600,
+                               fsync=False, temp_prefix=TEMP_PREFIX)
+        else:
+            atomic_write_bytes(name, data, mode=0o600, fsync=False,
+                               temp_prefix=TEMP_PREFIX, dir_fd=self._handle)
 
 
 # ---------------------------------------------------------------------------

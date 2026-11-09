@@ -35,6 +35,10 @@ state_file_lock = _state_file.locked
 StateLockTimeout = _state_file.StateLockTimeout
 STATE_LOCK_FILENAME = _state_file.STATE_LOCK_FILENAME
 
+#: The temp-file prefix of the ``state.json`` writes made through this
+#: module, ``util batch-done``'s and ``util write-prompt``'s included.
+METRICS_TEMP_PREFIX = ".metrics_"
+
 
 def _read_state(state_path: Path) -> dict:
     """``state.json``'s document; raises ``OSError`` or
@@ -45,7 +49,7 @@ def _read_state(state_path: Path) -> dict:
 
 def _write_state(state_path: Path, state: dict) -> None:
     """Write state JSON atomically (``state_file.write_document``)."""
-    _state_file.write_document(state_path, state, temp_prefix=".metrics_")
+    _state_file.write_document(state_path, state, temp_prefix=METRICS_TEMP_PREFIX)
 
 
 def format_duration(ms: Optional[int]) -> str:
@@ -630,7 +634,7 @@ def start_phase(state_path: Path, phase: str, total_batches: int) -> None:
     (necessary so ``--resume`` runs reset the progress baseline, and start a new
     ``run_id``).
     """
-    with _state_file.update(state_path, temp_prefix=".metrics_") as state:
+    with _state_file.update(state_path, temp_prefix=METRICS_TEMP_PREFIX) as state:
         start_phase_in_state(state, phase, total_batches)
 
 
@@ -749,7 +753,7 @@ def finish_phase(state_path: Path, phase: str) -> Optional[int]:
 
     Returns None if the phase was never started (graceful no-op).
     """
-    with _state_file.update(state_path, temp_prefix=".metrics_") as state:
+    with _state_file.update(state_path, temp_prefix=METRICS_TEMP_PREFIX) as state:
         if (
             phase not in (state.get("metrics_progress") or {})
             and not left_out_in_state(state, phase)
@@ -1420,7 +1424,7 @@ def record_metric(
             apply batch's label carries none): the line of one ``util
             batch-done`` recorded failed says so (fix round 24).
     """
-    with _state_file.update(state_path, temp_prefix=".metrics_") as state:
+    with _state_file.update(state_path, temp_prefix=METRICS_TEMP_PREFIX) as state:
         eta_line = record_metric_in_state(
             state,
             phase,

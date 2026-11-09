@@ -60,6 +60,7 @@ from . import (
     stream_bootstrap,
 )
 from .advisory import note_swallowed
+from .atomic_io import atomic_write_text
 from .cli_common import (
     EXIT_ERROR,
     EXIT_NEEDS_HUMAN,
@@ -1792,21 +1793,17 @@ def _record_worker_refusal(phase_dir: str, run_id: Optional[str], message: str) 
     launch reports the refusal instead of a run (Windows, where the lock is
     retaken across the boundary and another run can take it in between; and
     on POSIX a hand-off the worker could not adopt). Only a real detached
-    worker writes it, and only under its own run id."""
+    worker writes it, and only under its own run id. ``atomic_io``'s write
+    (docs/development/runtime.md#atomic-file-writes)."""
     if not run_id or os.environ.get(WORKER_ENV) != "1":
         return
     path = worker_refusal_path(phase_dir, str(run_id))
-    tmp = f"{path}.{os.getpid()}.tmp"
     try:
-        with open(tmp, "w", encoding="utf-8") as handle:
-            json.dump({"run_id": str(run_id), "pid": os.getpid(), "message": message},
-                      handle)
-        os.replace(tmp, path)
+        atomic_write_text(path, json.dumps(
+            {"run_id": str(run_id), "pid": os.getpid(), "message": message}),
+            keep_mode=False)
     except OSError:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
+        pass
 
 
 def _read_worker_refusal(phase_dir: str, run_id: str) -> Optional[Dict[str, Any]]:

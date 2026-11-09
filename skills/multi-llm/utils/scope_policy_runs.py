@@ -58,8 +58,10 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 try:  # normal import (utils is a package)
     from . import scope_policy as sp
+    from .clock import local_iso
 except ImportError:  # pragma: no cover - direct script runs with utils/ on path
     import scope_policy as sp  # type: ignore
+    from clock import local_iso  # type: ignore[no-redef]
 
 #: The ``state.json`` top-level key holding the run records.
 RUNS_KEY = "scope_policy_runs"
@@ -71,10 +73,10 @@ SITE_ID = "scope-policy"
 Choice = Tuple[str, str]
 
 
-def _now() -> str:
-    # Full precision: a completion stamp in the same second as the record must
-    # still compare on the right side of it.
-    return datetime.now().isoformat()
+#: A record's timestamp, to the microsecond (``utils/clock.py``): a completion
+#: stamp in the same second as the record must still compare on the right
+#: side of it.
+_now = local_iso
 
 
 def _parse(value: Any) -> Optional[datetime]:

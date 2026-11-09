@@ -35,8 +35,12 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+try:
+    from .clock import local_iso_seconds
+except ImportError:  # pragma: no cover - direct script runs with utils/ on path
+    from clock import local_iso_seconds  # type: ignore[no-redef]
 
 # ---------------------------------------------------------------------------
 # Vocabulary
@@ -953,8 +957,8 @@ def round_record(state: Mapping[str, Any], phase: str) -> Optional[Dict[str, Any
     return dict(record) if isinstance(record, Mapping) else None
 
 
-def _now() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+#: A record's timestamp: local time, whole seconds (``utils/clock.py``).
+_now = local_iso_seconds
 
 
 def record_review_round(
