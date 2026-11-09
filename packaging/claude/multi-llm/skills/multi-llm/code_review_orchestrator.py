@@ -6653,7 +6653,7 @@ async def _group_validate_and_report(
     # It has no per-model map and never touches `models`: it prints the step,
     # its own elapsed, and whatever counters the current step already
     # publishes — `progress.subagents`, which
-    # `subagent_executor._mirror_status` writes straight through
+    # `task_batch._mirror_status` writes straight through
     # `update_status` on every outcome. So the map the sweep froze stays
     # frozen, and a table rendered while validation runs still shows each
     # model's real duration rather than a clock that kept ticking after the
