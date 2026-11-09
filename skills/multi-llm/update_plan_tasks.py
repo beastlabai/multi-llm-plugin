@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from utils.atomic_io import atomic_write_bytes, atomic_write_text
 from utils.stream_bootstrap import bootstrap_streams
-from utils.output_handler import get_output_paths, get_relative_output_path
+from utils.output_handler import output_file_path
 from utils.plan_updater import insert_tasks_file_reference
 from utils.state_manager import get_or_create_state
 from utils.subagent_tasks import derive_executor_role
@@ -262,11 +262,17 @@ def find_in_plan_task_sections(plan_content: str) -> List[str]:
 class TasksDocumentError(Exception):
     """A task-generation document was not applied.
 
-    Raised before the first write for a missing plan, an invalid document or a
-    malformed ``SOURCE_DATE_EPOCH``; an ``OSError`` from a write propagates as
+    Raised before the first write for a missing plan, an invalid document, a
+    malformed ``SOURCE_DATE_EPOCH`` or a task list that would resolve out of
+    the plan's directory; an ``OSError`` from a write propagates as
     itself. Callers that must leave the plan untouched snapshot it first
     (``generate_tasks_orchestrator._Snapshot``).
     """
+
+
+class TasksOutputEscape(TasksDocumentError):
+    """A file in the plan's output folder resolves outside the plan's
+    directory, so it is not written (:func:`contain_plan_output`)."""
 
 
 class TasksDocumentInvalid(TasksDocumentError):
@@ -291,17 +297,76 @@ class AppliedTasks:
     dry_run: bool
 
 
+def plan_output_root(plan_path: Path) -> str:
+    """The folder *plan_path*'s outputs stay in: the directory the plan is
+    reached through. The plan file itself is not followed, so a plan kept
+    elsewhere and linked in keeps its outputs beside the link."""
+    return os.path.dirname(os.path.abspath(plan_path))
+
+
+def contain_plan_output(
+    plan_path: Path, path: Path, *, what: str, follow_final: bool = True
+) -> Path:
+    """Where *path*, a file in *plan_path*'s output folder, resolves;
+    :class:`TasksOutputEscape` unless that stays inside the plan's directory
+    (docs/development/write-safety.md#plan-output-containment).
+
+    The boundary (:func:`plan_output_root`), resolved, is inside the plan's
+    repository, and is where implement reads the task list from
+    (``tasks_file.resolve_tasks_marker`` refuses a list that resolves
+    anywhere else). A link that stays inside is resolved, so the write lands
+    where it leads; *follow_final* off resolves the folder alone, for a
+    rename of the entry itself. Pure: nothing is created. This is the check;
+    the write is :func:`write_plan_output` (or ``write_safety``'s rename and
+    removal), made through the resolved folder held, so a link swapped in
+    after this check is never followed.
+    """
+    from utils.write_safety import PathEscape, contain_local_path
+
+    path = Path(path)
+    plan_dir = plan_output_root(plan_path)
+    try:
+        if follow_final:
+            return contain_local_path(path, plan_dir, what=what)
+        return contain_local_path(path.parent, plan_dir, what=what) / path.name
+    except PathEscape as escape:
+        raise TasksOutputEscape(
+            f"{escape.message} A symlink in the plan's output folder leads out of "
+            f"the plan's directory, so nothing was written: the plan and its "
+            f"state are unchanged. Remove the link, or point it inside "
+            f"{plan_dir}, and re-run."
+        ) from escape
+
+
+def write_plan_output(plan_path: Path, target: Path, data: Union[str, bytes]) -> None:
+    """Write *data* at *target*, a file in *plan_path*'s output folder as
+    :func:`contain_plan_output` resolved it, through its folder held below
+    the plan's directory and never through a link
+    (``write_safety.write_below_root``). Text is written as
+    :func:`replace_file` writes it (the platform's newlines); an existing
+    file's mode carries over. ``OSError`` when it is not written: a link or
+    a moved folder met on the way is refused, never followed."""
+    from utils.write_safety import write_below_root
+
+    if isinstance(data, str):
+        data = data.replace("\n", os.linesep).encode("utf-8")
+    write_below_root(plan_output_root(plan_path), target, data)
+
+
 def replace_file(path: Path, data: Union[str, bytes]) -> None:
-    """Write *data* to *path* by ``atomic_io``'s atomic write.
+    """Write *data* to the plan at *path* by ``atomic_io``'s atomic write.
 
     A crash or a failed write leaves the old bytes in place, never a truncated
     file. Text is written the way ``Path.write_text(encoding="utf-8")`` writes
     it (the platform's newlines); bytes land exactly. A symlink is written
-    through to its target, so the link survives (a user may keep the plan
-    elsewhere and link it in), and an existing file's permission bits carry
-    over to the replacement; a new file gets the process umask, as
-    ``write_text`` would. The temp file is never readable more widely than the
-    file it replaces, and a returned call survives a power loss.
+    through to its target, so the link survives: the plan is the user's own
+    file, which they may keep elsewhere and link in on purpose, so it is the
+    one file this flow follows a link for. Every output written beside it
+    goes through :func:`write_plan_output`, which never does. An existing
+    file's permission bits carry over to the replacement; a new file gets the
+    process umask, as ``write_text`` would. The temp file is never readable
+    more widely than the file it replaces, and a returned call survives a
+    power loss.
     """
     if isinstance(data, bytes):
         atomic_write_bytes(path, data, follow_symlinks=True)
@@ -346,8 +411,13 @@ def apply_tasks_document(
     except ValueError as e:  # a malformed SOURCE_DATE_EPOCH; nothing written yet
         raise TasksDocumentError(str(e)) from e
 
-    tasks_output_path = get_output_paths(plan_path, "tasks", phase="tasks")
-    tasks_relative_path = get_relative_output_path(plan_path, "tasks", phase="tasks")
+    # Computed, not created, then contained before anything is written: a
+    # symlink named like the output (the list, its folder, the plan's output
+    # folder) must not carry the write out of the plan's directory. A dry run
+    # reports the same refusal.
+    tasks_output_path = output_file_path(plan_path, "tasks", phase="tasks")
+    tasks_target = contain_plan_output(plan_path, tasks_output_path, what="task list")
+    tasks_relative_path = tasks_output_path.relative_to(plan_path.parent).as_posix()
     applied = AppliedTasks(
         tasks_path=tasks_output_path,
         tasks_relative_path=tasks_relative_path,
@@ -366,10 +436,14 @@ def apply_tasks_document(
         print(f"   Add reference: <!-- TASKS_FILE: {tasks_relative_path} -->")
         return applied
 
-    tasks_output_path.parent.mkdir(parents=True, exist_ok=True)
-    replace_file(tasks_output_path, tasks_markdown)
+    # Through its folder, held below the plan's directory: a link swapped in
+    # after the check above, for the list or a folder above it, is refused.
+    write_plan_output(plan_path, tasks_target, tasks_markdown)
     print(f"Created tasks file: {tasks_output_path}")
 
+    # The plan alone is written through a symlink wherever it leads: the
+    # user's own file, kept elsewhere and linked in on purpose (not an
+    # output, so not contained).
     replace_file(plan_path, updated_plan)
     # Said what was written: a bare "Updated plan file" read as generate-tasks
     # rewriting the plan (OpenCode racing run 4). The section and its

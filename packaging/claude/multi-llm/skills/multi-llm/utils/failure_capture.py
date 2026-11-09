@@ -133,7 +133,7 @@ def _safe_task_filename(task_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", task_id or "task") or "task"
 
 
-def _retire_capture(target: Path) -> None:
+def _retire_capture(target: Path, root: str) -> None:
     """Move an earlier invocation's capture aside rather than overwrite it.
 
     Attempt numbering restarts at 1 on every invocation, and a re-invoked phase
@@ -143,8 +143,14 @@ def _retire_capture(target: Path) -> None:
     ``task_generation.attempt1.json``, the second's). The stamp is the retired
     file's own mtime in UTC, so the name says when that attempt ran; the batch
     report that named the old path is rewritten by the same invocation.
-    Best-effort: a rename that fails leaves the overwrite as it was.
+    Best-effort: a rename that fails leaves the overwrite as it was. *target*
+    is checked below the phase folder *root*, and renamed in its folder held
+    there (``write_safety.rename_below_root``), never through a link.
     """
+    try:  # pragma: no cover - import shim mirrors the rest of utils/
+        from .write_safety import rename_below_root
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.write_safety import rename_below_root
     try:
         if not target.exists():
             return
@@ -160,7 +166,7 @@ def _retire_capture(target: Path) -> None:
                 f"{target.stem}.{stamp}-{serial}{target.suffix}"
             )
             serial += 1
-        target.replace(retired)
+        rename_below_root(root, target, retired.name)
     except OSError:  # pragma: no cover - diagnostics must never fail a run
         return
 
@@ -194,6 +200,13 @@ def _write_failure_capture(
     """
     import hashlib
 
+    try:  # pragma: no cover - import shim mirrors the rest of utils/
+        from .write_safety import WriteSafetyError, contain_local_path, write_below_root
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.write_safety import (  # type: ignore[no-redef]
+            WriteSafetyError, contain_local_path, write_below_root,
+        )
+
     try:
         capture_dir = Path(phase_dir) / FAILED_CAPTURE_DIRNAME
         name = f"{_safe_task_filename(str(task.get('task_id', '')))}.attempt{attempt_index}.json"
@@ -204,8 +217,13 @@ def _write_failure_capture(
             else arg
             for arg in argv
         ]
-        _retire_capture(capture_dir / name)
-        _atomic_write_json(str(capture_dir / name), _redact_json({
+        # Checked below the phase folder, then retired and written through
+        # the capture folder held there: never through a link, `failed/`
+        # included (docs/development/write-safety.md#plan-output-containment).
+        target = contain_local_path(capture_dir / name, phase_dir,
+                                    what="failure capture")
+        _retire_capture(target, phase_dir)
+        payload = _redact_json({
             "task_id": task.get("task_id"),
             "kind": task.get("kind"),
             "attempt": attempt_index,
@@ -224,7 +242,9 @@ def _write_failure_capture(
             # Only on the schema-repair re-ask, so every other capture keeps
             # exactly the keys it always had.
             **({"repair": repair} if repair else {}),
-        }))
+        })
+        write_below_root(phase_dir, target,
+                         json.dumps(payload, indent=2).encode("utf-8"), mode=0o600)
         return str(capture_dir / name)
-    except OSError:  # pragma: no cover - diagnostics must never fail a run
+    except (OSError, WriteSafetyError):  # pragma: no cover - diagnostics must never fail a run
         return None

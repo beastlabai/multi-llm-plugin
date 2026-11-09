@@ -22,6 +22,7 @@ from update_plan_tasks import (  # noqa: E402
     generated_stamp,
     replace_file,
 )
+from utils import write_safety  # noqa: E402
 
 
 def _document(tasks, preamble="Shared context for every task."):
@@ -807,7 +808,10 @@ class TestThePlanWriteIsAtomic:
             self, temp_dir, sample_tasks_json, monkeypatch):
         plan_path, _ = _write_inputs(temp_dir, {})
         before = plan_path.read_bytes()
-        self._tear_write(monkeypatch, which=2)  # tasks.md first, then the plan
+        # tasks.md first, then the plan: the plan's is the first stream where
+        # tasks.md goes in by descriptor through its held folder.
+        self._tear_write(
+            monkeypatch, which=1 if write_safety._PUBLISHES_BY_DESCRIPTOR else 2)
 
         with pytest.raises(OSError, match="No space left"):
             apply_tasks_document(plan_path, _document(sample_tasks_json))
@@ -1002,3 +1006,285 @@ class TestInPlanTaskSections:
 
         plan = "# Plan\n\n## Subtasks of the design\n\n### Task 3: API\n\n## Testing\n"
         assert find_in_plan_task_sections(plan) == []
+
+
+def _tree(root):
+    """Every path under *root*: a file's bytes, inode and mtime, a link's
+    target text, ``None`` for a folder. Equal trees mean nothing was written
+    in there, not even bytes put back afterwards."""
+    found = {}
+    for path in sorted(Path(root).rglob("*")):
+        if path.is_symlink():
+            found[str(path)] = ("link", os.readlink(path))
+        elif path.is_dir():
+            found[str(path)] = None
+        else:
+            info = path.stat()
+            found[str(path)] = (path.read_bytes(), info.st_ino, info.st_mtime_ns)
+    return found
+
+
+@pytest.mark.skipif(os.name == "nt", reason="creating symlinks needs privileges on Windows")
+class TestTheTaskListStaysInThePlansDirectory:
+    """The task list is written through a symlink only while the link leads
+    somewhere inside the plan's directory: a repository link named like the
+    output (the list, its folder, the plan's output folder) that leads out is
+    refused before anything is written, and the plan and its state stay as
+    they were (docs/development/write-safety.md#plan-output-containment). The
+    plan itself may still be linked in from anywhere."""
+
+    @pytest.fixture
+    def world(self, temp_dir):
+        repo = temp_dir / "repo"
+        (repo / ".git").mkdir(parents=True)
+        outside = temp_dir / "outside"
+        outside.mkdir()
+        (outside / "victim.md").write_text("precious\n", encoding="utf-8")
+        plan = repo / "my-plan.md"
+        plan.write_text("# My Plan\n\nSome content here.\n", encoding="utf-8")
+        return repo, outside, plan
+
+    @staticmethod
+    def _plant(repo, outside, where):
+        output = repo / "my-plan"
+        if where == "the list":
+            (output / "tasks").mkdir(parents=True)
+            (output / "tasks" / "tasks.md").symlink_to(outside / "victim.md")
+        elif where == "a dangling list":
+            (output / "tasks").mkdir(parents=True)
+            (output / "tasks" / "tasks.md").symlink_to(outside / "new.md")
+        elif where == "its folder":
+            output.mkdir()
+            (output / "tasks").symlink_to(outside, target_is_directory=True)
+        else:  # the plan's output folder
+            output.symlink_to(outside, target_is_directory=True)
+
+    @pytest.mark.parametrize("where", [
+        "the list", "a dangling list", "its folder", "the output folder",
+    ])
+    def test_a_link_out_of_the_repository_is_refused_and_nothing_is_written(
+            self, world, sample_tasks_json, where, capsys):
+        repo, outside, plan = world
+        self._plant(repo, outside, where)
+        tasks_json = repo.parent / "tasks.json"
+        tasks_json.write_text(json.dumps(_document(sample_tasks_json)), encoding="utf-8")
+        plan_before = plan.read_bytes()
+        outside_before = _tree(outside)
+        repo_before = _tree(repo)
+
+        assert _main(plan, tasks_json) == 1
+
+        err = capsys.readouterr().err
+        assert "Refusing the task list" in err
+        assert "nothing was written" in err
+        assert _tree(outside) == outside_before, "a write landed outside the repository"
+        assert plan.read_bytes() == plan_before
+        assert _tree(repo) == repo_before, "no state.json, no folder, no marker"
+
+    def test_a_dry_run_reports_the_same_refusal_and_creates_no_folder(
+            self, world, sample_tasks_json):
+        repo, outside, plan = world
+        self._plant(repo, outside, "the output folder")
+        outside_before = _tree(outside)
+
+        for dry_run in (True, False):
+            with pytest.raises(update_plan_tasks.TasksOutputEscape) as refused:
+                apply_tasks_document(
+                    plan, _document(sample_tasks_json), dry_run=dry_run)
+            assert isinstance(refused.value, update_plan_tasks.TasksDocumentError)
+        assert _tree(outside) == outside_before, "not even the tasks/ folder"
+
+    def test_a_link_inside_the_plans_directory_is_written_through(
+            self, world, sample_tasks_json):
+        repo, _outside, plan = world
+        shared = repo / "shared" / "my-tasks.md"
+        shared.parent.mkdir()
+        (repo / "my-plan" / "tasks").mkdir(parents=True)
+        link = repo / "my-plan" / "tasks" / "tasks.md"
+        link.symlink_to(Path("..") / ".." / "shared" / "my-tasks.md")
+        tasks_json = repo.parent / "tasks.json"
+        tasks_json.write_text(json.dumps(_document(sample_tasks_json)), encoding="utf-8")
+
+        assert _main(plan, tasks_json) == 0
+
+        assert link.is_symlink(), "the link survives"
+        assert "### Task T001" in shared.read_text(encoding="utf-8")
+        assert "<!-- TASKS_FILE: my-plan/tasks/tasks.md -->" in plan.read_text(
+            encoding="utf-8")
+        from utils.tasks_file import resolve_tasks_marker
+        assert resolve_tasks_marker(plan) == shared.resolve(), (
+            "implement reads the list the link leads to")
+
+    def test_a_link_elsewhere_in_the_repository_is_refused_where_implement_would_refuse_it(
+            self, temp_dir, sample_tasks_json):
+        """The boundary is the plan's directory, the one implement reads the
+        list from (``tasks_file.resolve_tasks_marker``): a list written
+        elsewhere in the repository is one implement then refuses, and the
+        link could name any tracked file."""
+        repo = temp_dir / "repo"
+        (repo / ".git").mkdir(parents=True)
+        source = repo / "src" / "main.py"
+        source.parent.mkdir()
+        source.write_text("print('keep me')\n", encoding="utf-8")
+        plan = repo / "plans" / "my-plan.md"
+        plan.parent.mkdir()
+        plan.write_text("# My Plan\n", encoding="utf-8")
+        (plan.parent / "my-plan" / "tasks").mkdir(parents=True)
+        (plan.parent / "my-plan" / "tasks" / "tasks.md").symlink_to(source)
+
+        with pytest.raises(update_plan_tasks.TasksOutputEscape):
+            apply_tasks_document(plan, _document(sample_tasks_json))
+
+        assert source.read_text(encoding="utf-8") == "print('keep me')\n"
+        from utils.tasks_file import TasksFileRefused, _resolve_one
+        with pytest.raises(TasksFileRefused):
+            _resolve_one(str(plan.parent), "my-plan/tasks/tasks.md")
+
+    def test_a_plan_linked_in_from_outside_the_repository_still_works(
+            self, world, sample_tasks_json):
+        """The plan is the user's own file, written through its link wherever
+        that leads; its outputs stay beside the name it is reached by."""
+        repo, outside, _plan = world
+        real = outside / "plans" / "linked-plan.md"
+        real.parent.mkdir()
+        real.write_text("# Linked\n\nBody.\n", encoding="utf-8")
+        link = repo / "linked-plan.md"
+        link.symlink_to(real)
+
+        # In-process, as generate-tasks calls it: the link's own path.
+        apply_tasks_document(link, _document(sample_tasks_json))
+        assert link.is_symlink() and link.resolve() == real.resolve()
+        assert "<!-- TASKS_FILE: linked-plan/tasks/tasks.md -->" in real.read_text(
+            encoding="utf-8")
+        assert (repo / "linked-plan" / "tasks" / "tasks.md").is_file()
+
+        # `util update-tasks` resolves the plan first: the outputs go beside it.
+        real.write_text("# Linked\n\nBody.\n", encoding="utf-8")
+        tasks_json = repo.parent / "tasks.json"
+        tasks_json.write_text(json.dumps(_document(sample_tasks_json)), encoding="utf-8")
+        assert _main(link, tasks_json) == 0
+        assert link.is_symlink()
+        assert (real.parent / "linked-plan" / "tasks" / "tasks.md").is_file()
+        assert "<!-- TASKS_FILE:" in real.read_text(encoding="utf-8")
+
+    def test_a_looping_link_fails_the_write_alike_on_every_python(
+            self, world, sample_tasks_json):
+        """The check resolves the way the write does (``os.path.realpath``),
+        so a link that leads nowhere is the write's own ``OSError`` on every
+        Python, the plan untouched, never a ``RuntimeError`` from the check
+        (``Path.resolve`` raised one on a loop before 3.13)."""
+        repo, _outside, plan = world
+        (repo / "my-plan" / "tasks").mkdir(parents=True)
+        link = repo / "my-plan" / "tasks" / "tasks.md"
+        link.symlink_to("tasks.md")
+        plan_before = plan.read_bytes()
+
+        with pytest.raises(OSError):
+            apply_tasks_document(plan, _document(sample_tasks_json))
+
+        assert link.is_symlink() and os.readlink(link) == "tasks.md"
+        assert plan.read_bytes() == plan_before
+
+    def test_a_colon_in_the_plans_directory_is_not_an_escape(
+            self, temp_dir, sample_tasks_json):
+        """The check is for paths the plugin computed, not ones a model
+        supplied: a POSIX directory name may hold a colon, which the
+        task-path check (``contain_under_root``) reads as an NTFS stream."""
+        repo = temp_dir / "proj:2"
+        (repo / ".git").mkdir(parents=True)
+        plan = repo / "my-plan.md"
+        plan.write_text("# My Plan\n", encoding="utf-8")
+
+        apply_tasks_document(plan, _document(sample_tasks_json))
+
+        assert (repo / "my-plan" / "tasks" / "tasks.md").is_file()
+
+
+@pytest.mark.skipif(not write_safety._PUBLISHES_BY_DESCRIPTOR,
+                    reason="the held-folder write is Linux and macOS; Windows writes by path")
+class TestALinkSwappedInAfterTheCheckIsNeverWrittenThrough:
+    """A check of the task list's path followed by a write by that path can be
+    redirected in between: a link swapped in for the list, or for its folder,
+    after the containment check and before the write (Codex's review of U86a,
+    2026-11-09). The list is written through its folder, held below the
+    plan's directory and reached without following a link, so the link is
+    refused or replaced, never followed: the file outside, the plan and its
+    state stay as they were
+    (docs/development/write-safety.md#plan-output-containment)."""
+
+    @pytest.fixture
+    def world(self, temp_dir):
+        repo = temp_dir / "repo"
+        (repo / ".git").mkdir(parents=True)
+        outside = temp_dir / "outside"
+        outside.mkdir()
+        (outside / "tasks.md").write_text("precious\n", encoding="utf-8")
+        plan = repo / "my-plan.md"
+        plan.write_text("# My Plan\n\nSome content here.\n", encoding="utf-8")
+        folder = repo / "my-plan" / "tasks"
+        folder.mkdir(parents=True)
+        (folder / "tasks.md").write_text("the old list\n", encoding="utf-8")
+        return repo, outside, plan, folder
+
+    @staticmethod
+    def _swap(folder, outside, swap):
+        if swap == "the list":
+            (folder / "tasks.md").unlink()
+            (folder / "tasks.md").symlink_to(outside / "tasks.md")
+        else:
+            folder.rename(folder.with_name("saved"))
+            folder.symlink_to(outside, target_is_directory=True)
+
+    @pytest.mark.parametrize("swap", ["the list", "its folder"])
+    def test_a_link_swapped_in_just_before_the_write_is_refused(
+            self, world, sample_tasks_json, monkeypatch, swap):
+        """The seam: the containment check returns, then the swap."""
+        repo, outside, plan, folder = world
+        real_check = update_plan_tasks.contain_plan_output
+
+        def check_then_swap(*args, **kwargs):
+            checked = real_check(*args, **kwargs)
+            self._swap(folder, outside, swap)
+            return checked
+
+        monkeypatch.setattr(update_plan_tasks, "contain_plan_output", check_then_swap)
+        outside_before, plan_before = _tree(outside), plan.read_bytes()
+
+        with pytest.raises(OSError, match="nothing was written"):
+            apply_tasks_document(plan, _document(sample_tasks_json))
+
+        assert _tree(outside) == outside_before, "the list landed outside"
+        assert plan.read_bytes() == plan_before
+        assert not (repo / "my-plan" / "state.json").exists()
+
+    @pytest.mark.parametrize("swap", ["the list", "its folder"])
+    def test_a_link_swapped_in_while_the_list_is_staged_is_never_followed(
+            self, world, sample_tasks_json, monkeypatch, swap):
+        """The seam: the folder held and the list staged in it, just before
+        the rename. A link at the list's name is replaced by the list, its
+        target untouched; a folder replaced by a link is no longer the one
+        held, so nothing is renamed into it."""
+        repo, outside, plan, folder = world
+        real_check = write_safety._check_staged
+        swapped = []
+
+        def swap_then_check(*args, **kwargs):
+            if not swapped:
+                self._swap(folder, outside, swap)
+                swapped.append(swap)
+            return real_check(*args, **kwargs)
+
+        monkeypatch.setattr(write_safety, "_check_staged", swap_then_check)
+        outside_before, plan_before = _tree(outside), plan.read_bytes()
+
+        if swap == "the list":
+            apply_tasks_document(plan, _document(sample_tasks_json))
+            assert not (folder / "tasks.md").is_symlink()
+            assert "### Task T001" in (folder / "tasks.md").read_text(encoding="utf-8")
+        else:
+            with pytest.raises(OSError, match="moved or replaced"):
+                apply_tasks_document(plan, _document(sample_tasks_json))
+            assert plan.read_bytes() == plan_before
+
+        assert swapped, "the list went in through its held folder"
+        assert _tree(outside) == outside_before, "the list landed outside"

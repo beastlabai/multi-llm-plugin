@@ -70,15 +70,19 @@ OUTPUT_TYPE_TO_FILENAME = {
     'applied_task_suggestions': 'results.json',
 }
 
+def archive_name(path: Path) -> str:
+    """The name :func:`archive_file` renames *path* to: its stem, now's
+    timestamp, its suffix."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"{path.stem}_{timestamp}{path.suffix}"
+
+
 def archive_file(path: Path) -> Path:
     """Archive an existing file by renaming it with a timestamp."""
     if not path.exists():
         return path
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    stem = path.stem
-    suffix = path.suffix
-    archived_path = path.parent / f"{stem}_{timestamp}{suffix}"
+    archived_path = path.parent / archive_name(path)
 
     path.rename(archived_path)
     return archived_path
@@ -457,8 +461,16 @@ def get_output_paths(plan_path: Path, output_type: str, phase: Optional[str] = N
     """
     if phase is None:
         phase = OUTPUT_TYPE_TO_PHASE.get(output_type, 'misc')
+    get_phase_dir(plan_path, phase)
+    return output_file_path(plan_path, output_type, phase)
 
-    phase_dir = get_phase_dir(plan_path, phase)
+
+def output_file_path(plan_path: Path, output_type: str, phase: Optional[str] = None) -> Path:
+    """:func:`get_output_paths`' answer — **computed, never created**, like
+    :func:`output_dir_path`: for a writer that must check where the file
+    resolves before any directory of it exists (``update_plan_tasks``)."""
+    if phase is None:
+        phase = OUTPUT_TYPE_TO_PHASE.get(output_type, 'misc')
 
     # Use mapped filename if available, otherwise construct from output_type
     if output_type in OUTPUT_TYPE_TO_FILENAME:
@@ -482,7 +494,7 @@ def get_output_paths(plan_path: Path, output_type: str, phase: Optional[str] = N
         suffix = suffix_map.get(output_type, ".json")
         filename = f"{output_type}{suffix}"
 
-    return phase_dir / filename
+    return phase_dir_path(plan_path, phase) / filename
 
 def get_relative_output_path(plan_path: Path, output_type: str, phase: Optional[str] = None) -> str:
     """Get the relative path from the plan file to an output file in the phase subfolder.

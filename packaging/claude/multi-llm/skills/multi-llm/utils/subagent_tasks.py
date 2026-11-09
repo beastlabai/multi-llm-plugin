@@ -88,6 +88,7 @@ __all__ = [
     "make_task",
     "make_task_file",
     "tasks_of",
+    "task_file_text",
     "write_task_file",
     "read_task_file",
     "assert_dispatchable",
@@ -766,19 +767,28 @@ def make_task_file(
     return document
 
 
-def write_task_file(path: str, document: Dict[str, Any]) -> None:
-    """Validate a task file and write it, creating parent directories."""
+def task_file_text(path: str, document: Dict[str, Any]) -> str:
+    """What :func:`write_task_file` writes to *path*: *document* as JSON,
+    once it matches the schema (:class:`TaskFileError` naming *path* if not),
+    for a writer that puts the text on disk its own way
+    (``generate_tasks_orchestrator.materialize_task_file``)."""
     errors = validate_subagent_task_file(document)
     if errors:
         raise TaskFileError(
             f"Refusing to write {path}: it does not match "
             "schemas/subagent_tasks.schema.json — " + "; ".join(errors)
         )
+    return json.dumps(document, indent=2)
+
+
+def write_task_file(path: str, document: Dict[str, Any]) -> None:
+    """Validate a task file and write it, creating parent directories."""
+    text = task_file_text(path, document)
     parent = os.path.dirname(os.path.abspath(path))
     if parent:
         os.makedirs(parent, exist_ok=True)
     with open(path, "w", encoding="utf-8") as handle:
-        json.dump(document, handle, indent=2)
+        handle.write(text)
 
 
 # ---------------------------------------------------------------------------

@@ -75,7 +75,13 @@ from utils.cli_common import (
     record_next,
 )
 from utils.git_utils import get_project_root
-from utils.output_handler import archive_file, get_output_paths, get_phase_dir
+from utils.output_handler import (
+    archive_name,
+    get_output_paths,
+    get_phase_dir,
+    output_file_path,
+    phase_dir_path,
+)
 from utils.tasks_file import TasksFileRefused, resolve_tasks_marker
 from utils.provider_registry import set_run_anchor
 from utils.stream_bootstrap import bootstrap_streams
@@ -85,8 +91,8 @@ from utils.subagent_tasks import (
     build_inputs,
     make_task,
     make_task_file,
+    task_file_text,
     tasks_of,
-    write_task_file,
 )
 from utils.task_decomposer import TaskDecomposer
 from utils import scope_policy_runs
@@ -276,7 +282,23 @@ def materialize_task_file(
     write_prompt_sidecars([task], phase_dir, stale_glob=PROMPT_FILE_NAME)
     document = make_task_file(kind=TASK_KIND, tasks=[task], inputs=inputs)
     task_file = os.path.join(phase_dir, TASK_FILE_NAME)
-    write_task_file(task_file, document)
+    text = task_file_text(task_file, document)
+    # Checked, then written through its folder held below the plan's
+    # directory, so a link swapped in after the check is never followed
+    # (docs/development/write-safety.md#plan-output-containment).
+    import update_plan_tasks
+
+    try:
+        target = update_plan_tasks.contain_plan_output(
+            plan_path, Path(task_file), what="task file")
+        update_plan_tasks.write_plan_output(plan_path, target, text)
+    except update_plan_tasks.TasksOutputEscape as exc:
+        raise TaskFileError(str(exc)) from exc
+    except OSError as exc:
+        raise TaskFileError(
+            f"Refusing the task file {task_file}: it was not written ({exc}). "
+            f"Nothing was dispatched; re-run once the folder is as it was."
+        ) from exc
     return task_file, document
 
 
@@ -400,25 +422,52 @@ class _Snapshot:
     written to the plan" literally true on the failure path is to be able to put
     the bytes back. Cheap (three small files) and strictly local: this runs
     single-threaded between the dispatch and the summary.
+
+    Each file is put back the way its writer writes it, and only when its bytes
+    changed: the plan through a symlink (a plan kept elsewhere and linked in),
+    ``state.json`` over the entry (its writer replaces a link, never follows
+    one), and the task list at the target ``contain_plan_output`` resolved,
+    written or removed through its folder held below the plan's directory
+    (``write_safety.write_below_root``), so a restore never writes out of the
+    plan's directory either.
     """
 
-    def __init__(self, plan_path: Path, state_file: Path, tasks_file: Path):
-        self._targets = (plan_path, state_file, tasks_file)
+    def __init__(self, plan_path: Path, state_file: Path, tasks_target: Path):
+        import update_plan_tasks
+
+        self._plan, self._tasks = plan_path, tasks_target
+        self._root = update_plan_tasks.plan_output_root(plan_path)
         self._before = {
-            path: (path.read_bytes() if path.exists() else None)
-            for path in self._targets
+            path: self._read(path) for path in (plan_path, state_file, tasks_target)
         }
 
-    def restore(self) -> None:
-        from update_plan_tasks import replace_file
+    @staticmethod
+    def _read(path: Path) -> Optional[bytes]:
+        return path.read_bytes() if path.exists() else None
 
+    def _put_back(self, path: Path, before: Optional[bytes]) -> None:
+        from update_plan_tasks import replace_file
+        from utils.atomic_io import atomic_write_bytes
+        from utils.write_safety import remove_below_root, write_below_root
+
+        if path == self._tasks:
+            if before is None:
+                remove_below_root(self._root, path)
+            else:
+                write_below_root(self._root, path, before)
+        elif before is None:
+            if os.path.lexists(path):
+                path.unlink()
+        elif path == self._plan:
+            replace_file(path, before)
+        else:
+            atomic_write_bytes(path, before)
+
+    def restore(self) -> None:
         for path, before in self._before.items():
             try:
-                if before is None:
-                    if path.exists():
-                        path.unlink()
-                else:
-                    replace_file(path, before)
+                if self._read(path) != before:
+                    self._put_back(path, before)
             except OSError as exc:  # pragma: no cover - best effort
                 print(
                     f"multi-llm warning: could not restore {path}: {exc}",
@@ -478,6 +527,21 @@ def verify_outcome(plan_path: Path, expected_count: int) -> List[str]:
 
 def consume_document(plan_path: Path, result_path: str) -> int:
     """Validate, run ``update_plan_tasks`` in-process, verify, or restore and fail."""
+    import update_plan_tasks
+
+    # Both files this consumer writes beside the plan, checked before the
+    # first byte and then written through their folder held below the plan's
+    # directory: the task list (by `update_plan_tasks`) and the result
+    # document (rewritten below when a key was supplied).
+    try:
+        tasks_target = update_plan_tasks.contain_plan_output(
+            plan_path, output_file_path(plan_path, "tasks", phase="tasks"),
+            what="task list")
+        result_target = update_plan_tasks.contain_plan_output(
+            plan_path, Path(result_path), what="result document")
+    except update_plan_tasks.TasksOutputEscape as exc:
+        return _fail(f"ERROR: {exc}")
+
     try:
         data = json.loads(Path(result_path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -514,9 +578,8 @@ def consume_document(plan_path: Path, result_path: str) -> int:
         )
     if notes or version:
         try:
-            Path(result_path).write_text(
-                json.dumps(data, indent=2) + "\n", encoding="utf-8"
-            )
+            update_plan_tasks.write_plan_output(
+                plan_path, result_target, json.dumps(data, indent=2) + "\n")
         except OSError as exc:
             return _fail(
                 f"ERROR: {result_path} could not be rewritten with the completed "
@@ -542,13 +605,7 @@ def consume_document(plan_path: Path, result_path: str) -> int:
         )
 
     tasks = data.get("tasks") or []
-    snapshot = _Snapshot(
-        plan_path,
-        _state_file_for(plan_path),
-        get_output_paths(plan_path, "tasks", phase="tasks"),
-    )
-
-    import update_plan_tasks
+    snapshot = _Snapshot(plan_path, _state_file_for(plan_path), tasks_target)
 
     try:
         update_plan_tasks.apply_tasks_document(plan_path, data)
@@ -622,20 +679,23 @@ def consume_document(plan_path: Path, result_path: str) -> int:
 def _state_file_for(plan_path: Path) -> Path:
     """Where ``StateManager`` keeps this plan's ``state.json``.
 
-    Computed from the same output-dir helper ``StateManager`` uses rather than by
-    constructing one, so taking a snapshot never touches git or the clock.
+    Computed (never created) from the same output-dir helper ``StateManager``
+    uses rather than by constructing one, so taking a snapshot never touches
+    git or the clock, and from the plan resolved as ``StateManager`` resolves
+    it: a plan linked in keeps its state beside the file the link leads to.
     """
-    from utils.output_handler import get_output_dir
+    from utils.output_handler import output_dir_path
 
-    return get_output_dir(Path(plan_path)) / "state.json"
+    return output_dir_path(Path(plan_path).resolve()) / "state.json"
 
 
 def _move_result_aside(
+    plan_path: Path,
     result_path: str,
     dry_run: bool,
     *,
     kept: str,
-    failed: Callable[[OSError], str],
+    failed: Callable[[Exception], str],
     done: Callable[[Path], str],
 ) -> Optional[int]:
     """Archive the result file before a re-dispatch; ``None`` to go on, else the exit.
@@ -644,16 +704,60 @@ def _move_result_aside(
     silently. Under ``--dry-run-subagents`` (D3l) it stays put — the run starts
     no child, so nothing would replace it, and the flag promises nothing else
     changes. A move that fails is exit 3: leaving the file would make the
-    re-dispatch a no-op that consumes it again.
+    re-dispatch a no-op that consumes it again. So is a folder that resolves out
+    of the plan's directory: the rename renames the entry, never a link's
+    target, so its directory is what is contained, and the rename is made in
+    that folder held below the plan's directory
+    (``write_safety.rename_below_root``), never through a link swapped in
+    after the check.
     """
     if dry_run:
         print(kept)
         return None
+    import update_plan_tasks
+    from utils.write_safety import rename_below_root
+
+    result = Path(result_path)
     try:
-        archived = archive_file(Path(result_path))
-    except OSError as exc:
+        source = update_plan_tasks.contain_plan_output(
+            plan_path, result, what="archived result", follow_final=False)
+        name = archive_name(result)
+        rename_below_root(update_plan_tasks.plan_output_root(plan_path), source, name)
+    except (OSError, update_plan_tasks.TasksOutputEscape) as exc:
         return _fail(failed(exc))
-    print(done(archived))
+    print(done(result.with_name(name)))
+    return None
+
+
+def _contain_phase_outputs(plan_path: Path) -> Optional[int]:
+    """Refuse a run whose outputs a symlink would carry out of the plan's
+    directory, before anything is written or dispatched; ``None`` to go on.
+
+    Every destination the phase writes, checked ahead of the gate, the scope
+    policy's record in ``state.json``, the prompt sidecar's cleanup and the
+    task file: the phase's own folder (status, archive) and the failure
+    captures' folder the executor writes in it, the task file, the prompt
+    sidecar, the result document and the task list ``update_plan_tasks``
+    writes. Refused here, a planted link costs no dispatch and changes
+    nothing. Each writer checks its own file again and writes it through its
+    folder held, so a link planted after this check is refused there.
+    """
+    import update_plan_tasks
+    from utils.subagent_executor import FAILED_CAPTURE_DIRNAME
+
+    phase_dir = phase_dir_path(plan_path, PHASE_NAME)
+    try:
+        for path, what in (
+            (phase_dir, "generate-tasks folder"),
+            (phase_dir / FAILED_CAPTURE_DIRNAME, "failure-capture folder"),
+            (phase_dir / TASK_FILE_NAME, "task file"),
+            (phase_dir / PROMPT_FILE_NAME, "prompt file"),
+            (phase_dir / RESULT_NAME, "result document"),
+            (output_file_path(plan_path, "tasks", phase="tasks"), "task list"),
+        ):
+            update_plan_tasks.contain_plan_output(plan_path, path, what=what)
+    except update_plan_tasks.TasksOutputEscape as exc:
+        return _fail(f"ERROR: {exc} Nothing was dispatched.")
     return None
 
 
@@ -724,6 +828,12 @@ def run_generate_tasks(
     # which is the first thing on this path that can read config.
     set_run_anchor(str(plan_path))
 
+    # A check that produces nothing, ahead of the gate (which may run
+    # apply-suggestions inside `full`) so a refused folder changes nothing.
+    escaped = _contain_phase_outputs(plan_path)
+    if escaped is not None:
+        return escaped
+
     # Nothing is produced before the gate: no phase dir, no task file, no state
     # mutation (D6a).
     gated = _run_gate(
@@ -778,6 +888,7 @@ def run_generate_tasks(
             f" (+{len(problems) - 1} more)" if len(problems) > 1 else ""
         )
         refused = _move_result_aside(
+            plan_path,
             result_path,
             getattr(args, "dry_run_subagents", False),
             kept=(
@@ -808,6 +919,7 @@ def run_generate_tasks(
         # materialization, and archive rather than delete: a result that cost a
         # dispatch is never thrown away silently.
         refused = _move_result_aside(
+            plan_path,
             result_path,
             getattr(args, "dry_run_subagents", False),
             kept=(

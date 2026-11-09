@@ -7,6 +7,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 ## Contents
 
 - [Write safety controls](#write-safety-controls)
+- [Plan output containment](#plan-output-containment)
 - [Backups](#backups)
 - [Code-phase tracking](#code-phase-tracking)
 
@@ -356,7 +357,8 @@ name, just before `copystat`, for a hard link or a symlink to a file outside the
 file then took the payload's mode and times (`copystat` follows a symlink), and the link was renamed
 over the repository's file, reported `restored`. A rewrite of the temp file before the rename put
 back bytes nobody hashed. Linux and macOS took that path for every file, Windows for a read-only
-payload since U82. Now (`_restored_through_descriptor` and `_stage_and_rename`, Linux and macOS):
+payload since U82. Now (`_restored_through_descriptor`, `_stage_and_rename` and the
+`_publish_staged` it shares with the [plan outputs](#plan-output-containment), Linux and macOS):
 
 1. The payload is opened without following a link and read once; its folder's revalidation is
    unchanged. The target's folder is reached from the pinned root one component at a time, each
@@ -535,6 +537,83 @@ runs natively on Windows CI as the sweep tests' `staged copy` restore. A policy 
 says "no rollback point exists" only for a path the snapshot holds nothing for; any other path left
 on disk is named with the restore's own reason (`PolicyRestore.not_restored`), so a refusal with
 the snapshot kept is never reported as a missing one.
+
+## Plan output containment
+
+**A file the plugin writes beside a plan resolves inside the plan's directory and is written through
+its folder held there, or is not written; the plan itself is the one file written through a symlink
+wherever it leads.** The plan is the user's own file, and a plan kept elsewhere and linked in is a
+supported setup (`update_plan_tasks.replace_file`, the only `follow_symlinks=True` write in this
+flow). Its outputs are not: a repository symlink named like one (the task list, its `tasks/` folder,
+the plan's output folder) carried `util update-tasks`' write of `tasks.md` to any file the link
+named, outside the repository included (U55's Codex review, 2026-11-08). Two steps keep every
+output in: a check, then a write that cannot be redirected after it.
+
+- **The check.** `update_plan_tasks.contain_plan_output` resolves the path (all of it, or the folder
+  alone for a rename of the entry) and refuses with `TasksOutputEscape`, exit 1 from
+  `util update-tasks` and exit 3 from `generate-tasks`, before anything is created: the output
+  paths are computed (`output_handler.output_file_path`, `phase_dir_path`), not made, until it has
+  passed. The comparison is `write_safety.contain_local_path`: both sides resolved, as in
+  `contain_under_root`, without that check's refusals for a model-supplied path (drive-relative,
+  UNC, an NTFS stream colon), which a real POSIX directory with a colon in its name would trip.
+- **The boundary is the directory the plan is reached through, resolved** — not the plan file, so
+  a linked-in plan's outputs stay beside the link — and it is the one implement reads the list from:
+  `tasks_file.resolve_tasks_marker` refuses a list that resolves anywhere else, so a link elsewhere
+  in the repository is refused too (it could name any tracked file, and the list it produced could
+  never be implemented). A link that stays inside is resolved by the check, and the write lands
+  where it leads; the link survives.
+- **The write goes through the folder, held** (`write_safety.write_below_root`; the move aside and
+  the restore's removal are `rename_below_root` and `remove_below_root`). A check of a path
+  followed by a write by that path can always be redirected in between, by a link swapped in for
+  the file or for any folder above it (Codex's review of U86a, 2026-11-09: both swaps, made just
+  before the write, overwrote a file outside). On Linux and macOS the checked path's folder is
+  reached from the plan's directory one component at a time without following a link, a missing
+  one made on the way relative to its parent's descriptor, and held (`_HeldFolder`, the restore's,
+  [above](#write-safety-controls)); the file is staged and renamed in by the restore's rules
+  (`_publish_staged`, which the restore's `_stage_and_rename` uses too): made exclusively, never
+  through a link, unnamed where Linux can, flushed with its mode, and renamed over the target
+  relative to the held descriptor only while that folder is still the one at its path (`fstat` of
+  the held descriptor against a fresh walk). A link met on the walk is refused, and so is anything
+  but a file at the target's own name: the check resolved it, so a link there now was put there
+  since, or leads nowhere (a loop is refused alike on every Python). An existing file's mode carries
+  over and a new one gets the umask's, as `atomic_io` gives them. A staged file that was named but
+  not renamed is left and named, never removed, as the restore leaves its own.
+- **Windows** has no `dir_fd` and no `O_NOFOLLOW`, so the write is `atomic_io`'s at the checked
+  path, which replaces a link at the name and never follows one: a folder above it swapped for a
+  link or junction between the check and the write is still followed there. That window is the
+  one a write by path always had, no wider than base's.
+- **`generate-tasks` checks every destination before it writes anything**
+  (`_contain_phase_outputs`, ahead of the prerequisite gate, the scope policy's record in
+  `state.json`, the prompt sidecar's cleanup and the task file): its own folder, the executor's
+  failure-capture folder in it (`failed/`), the task file, the prompt sidecar, the result document
+  and the task list. A planted link costs no dispatch and leaves the whole tree, `state.json` and
+  prompts included, byte for byte and inode for inode as it was. Each writer then checks its file
+  again and writes through its held folder: the task file (`materialize_task_file`), the result
+  document the consumer rewrites, the task list, the archive `--force` and a stale result move
+  aside (`_move_result_aside`), and the consumer's restore, which puts each file back the way its
+  writer writes it and only when its bytes changed: the plan through its link, `state.json` over
+  the entry, the task list through its held folder.
+- **The executor's failure captures** (`subagent_executor._write_failure_capture`, every phase) are
+  checked below the phase folder, and retired and written through `failed/` held there, so a link
+  planted at `failed/` after the phase's check is refused too: the capture is skipped, as any
+  capture that cannot be written is.
+- **Not covered here**: `state.json` follows a symlinked output folder in every phase (its writer
+  replaces a link at the name, never one above it), and `StateManager` resolves the plan, so a
+  linked-in plan keeps its state beside the file the link leads to while its task list sits beside
+  the link. `util update-tasks` resolves the plan first, so its outputs land beside that file too.
+  The prompt sidecar, `.status.json` and the batch report replace a link at their name; their
+  folder is checked before the dispatch, not held. **A swap made during the run, after that
+  check**, can still redirect the writers that are not held: the prompt sidecar, the scope
+  policy's record in `state.json`, the executor's result persistence, the restore's `state.json`,
+  and the failure captures, whose root is the phase folder rather than a walk from the plan's
+  directory (Codex's re-check of U86a, 2026-11-09). Every link present when the run starts is
+  refused before anything is written; holding the rest is the follow-up U89 (every plugin write
+  under a plan's directory through `write_below_root`).
+
+Tests: `tests/test_update_plan_tasks.py` (`TestTheTaskListStaysInThePlansDirectory`,
+`TestALinkSwappedInAfterTheCheckIsNeverWrittenThrough`) and
+`tests/test_generate_tasks_orchestrator.py` (`TestTheOutputsStayInThePlansDirectory`,
+`TestEveryWriteGoesThroughItsHeldFolder`).
 
 ## Backups
 

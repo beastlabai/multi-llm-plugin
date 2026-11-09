@@ -514,7 +514,8 @@ def test_the_staging_names_the_staged_file_only_relative_to_its_folder():
     named = {"open", "stat", "lstat", "rename", "replace", "link", "symlink",
              "readlink"}
     relative = {"dir_fd", "src_dir_fd", "dst_dir_fd"}
-    for function in (write_safety._stage_and_rename, write_safety._staged,
+    for function in (write_safety._stage_and_rename, write_safety._publish_staged,
+                     write_safety._mode_at_name, write_safety._staged,
                      write_safety._link_unnamed, write_safety._check_staged,
                      write_safety._leave_staged, write_safety._set_flags,
                      write_safety._link_and_rename, write_safety._link_at):

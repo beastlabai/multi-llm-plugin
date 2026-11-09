@@ -68,8 +68,9 @@ import time
 from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 
+from .atomic_io import atomic_write_bytes, temp_path_for
 from .git_utils import pin_repo_root
 from .process_control import FileMutex, descriptor_owning_handle, handle_of_descriptor
 from .provider_registry import get_write_paths
@@ -101,6 +102,10 @@ __all__ = [
     "claim_external_safety_dir",
     "state_home",
     "contain_under_root",
+    "contain_local_path",
+    "write_below_root",
+    "rename_below_root",
+    "remove_below_root",
     "relative_to_root",
     "admit_disjoint_groups",
     "file_sha256",
@@ -435,6 +440,49 @@ def repo_root_for_report(anchor: Optional[str]) -> str:
     return find_git_entry_root(probe_dir) or str(Path(probe_dir).resolve())
 
 
+def _resolves_within(resolved: Path, resolved_root: Path) -> bool:
+    """Whether *resolved* is *resolved_root* or beneath it; both canonical."""
+    try:
+        return resolved.is_relative_to(resolved_root)
+    except AttributeError:  # pragma: no cover - Python < 3.9
+        return os.path.commonpath(
+            [str(resolved), str(resolved_root)]
+        ) == str(resolved_root)
+
+
+def contain_local_path(
+    path: Union[str, "os.PathLike[str]"], root: Union[str, "os.PathLike[str]"],
+    *, what: str,
+) -> Path:
+    """Resolve *path*, a path the plugin computed itself, and require it at or
+    beneath *root*, or raise :class:`PathEscape`.
+
+    The comparison is :func:`contain_under_root`'s: both sides resolved, every
+    symlinked component followed, so a link planted in the repository cannot
+    redirect the write. What it leaves out are the refusals for a path a task
+    file or a model supplied (a drive-relative or UNC spelling, an NTFS stream
+    colon): this path is built from the plan's own location, where a colon in a
+    POSIX directory name or a plan on a network share is real. A relative
+    *path* or *root* is taken from the working directory, as the write would
+    take it. Resolution is ``os.path.realpath``, the call ``atomic_io`` makes
+    to write through a link, so the check and the write agree on the target on
+    every Python (``Path.resolve`` raised on a symlink loop before 3.13).
+    """
+    resolved_root = Path(os.path.realpath(os.path.abspath(root)))
+    try:
+        resolved = Path(os.path.realpath(os.path.abspath(path)))
+    except OSError as exc:  # pragma: no cover - realpath is non-strict
+        raise PathEscape(
+            f"Refusing the {what} {os.fspath(path)}: it cannot be resolved ({exc})."
+        ) from exc
+    if not _resolves_within(resolved, resolved_root):
+        raise PathEscape(
+            f"Refusing the {what} {os.fspath(path)}: it resolves to {resolved}, "
+            f"outside {resolved_root}."
+        )
+    return resolved
+
+
 def contain_under_root(candidate: str, root: str, *, what: str = "path") -> Path:
     """Resolve ``candidate`` and require it beneath ``root``, or raise (D3f/D3h).
 
@@ -453,13 +501,7 @@ def contain_under_root(candidate: str, root: str, *, what: str = "path") -> Path
             f"Repo root: {resolved_root}. Nothing was dispatched."
         )
     resolved = joined.resolve()
-    try:
-        contained = resolved.is_relative_to(resolved_root)
-    except AttributeError:  # pragma: no cover - Python < 3.9
-        contained = os.path.commonpath(
-            [str(resolved), str(resolved_root)]
-        ) == str(resolved_root)
-    if not contained:
+    if not _resolves_within(resolved, resolved_root):
         raise PathEscape(
             f"Refusing the {what} {candidate!r}: it resolves to {resolved}, outside "
             f"the pinned repo root {resolved_root}. A batch cannot be steered into "
@@ -539,25 +581,35 @@ OPENS_WITHOUT_FOLLOWING = bool(
 
 
 def _open_below_root(root: str, parts: Sequence[str], *,
-                     folder: bool = False) -> Optional[int]:
+                     folder: bool = False, make: bool = False) -> Optional[int]:
     """``root/parts`` opened for reading, every component below *root*
     opened through its parent's descriptor without following a link; ``None``
     when one is a link, is gone or is not a directory where one must be.
     With *folder*, ``root/parts`` is a directory too, its descriptor handed
     back (*root*'s own for no *parts*): the rollback restore holds the folder
-    it puts a file back in this way (:class:`_HeldFolder`). *root* itself is
-    opened by path: a link above the repository is the user's
-    (``prompt_files`` walks the phase dir the same way)."""
+    it puts a file back in this way (:class:`_HeldFolder`). With *make* too, a
+    folder missing on the way is made relative to its parent's descriptor
+    (``mkdirat``, which never follows a link) and then opened like the rest
+    (:func:`write_below_root`). *root* itself is opened by path: a link above
+    the repository is the user's (``prompt_files`` walks the phase dir the
+    same way)."""
     try:
         handle = os.open(root, os.O_RDONLY | os.O_DIRECTORY | _CLOEXEC)
     except OSError:
         return None
     try:
         for name in (parts if folder else parts[:-1]):
-            child = os.open(
-                name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | _CLOEXEC,
-                dir_fd=handle,
-            )
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | _CLOEXEC
+            try:
+                child = os.open(name, flags, dir_fd=handle)
+            except FileNotFoundError:
+                if not (make and folder):
+                    raise
+                try:
+                    os.mkdir(name, dir_fd=handle)
+                except FileExistsError:
+                    pass
+                child = os.open(name, flags, dir_fd=handle)
             os.close(handle)
             handle = child
         if folder:
@@ -2498,6 +2550,33 @@ _STAGE_FLAGS = (os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0
 
 
 @dataclass(frozen=True)
+class _Wording:
+    """How a write through a held folder names its work in a message. The
+    rollback restore puts a snapshot's file back (:data:`_PUT_BACK`); the
+    plan-output writes write a file (:data:`_WRITTEN`) or move one aside
+    (:data:`_MOVED`). The steps and the refusals are the same
+    (:func:`_publish_staged`); only the words differ."""
+
+    done: str
+    staged: str
+    ours: str
+    kept: str
+    actor: str
+    root: str
+
+
+_PUT_BACK = _Wording(
+    done="put back", staged="the file staged to put back",
+    ours="the snapshot's file", kept=" (the snapshot is kept)",
+    actor="restore", root="the pinned repo root")
+_WRITTEN = _Wording(
+    done="written", staged="the file staged to write it",
+    ours="the file written", kept="", actor="write", root="the folder")
+_MOVED = _Wording(
+    done="moved", staged="", ours="", kept="", actor="move", root="the folder")
+
+
+@dataclass(frozen=True)
 class _HeldFolder:
     """The folder a restore puts a file back in (Linux, macOS), reached from
     the pinned repo root one component at a time without following a link
@@ -2507,30 +2586,36 @@ class _HeldFolder:
     be the folder at its path (:meth:`in_place`) before anything is
     published in it, and again before the restore says ``restored``
     (docs/development/write-safety.md, restore). *root* and *parts* are the
-    walk; *shown* is the folder's path as the restore names it."""
+    walk; *shown* is the folder's path as the restore names it; *say* is how
+    its messages name the work (:class:`_Wording`): the plan-output writes
+    hold their folder the same way (:func:`write_below_root`)."""
 
     fd: int
     root: str
     parts: Tuple[str, ...]
     shown: str
+    say: _Wording = _PUT_BACK
 
     @classmethod
-    def open(cls, root: str, target: Path) -> "_HeldFolder":
+    def open(cls, root: str, target: Path, *, make: bool = False,
+             say: _Wording = _PUT_BACK) -> "_HeldFolder":
         """*target*'s folder below *root*, which :func:`_revalidated_target`
-        derived *target* under; ``OSError`` when a component on the way is
-        gone, a link or not a folder."""
+        (or the caller's containment check) derived *target* under;
+        ``OSError`` when a component on the way is gone, a link or not a
+        folder. With *make*, a missing folder on the way is made, never
+        through a link (:func:`_open_below_root`)."""
         resolved = str(Path(root).resolve())
         try:
             parts = tuple(target.parent.relative_to(resolved).parts)
         except ValueError:
-            raise OSError(f"{target} is not below the pinned repo root "
-                          f"{resolved}, so nothing was put back") from None
-        handle = _open_below_root(resolved, parts, folder=True)
+            raise OSError(f"{target} is not below {say.root} {resolved}, so "
+                          f"nothing was {say.done}") from None
+        handle = _open_below_root(resolved, parts, folder=True, make=make)
         if handle is None:
-            raise OSError(f"{target.parent} could not be reached from the pinned "
-                          f"repo root {resolved} without following a link, so "
-                          f"nothing was put back")
-        return cls(handle, resolved, parts, str(target.parent))
+            raise OSError(f"{target.parent} could not be reached from {say.root} "
+                          f"{resolved} without following a link, so nothing was "
+                          f"{say.done}")
+        return cls(handle, resolved, parts, str(target.parent), say)
 
     def in_place(self) -> bool:
         """Whether a fresh walk from the root, without following a link,
@@ -2563,9 +2648,10 @@ class _HeldFolder:
 
 
 def _folder_moved(folder: _HeldFolder, target: str) -> str:
-    return (f"{folder.shown} is no longer the folder the restore opened: it was "
-            f"moved or replaced while {target} was being put back, so nothing "
-            f"was put back (the snapshot is kept)")
+    say = folder.say
+    return (f"{folder.shown} is no longer the folder the {say.actor} opened: it "
+            f"was moved or replaced while {target} was being {say.done}, so "
+            f"nothing was {say.done}{say.kept}")
 
 
 def _restored_through_descriptor(source: str, tmp: Path, target: Path,
@@ -2609,11 +2695,11 @@ def _restored_through_descriptor(source: str, tmp: Path, target: Path,
 def _stage_and_rename(payload: int, folder: _HeldFolder, source: str, tmp: str,
                       target: str, sha256: Optional[str]) -> None:
     """The staged file's whole life in :func:`_restored_through_descriptor`:
-    *payload* the payload's descriptor, *folder* the target's folder."""
-    name, target_name = os.path.basename(tmp), os.path.basename(target)
-    staged, named = _staged(folder.fd, name, tmp)
-    try:
-        made = os.fstat(staged)
+    *payload* the payload's descriptor, *folder* the target's folder. The
+    bytes and the metadata are the payload's; staging, naming, the checks and
+    the rename are :func:`_publish_staged`'s."""
+
+    def fill(staged: int) -> None:
         digest = _copy_hashed(payload, staged)
         if sha256 is not None and digest != sha256:
             raise OSError(
@@ -2630,14 +2716,39 @@ def _stage_and_rename(payload: int, folder: _HeldFolder, source: str, tmp: str,
         flags = getattr(info, "st_flags", 0)
         if flags != getattr(os.fstat(staged), "st_flags", 0):
             _set_flags(staged, flags, target)
+
+    _publish_staged(folder, tmp, target, fill)
+
+
+def _publish_staged(folder: _HeldFolder, tmp: str, target: str,
+                    fill: Callable[[int], None], *, mode: int = 0o600) -> None:
+    """Stage a new file in the held *folder*, have *fill* put its bytes and
+    metadata in through its descriptor, and rename it over *target*: the
+    rules every write through a held folder keeps, the restore's
+    (:func:`_stage_and_rename`) and the plan outputs' (:func:`write_below_root`)
+    (docs/development/write-safety.md, restore). The file is made with no
+    name where Linux can, else as *tmp* exclusively and never through a link
+    (:func:`_staged`, with *mode*), and is named only once filled; just
+    before the rename *tmp* must still be that file, a regular file with no
+    other name, and the folder must still be the one at its path. Once
+    renamed, the folder must still be in place and *target* must name the
+    file. A named file that is not renamed is left and raised
+    (:func:`_leave_staged`), never removed. The messages are the folder's
+    (:class:`_Wording`)."""
+    say = folder.say
+    name, target_name = os.path.basename(tmp), os.path.basename(target)
+    staged, named = _staged(folder.fd, name, tmp, mode=mode, say=say)
+    try:
+        made = os.fstat(staged)
+        fill(staged)
         if not named:
             if os.fstat(staged).st_nlink:
-                raise OSError(_given_another_name(tmp, target))
+                raise OSError(_given_another_name(tmp, target, say))
             if not folder.in_place():
                 raise OSError(_folder_moved(folder, target))
-            _link_unnamed(staged, folder.fd, name, tmp)
+            _link_unnamed(staged, folder.fd, name, tmp, say)
             named = True
-        _check_staged(folder.fd, name, staged, tmp, target)
+        _check_staged(folder.fd, name, staged, tmp, target, say)
         if not folder.in_place():
             raise OSError(_folder_moved(folder, target))
         try:
@@ -2649,38 +2760,40 @@ def _stage_and_rename(payload: int, folder: _HeldFolder, source: str, tmp: str,
         # A name found where the staged file was to be (CopyNotContained) is
         # not the staged file's, and is left as it is already.
         if named and not isinstance(failure, CopyNotContained):
-            _leave_staged(folder, name, tmp, failure, "the file staged to put back",
-                          _identity_of(staged))
+            _leave_staged(folder, name, tmp, failure, say.staged, _identity_of(staged))
         raise
     finally:
         os.close(staged)
     if not folder.in_place():
         raise OSError(
-            f"{folder.shown} was moved or replaced while {target} was being put "
-            f"back, so what is at {target} now is not the snapshot's file (the "
-            f"file put back is at {folder.where(target_name, target)}); check "
-            f"both (the snapshot is kept)")
+            f"{folder.shown} was moved or replaced while {target} was being "
+            f"{say.done}, so what is at {target} now is not {say.ours} (the "
+            f"file {say.done} is at {folder.where(target_name, target)}); check "
+            f"both{say.kept}")
     try:
-        put_back = os.lstat(target_name, dir_fd=folder.fd)
+        published = os.lstat(target_name, dir_fd=folder.fd)
     except OSError:
-        put_back = None
-    if put_back is None or (put_back.st_dev, put_back.st_ino) != (made.st_dev, made.st_ino):
+        published = None
+    if published is None or (
+            (published.st_dev, published.st_ino) != (made.st_dev, made.st_ino)):
         raise OSError(
-            f"{target} did not name the file put back once it was renamed there: "
-            f"another file was swapped in for {tmp} just before the rename, or "
-            f"over {target} just after it, so what is at {target} now is not "
-            f"the snapshot's file; check it (the snapshot is kept)")
+            f"{target} did not name the file {say.done} once it was renamed "
+            f"there: another file was swapped in for {tmp} just before the "
+            f"rename, or over {target} just after it, so what is at {target} "
+            f"now is not {say.ours}; check it{say.kept}")
 
 
-def _staged(folder: int, name: str, tmp: str) -> Tuple[int, bool]:
-    """A new file to stage a restore in, open to read and write, and whether
+def _staged(folder: int, name: str, tmp: str, *, mode: int = 0o600,
+            say: _Wording = _PUT_BACK) -> Tuple[int, bool]:
+    """A new file to stage a write in, open to read and write, and whether
     it is named: with no name (``O_TMPFILE``) where the folder's filesystem
     can make one and :data:`_PROC_SELF_FD` can name it later, else made as
-    *name* in *folder*, exclusively and never through a link. A name already
-    there is left as it is and raised as :class:`CopyNotContained`."""
+    *name* in *folder*, exclusively and never through a link. *mode* is the
+    one ``open(2)`` takes (the umask applies). A name already there is left
+    as it is and raised as :class:`CopyNotContained`."""
     if _O_TMPFILE:
         try:
-            handle = os.open(".", _O_TMPFILE | os.O_RDWR | _CLOEXEC, 0o600, dir_fd=folder)
+            handle = os.open(".", _O_TMPFILE | os.O_RDWR | _CLOEXEC, mode, dir_fd=folder)
         except OSError as exc:
             if exc.errno not in _NO_TMPFILE:
                 raise _respelled(exc, os.path.dirname(tmp)) from exc
@@ -2689,14 +2802,15 @@ def _staged(folder: int, name: str, tmp: str) -> Tuple[int, bool]:
                 return handle, False
             os.close(handle)
     try:
-        return os.open(name, _STAGE_FLAGS, 0o600, dir_fd=folder), True
+        return os.open(name, _STAGE_FLAGS, mode, dir_fd=folder), True
     except FileExistsError as exc:
-        raise _already_there(tmp) from exc
+        raise _already_there(tmp, say) from exc
     except OSError as exc:
         raise _respelled(exc, tmp) from exc
 
 
-def _link_unnamed(staged: int, folder: int, name: str, tmp: str) -> None:
+def _link_unnamed(staged: int, folder: int, name: str, tmp: str,
+                  say: _Wording = _PUT_BACK) -> None:
     """Give the unnamed file *staged* the name *name* in *folder*. A link
     is never made over a name already there, a link included: that name is
     left as it is and raised as :class:`CopyNotContained`."""
@@ -2704,12 +2818,13 @@ def _link_unnamed(staged: int, folder: int, name: str, tmp: str) -> None:
         os.link(f"{_PROC_SELF_FD}/{staged}", name, dst_dir_fd=folder,
                 follow_symlinks=True)
     except FileExistsError as exc:
-        raise _already_there(tmp) from exc
+        raise _already_there(tmp, say) from exc
     except OSError as exc:
         raise _respelled(exc, tmp) from exc
 
 
-def _check_staged(folder: int, name: str, staged: int, tmp: str, target: str) -> None:
+def _check_staged(folder: int, name: str, staged: int, tmp: str, target: str,
+                  say: _Wording = _PUT_BACK) -> None:
     """Refuse to rename *name* unless it is still the file *staged* holds,
     a regular file with no other name. A name swapped in is raised as
     :class:`CopyNotContained` (left as it is); another name given to the
@@ -2717,23 +2832,23 @@ def _check_staged(folder: int, name: str, staged: int, tmp: str, target: str) ->
     try:
         named = os.lstat(name, dir_fd=folder)
     except OSError as exc:
-        raise OSError(f"{tmp}, the file staged to put back, could not be examined "
-                      f"({exc}), so nothing was put back") from exc
+        raise OSError(f"{tmp}, {say.staged}, could not be examined ({exc}), so "
+                      f"nothing was {say.done}") from exc
     opened = os.fstat(staged)
     if (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino):
         what = ("a link" if stat.S_ISLNK(named.st_mode) else
                 "another file" if stat.S_ISREG(named.st_mode) else "something else")
         raise CopyNotContained(
             tmp, f"{tmp} was {what} by the time the file staged there was to be "
-                 f"renamed over {target}, so nothing was put back, and what is at "
-                 f"{tmp} was left as it is")
+                 f"renamed over {target}, so nothing was {say.done}, and what is "
+                 f"at {tmp} was left as it is")
     if not stat.S_ISREG(named.st_mode) or opened.st_nlink != 1:
-        raise OSError(_given_another_name(tmp, target))
+        raise OSError(_given_another_name(tmp, target, say))
 
 
-def _given_another_name(tmp: str, target: str) -> str:
-    return (f"{tmp}, the file staged to put back, was given another name before "
-            f"it could be renamed over {target}, so nothing was put back")
+def _given_another_name(tmp: str, target: str, say: _Wording = _PUT_BACK) -> str:
+    return (f"{tmp}, {say.staged}, was given another name before it could be "
+            f"renamed over {target}, so nothing was {say.done}")
 
 
 def _leave_staged(folder: Optional[_HeldFolder], name: str, tmp: str,
@@ -2746,14 +2861,190 @@ def _leave_staged(folder: Optional[_HeldFolder], name: str, tmp: str,
     is. The name is never removed: POSIX removes a name, not a file, and
     between any check of the name and ``unlink(2)`` another process can swap
     its own file in, which the removal would then delete, its only name
-    perhaps (docs/development/write-safety.md, restore)."""
+    perhaps (docs/development/write-safety.md, restore). A plan-output
+    write leaves its staged file the same way (:func:`_publish_staged`)."""
     if not isinstance(failure, Exception):
         return
     where = folder.where(name, tmp) if folder is not None else tmp
+    actor = (folder.say if folder is not None else _PUT_BACK).actor
     raise _StagingLeft(
-        where, f"{failure}; {what} was left at {where}: a restore never removes "
+        where, f"{failure}; {what} was left at {where}: a {actor} never removes "
                f"a name it made, as another file can be swapped in for it between "
                f"a check and the removal", made) from failure
+
+
+# ---------------------------------------------------------------------------
+# Plan outputs: a write, a move aside or a removal through a held folder
+# ---------------------------------------------------------------------------
+
+_REMOVED = _Wording(
+    done="removed", staged="", ours="", kept="", actor="removal", root="the folder")
+
+#: Whether a plan-output write goes through a held folder (Linux, macOS): the
+#: restore's staging by descriptor (:data:`_STAGES_BY_DESCRIPTOR`), plus making
+#: and removing a name relative to a folder's descriptor. Windows writes by
+#: path instead (:func:`write_below_root`).
+_PUBLISHES_BY_DESCRIPTOR = bool(
+    _STAGES_BY_DESCRIPTOR and os.mkdir in os.supports_dir_fd
+    and os.unlink in os.supports_dir_fd
+)
+
+
+def write_below_root(root: Union[str, "os.PathLike[str]"],
+                     target: Union[str, "os.PathLike[str]"], data: bytes, *,
+                     mode: Optional[int] = None, fsync: bool = True) -> None:
+    """Replace *target*, a file below the folder *root*, with *data*, never
+    through a link (docs/development/write-safety.md#plan-output-containment).
+
+    *target* is the caller's checked path: :func:`contain_local_path` gives
+    it resolved, below *root* resolved. A check of a path followed by a write
+    by that path can always be redirected in between, by a link swapped in
+    for the file or for any folder above it, so on Linux and macOS the write
+    is made through the folder, held: reached from *root* one component at a
+    time without following a link, a missing one made on the way relative to
+    its parent's descriptor (:class:`_HeldFolder`), and every name in it
+    reached through that descriptor. The bytes are staged and renamed in by
+    the restore's rules (:func:`_publish_staged`): a new file made
+    exclusively, never through a link, flushed with its mode, and renamed
+    over the target only while the folder is still the one at its path. Any
+    link or junction swapped in on the way is refused, and so is anything but
+    a file at the target's own name: the caller resolved it, so a link there
+    now was put there since, or leads nowhere. An existing file's permission
+    bits carry over, a new one gets the umask's, *mode* overrides both, and
+    the bytes go in owner-only (``atomic_io``'s rules); *fsync* flushes the
+    file and its folder.
+
+    Windows (no ``dir_fd``, no ``O_NOFOLLOW``) writes the checked path with
+    ``atomic_io``, which replaces a link at the name and never follows one:
+    a folder above it swapped for a link or junction between the caller's
+    check and the write is still followed there, the window a write by path
+    always had.
+
+    Raises ``OSError`` with nothing written at the target, or once the file
+    is in, when the folder moved or the name changed meanwhile (the message
+    says where the file is). A staged file that was named but not renamed is
+    left and named (:class:`CopyNotContained`), never removed.
+    """
+    target = Path(target)
+    if not _PUBLISHES_BY_DESCRIPTOR:
+        os.makedirs(target.parent, exist_ok=True)
+        atomic_write_bytes(target, data, mode=mode, fsync=fsync)
+        return
+    folder = _HeldFolder.open(str(root), target, make=True, say=_WRITTEN)
+    try:
+        kept = _mode_at_name(folder, target)
+        final = mode if mode is not None else kept
+
+        def fill(staged: int) -> None:
+            final_mode, apply = final, final is not None
+            if final_mode is None:
+                # A new file: the umask's mode, read off the empty file, and
+                # the bytes go in owner-only until it is applied.
+                final_mode = stat.S_IMODE(os.fstat(staged).st_mode)
+                if final_mode & ~0o600:
+                    try:
+                        os.fchmod(staged, final_mode & 0o600)
+                        apply = True
+                    except OSError:  # a filesystem that keeps no modes
+                        pass
+            view = memoryview(data)
+            while view:
+                view = view[os.write(staged, view):]
+            if apply:
+                os.fchmod(staged, final_mode)
+            if fsync:
+                os.fsync(staged)
+
+        _publish_staged(folder, temp_path_for(str(target)), str(target), fill,
+                        mode=0o666 if final is None else 0o600)
+        if fsync:
+            try:
+                os.fsync(folder.fd)
+            except OSError:
+                pass
+    finally:
+        os.close(folder.fd)
+
+
+def _mode_at_name(folder: _HeldFolder, target: Path) -> Optional[int]:
+    """The permission bits of the file at *target*'s name in *folder*, to
+    carry over (``None`` when there is none); ``OSError`` for anything else
+    there, a link above all (:func:`write_below_root`)."""
+    try:
+        info = os.lstat(target.name, dir_fd=folder.fd)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise _respelled(exc, str(target)) from exc
+    if stat.S_ISREG(info.st_mode):
+        return stat.S_IMODE(info.st_mode)
+    what = "a symlink" if stat.S_ISLNK(info.st_mode) else "not a file"
+    raise OSError(f"{target} is {what}, so nothing was written: its name was "
+                  f"resolved before the write, so a link there now was put "
+                  f"there since, or leads nowhere")
+
+
+def rename_below_root(root: Union[str, "os.PathLike[str]"],
+                      source: Union[str, "os.PathLike[str]"], name: str) -> Path:
+    """Rename *source*, a file below the folder *root* whose folder the
+    caller checked (resolved, as :func:`contain_local_path` gives it), to
+    *name* in that folder; the new path. The entry is renamed, never a
+    link's target, and on Linux and macOS relative to the folder held as
+    :func:`write_below_root` holds it, which must still be the one at its
+    path; Windows renames by path (the window :func:`write_below_root`
+    names). ``OSError`` when nothing was renamed."""
+    source = Path(source)
+    renamed = source.with_name(name)
+    if not _PUBLISHES_BY_DESCRIPTOR:
+        os.replace(source, renamed)
+        return renamed
+
+    def rename(fd: int) -> None:
+        try:
+            os.replace(source.name, name, src_dir_fd=fd, dst_dir_fd=fd)
+        except OSError as exc:
+            raise _respelled(exc, str(source), str(renamed)) from exc
+
+    _in_held_folder(root, source, _MOVED, rename)
+    return renamed
+
+
+def remove_below_root(root: Union[str, "os.PathLike[str]"],
+                      target: Union[str, "os.PathLike[str]"]) -> None:
+    """Remove the name *target*, below the folder *root* (checked as for
+    :func:`rename_below_root`), relative to its folder held: the name is
+    removed, never a link's target, and never a name in a folder a link
+    swapped in leads to. A name already gone is nothing to remove."""
+    target = Path(target)
+    if not _PUBLISHES_BY_DESCRIPTOR:
+        try:
+            os.unlink(target)
+        except FileNotFoundError:
+            pass
+        return
+
+    def remove(fd: int) -> None:
+        try:
+            os.unlink(target.name, dir_fd=fd)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise _respelled(exc, str(target)) from exc
+
+    _in_held_folder(root, target, _REMOVED, remove)
+
+
+def _in_held_folder(root: Union[str, "os.PathLike[str]"], path: Path,
+                    say: _Wording, act: Callable[[int], None]) -> None:
+    """Run *act* on the descriptor of *path*'s folder, held below *root*
+    (:class:`_HeldFolder`), once that folder is still the one at its path."""
+    folder = _HeldFolder.open(str(root), path, say=say)
+    try:
+        if not folder.in_place():
+            raise OSError(_folder_moved(folder, str(path)))
+        act(folder.fd)
+    finally:
+        os.close(folder.fd)
 
 
 def _identity_of(descriptor: int) -> Optional[_Identity]:
@@ -2927,10 +3218,10 @@ def _not_the_link(tmp: str, target: str) -> str:
             f"{tmp} was left as it is")
 
 
-def _already_there(tmp: str) -> CopyNotContained:
+def _already_there(tmp: str, say: _Wording = _PUT_BACK) -> CopyNotContained:
     return CopyNotContained(
-        tmp, f"{tmp} was already there, so nothing was put back, and it was left "
-             f"as it is")
+        tmp, f"{tmp} was already there, so nothing was {say.done}, and it was "
+             f"left as it is")
 
 
 def _respelled(exc: OSError, path: str, other: Optional[str] = None) -> OSError:
