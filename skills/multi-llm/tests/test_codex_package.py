@@ -912,6 +912,7 @@ _ALLOWED_ABSOLUTE = {
     # (3) interpreter, shell and device spellings.
     "mcp/server.py": {"/bin/bash", "/dev/null"},
     f"{PAYLOAD}/utils/write_batch_scheduler.py": {"/bin/sh"},
+    f"{PAYLOAD}/utils/write_verify.py": {"/bin/sh"},
     f"{PAYLOAD}/multi_llm.py": {"/dev/null"},
     f"{PAYLOAD}/utils/git_utils.py": {"/dev/null"},
     f"{PAYLOAD}/utils/git_diff.py": {"/dev/null"},
