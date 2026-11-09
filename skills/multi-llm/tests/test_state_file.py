@@ -284,7 +284,8 @@ class TestTheWriter:
         path.write_text('{"old": true}', encoding="utf-8")
         sources = []
 
-        def refuse(source, _destination):
+        def refuse(source, _destination, **_held_folder):
+            # The rename is relative to the output folder held (dir_fd).
             sources.append(os.path.basename(source))
             raise OSError("disk failure")
 

@@ -20,7 +20,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 try:
-    from .atomic_io import atomic_write_bytes, atomic_write_text
+    from .atomic_io import atomic_write_bytes
+    from .held_folder import write_in_plan_dir
     from .state_manager import generate_group_id, CURRENT_FORMAT_VERSION
     from .state_manager import group_join_ids, records_by_unique_id, stamped_group_id
     from .cli_common import (
@@ -46,7 +47,8 @@ try:
         tasks_of,
     )
 except ImportError:
-    from utils.atomic_io import atomic_write_bytes, atomic_write_text
+    from utils.atomic_io import atomic_write_bytes
+    from utils.held_folder import write_in_plan_dir
     from utils.state_manager import generate_group_id, CURRENT_FORMAT_VERSION
     from utils.state_manager import group_join_ids, records_by_unique_id, stamped_group_id
     from utils.cli_common import (
@@ -980,14 +982,17 @@ def sidecar_path(phase_dir: str, batch_index: int) -> str:
 def _write_one_sidecar(target: str, prompt: str) -> None:
     r"""Atomic, byte-identical write.
 
-    No newline translation (``atomic_write_text`` writes ``\n`` as ``\n``) is
+    No newline translation (the UTF-8 bytes of ``prompt``, ``\n`` as ``\n``) is
     load-bearing: a text-mode write on Windows would rewrite ``\n`` as
     ``\r\n`` and the file would no longer equal ``prompt`` — and byte
     identity is the whole contract, since a host hands a subagent this file
     *instead of* the prompt. A failed write leaves no temp file behind, so the
     all-or-none rule's cleanup of the sidecars already written is complete.
+    Published through the phase folder held below the plan's directory: a link
+    swapped in for it during the run is refused (``OSError``), never written
+    through (docs/development/write-safety.md#plan-output-containment).
     """
-    atomic_write_text(target, prompt)
+    write_in_plan_dir(target, prompt.encode("utf-8"))
 
 
 def write_prompt_sidecars(

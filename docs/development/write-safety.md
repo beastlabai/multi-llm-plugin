@@ -363,7 +363,8 @@ payload since U82. Now (`_restored_through_descriptor`, `_stage_and_rename` and 
 1. The payload is opened without following a link and read once; its folder's revalidation is
    unchanged. The target's folder is reached from the pinned root one component at a time, each
    opened `O_DIRECTORY|O_NOFOLLOW` relative to the one above (`_open_below_root`, the walk the
-   write policy's reads take), and held by that descriptor (`_HeldFolder`); every name in it is
+   write policy's reads take), and held by that descriptor (`_HeldFolder`; both in
+   `utils/held_folder.py`, below `write_safety`); every name in it is
    reached relative to that descriptor (`openat`, `linkat`, `fstatat`, `renameat`). A link
    planted at any folder on the way after the revalidation is refused, never followed.
 2. The staged file is made with no name where Linux can (`O_TMPFILE`, mode 0600; ext4 and tmpfs
@@ -593,27 +594,115 @@ output in: a check, then a write that cannot be redirected after it.
   aside (`_move_result_aside`), and the consumer's restore, which puts each file back the way its
   writer writes it and only when its bytes changed: the plan through its link, `state.json` over
   the entry, the task list through its held folder.
-- **The executor's failure captures** (`subagent_executor._write_failure_capture`, every phase) are
-  checked below the phase folder, and retired and written through `failed/` held there, so a link
-  planted at `failed/` after the phase's check is refused too: the capture is skipped, as any
-  capture that cannot be written is.
-- **Not covered here**: `state.json` follows a symlinked output folder in every phase (its writer
-  replaces a link at the name, never one above it), and `StateManager` resolves the plan, so a
-  linked-in plan keeps its state beside the file the link leads to while its task list sits beside
-  the link. `util update-tasks` resolves the plan first, so its outputs land beside that file too.
-  The prompt sidecar, `.status.json` and the batch report replace a link at their name; their
-  folder is checked before the dispatch, not held. **A swap made during the run, after that
-  check**, can still redirect the writers that are not held: the prompt sidecar, the scope
-  policy's record in `state.json`, the executor's result persistence, the restore's `state.json`,
-  and the failure captures, whose root is the phase folder rather than a walk from the plan's
-  directory (Codex's re-check of U86a, 2026-11-09). Every link present when the run starts is
-  refused before anything is written; holding the rest is the follow-up U89 (every plugin write
-  under a plan's directory through `write_below_root`).
+- **The following writers under a plan's directory are held from it too** (the ones still
+  written by path are listed under "Not covered here") (`utils/held_folder.py`, `write_in_plan_dir` and `remove_in_plan_dir`): `state.json` (every
+  write goes through `state_file.write_document`: `StateManager`, the scope policy's record,
+  `util metrics`, `util batch-done`, `util finalize-tracking`, `util write-prompt`,
+  `commit_apply`; `StateManager`'s move from the old location, below, writes through its
+  `write_bytes`, and `StateManager.delete` removes the file through `remove_document`, under the
+  state lock), `.status.json` (`status_file.write_status`, the heartbeats included), the prompt
+  sidecars and host views (`validation._write_one_sidecar`), the executor's JSON records
+  (`failure_capture._atomic_write_json`: a result, `task_result.persist_result`; the executor's
+  batch report; the write scheduler's `write_batch_report.json`; the task files and reports that
+  helper writes) and the generate-tasks restore's `state.json`, written or removed. Nothing a
+  writer stated changes: its mode, `fsync`, temp-file prefix, lock, and whether it made its folder;
+  only the publication is held, so a normal run writes the same bytes with the same mode and the
+  same flushes (`tests/test_held_folder.py`). Codex's re-check of U86a (2026-11-09) found these
+  writing by path after the run's start check, so a link swapped in during the run redirected
+  them.
+  - **`StateManager`'s move from the old location** (`_migrate_from_old_location`: a state file an
+    old version kept in the skill's own `state/` folder, named by a hash of the plan's path) is
+    the one writer whose write changed. It was a `shutil.copy2` by path, unlocked, so an output
+    folder swapped for a link after its check overwrote the `state.json` the link led to, and the
+    old file was then deleted (Codex's re-check of U89, 2026-11-09). It now holds the state lock
+    from its check that `state.json` is absent to the old file's removal, and writes the old
+    file's bytes as they are through `state_file.write_bytes` (`write_document`'s write, for bytes
+    already in hand). The old file is removed only after that write succeeds; a refusal, an OS
+    error, or an old file that is not UTF-8 JSON keeps it and is logged, as a failed move always
+    was. The copy is owner-only, as
+    every other write of the file is, rather than taking the old file's mode, and it carries the
+    time of the move rather than the old file's. The next save rewrites both anyway, and the
+    file's time is read only as "when the state was last written" (`status_native`).
+  - **The root is the plan's directory, resolved once**: the run's first look at its outputs
+    (`output_handler.output_dir_path`, which every producer and `StateManager` compute their folders
+    through) anchors it (`held_folder.anchor_plan_dir`), and every later write takes the anchored
+    directory its path is below by spelling (`plan_dir_of`). A command handed `state.json` alone
+    (`--state-file`) anchors its grandparent, the output folder's parent, when it takes the state
+    lock (`state_file.locked`), before the read its write is based on, and keeps it through the
+    write. Once recorded, a link swapped in for the plan's directory or a folder above it never
+    moves the root. A swap made before it is recorded (before the run locates its outputs, or
+    before such a command takes the lock) is the directory the run starts from, as a link already
+    there would be.
+  - **The write**: the file's folder (not its own name) is resolved and must be the root or below it
+    (`held_folder.OutsidePlanDir`, an `OSError`, otherwise: a static link leading out is refused, one
+    that stays inside is written where it leads, as above). On Linux and macOS that folder is
+    reached from the root without following a link, a missing one made on the way relative to its
+    parent's descriptor where the writer made its folder, and held (`_HeldFolder`, the same walk as
+    `write_below_root`'s and the restore's, moved below `write_safety` so the L1 writers can use
+    it); `atomic_io` then writes relative to the held descriptor (`dir_fd`): its exclusive temp file,
+    the rename over the name (a link at the name is replaced, never followed, as these writers
+    always did) and the folder's flush. Just before the rename (`atomic_io`'s `before_replace`) and
+    once after it, a fresh walk must reach the folder held: a phase folder or file folder swapped for
+    a link after the walk is refused and never written through. A refusal is the writer's own
+    failure: `state.json` and a result raise, the checkpoint and a failure capture are skipped as
+    any failed write of theirs is, a sidecar falls back to the inline prompt.
+  - **The failure captures** (`failure_capture._write_failure_capture`, every phase) stay checked
+    below the phase folder, and are checked below the plan's directory as recorded too, then retired
+    and written through `failed/` held from that recorded directory, the phase folder and `failed/`
+    both walked. The recorded directory is walked from as recorded, never resolved again
+    (`rename_below_root` and `write_below_root` with `resolve_root` off): a phase folder, the plan's
+    directory or a folder above it swapped for a link before the capture, which its own check
+    resolves on both sides, is refused too, and the capture is skipped (it used to anchor on the
+    phase folder, which then moved with the link).
+  - **Overhead** (measured 2026-11-09, ext4, a plan seven folders deep): a held write is about 53 µs
+    against 15 µs for the plain one (`.status.json`, 0.8 KB) and 54 µs against 23 µs (`state.json`,
+    33 KB); one walk is 2.7 µs, resolving the file's folder 6.6 µs, the rest is the extra
+    descriptors and path objects. A mocked full chain makes about 30 such writes, 4 ms in all, and
+    a heartbeat every few seconds adds well under a millisecond a minute. The folder's descriptor is
+    not cached across writes: it would save one walk of the three (the two re-checks around the
+    rename are the safety and stay), a few microseconds, against a descriptor held for the whole run
+    and a reopen path for a folder legitimately replaced meanwhile (an archive, `--force`).
+- **Not covered here.** `StateManager` resolves the plan, so a linked-in plan keeps its state beside
+  the file the link leads to while its task list sits beside the link (each is held from the
+  directory it is in, both anchored), and `util update-tasks` resolves the plan first, so its
+  outputs land beside that file too. Kept exactly as they were, and so still by path: the lock files (`.state.lock`,
+  `.status.lock`, made by `FileMutex` at their path, so a folder swapped for a link before the lock
+  is taken gets an empty lock file where the link leads), and in `validation.write_prompt_sidecars`
+  the phase folder's `makedirs`, the removal of the previous round's sidecars and the all-or-none
+  cleanup. The other files in the output folder are written by path; holding one is the same call.
+  A sweep of the raw writes (`open(..., "w")`, `shutil.copy*`, `os.replace`, `os.rename`) on
+  2026-11-09 found these: the reports, the grouped, consolidated and validation documents and the
+  HTML report (`consolidation`, `apply_report`, `apply_output_helpers`,
+  `write_reports.write_summary`, the code review's issue files); the review slots' results, error
+  files, logs and salvage requests (`review_orchestrator_base.write_model_result`,
+  `save_model_result` and `_write_salvage_request`, `code_review_orchestrator`'s own,
+  `llm_client._save_log` and `_adopt_misnamed_result`), and their moves aside
+  (`result_files.set_aside_*`, `retire_salvage_artifacts`, `retire_unselected_results`,
+  `retire_result_from_another_scope`, `write_resume.retire_foreign_result`,
+  `scope_apply.retire_task_file`); the task files `subagent_tasks.write_task_file` writes
+  (`write_tasks.json`, `salvage_task_*.json`, `human_decision_tasks.json`; the ones
+  `failure_capture._atomic_write_json` writes are held, above), and the fix, consolidation and
+  revalidation task files; the copies made before a change (`backup.backup_before_write`, the
+  apply phases' target backups, a review round's `backup.md` or `tasks-backup.md`,
+  `apply-task-suggestions`' task-list backup); the ask mode's answers and logs; the code review's
+  diff files (`review_diff`); the changelog (`output_handler.append_to_changelog`), the record of
+  earlier batches (`prior_changes.append`), and a detached run's rotated log and copy of its
+  question (`detach`); and `util write-prompt --output`, a path the caller named. A file below no
+  anchored directory (a tool or a test handed a folder directly) is written by its path. The root
+  itself is opened by path, so the plan's directory swapped for a link in the instant between a
+  write's check and its walk is followed (the re-check before the rename walks the same way); a
+  swap after the root is recorded and before the check, or after the walk, is refused, and a swap
+  before it is recorded is the directory the run starts from (above). These root guarantees hold
+  for the writers in this list; the task list and the other `write_below_root` writers above
+  resolve the plan's directory at each check instead. Windows writes by the checked path, the
+  residual above.
 
 Tests: `tests/test_update_plan_tasks.py` (`TestTheTaskListStaysInThePlansDirectory`,
-`TestALinkSwappedInAfterTheCheckIsNeverWrittenThrough`) and
+`TestALinkSwappedInAfterTheCheckIsNeverWrittenThrough`),
 `tests/test_generate_tasks_orchestrator.py` (`TestTheOutputsStayInThePlansDirectory`,
-`TestEveryWriteGoesThroughItsHeldFolder`).
+`TestEveryWriteGoesThroughItsHeldFolder`), `tests/test_plan_dir_writers_held.py` (each writer, a
+link swapped in just before its write) and `tests/test_held_folder.py` (the root, the refusals, the
+fallbacks, and a normal write against each writer's own).
 
 ## Backups
 

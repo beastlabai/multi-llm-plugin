@@ -26,7 +26,8 @@ through a symlink):
 * with *dir_fd*, the target is a name in a directory the caller holds open,
   and every step (create, rename, removal, directory flush) is relative to
   that descriptor, so a link swapped in for the directory, or for one above
-  it, is never followed (POSIX).
+  it, is never followed (POSIX); *before_replace* lets that caller check the
+  directory is still the one at its path just before the rename.
 
 See docs/development/runtime.md#atomic-file-writes. Stdlib only; layer L0
 (``tests/test_import_layers.py``).
@@ -37,7 +38,7 @@ from __future__ import annotations
 import os
 import secrets
 import stat
-from typing import Optional, Tuple, Union
+from typing import Callable, Optional, Tuple, Union
 
 PathLike = Union[str, "os.PathLike[str]"]
 
@@ -193,6 +194,7 @@ def atomic_write_bytes(
     follow_symlinks: bool = False,
     temp_prefix: Optional[str] = None,
     dir_fd: Optional[int] = None,
+    before_replace: Optional[Callable[[], None]] = None,
 ) -> None:
     """Replace *path* with *data*, atomically.
 
@@ -214,6 +216,10 @@ def atomic_write_bytes(
       flushed relative to it: a link swapped in for that directory, or for a
       folder above it, after the caller opened it is never followed. POSIX
       (``os.supports_dir_fd``); *follow_symlinks* stays off (``ValueError``).
+    - *before_replace*: called once the temp file is written, given its mode
+      and flushed, just before the rename; whatever it raises aborts the write
+      as any failure does. ``utils/held_folder.py`` checks there that the
+      folder it holds (*dir_fd*) is still the one at its path.
 
     The directory must exist. Raises ``OSError`` (``FileExistsError`` if the
     temp name is taken); on any exception the temp file is removed and the
@@ -257,6 +263,8 @@ def atomic_write_bytes(
             read_only = not final_mode & stat.S_IWUSR
             if fsync:
                 os.fsync(stream.fileno())
+        if before_replace is not None:
+            before_replace()
         if dir_fd is None:
             os.replace(temporary, target)
         else:

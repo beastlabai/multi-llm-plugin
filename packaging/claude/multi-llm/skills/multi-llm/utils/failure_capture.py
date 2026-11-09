@@ -22,12 +22,12 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
 try:  # pragma: no cover - import shim mirrors the rest of utils/
-    from .atomic_io import atomic_write_text
+    from .held_folder import plan_dir_of, write_in_plan_dir
     from .retry_ladder import (  # noqa: F401 - re-exported, see below
         RUNG_BY_STATUS,
     )
 except ImportError:  # pragma: no cover - direct-script import shim
-    from utils.atomic_io import atomic_write_text  # type: ignore
+    from utils.held_folder import plan_dir_of, write_in_plan_dir  # type: ignore
     from utils.retry_ladder import (  # noqa: F401 - re-exported, see below
         RUNG_BY_STATUS,
     )
@@ -46,10 +46,13 @@ def _atomic_write_json(path: str, data: Any) -> None:
 
     An executor killed mid-batch (expected on the D4 detached path) therefore
     never leaves a half-written result for the reaggregation glob to pick up.
+    The file is published through its folder held below the plan's directory,
+    made there if missing (``held_folder.write_in_plan_dir``): a link swapped
+    in for the phase folder during the run is refused, never written through
+    (docs/development/write-safety.md#plan-output-containment).
     """
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(target, json.dumps(data, indent=2), mode=0o600)
+    write_in_plan_dir(path, json.dumps(data, indent=2).encode("utf-8"), make=True,
+                      mode=0o600)
 
 
 def _tail(text: str, limit: int = MAX_CAPTURE_BYTES) -> str:
@@ -133,7 +136,7 @@ def _safe_task_filename(task_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]", "_", task_id or "task") or "task"
 
 
-def _retire_capture(target: Path, root: str) -> None:
+def _retire_capture(target: Path, root: str, *, resolve_root: bool = True) -> None:
     """Move an earlier invocation's capture aside rather than overwrite it.
 
     Attempt numbering restarts at 1 on every invocation, and a re-invoked phase
@@ -144,8 +147,10 @@ def _retire_capture(target: Path, root: str) -> None:
     file's own mtime in UTC, so the name says when that attempt ran; the batch
     report that named the old path is rewritten by the same invocation.
     Best-effort: a rename that fails leaves the overwrite as it was. *target*
-    is checked below the phase folder *root*, and renamed in its folder held
-    there (``write_safety.rename_below_root``), never through a link.
+    is checked below the phase folder, and renamed in its folder held below
+    *root*, the plan's directory as the run recorded it, not resolved again
+    (*resolve_root* off; ``write_safety.rename_below_root``), never through a
+    link.
     """
     try:  # pragma: no cover - import shim mirrors the rest of utils/
         from .write_safety import rename_below_root
@@ -166,7 +171,7 @@ def _retire_capture(target: Path, root: str) -> None:
                 f"{target.stem}.{stamp}-{serial}{target.suffix}"
             )
             serial += 1
-        rename_below_root(root, target, retired.name)
+        rename_below_root(root, target, retired.name, resolve_root=resolve_root)
     except OSError:  # pragma: no cover - diagnostics must never fail a run
         return
 
@@ -217,12 +222,18 @@ def _write_failure_capture(
             else arg
             for arg in argv
         ]
-        # Checked below the phase folder, then retired and written through
-        # the capture folder held there: never through a link, `failed/`
-        # included (docs/development/write-safety.md#plan-output-containment).
+        # Checked below the phase folder and below the plan's directory as
+        # the run recorded it, then retired and written through the capture
+        # folder held from that recorded directory, never resolved again, the
+        # phase folder and `failed/` walked: never through a link swapped in
+        # for any of them (docs/development/write-safety.md#plan-output-containment).
         target = contain_local_path(capture_dir / name, phase_dir,
                                     what="failure capture")
-        _retire_capture(target, phase_dir)
+        recorded = plan_dir_of(capture_dir / name)
+        if recorded is not None and not target.is_relative_to(recorded):
+            return None
+        root = recorded or phase_dir
+        _retire_capture(target, root, resolve_root=recorded is None)
         payload = _redact_json({
             "task_id": task.get("task_id"),
             "kind": task.get("kind"),
@@ -243,8 +254,9 @@ def _write_failure_capture(
             # exactly the keys it always had.
             **({"repair": repair} if repair else {}),
         })
-        write_below_root(phase_dir, target,
-                         json.dumps(payload, indent=2).encode("utf-8"), mode=0o600)
+        write_below_root(root, target,
+                         json.dumps(payload, indent=2).encode("utf-8"), mode=0o600,
+                         resolve_root=recorded is None)
         return str(capture_dir / name)
     except (OSError, WriteSafetyError):  # pragma: no cover - diagnostics must never fail a run
         return None

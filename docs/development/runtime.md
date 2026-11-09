@@ -771,7 +771,8 @@ not a private temp-then-`os.replace` copy. The guarantees, each pinned by an inj
 - With `dir_fd` the target is one name in a directory the caller holds open, and the create, the
   rename, a removal and the directory flush are all relative to that descriptor: a link swapped in
   for the directory, or for a folder above it, after it was opened is never followed (POSIX only;
-  `atomic_io.DIR_FD_SUPPORTED`).
+  `atomic_io.DIR_FD_SUPPORTED`). `before_replace` is called once the file is written, given its
+  mode and flushed, just before the rename; what it raises aborts the write like any failure.
 
 A call site states only how it differs, through a parameter:
 
@@ -783,7 +784,8 @@ A call site states only how it differs, through a parameter:
 | `follow_symlinks` | off: a symlink is replaced by a file | `update_plan_tasks.replace_file`, for the plan alone: a plan kept elsewhere and linked in stays linked. The outputs beside it never follow a link ([plan output containment](write-safety.md#plan-output-containment)) |
 | `newline` (text) | `\n` | `os.linesep` where a writer has always written what `write_text` does (`update_plan_tasks`, `review_round`, the HTML report, ask's records) |
 | `temp_prefix` | `.<name>.` | where something matches leftovers by name (`.state_`, `.metrics_`, `.tracking_`, `.status_`, `.prompt-`, `.multi-llm-shim-`, `.multi-llm-trust-`) |
-| `dir_fd` | none: by path | `utils/prompt_files.py`, inside the prompt folder it reached without following a link |
+| `dir_fd` | none: by path | `utils/prompt_files.py`, inside the prompt folder it reached without following a link; `utils/held_folder.py` (`write_in_plan_dir`), inside a folder below the plan's directory it reached the same way, for `state.json`, `.status.json`, the prompt sidecars and the executor's JSON records ([plan output containment](write-safety.md#plan-output-containment)) |
+| `before_replace` | none | `utils/held_folder.py`: the folder held must still be the one at its path just before the rename |
 
 `state.json` itself goes through `utils/state_file.py`: `write_document` (the one writer),
 `read_document` / `read_document_strict` (the raw readers; a raw read migrates and writes

@@ -15,14 +15,18 @@ writer outside it:
   why the raw readers exist: a read-only look at a plan must not build a
   ``StateManager`` (its load upgrades legacy values and writes them back).
 * :func:`write_document`: the one writer, ``atomic_io``'s atomic write of
-  ``indent=2`` JSON (hosts read the file raw), owner-only, without ``fsync``.
+  ``indent=2`` JSON (hosts read the file raw), owner-only, without ``fsync``,
+  through the output folder held below the plan's directory
+  (``held_folder.write_in_plan_dir``); :func:`write_bytes` is the same write
+  of bytes a caller already has (the old-location move), and
+  :func:`remove_document` the removal made the same way.
 * :func:`update`: read, change and write the document under the lock.
 * :class:`StateDoc`: the top-level keys the skill writes, the contract that
   ``schemas/state_file.schema.json`` follows (a test compares the two, and
   the keys ``StateManager``'s writers put in the file with both).
 
 See docs/development/runtime.md#atomic-file-writes. Layer L1; it imports only
-``process_control`` and the stdlib-only ``atomic_io`` from the project.
+``process_control`` and the stdlib-only ``held_folder`` from the project.
 """
 
 from __future__ import annotations
@@ -33,15 +37,15 @@ import json
 import os
 import threading
 import time
-from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, TypedDict, Union
 
 try:
     from . import process_control
-    from .atomic_io import atomic_write_text
+    from .held_folder import anchor_plan_dir, remove_in_plan_dir, write_in_plan_dir
 except ImportError:  # pragma: no cover - direct script runs (metrics.py) with utils/ on path
     import process_control  # type: ignore[no-redef]
-    from atomic_io import atomic_write_text  # type: ignore[no-redef]
+    from held_folder import (  # type: ignore[no-redef]
+        anchor_plan_dir, remove_in_plan_dir, write_in_plan_dir)
 
 PathLike = Union[str, "os.PathLike[str]"]
 
@@ -65,6 +69,16 @@ STATE_LOCK_TIMEOUT_S = 120.0
 #: Every writer's temp file ends in ``.tmp`` (``output_handler`` reads such a
 #: dot-file as the workflow's own).
 STATE_TEMP_PREFIX = ".state_"
+
+
+def _anchor_plan_dir_of(state_path: PathLike) -> None:
+    """Record the plan's directory *state_path* is written below
+    (``held_folder.anchor_plan_dir``): the state file sits in the plan's
+    output folder, whose parent is the plan's directory, so a command handed
+    the file alone (``--state-file``) records that grandparent. The first
+    record for a spelling decides; a run that located its outputs made it
+    already (docs/development/write-safety.md#plan-output-containment)."""
+    anchor_plan_dir(os.path.dirname(os.path.dirname(os.path.abspath(state_path))))
 
 
 class StateLockTimeout(OSError):
@@ -116,7 +130,13 @@ def locked(state_path: PathLike) -> Iterator[None]:
     write is exactly the lost record this lock exists to prevent. The
     same-thread reentry takes neither wait. It is the innermost lock: nothing
     else is taken while it is held.
+
+    Entry records the plan's directory as the root the write is held from
+    (:func:`_anchor_plan_dir_of`), before the read this lock is held around:
+    a command handed the state file alone keeps the directory it read from,
+    so one swapped for a link between its read and its write is refused.
     """
+    _anchor_plan_dir_of(state_path)
     timeout_s = STATE_LOCK_TIMEOUT_S
     deadline = time.monotonic() + max(0.0, float(timeout_s))
     if not _STATE_THREAD_LOCK.acquire(timeout=max(0.0, float(timeout_s))):
@@ -185,11 +205,40 @@ def write_document(path: PathLike, document: Dict[str, Any], *,
     every writer of the file always had: it is rewritten dozens of times a
     run under :func:`locked`, where a flush (milliseconds each) would hold up
     every waiting writer. The parent folder is created if missing. Hold
-    :func:`locked` around the read this write is based on."""
+    :func:`locked` around the read this write is based on.
+
+    The file is published through its folder held below the plan's directory
+    (``held_folder.write_in_plan_dir``), so a link swapped in for the output
+    folder during the run is refused, never written through
+    (docs/development/write-safety.md#plan-output-containment). The root is
+    the one recorded when the run located its outputs, or else by
+    :func:`locked` before the read; a write made without either records it
+    here (:func:`_anchor_plan_dir_of`)."""
     text = json.dumps(document, indent=2)
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(path, text, mode=0o600, fsync=False, temp_prefix=temp_prefix)
+    write_bytes(path, text.encode("utf-8"), temp_prefix=temp_prefix)
     return text
+
+
+def write_bytes(path: PathLike, data: bytes, *,
+                temp_prefix: str = STATE_TEMP_PREFIX) -> None:
+    """Replace *path* with *data* as given: :func:`write_document`'s write
+    (owner-only, no ``fsync``, the folder made, published through it held
+    below the plan's directory) for a caller that has the file's bytes
+    rather than a document, ``StateManager``'s move of a state file from its
+    old location (docs/development/write-safety.md#plan-output-containment).
+    Hold :func:`locked` around it."""
+    _anchor_plan_dir_of(path)
+    write_in_plan_dir(path, data, make=True, mode=0o600, fsync=False,
+                      temp_prefix=temp_prefix)
+
+
+def remove_document(path: PathLike) -> None:
+    """Remove *path* the way :func:`write_document` writes it: through its
+    folder held below the plan's directory (``held_folder.remove_in_plan_dir``),
+    so a name is never removed in a folder a link swapped in leads to. A file
+    already gone is nothing to remove. Hold :func:`locked` around it."""
+    _anchor_plan_dir_of(path)
+    remove_in_plan_dir(path)
 
 
 @contextlib.contextmanager

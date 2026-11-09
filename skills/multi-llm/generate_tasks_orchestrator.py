@@ -426,10 +426,12 @@ class _Snapshot:
     Each file is put back the way its writer writes it, and only when its bytes
     changed: the plan through a symlink (a plan kept elsewhere and linked in),
     ``state.json`` over the entry (its writer replaces a link, never follows
-    one), and the task list at the target ``contain_plan_output`` resolved,
-    written or removed through its folder held below the plan's directory
-    (``write_safety.write_below_root``), so a restore never writes out of the
-    plan's directory either.
+    one), written or removed through its folder held below the plan's
+    directory (``held_folder.write_in_plan_dir``, ``remove_in_plan_dir``), and
+    the task list at the target ``contain_plan_output`` resolved, written or
+    removed through its folder held there too (``write_safety.write_below_root``),
+    so a restore never writes out of the plan's directory, nor through a link
+    swapped in during the run.
     """
 
     def __init__(self, plan_path: Path, state_file: Path, tasks_target: Path):
@@ -447,7 +449,7 @@ class _Snapshot:
 
     def _put_back(self, path: Path, before: Optional[bytes]) -> None:
         from update_plan_tasks import replace_file
-        from utils.atomic_io import atomic_write_bytes
+        from utils.held_folder import remove_in_plan_dir, write_in_plan_dir
         from utils.write_safety import remove_below_root, write_below_root
 
         if path == self._tasks:
@@ -457,11 +459,11 @@ class _Snapshot:
                 write_below_root(self._root, path, before)
         elif before is None:
             if os.path.lexists(path):
-                path.unlink()
+                remove_in_plan_dir(path)
         elif path == self._plan:
             replace_file(path, before)
         else:
-            atomic_write_bytes(path, before)
+            write_in_plan_dir(path, before)
 
     def restore(self) -> None:
         for path, before in self._before.items():

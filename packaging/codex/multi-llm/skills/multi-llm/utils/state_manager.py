@@ -5,7 +5,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import unicodedata
 from datetime import datetime
 from pathlib import Path
@@ -1716,32 +1715,40 @@ class StateManager:
     def _migrate_from_old_location(self) -> None:
         """Migrate state file from old hash-based location if it exists.
 
+        Copy, then delete, rather than a rename: the old location is in the
+        skill's folder, often on another filesystem. The old file's bytes
+        are written as they are, by ``state_file``'s writer (``write_bytes``:
+        owner-only, through the output folder held below the plan's
+        directory, docs/development/write-safety.md#plan-output-containment),
+        under the state lock from the check that ``state.json`` is absent to
+        the old file's removal. The old file is removed only once that write
+        succeeded, and kept on any failure, a refused write included.
+
         Note: Migration is silent unless verbose/debug logging is enabled.
-        Uses copy+delete instead of rename for cross-filesystem compatibility.
         """
         old_state_dir = Path(__file__).parent.parent / "state"
         path_hash = hashlib.sha256(str(self.plan_path).encode()).hexdigest()[:16]
         old_state_file = old_state_dir / f"{path_hash}.json"
 
-        if old_state_file.exists() and not self.state_file.exists():
-            try:
-                # Validate JSON is parseable before migrating
-                with open(old_state_file, 'r', encoding='utf-8') as f:
-                    json.load(f)
-
-                # Use copy+delete instead of rename (works across filesystems)
-                self.plan_dir.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(old_state_file, self.state_file)
-
-                # Verify copy succeeded before deleting old file
+        if not old_state_file.exists() or self.state_file.exists():
+            return
+        try:
+            # The lock lives beside the file, so its folder is made first.
+            self.plan_dir.mkdir(parents=True, exist_ok=True)
+            with _state_file.locked(self.state_file):
                 if self.state_file.exists():
-                    os.unlink(old_state_file)
-                    logger.debug(f"Migrated state file to: {self.state_file}")
-
-            except (json.JSONDecodeError, OSError) as e:
-                # Log warning but continue - old state may be corrupt or inaccessible
-                logger.warning(f"Failed to migrate state from {old_state_file}: {e}")
-                # Don't delete old file on failure - let user investigate
+                    return  # another process wrote it meanwhile
+                data = old_state_file.read_bytes()
+                # Validate JSON is parseable before migrating
+                json.loads(data.decode("utf-8"))
+                _state_file.write_bytes(self.state_file, data)
+                os.unlink(old_state_file)
+            logger.debug(f"Migrated state file to: {self.state_file}")
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
+            # Log warning but continue - old state may be corrupt (bad JSON or
+            # bad UTF-8) or inaccessible
+            logger.warning(f"Failed to migrate state from {old_state_file}: {e}")
+            # Don't delete old file on failure - let user investigate
 
     def _compute_plan_path_hash(self) -> str:
         """Compute hash of plan PATH for state file naming (stable across content edits)."""
@@ -2944,9 +2951,11 @@ class StateManager:
         self._touched = set()
 
     def delete(self) -> None:
-        """Delete the state file."""
-        if self.state_file.exists():
-            self.state_file.unlink()
+        """Delete the state file, under the state lock and through its folder
+        held below the plan's directory (``state_file.remove_document``)."""
+        with _state_file.locked(self.state_file):
+            if self.state_file.exists():
+                _state_file.remove_document(self.state_file)
         self._remember_baseline(None)
 
     # --- Human Task Strategy ---

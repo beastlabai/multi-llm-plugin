@@ -73,6 +73,24 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set,
 from .atomic_io import atomic_write_bytes, atomic_write_text, temp_path_for
 from .clock import local_iso_seconds
 from .git_utils import pin_repo_root
+# The walk and the hold (a folder reached from a root without following a link,
+# held by its descriptor) live below this module, so the L1 writers beside a
+# plan (state_file, status_file) hold their folder the same way.
+from .held_folder import (  # noqa: F401 - OPENS_WITHOUT_FOLLOWING is re-exported
+    _CLOEXEC,
+    _MOVED,
+    _PROC_SELF_FD,
+    _PUT_BACK,
+    _READ_FLAGS,
+    _REMOVED,
+    _WRITTEN,
+    OPENS_WITHOUT_FOLLOWING,
+    _folder_moved,
+    _HeldFolder,
+    _in_held_folder,
+    _open_below_root,
+    _Wording,
+)
 from .process_control import FileMutex, descriptor_owning_handle, handle_of_descriptor
 from .provider_registry import get_write_paths
 from .state_manager import _parse_completion_time, predates_review
@@ -558,70 +576,6 @@ def file_sha256(path: str) -> Optional[str]:
             return digest.hexdigest()
     except (OSError, IsADirectoryError):
         return None
-
-
-_CLOEXEC = getattr(os, "O_CLOEXEC", 0)
-
-#: How :meth:`WritePolicy.open_permitted` opens the file it hands back: never
-#: blocking on a FIFO swapped in, never inherited by a child, binary on Windows.
-_READ_FLAGS = (
-    os.O_RDONLY
-    | getattr(os, "O_NONBLOCK", 0)
-    | _CLOEXEC
-    | getattr(os, "O_NOINHERIT", 0)
-    | getattr(os, "O_BINARY", 0)
-)
-
-#: Whether a file below the root can be reached one component at a time, each
-#: opened through its parent's descriptor and never through a link (Linux,
-#: macOS). Windows' ``os.open`` takes no ``dir_fd`` and has no ``O_NOFOLLOW``.
-OPENS_WITHOUT_FOLLOWING = bool(
-    hasattr(os, "O_NOFOLLOW") and hasattr(os, "O_DIRECTORY")
-    and os.open in os.supports_dir_fd
-)
-
-
-def _open_below_root(root: str, parts: Sequence[str], *,
-                     folder: bool = False, make: bool = False) -> Optional[int]:
-    """``root/parts`` opened for reading, every component below *root*
-    opened through its parent's descriptor without following a link; ``None``
-    when one is a link, is gone or is not a directory where one must be.
-    With *folder*, ``root/parts`` is a directory too, its descriptor handed
-    back (*root*'s own for no *parts*): the rollback restore holds the folder
-    it puts a file back in this way (:class:`_HeldFolder`). With *make* too, a
-    folder missing on the way is made relative to its parent's descriptor
-    (``mkdirat``, which never follows a link) and then opened like the rest
-    (:func:`write_below_root`). *root* itself is opened by path: a link above
-    the repository is the user's (``prompt_files`` walks the phase dir the
-    same way)."""
-    try:
-        handle = os.open(root, os.O_RDONLY | os.O_DIRECTORY | _CLOEXEC)
-    except OSError:
-        return None
-    try:
-        for name in (parts if folder else parts[:-1]):
-            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | _CLOEXEC
-            try:
-                child = os.open(name, flags, dir_fd=handle)
-            except FileNotFoundError:
-                if not (make and folder):
-                    raise
-                try:
-                    os.mkdir(name, dir_fd=handle)
-                except FileExistsError:
-                    pass
-                child = os.open(name, flags, dir_fd=handle)
-            os.close(handle)
-            handle = child
-        if folder:
-            opened, handle = handle, -1
-            return opened
-        return os.open(parts[-1], _READ_FLAGS | os.O_NOFOLLOW, dir_fd=handle)
-    except OSError:
-        return None
-    finally:
-        if handle >= 0:
-            os.close(handle)
 
 
 def read_capped(handle: int, limit: int, *, size_hint: int = 0) -> Optional[bytes]:
@@ -2536,10 +2490,6 @@ _STAGES_BY_DESCRIPTOR = bool(
 #: ``O_TMPFILE`` (Linux): a file made with no name in a folder, so nobody can
 #: reach it by a name until it is given one (``0`` where there is none).
 _O_TMPFILE = getattr(os, "O_TMPFILE", 0)
-#: Where a process's own descriptors are named, the one way an unprivileged
-#: process gives an ``O_TMPFILE`` file a name (``linkat(2)`` with
-#: ``AT_EMPTY_PATH`` needs ``CAP_DAC_READ_SEARCH``; open(2), ``O_TMPFILE``).
-_PROC_SELF_FD = "/proc/self/fd"
 #: How ``open(2)`` refuses ``O_TMPFILE`` where the kernel (``EISDIR``) or the
 #: folder's filesystem (``EOPNOTSUPP``) cannot make one.
 _NO_TMPFILE = tuple(getattr(errno, name) for name in (
@@ -2548,111 +2498,6 @@ _NO_TMPFILE = tuple(getattr(errno, name) for name in (
 #: exclusively, never through a link already there.
 _STAGE_FLAGS = (os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
                 | _CLOEXEC)
-
-
-@dataclass(frozen=True)
-class _Wording:
-    """How a write through a held folder names its work in a message. The
-    rollback restore puts a snapshot's file back (:data:`_PUT_BACK`); the
-    plan-output writes write a file (:data:`_WRITTEN`) or move one aside
-    (:data:`_MOVED`). The steps and the refusals are the same
-    (:func:`_publish_staged`); only the words differ."""
-
-    done: str
-    staged: str
-    ours: str
-    kept: str
-    actor: str
-    root: str
-
-
-_PUT_BACK = _Wording(
-    done="put back", staged="the file staged to put back",
-    ours="the snapshot's file", kept=" (the snapshot is kept)",
-    actor="restore", root="the pinned repo root")
-_WRITTEN = _Wording(
-    done="written", staged="the file staged to write it",
-    ours="the file written", kept="", actor="write", root="the folder")
-_MOVED = _Wording(
-    done="moved", staged="", ours="", kept="", actor="move", root="the folder")
-
-
-@dataclass(frozen=True)
-class _HeldFolder:
-    """The folder a restore puts a file back in (Linux, macOS), reached from
-    the pinned repo root one component at a time without following a link
-    (:func:`_open_below_root`) and held by the descriptor *fd*, which every
-    name in it is reached through. A writer of a folder above it can move it
-    away and put another folder at its path at any moment, so it must still
-    be the folder at its path (:meth:`in_place`) before anything is
-    published in it, and again before the restore says ``restored``
-    (docs/development/write-safety.md, restore). *root* and *parts* are the
-    walk; *shown* is the folder's path as the restore names it; *say* is how
-    its messages name the work (:class:`_Wording`): the plan-output writes
-    hold their folder the same way (:func:`write_below_root`)."""
-
-    fd: int
-    root: str
-    parts: Tuple[str, ...]
-    shown: str
-    say: _Wording = _PUT_BACK
-
-    @classmethod
-    def open(cls, root: str, target: Path, *, make: bool = False,
-             say: _Wording = _PUT_BACK) -> "_HeldFolder":
-        """*target*'s folder below *root*, which :func:`_revalidated_target`
-        (or the caller's containment check) derived *target* under;
-        ``OSError`` when a component on the way is gone, a link or not a
-        folder. With *make*, a missing folder on the way is made, never
-        through a link (:func:`_open_below_root`)."""
-        resolved = str(Path(root).resolve())
-        try:
-            parts = tuple(target.parent.relative_to(resolved).parts)
-        except ValueError:
-            raise OSError(f"{target} is not below {say.root} {resolved}, so "
-                          f"nothing was {say.done}") from None
-        handle = _open_below_root(resolved, parts, folder=True, make=make)
-        if handle is None:
-            raise OSError(f"{target.parent} could not be reached from {say.root} "
-                          f"{resolved} without following a link, so nothing was "
-                          f"{say.done}")
-        return cls(handle, resolved, parts, str(target.parent), say)
-
-    def in_place(self) -> bool:
-        """Whether a fresh walk from the root, without following a link,
-        reaches the folder held (``(st_dev, st_ino)`` against ``fstat``)."""
-        fresh = _open_below_root(self.root, self.parts, folder=True)
-        if fresh is None:
-            return False
-        try:
-            now, held = os.fstat(fresh), os.fstat(self.fd)
-        except OSError:
-            return False
-        finally:
-            os.close(fresh)
-        return (now.st_dev, now.st_ino) == (held.st_dev, held.st_ino)
-
-    def where(self, name: str, spelled: str) -> str:
-        """Where *name* in the folder held is, for a message: *spelled*, its
-        path as the restore spelled it, while the folder is in place; once it
-        was moved, its path now (through :data:`_PROC_SELF_FD`, Linux), else
-        *name* in the folder that was at its path."""
-        if self.in_place():
-            return spelled
-        try:
-            now = os.readlink(f"{_PROC_SELF_FD}/{self.fd}")
-        except OSError:
-            now = ""
-        if os.path.isabs(now):
-            return os.path.join(now, name)
-        return f"{name} in the folder that was at {self.shown}"
-
-
-def _folder_moved(folder: _HeldFolder, target: str) -> str:
-    say = folder.say
-    return (f"{folder.shown} is no longer the folder the {say.actor} opened: it "
-            f"was moved or replaced while {target} was being {say.done}, so "
-            f"nothing was {say.done}{say.kept}")
 
 
 def _restored_through_descriptor(source: str, tmp: Path, target: Path,
@@ -2878,9 +2723,6 @@ def _leave_staged(folder: Optional[_HeldFolder], name: str, tmp: str,
 # Plan outputs: a write, a move aside or a removal through a held folder
 # ---------------------------------------------------------------------------
 
-_REMOVED = _Wording(
-    done="removed", staged="", ours="", kept="", actor="removal", root="the folder")
-
 #: Whether a plan-output write goes through a held folder (Linux, macOS): the
 #: restore's staging by descriptor (:data:`_STAGES_BY_DESCRIPTOR`), plus making
 #: and removing a name relative to a folder's descriptor. Windows writes by
@@ -2893,7 +2735,8 @@ _PUBLISHES_BY_DESCRIPTOR = bool(
 
 def write_below_root(root: Union[str, "os.PathLike[str]"],
                      target: Union[str, "os.PathLike[str]"], data: bytes, *,
-                     mode: Optional[int] = None, fsync: bool = True) -> None:
+                     mode: Optional[int] = None, fsync: bool = True,
+                     resolve_root: bool = True) -> None:
     """Replace *target*, a file below the folder *root*, with *data*, never
     through a link (docs/development/write-safety.md#plan-output-containment).
 
@@ -2913,7 +2756,11 @@ def write_below_root(root: Union[str, "os.PathLike[str]"],
     now was put there since, or leads nowhere. An existing file's permission
     bits carry over, a new one gets the umask's, *mode* overrides both, and
     the bytes go in owner-only (``atomic_io``'s rules); *fsync* flushes the
-    file and its folder.
+    file and its folder. *resolve_root* off: *root* is a plan's directory
+    the run recorded resolved (``held_folder.anchor_plan_dir``), walked from
+    as recorded and never resolved again, so a link swapped in for it or a
+    folder above it since is not adopted as the root (the caller checked
+    *target* below it as recorded).
 
     Windows (no ``dir_fd``, no ``O_NOFOLLOW``) writes the checked path with
     ``atomic_io``, which replaces a link at the name and never follows one:
@@ -2931,7 +2778,8 @@ def write_below_root(root: Union[str, "os.PathLike[str]"],
         os.makedirs(target.parent, exist_ok=True)
         atomic_write_bytes(target, data, mode=mode, fsync=fsync)
         return
-    folder = _HeldFolder.open(str(root), target, make=True, say=_WRITTEN)
+    folder = _HeldFolder.open(str(root), target, make=True, say=_WRITTEN,
+                              resolve_root=resolve_root)
     try:
         kept = _mode_at_name(folder, target)
         final = mode if mode is not None else kept
@@ -2986,14 +2834,15 @@ def _mode_at_name(folder: _HeldFolder, target: Path) -> Optional[int]:
 
 
 def rename_below_root(root: Union[str, "os.PathLike[str]"],
-                      source: Union[str, "os.PathLike[str]"], name: str) -> Path:
+                      source: Union[str, "os.PathLike[str]"], name: str, *,
+                      resolve_root: bool = True) -> Path:
     """Rename *source*, a file below the folder *root* whose folder the
     caller checked (resolved, as :func:`contain_local_path` gives it), to
     *name* in that folder; the new path. The entry is renamed, never a
     link's target, and on Linux and macOS relative to the folder held as
-    :func:`write_below_root` holds it, which must still be the one at its
-    path; Windows renames by path (the window :func:`write_below_root`
-    names). ``OSError`` when nothing was renamed."""
+    :func:`write_below_root` holds it, *resolve_root* included, which must
+    still be the one at its path; Windows renames by path (the window
+    :func:`write_below_root` names). ``OSError`` when nothing was renamed."""
     source = Path(source)
     renamed = source.with_name(name)
     if not _PUBLISHES_BY_DESCRIPTOR:
@@ -3006,7 +2855,7 @@ def rename_below_root(root: Union[str, "os.PathLike[str]"],
         except OSError as exc:
             raise _respelled(exc, str(source), str(renamed)) from exc
 
-    _in_held_folder(root, source, _MOVED, rename)
+    _in_held_folder(root, source, _MOVED, rename, resolve_root=resolve_root)
     return renamed
 
 
@@ -3033,19 +2882,6 @@ def remove_below_root(root: Union[str, "os.PathLike[str]"],
             raise _respelled(exc, str(target)) from exc
 
     _in_held_folder(root, target, _REMOVED, remove)
-
-
-def _in_held_folder(root: Union[str, "os.PathLike[str]"], path: Path,
-                    say: _Wording, act: Callable[[int], None]) -> None:
-    """Run *act* on the descriptor of *path*'s folder, held below *root*
-    (:class:`_HeldFolder`), once that folder is still the one at its path."""
-    folder = _HeldFolder.open(str(root), path, say=say)
-    try:
-        if not folder.in_place():
-            raise OSError(_folder_moved(folder, str(path)))
-        act(folder.fd)
-    finally:
-        os.close(folder.fd)
 
 
 def _identity_of(descriptor: int) -> Optional[_Identity]:

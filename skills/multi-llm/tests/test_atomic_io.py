@@ -220,6 +220,30 @@ class TestTheOrderOfFlushes:
         atomic_write_bytes(target, b"new")
         assert events == ["file", "replace", "dir"]
 
+    def test_before_replace_runs_once_the_file_is_flushed_just_before_the_rename(
+            self, tmp_path, monkeypatch):
+        target = tmp_path / "f.txt"
+        events = []
+        real_fsync, real_replace = os.fsync, os.replace
+        monkeypatch.setattr(os, "fsync", lambda fd: events.append("fsync") or real_fsync(fd))
+        monkeypatch.setattr(os, "replace", lambda *a, **k: events.append("replace")
+                            or real_replace(*a, **k))
+        atomic_write_bytes(target, b"new", before_replace=lambda: events.append("check"))
+        assert events[:3] == ["fsync", "check", "replace"]
+        assert target.read_bytes() == b"new"
+
+    def test_what_before_replace_raises_aborts_the_write(self, tmp_path):
+        target = tmp_path / "f.txt"
+        target.write_bytes(b"old")
+
+        def refuse():
+            raise OSError("the folder moved")
+
+        with pytest.raises(OSError, match="the folder moved"):
+            atomic_write_bytes(target, b"new", before_replace=refuse)
+        assert target.read_bytes() == b"old"
+        assert _names(tmp_path) == ["f.txt"]
+
     def test_no_fsync_flushes_nothing(self, tmp_path, monkeypatch):
         def no_fsync(_descriptor):
             raise AssertionError("fsync=False must not flush")

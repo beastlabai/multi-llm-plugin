@@ -326,7 +326,12 @@ def persist_result(task: Dict[str, Any], phase_dir: str, data: Any) -> str:
 
     with persisting_result(phase_dir, target.name) as current:
         if current:
-            _failure_capture._atomic_write_json(str(target), data)
+            # By the phase folder as the run spelled it, not as it resolves
+            # now: the write holds that folder from the plan's directory, so a
+            # link swapped in for it since the check above is refused
+            # (docs/development/write-safety.md#plan-output-containment).
+            _failure_capture._atomic_write_json(
+                os.path.join(os.path.abspath(phase_dir), target.name), data)
     return str(target)
 
 

@@ -8,6 +8,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+try:
+    from .held_folder import anchor_plan_dir
+except ImportError:  # pragma: no cover - direct script runs with utils/ on path
+    from held_folder import anchor_plan_dir  # type: ignore[no-redef]
+
 # Phase-to-subdirectory mapping (kebab-case for on-disk directories)
 PHASE_DIRECTORIES = {
     'review-plan': 'review-plan',
@@ -244,8 +249,13 @@ def output_dir_path(plan_path: Path) -> Path:
     :func:`get_output_dir` is the same computation plus ``mkdir``. Readers that
     must not write (``status``, which is polled while another run owns the dir)
     use this one; producers keep using ``get_output_dir``.
+
+    The run's first look at its outputs anchors the plan's directory, resolved
+    once, as the root the writes below it hold their folder from
+    (``held_folder.anchor_plan_dir``, docs/development/write-safety.md#plan-output-containment).
     """
     plan_path = Path(plan_path)
+    anchor_plan_dir(plan_path.parent)
     return plan_path.parent / sanitize_prefix(plan_path.stem)
 
 

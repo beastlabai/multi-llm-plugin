@@ -145,7 +145,7 @@ import threading
 from typing import Any, Dict, Iterable, Iterator, Optional, Tuple
 
 from . import process_control
-from .atomic_io import atomic_write_text
+from .held_folder import write_in_plan_dir
 from .clock import local_iso
 
 #: The checkpoint file name. Dot-prefixed on purpose: reaggregation globs
@@ -313,7 +313,12 @@ def write_status(phase_dir: str, data: dict) -> None:
 
     The write is ``atomic_io``'s, owner-only (0600), without ``fsync``: the
     heartbeat rewrites the file every few seconds under the checkpoint lock
-    (docs/development/runtime.md#atomic-file-writes).
+    (docs/development/runtime.md#atomic-file-writes). It is published through
+    the phase folder held below the plan's directory
+    (``held_folder.write_in_plan_dir``): a link swapped in for that folder
+    during the run is refused, never written through, and the checkpoint is
+    then not written, as any failed write leaves it
+    (docs/development/write-safety.md#plan-output-containment).
     """
     path = status_path(phase_dir)
     with checkpoint_lock(phase_dir):
@@ -327,8 +332,8 @@ def write_status(phase_dir: str, data: dict) -> None:
             pass
         try:
             data["updated_at"] = now_iso()
-            atomic_write_text(path, json.dumps(data, indent=2), mode=0o600,
-                              fsync=False, temp_prefix=STATUS_TEMP_PREFIX)
+            write_in_plan_dir(path, json.dumps(data, indent=2).encode("utf-8"),
+                              mode=0o600, fsync=False, temp_prefix=STATUS_TEMP_PREFIX)
         except Exception:
             pass
 
