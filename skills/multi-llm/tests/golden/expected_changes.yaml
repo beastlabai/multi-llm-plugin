@@ -608,6 +608,19 @@ changes:
       without a file date. An added key; every other key, every artifact and
       every instruction is untouched (review-code's checkpoint is already
       declared as a subtree under `/phases/code-review/status_shape`).
+  - pointer: /phases/review-plan/status_shape/models_rejected
+    rationale: >
+      U90, 2026-11-09 — a slot whose safety checks failed has its model recorded
+      under `models_rejected`, so neither a resume, the salvage dispatch nor a
+      `--reaggregate` reads its answer back (utils/review_lane.py,
+      `reject_slot_answer`). The round opening writes the map, empty on a clean
+      run. An added key; nothing else moves.
+  - pointer: /phases/review-plan/status_shape/models_unchecked
+    rationale: >
+      U90, 2026-11-09 — every slot is recorded under `models_unchecked` before it
+      is dispatched and cleared once its checks pass, so an answer whose checks
+      never finished (a cancellation, a deadline, an exception) is withheld in
+      later runs too. Empty after a clean run. An added key; nothing else moves.
 
   # ---------------------------------------------------------------------------
   # T2 — `progress` is the one reserved object a FOREGROUND run writes.
