@@ -216,6 +216,14 @@ class Claim:
     #: Result notes the round brings from its start (:func:`start_round`).
     notes: Tuple[str, ...] = field(default=(), compare=False)
     _verdicts: List[Verdicts] = field(default_factory=list, compare=False, repr=False)
+    #: The result files the latest dispatch bound to this claim persisted or
+    #: found complete, by name, as the bytes it wrote or checked and whether
+    #: it wrote them itself (:func:`record_checked_result`).
+    _results: Dict[str, Tuple[bytes, bool]] = field(
+        default_factory=dict, compare=False, repr=False)
+    #: The ``grouped.json`` text this invocation last wrote or read
+    #: (:meth:`hold_grouping`).
+    _grouping: List[str] = field(default_factory=list, compare=False, repr=False)
 
     def describe(self) -> str:
         if self.started:
@@ -308,9 +316,40 @@ class Claim:
     def read_verdicts(self, path: PathLike) -> bytes:
         """Read ``validation.json`` once for the report; remembers those bytes
         as :attr:`verdicts` and returns them for the caller to parse."""
-        data = Path(path).read_bytes()
+        return self.hold_verdicts(Path(path).read_bytes())
+
+    def hold_verdicts(self, data: bytes) -> bytes:
+        """The ``validation.json`` bytes a caller has already read and checked,
+        remembered as :attr:`verdicts` and returned for it to parse: the report
+        binds the bytes it was built from, never a later read of the file."""
         self._remember(verdicts_of(data))
         return data
+
+    def hold_grouping(self, text: str) -> None:
+        """Remember the ``grouped.json`` this invocation reports, as the text it
+        wrote or read (a text-mode read's): the digests that bind the round's
+        task file and verdicts to it are taken over this text, never over a
+        later read of the file (:attr:`grouping_text`)."""
+        self._grouping[:] = [text]
+
+    @property
+    def grouping_text(self) -> Optional[str]:
+        """The ``grouped.json`` text this invocation last held, or ``None``."""
+        return self._grouping[0] if self._grouping else None
+
+    def checked_result(self, name: str, *, dispatched: bool = False) -> Optional[bytes]:
+        """The bytes of the result file *name* that the latest dispatch bound to
+        this claim persisted or found complete (:func:`record_checked_result`),
+        or ``None`` when it did neither: the round reads these in place of the
+        file, which a concurrent writer may have replaced since. With
+        *dispatched*, only bytes that dispatch wrote itself count: a file it
+        found complete on disk may be another round's
+        (docs/development/review-results.md, "Consuming checked bytes")."""
+        with _BOUND_LOCK:
+            held = self._results.get(name)
+        if held is None or (dispatched and not held[1]):
+            return None
+        return held[0]
 
     def _remember(self, verdicts: Verdicts) -> Verdicts:
         self._verdicts[:] = [verdicts]
@@ -384,10 +423,13 @@ def _bound_key(phase_dir: PathLike) -> str:
 def results_bound_to(claim: Claim) -> Iterator[None]:
     """While the block runs, a result file the executor persists into
     *claim*'s phase dir belongs to *claim*'s round
-    (:func:`persisting_result`). Thread-safe; held on the dispatch's own
+    (:func:`persisting_result`), and the bytes it persists or finds complete
+    are remembered on *claim* (:func:`record_checked_result`), those of an
+    earlier dispatch forgotten. Thread-safe; held on the dispatch's own
     thread, so it lasts exactly as long as the dispatch."""
     key = _bound_key(claim.phase_dir)
     with _BOUND_LOCK:
+        claim._results.clear()
         _BOUND.setdefault(key, []).append(claim)
     try:
         yield
@@ -400,6 +442,30 @@ def results_bound_to(claim: Claim) -> Iterator[None]:
                     break
             if not claims:
                 _BOUND.pop(key, None)
+
+
+def record_checked_result(
+    phase_dir: PathLike, name: str, data: bytes, *, dispatched: bool,
+) -> None:
+    """Remember *data* on the claim a dispatch into *phase_dir* is bound to,
+    as the result file *name*: the bytes the executor wrote there after its
+    checks passed (``task_result.persist_result``, *dispatched*), or the
+    bytes of a file it found already complete and so did not dispatch again
+    (``task_result.task_is_complete``). The round's readers take them from
+    the claim (:meth:`Claim.checked_result`), never from the file again, so a
+    concurrent writer that replaces it afterwards reaches nothing
+    (docs/development/review-results.md, "Consuming checked bytes"). A file
+    found complete never displaces bytes the dispatch wrote itself. A phase
+    dir no dispatch is bound to remembers nothing."""
+    key = _bound_key(phase_dir)
+    with _BOUND_LOCK:
+        claims = _BOUND.get(key)
+        if not claims:
+            return
+        results = claims[-1]._results
+        held = results.get(name)
+        if dispatched or held is None or not held[1]:
+            results[name] = (bytes(data), dispatched)
 
 
 def bound(claim: Claim, func: Callable[..., Any]) -> Callable[..., Any]:
@@ -580,21 +646,29 @@ def report_seal(phase_dir: PathLike) -> ReportSeal:
     """Read *phase_dir*'s ``report.md`` seal. A report cut short, edited, or
     rebuilt from other verdicts than the ``validation.json`` beside it is not
     ``whole`` or does not bind it; a report with no line has neither."""
+    return sealed_verdicts(phase_dir)[0]
+
+
+def sealed_verdicts(phase_dir: PathLike) -> Tuple[ReportSeal, Optional[bytes]]:
+    """:func:`report_seal`, and the ``validation.json`` bytes it hashed
+    (``None`` when it read none). A caller that acts on a seal binding its
+    verdicts reads them from these bytes, never from the file again
+    (docs/development/review-results.md, "Consuming checked bytes")."""
     directory = Path(phase_dir)
     try:
         with open(directory / REPORT_NAME, encoding="utf-8", errors="replace") as handle:
             content = handle.read()
     except OSError:
-        return ReportSeal(None, False, False)
+        return ReportSeal(None, False, False), None
     mark = report_markdown.report_round_mark(content)
     if mark is None:
-        return ReportSeal(None, False, False)
+        return ReportSeal(None, False, False), None
     body = content.lstrip("\ufeff").split("\n", 2)
     whole = mark.body is not None and len(body) == 3 and digest(body[2]) == mark.body
     validation = _file_bytes(directory / VALIDATION_NAME)
     binds = (mark.validation is not None and validation is not None
              and digest(validation) == mark.validation)
-    return ReportSeal(mark.round_id, whole, binds)
+    return ReportSeal(mark.round_id, whole, binds), validation
 
 
 def ownership(current: Optional[str], recorded: Optional[str]) -> str:

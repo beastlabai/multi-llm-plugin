@@ -44,8 +44,9 @@ FAILED_CAPTURE_DIRNAME = "failed"
 MAX_CAPTURE_BYTES = 64 * 1024
 
 
-def _atomic_write_json(path: str, data: Any) -> None:
-    """Write ``data`` as JSON, owner-only (0600), by ``atomic_io``'s atomic write.
+def _atomic_write_json(path: str, data: Any) -> bytes:
+    """Write ``data`` as JSON, owner-only (0600), by ``atomic_io``'s atomic write;
+    the bytes written.
 
     An executor killed mid-batch (expected on the D4 detached path) therefore
     never leaves a half-written result for the reaggregation glob to pick up.
@@ -54,8 +55,9 @@ def _atomic_write_json(path: str, data: Any) -> None:
     in for the phase folder during the run is refused, never written through
     (docs/development/write-safety.md#plan-output-containment).
     """
-    write_in_plan_dir(path, json.dumps(data, indent=2).encode("utf-8"), make=True,
-                      mode=0o600)
+    encoded = json.dumps(data, indent=2).encode("utf-8")
+    write_in_plan_dir(path, encoded, make=True, mode=0o600)
+    return encoded
 
 
 def _tail(text: str, limit: int = MAX_CAPTURE_BYTES) -> str:

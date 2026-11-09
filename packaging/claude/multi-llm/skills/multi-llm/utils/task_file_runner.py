@@ -538,6 +538,7 @@ def continue_past_marker(
     cwd: Optional[str] = None,
     label: str = "subagent",
     retry_command: Optional[str] = None,
+    resume: bool = True,
 ) -> bool:
     """Should this phase continue in-process past the marker it just printed?
 
@@ -551,6 +552,8 @@ def continue_past_marker(
     falls through to reaggregation / verdict ingest / consolidation inline and the
     phase completes in one invocation. Markers are still printed — they are
     informational on this path, and the run is finished when the process exits.
+    *resume* is :func:`run_task_file`'s: ``False`` dispatches every task, a
+    result file already on disk counting for none.
 
     Raises:
         BatchFailed: exit 3 (even under ``--yes``) when any task failed or is
@@ -584,6 +587,7 @@ def continue_past_marker(
         document=document,
         anchor=anchor,
         cwd=cwd,
+        **({"resume": False} if not resume else {}),
     )
     if report.ok:
         print(

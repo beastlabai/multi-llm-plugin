@@ -230,6 +230,7 @@ def build_inputs(
     salvage_request_file: Optional[str] = None,
     items: Optional[Any] = None,
     context_plan_sha256: Optional[str] = None,
+    grouped_text: Optional[str] = None,
 ) -> Dict[str, str]:
     """Build the ``inputs`` hash block for a task file.
 
@@ -259,9 +260,17 @@ def build_inputs(
     plans/review-commits.md §2.4): passed as recorded rather than re-read, so
     a resume or a reaggregate whose snapshot no longer hashes to it is refused
     like a changed plan. Absent everywhere else, so no other block moves.
+
+    ``grouped_text`` is the grouping a review round wrote, as text: when given,
+    ``grouped_sha256`` is its hash rather than a read of *grouped_file*, so the
+    round binds the groups its prompts were built from, never a file replaced
+    after it was written (docs/development/review-results.md, "Consuming
+    checked bytes").
     """
     inputs: Dict[str, str] = {"plan_sha256": file_content_hash(plan_file)}
-    if grouped_file is not None:
+    if grouped_text is not None:
+        inputs["grouped_sha256"] = content_hash(grouped_text)
+    elif grouped_file is not None:
         inputs["grouped_sha256"] = file_content_hash(grouped_file)
     if tasks_file:
         inputs["tasks_sha256"] = file_content_hash(tasks_file)
@@ -917,11 +926,36 @@ def read_task_file(
         with open(path, "r", encoding="utf-8") as handle:
             document = json.load(handle)
     except (OSError, json.JSONDecodeError) as exc:
-        raise TaskFileError(
-            f"Refusing task file {path}: it could not be read as JSON ({exc}). "
-            f"Phase dir: {resolved_phase_dir}. {_REMATERIALIZE_FIX}."
-        ) from exc
+        raise unreadable_task_file(path, resolved_phase_dir, exc) from exc
+    return check_task_document(
+        document, path, phase_dir=resolved_phase_dir, current_inputs=current_inputs,
+    )
 
+
+def unreadable_task_file(path: str, phase_dir: str, exc: BaseException) -> TaskFileError:
+    """The refusal :func:`read_task_file` raises for a file it could not read
+    as JSON (*exc*)."""
+    return TaskFileError(
+        f"Refusing task file {path}: it could not be read as JSON ({exc}). "
+        f"Phase dir: {phase_dir}. {_REMATERIALIZE_FIX}."
+    )
+
+
+def check_task_document(
+    document: Any,
+    path: str,
+    *,
+    phase_dir: Optional[str] = None,
+    current_inputs: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """:func:`read_task_file`'s version, schema and inputs checks, on a
+    document the caller has already read from *path*, so a caller that judges
+    the file by more than these checks judges one read of it.
+
+    Raises:
+        TaskFileError: exit code 3, as :func:`read_task_file`.
+    """
+    resolved_phase_dir = phase_dir or os.path.dirname(os.path.abspath(path))
     check_task_file_version(document, path, resolved_phase_dir)
     errors = validate_subagent_task_file(document)
     if errors:

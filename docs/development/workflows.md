@@ -625,6 +625,15 @@ symlink at `answers.md` is replaced by a regular file: a report linked to anothe
 being updated there, and the link's target is left as it was. `tests/test_ask_answer_persistence.py`
 holds the cases.
 
+**The close uses the answers its checked slots held.** A slot that answered with its checks
+passed keeps the text it counted: the answer file as step 1 read it, or step 2's recovered answer
+as a text-mode read of the bytes `publish_atomically` wrote (`AskRun.checked_answers`). The
+closing scan counts that text and `answers.md` shows it, never the file read again, and every
+other answer file is read once for both (`collect_completed(held=...)`,
+`write_answers_md(sections=...)`), so a provider a crashed run left behind cannot replace an
+answer between its slot's checks and the report ([Consuming checked
+bytes](review-results.md#consuming-checked-bytes)).
+
 **Withheld answers.** An answer is reused only from a slot whose safety checks passed, as on
 the review lanes ([Withheld slot answers](review-results.md#withheld-slot-answers)): the
 question folder's `.status.json` keeps the same two maps, `models_rejected` and

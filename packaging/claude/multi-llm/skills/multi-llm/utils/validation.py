@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 try:
-    from .atomic_io import atomic_write_bytes
+    from .atomic_io import atomic_write_bytes, read_back_text
     from .held_folder import write_in_plan_dir
     from .state_manager import generate_group_id, CURRENT_FORMAT_VERSION
     from .state_manager import group_join_ids, records_by_unique_id, stamped_group_id
@@ -47,7 +47,7 @@ try:
         tasks_of,
     )
 except ImportError:
-    from utils.atomic_io import atomic_write_bytes
+    from utils.atomic_io import atomic_write_bytes, read_back_text
     from utils.held_folder import write_in_plan_dir
     from utils.state_manager import generate_group_id, CURRENT_FORMAT_VERSION
     from utils.state_manager import group_join_ids, records_by_unique_id, stamped_group_id
@@ -846,6 +846,13 @@ def legacy_context_round_reason(
             document = json.load(handle)
     except (OSError, ValueError):
         return None
+    return legacy_context_document_reason(document, tasks_name)
+
+
+def legacy_context_document_reason(
+    document: Any, tasks_name: str = "validation_tasks.json",
+) -> Optional[str]:
+    """:func:`legacy_context_round_reason` for a task document already read."""
     if not isinstance(document, dict):
         return None
     try:
@@ -1488,9 +1495,20 @@ def _read_task_manifest(tasks_path: Optional[Path]) -> Tuple[Optional[Dict[str, 
             document = json.load(f)
     except (OSError, ValueError):
         return None, []
+    return _task_manifest_of(document)
+
+
+def _task_manifest_of(document: Any) -> Tuple[Optional[Dict[str, str]], List[Dict[str, Any]]]:
+    """:func:`_read_task_manifest` for a task document already read (``None``:
+    there was none to read, or it could not be)."""
     if not isinstance(document, dict):
         return None, []
     return batch_manifest(document), tasks_of(document)
+
+
+#: :func:`validation_source_decision`'s *task_document* when the caller read no
+#: task file: the decision reads it itself.
+UNREAD = object()
 
 
 def _batch_file_group_hashes(path: Path) -> set:
@@ -1514,6 +1532,10 @@ def validation_source_decision(
     validation_path: Path,
     grouped_path: Path,
     tasks_path: Optional[Path] = None,
+    *,
+    validation_bytes: Optional[bytes] = None,
+    grouped_text: Optional[str] = None,
+    task_document: Any = UNREAD,
 ) -> Tuple[Optional[str], str]:
     """``(stale_reason, use_note)`` for a ``validation.json`` (D7, §7.1).
 
@@ -1551,10 +1573,24 @@ def validation_source_decision(
         grouped_path: The ``grouped.json`` it must belong to.
         tasks_path: The current task file; defaults to the
             ``validation_tasks.json`` beside ``validation_path``.
+        validation_bytes: ``validation_path``'s bytes, when the caller has read
+            them to use the verdicts they hold: they are judged, never the
+            file again.
+        grouped_text: ``grouped_path``'s text, when the caller holds the
+            grouping it reports (read, or written, as a text-mode read returns
+            it): its digest is checked, never the file's
+            (docs/development/review-results.md, "Consuming checked bytes").
+        task_document: ``tasks_path`` as the caller read it, once, to reuse
+            the verdicts against (``None``: absent or unreadable): the round
+            and contract checks read this document, never the file again.
+            :data:`UNREAD` (the default) reads the file here.
     """
     try:
-        with open(validation_path, 'r', encoding='utf-8') as f:
-            data = json.load(f)
+        if validation_bytes is not None:
+            data = json.loads(read_back_text(validation_bytes))
+        else:
+            with open(validation_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
     except (OSError, ValueError) as exc:
         return f"could not read {validation_path.name}: {exc}", ""
 
@@ -1564,7 +1600,10 @@ def validation_source_decision(
     bound_hash = metadata.get("grouped_sha256")
     grouping_note = ""
     if bound_hash:
-        current_hash = file_content_hash(str(grouped_path))
+        current_hash = (
+            content_hash(grouped_text) if grouped_text is not None
+            else file_content_hash(str(grouped_path))
+        )
         if bound_hash != current_hash:
             return (
                 f"{validation_path.name} belongs to grouping {bound_hash}, current "
@@ -1577,7 +1616,10 @@ def validation_source_decision(
         phase_dir = validation_path.parent
         if tasks_path is None:
             tasks_path = phase_dir / "validation_tasks.json"
-        current_manifest, current_tasks = _read_task_manifest(tasks_path)
+        current_manifest, current_tasks = (
+            _read_task_manifest(tasks_path) if task_document is UNREAD
+            else _task_manifest_of(task_document)
+        )
         recorded_manifest = metadata.get("batch_manifest")
         problems: List[str] = []
         # The round check needs both sides: a file that merged no batch round
@@ -1649,7 +1691,7 @@ def validation_source_decision(
         # 7.1d / task 2.10: a bound, up-to-date file is still not reusable when
         # it predates the context contract and its round's prompts carry the
         # contract-1 cut of an over-limit document.
-        legacy = _legacy_contract_reason(metadata, phase_dir)
+        legacy = _legacy_contract_reason(metadata, phase_dir, task_document)
         if legacy:
             return legacy, ""
         batch_note = (
@@ -1666,7 +1708,7 @@ def validation_source_decision(
     # Legacy file: no binding to its batches, so fall back to what the phase dir
     # says happened after it was written — after the 2.10 check, which retires
     # it outright when its round cut an over-limit document.
-    legacy = _legacy_contract_reason(metadata, validation_path.parent)
+    legacy = _legacy_contract_reason(metadata, validation_path.parent, task_document)
     if legacy:
         return legacy, ""
     try:
@@ -1693,15 +1735,20 @@ def validation_source_decision(
     return None, ", ".join(parts)
 
 
-def _legacy_contract_reason(metadata: Dict[str, Any], phase_dir: Path) -> Optional[str]:
-    """7.1d: a ``validation.json`` from before contract 2 over an over-limit round."""
+def _legacy_contract_reason(
+    metadata: Dict[str, Any], phase_dir: Path, task_document: Any = UNREAD,
+) -> Optional[str]:
+    """7.1d: a ``validation.json`` from before contract 2 over an over-limit
+    round, judged on *task_document* when the caller read it."""
     try:
         contract = int(metadata.get("context_contract") or 1)
     except (TypeError, ValueError):
         contract = 1
     if contract >= CONTEXT_CONTRACT:
         return None
-    return legacy_context_round_reason(str(phase_dir))
+    if task_document is UNREAD:
+        return legacy_context_round_reason(str(phase_dir))
+    return legacy_context_document_reason(task_document)
 
 
 def _derive_model_from_results(validation_results: List[Dict[str, Any]]) -> Optional[str]:
@@ -1769,8 +1816,11 @@ def save_validation_results(
     ``validation_tasks.json`` records under ``inputs.grouped_sha256`` — so
     ``reaggregate_from_existing_files`` can tell a file left behind by an
     earlier grouping from one that belongs to the current one. Defaults to the
-    ``grouped.json`` beside ``output_path``; the key is omitted when that file
-    does not exist.
+    ``grouped.json`` beside ``output_path``, and then to the text of it *claim*
+    holds (``review_round.Claim.grouping_text``: the grouping the merge joined
+    its verdicts to), never the file read again
+    (docs/development/review-results.md, "Consuming checked bytes"); the key is
+    omitted when that file does not exist.
 
     Args:
         validation_results: List of validation results
@@ -1830,9 +1880,14 @@ def save_validation_results(
     if not model:
         model = _derive_model_from_results(validation_results) or "unknown"
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    held_grouping = None
     if grouped_file is None:
         grouped_file = str(output_path.parent / "grouped.json")
-    grouped_sha256 = file_content_hash(grouped_file)
+        held_grouping = claim.grouping_text if claim is not None else None
+    grouped_sha256 = (
+        content_hash(held_grouping) if held_grouping is not None
+        else file_content_hash(grouped_file)
+    )
 
     # Build a mapping from index to group_id if groups provided
     group_id_by_index = {}
@@ -2349,6 +2404,11 @@ class ValidationRound:
     * ``prompt_budget``: the D2d budget; an over-budget batch is split, and a
       single group that still does not fit fails loudly, never truncated.
     * ``publish``: publish ``validation_context`` for this round.
+    * ``grouped_text``: the ``grouped.json`` text the round's groups were
+      written as (``review_round.Claim.grouping_text``), hashed into
+      ``inputs.grouped_sha256`` in place of a read of the file; ``None`` reads
+      the file (docs/development/review-results.md, "Consuming checked
+      bytes").
     """
 
     groups: List[Dict[str, Any]]
@@ -2368,6 +2428,7 @@ class ValidationRound:
     max_per_batch: int = 4
     prompt_budget: Optional[PromptBudget] = None
     publish: bool = True
+    grouped_text: Optional[str] = None
 
 
 def prepare_batched_validation_tasks(
@@ -2538,6 +2599,7 @@ def materialize_validation_round(round_: ValidationRound) -> Dict[str, Any]:
         # resume guard and `state.plan_hash` compare in.
         plan_file=None if bound_plan is not None else plan_file,
         grouped_file=grouped_file,
+        grouped_text=round_.grouped_text,
         tasks_file=None if bound_tasks is not None else tasks_file,
         diff_base=(
             f"{base_ref}..{head_ref}" if base_ref and head_ref else base_ref
@@ -2882,6 +2944,8 @@ def merge_batched_validation_results(
     batch_metadata: Dict[str, Any],
     total_groups: int,
     groups: Optional[List[Any]] = None,
+    *,
+    batch_bytes: Optional[Dict[Any, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """
     Merge results from multiple validation batch files.
@@ -2902,6 +2966,11 @@ def merge_batched_validation_results(
         groups: The host's groups the batches were materialized from
             (``grouped.json``), looked up by stable hash; ``None`` stamps
             nothing.
+        batch_bytes: ``{batch_index: bytes}`` for the batches the caller has
+            already read or taken from its dispatch, ``None`` for one it found
+            missing and the ``OSError`` for one it could not read; a batch
+            named here is never read from disk
+            (docs/development/review-results.md, "Consuming checked bytes").
 
     Returns:
         Merged validation results list with proper group indices
@@ -2943,15 +3012,23 @@ def merge_batched_validation_results(
     for batch_info in batches:
         batch_index = batch_info["batch_index"]
         batch_file = output_path / f"validation_batch_{batch_index}.json"
+        given = batch_bytes is not None and batch_index in batch_bytes
+        held = batch_bytes[batch_index] if given else None
+        missing = held is None if given else not batch_file.exists()
 
-        if not batch_file.exists():
+        if missing:
             print(f"[merge] Warning: Batch file not found: {batch_file}")
             batches_missing += 1
             continue
 
         try:
-            with open(batch_file, 'r', encoding='utf-8') as f:
-                batch_data = json.load(f)
+            if isinstance(held, OSError):
+                raise held
+            if given:
+                batch_data = json.loads(read_back_text(held))
+            else:
+                with open(batch_file, 'r', encoding='utf-8') as f:
+                    batch_data = json.load(f)
 
             # Handle both wrapped format and direct list
             if isinstance(batch_data, dict):

@@ -304,3 +304,14 @@ def atomic_write_text(
         follow_symlinks=follow_symlinks, temp_prefix=temp_prefix, dir_fd=dir_fd,
     )
     return data
+
+
+def read_back_text(data: bytes) -> str:
+    """*data* as a text-mode read of a file holding it returns it: UTF-8, with
+    universal newlines (``open(path, encoding="utf-8").read()``). A caller that
+    read a file's bytes once, or holds the bytes it wrote, parses this, so it
+    parses what a second, text-mode read would have returned without making
+    one (docs/development/review-results.md, "Consuming checked bytes")."""
+    import io
+
+    return io.TextIOWrapper(io.BytesIO(data), encoding="utf-8").read()

@@ -59,12 +59,12 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, NamedTuple, Optional, Set, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Set, Tuple, Union
 
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
-from utils.atomic_io import atomic_write_text
+from utils.atomic_io import atomic_write_text, read_back_text
 from utils.stream_bootstrap import bootstrap_streams
 from utils import cli_common
 from utils.cli_common import (
@@ -785,9 +785,9 @@ def _write_atomically(path: str, text: str) -> None:
     atomic_write_text(path, text, newline=os.linesep, mode=0o600)
 
 
-def publish_atomically(path: str, text: str) -> None:
+def publish_atomically(path: str, text: str) -> bytes:
     """Replace a published file, an ``answer_<model>.md`` or ``answers.md``,
-    with *text* by ``atomic_io``'s atomic write.
+    with *text* by ``atomic_io``'s atomic write; the bytes written.
 
     A write that fails leaves the path as it was, never a cut prefix that the
     closing scan, a resume or a reader of ``answers.md`` would take for the
@@ -796,7 +796,7 @@ def publish_atomically(path: str, text: str) -> None:
     gets the umask's, as the plain ``open()`` these files were written with
     gave them; the platform's newlines. Raises ``OSError``.
     """
-    atomic_write_text(path, text, newline=os.linesep)
+    return atomic_write_text(path, text, newline=os.linesep)
 
 
 def answers_on_stdout(provider_name: Optional[str]) -> bool:
@@ -1377,7 +1377,8 @@ def demote_headings(text: str) -> str:
 
 
 def collect_completed(
-    question_dir: str, model_specs: List[str]
+    question_dir: str, model_specs: List[str],
+    held: Optional[Mapping[str, str]] = None,
 ) -> List[Tuple[str, str]]:
     """Read-only scan of ``answer_<model>.md`` files.
 
@@ -1385,12 +1386,20 @@ def collect_completed(
     a usable (non-empty) answer, in the resolved ``model_specs`` order. This is
     the file-based source of truth for which models succeeded, and lets callers
     derive ``completed`` without writing ``answers.md``.
+
+    *held* maps a spec to the answer text this run's slot read or wrote after
+    its checks passed (``AskRun.checked_answers``): that text is the answer,
+    and its file is not read again, so a concurrent writer that replaces it
+    reaches nothing (docs/development/workflows.md#ask-mode).
     """
     sections: List[Tuple[str, str]] = []
     for spec in model_specs:
-        sanitized = sanitize_model_name(spec)
-        answer_path = os.path.join(question_dir, f"answer_{sanitized}.md")
-        text = read_nonempty_answer(answer_path)
+        if held is not None and spec in held:
+            text: Optional[str] = held[spec] if held[spec].strip() else None
+        else:
+            sanitized = sanitize_model_name(spec)
+            answer_path = os.path.join(question_dir, f"answer_{sanitized}.md")
+            text = read_nonempty_answer(answer_path)
         if text is not None:
             sections.append((spec, text.strip()))
     return sections
@@ -1405,6 +1414,7 @@ def write_answers_md(
     timestamp: str,
     earlier_partials: Iterable[str] = (),
     withheld: Iterable[str] = (),
+    sections: Optional[List[Tuple[str, str]]] = None,
 ) -> Tuple[str, List[str]]:
     """Fully (re)generate ``answers.md`` from all current ``answer_<model>.md``
     files plus the failed-models map.
@@ -1424,12 +1434,17 @@ def write_answers_md(
     counted: one a failed run left that could not be set aside
     (:func:`set_answer_file_aside`), one a model the question withholds, or,
     under ``--rerun-all``, an earlier run's answer to a model this run never
-    dispatched (``AskRun.close``).
+    dispatched (``AskRun.close``). *sections* are the answers the caller has
+    already scanned (:func:`collect_completed`), written as they are, never
+    read again; ``None`` scans the files here.
     """
     earlier = set(earlier_partials)
     withheld_set = set(withheld)
     sections = [
-        (spec, text) for spec, text in collect_completed(question_dir, model_specs)
+        (spec, text) for spec, text in (
+            collect_completed(question_dir, model_specs) if sections is None
+            else sections
+        )
         if spec not in withheld_set
     ]
     completed: List[str] = [spec for spec, _ in sections]
@@ -2277,9 +2292,9 @@ def _accept_partials_locked(
     # A model the question still withholds is not counted, as at a run's close.
     still = _result_files.withheld_models(question_dir)
     unread = {spec for spec in roster if spec in still}
-    completed = [
-        spec for spec, _ in collect_completed(question_dir, roster) if spec not in unread
-    ]
+    # One scan for the count and for answers.md, each file read once.
+    sections = collect_completed(question_dir, roster)
+    completed = [spec for spec, _ in sections if spec not in unread]
     reconcile_failed_map(roster, completed, failed_models)
     # A slot the last run never dispatched (its progress row reads
     # `not-dispatched`) kept an earlier run's partial.
@@ -2293,7 +2308,7 @@ def _accept_partials_locked(
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     answers_md, completed = write_answers_md(
         question_dir, question, plan_path, roster, failed_models, timestamp,
-        earlier_partials=earlier_partials, withheld=unread,
+        earlier_partials=earlier_partials, withheld=unread, sections=sections,
     )
     record_output_files(question_dir, answers=answers_md)
     # The accepted models' progress rows move with the rest of the record: a
@@ -2740,6 +2755,10 @@ class AskRun:
     #: Each dispatched slot's provider call, so the closing report can stop and
     #: join the ones the deadline cut before it sets their answer files aside.
     provider_calls: Dict[str, ProviderCall] = field(default_factory=dict)
+    #: The answer each slot that succeeded with its checks passed read or
+    #: wrote, as text: what the close counts and ``answers.md`` shows for it,
+    #: never its file read again (docs/development/workflows.md#ask-mode).
+    checked_answers: Dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def start(cls, setup: AskSetup) -> "AskRun":
@@ -3101,8 +3120,12 @@ class AskRun:
             # 1. The answer file the model was asked for. Only here: nothing
             #    shows a file from a timed-out or failed run is finished — it
             #    can be cut mid-write, an outline or a draft (D3.3).
-            if read_nonempty_answer(answer_path) is not None:
+            answer = read_nonempty_answer(answer_path)
+            if answer is not None:
                 write_origin(question_dir, model_spec, ORIGIN_FILE)
+                # The answer as read after the checks: the close counts and
+                # shows this text, never a later read of the file.
+                self.checked_answers[model_spec] = answer
                 return checked_ending(question_dir, model_spec, answer_path, {
                     "model": model_spec, "success": True, "error": None,
                     "source": "file"})
@@ -3117,11 +3140,15 @@ class AskRun:
             recovered = recover_answer_text(result, answer_text)
             if recovered is not None:
                 try:
-                    publish_atomically(answer_path, recovered)
+                    written = publish_atomically(answer_path, recovered)
                 except OSError as e:
                     persist_error = f"Recovered answer but failed to persist it: {e}"
                     unpublished = recovered
                 else:
+                    # The answer as written, read back in memory: the close
+                    # counts and shows this text, never the file again.
+                    if isinstance(written, bytes):
+                        self.checked_answers[model_spec] = read_back_text(written)
                     # D7.1: `stdout` when this adapter is asked for stdout (the
                     # same capability, off the same provider_name, that picked
                     # the prompt variant), `fallback` when it was asked for the
@@ -3257,10 +3284,17 @@ class AskRun:
             # question withholds is read: a slot that failed its safety checks, or
             # whose checks never finished, and no checked slot since (a model this
             # run refused or never reached among them).
-            completed = [
-                spec for spec, _ in collect_completed(question_dir, model_specs)
-                if spec not in unread
-            ]
+            # Read once, and a slot of this run that answered with its checks
+            # passed by the text it read or wrote (`checked_answers`), never by
+            # its file read again: the same sections give `completed` and
+            # `answers.md` (docs/development/workflows.md#ask-mode).
+            held = {
+                spec: text for spec, text in self.checked_answers.items()
+                if isinstance(results.get(spec), dict)
+                and results[spec].get("success") and results[spec].get(CHECKED_KEY) is True
+            }
+            sections = collect_completed(question_dir, model_specs, held)
+            completed = [spec for spec, _ in sections if spec not in unread]
             completed_set = set(completed)
 
             # Every requested model is either completed (has a usable answer file)
@@ -3341,7 +3375,7 @@ class AskRun:
             earlier_partials = [s for s in failed_models if s not in dispatched_specs]
             answers_md, completed = write_answers_md(
                 question_dir, question, plan_path, model_specs, failed_models, timestamp,
-                earlier_partials=earlier_partials, withheld=unread,
+                earlier_partials=earlier_partials, withheld=unread, sections=sections,
             )
 
             state = ask_run_state(completed, failed_models)

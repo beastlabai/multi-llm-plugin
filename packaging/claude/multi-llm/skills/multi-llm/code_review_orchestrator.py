@@ -68,7 +68,7 @@ from utils import report_markdown
 from utils import commit_report
 from utils import commit_spelling
 from utils.commit_attribution import attribute_review_groups
-from utils.atomic_io import atomic_write_text
+from utils.atomic_io import atomic_write_text, read_back_text
 from utils.state_manager import (
     load_groups_payload,  # noqa: F401 - the module's name for grouped.json's reader
     match_issues_to_suggestions,
@@ -474,12 +474,22 @@ class CodeLane:
         )
 
     def adopt_salvaged(
-        self, model_spec: str, path: Path,
+        self, model_spec: str, path: Path, *, data: Optional[bytes] = None,
     ) -> Optional["_review_lane.SlotResult"]:
-        if not (path.exists() and path.stat().st_size > 0):
+        # The bytes the salvage dispatch persisted (*data*), or the file read
+        # once here when it reported none: the issues they hold rejoin the
+        # round, which never reads the file again (docs/development/
+        # review-results.md, "Consuming checked bytes").
+        if data is None:
+            if not (path.exists() and path.stat().st_size > 0):
+                return None
+        elif not data:
             return None
         try:
-            repaired_issues = json.loads(path.read_text(encoding="utf-8"))
+            repaired_issues = json.loads(
+                path.read_text(encoding="utf-8") if data is None
+                else read_back_text(data)
+            )
         except (OSError, ValueError) as read_error:
             print(
                 f"[{model_spec}] salvage output unreadable, leaving failed: "
@@ -5285,6 +5295,8 @@ async def reaggregate_from_existing_files(
             current_inputs=lambda: build_inputs(
                 plan_file=str(plan_path),
                 grouped_file=str(grouped_path),
+                # The grouping this reaggregate reports, as it holds it.
+                grouped_text=claim.grouping_text,
                 # Recut from the same groups and the files as they are now: a
                 # reviewed file edited between fan-out and this reaggregate
                 # moves this hash, and only this hash — `diff_base` names the
@@ -5428,7 +5440,7 @@ def finish_code_review(
 
 
 def _sealed_grouping(
-    phase_dir: Path,
+    phase_dir: Path, *, validation_bytes: Optional[bytes] = None,
 ) -> Tuple[Optional[List[Dict[str, Any]]], str]:
     """``(groups, "")`` from the ``grouped.json`` the ``validation.json``
     beside it binds, or ``(None, why)``.
@@ -5439,11 +5451,19 @@ def _sealed_grouping(
     was built from. A grouping that is missing, unreadable, of other bytes, or
     that ``validation.json`` binds no digest for, gives no groups: it is never
     read as zero groups. The bytes hashed are the bytes parsed.
+
+    *validation_bytes* are the ``validation.json`` bytes the seal was checked
+    against (``review_round.sealed_verdicts``): the digest is read from them,
+    never from the file again, so a pair replaced after the seal check does
+    not pass; ``None`` reads the file once.
     """
     grouped_path = phase_dir / "grouped.json"
     validation_path = phase_dir / "validation.json"
     try:
-        validation = json.loads(validation_path.read_text(encoding="utf-8"))
+        validation = json.loads(
+            validation_path.read_text(encoding="utf-8") if validation_bytes is None
+            else read_back_text(validation_bytes)
+        )
     except (OSError, ValueError) as exc:
         return None, f"{validation_path.name} could not be read: {exc}"
     metadata = validation.get("metadata") if isinstance(validation, dict) else None
@@ -5470,7 +5490,7 @@ def _sealed_grouping(
 
 def heal_unrecorded_completion(
     phase_dir: Path, state: Any, args: argparse.Namespace, *, report_path: Path,
-    plan_path: Path,
+    plan_path: Path, validation_bytes: Optional[bytes] = None,
 ) -> int:
     """Finish the completion of a round whose report outlived its record.
 
@@ -5488,11 +5508,14 @@ def heal_unrecorded_completion(
     A grouping that does not check out records nothing and refuses with exit 3,
     naming ``--force``: unavailable evidence is never counted as zero HIGH
     groups (docs/development/review-results.md, "The shared review lane").
+    *validation_bytes* are the ``validation.json`` bytes the caller checked the
+    seal against; the grouping is bound through them, never through a later
+    read (docs/development/review-results.md, "Consuming checked bytes").
     """
     grouped_path = phase_dir / "grouped.json"
     validation_path = phase_dir / "validation.json"
     issues_path = phase_dir / "issues.json"
-    sealed, problem = _sealed_grouping(phase_dir)
+    sealed, problem = _sealed_grouping(phase_dir, validation_bytes=validation_bytes)
     if sealed is None:
         print("ERROR: Partial completion detected for 'code-review'.")
         print("  validation.json and a whole report.md sealed with it record this "
@@ -6076,11 +6099,20 @@ def _guard_partial_completion(
                 flags=cli_common.current_replay_flags(mode="review-code"),
             ))
             sys.exit(EXIT_NEEDS_HUMAN)
-        seal = _review_round.report_seal(phase_dir_check)
+        # The seal read once, with the validation.json bytes it hashed: the
+        # heal takes its verdicts' grouping digest from those bytes, never
+        # from the file read again, and the round both record is checked on
+        # the same reads (docs/development/review-results.md, "Consuming
+        # checked bytes").
+        seal, sealed_validation = _review_round.sealed_verdicts(phase_dir_check)
+        recorded_round = _review_round.status_round(status_check)
         if validation_path.exists() and report_path_check.exists() and (
             rounds.owner(_review_round.VALIDATION_NAME) == _review_round.OWNED
             and rounds.owner(_review_round.REPORT_NAME) == _review_round.OWNED
             and seal.whole and seal.binds_validation
+            and sealed_validation is not None
+            and seal.round_id == recorded_round
+            and _review_round.verdicts_of(sealed_validation).round_id == recorded_round
         ):
             # Auto-heal: this round's verdicts and report are both on disk
             # (both record the round on record, and the report is whole and
@@ -6091,7 +6123,7 @@ def _guard_partial_completion(
             # grouped.json that validation.json binds, or refuses (exit 3).
             sys.exit(heal_unrecorded_completion(
                 phase_dir_check, state_guard, args, report_path=report_path_check,
-                plan_path=plan_path,
+                plan_path=plan_path, validation_bytes=sealed_validation,
             ))
         elif validation_path.exists() and report_path_check.exists():
             # This round's task file, but a validation.json or report.md

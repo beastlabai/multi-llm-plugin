@@ -44,7 +44,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         validate_with_schema_file,
         validation_reply_problems,
     )
-    from .subagent_tasks import WRITE_KINDS
+    from .subagent_tasks import WRITE_KINDS, content_hash
     from . import failure_capture as _failure_capture
     from . import task_outcome as _task_outcome
 except ImportError:  # pragma: no cover - direct-script import shim
@@ -70,7 +70,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         validate_with_schema_file,
         validation_reply_problems,
     )
-    from utils.subagent_tasks import WRITE_KINDS
+    from utils.subagent_tasks import WRITE_KINDS, content_hash
     from utils import failure_capture as _failure_capture  # type: ignore[no-redef]
     from utils import task_outcome as _task_outcome  # type: ignore[no-redef]
 
@@ -324,7 +324,7 @@ def persist_result(task: Dict[str, Any], phase_dir: str, data: Any) -> str:
         )
     # Written only while the round that dispatched it is still the round on
     # record; a late result of a replaced round is dropped (utils/review_round.py).
-    from .review_round import persisting_result
+    from .review_round import persisting_result, record_checked_result
 
     with persisting_result(phase_dir, target.name) as current:
         if current:
@@ -332,8 +332,13 @@ def persist_result(task: Dict[str, Any], phase_dir: str, data: Any) -> str:
             # now: the write holds that folder from the plan's directory, so a
             # link swapped in for it since the check above is refused
             # (docs/development/write-safety.md#plan-output-containment).
-            _failure_capture._atomic_write_json(
+            written = _failure_capture._atomic_write_json(
                 os.path.join(os.path.abspath(phase_dir), target.name), data)
+            # The bytes written, for the round that dispatched them to read
+            # instead of the file (docs/development/review-results.md,
+            # "Consuming checked bytes").
+            if isinstance(written, bytes):
+                record_checked_result(phase_dir, target.name, written, dispatched=True)
     return str(target)
 
 
@@ -547,22 +552,41 @@ def salvage_failure_of(task: Dict[str, Any], phase_dir: str) -> Optional[str]:
     retire glob relies on. The request is the record that says whether a
     deadline ended the run (``"failure": "timeout"``); the task itself carries no
     such field, and its ``inputs.salvage_request_sha256`` already binds it to
-    that request's bytes. ``None`` for any other kind, and whenever the request
-    cannot be read — which keeps today's behaviour (a salvaged ``[]`` persists).
+    that request's bytes. ``None`` for any other kind.
+
+    The request is read once, and its text must still hash to the
+    ``inputs.salvage_request_sha256`` the task records, the digest the
+    dispatch checked it against, before anything in it is believed. A bound
+    request that is gone, unreadable, no longer that digest's text, or not a
+    JSON object is not the one the task was bound to, so its failure kind is
+    unknown and read as ``"timeout"``, which refuses a salvaged ``[]`` and
+    nothing else. Only a task that binds no request keeps the old reading,
+    ``None`` when the request cannot be read, so its salvaged ``[]`` persists
+    (docs/development/review-results.md, "Consuming checked bytes").
     """
     if str(task.get("kind", "")) != "salvage":
         return None
     output_name = str(task.get("output_name") or "")
     if not output_name:
         return None
+    inputs = task.get("inputs")
+    bound = inputs.get("salvage_request_sha256") if isinstance(inputs, dict) else None
+    bound = bound if isinstance(bound, str) and bound else None
+    unknown = SALVAGE_FAILURE_TIMEOUT if bound else None
     path = os.path.join(phase_dir, f"salvage_{output_name}")
     try:
         with open(path, encoding="utf-8") as handle:
-            request = json.load(handle)
+            text = handle.read()
     except (OSError, ValueError):
-        return None
+        return unknown
+    if bound and content_hash(text) != bound:
+        return SALVAGE_FAILURE_TIMEOUT
+    try:
+        request = json.loads(text)
+    except ValueError:
+        return unknown
     if not isinstance(request, dict):
-        return None
+        return unknown
     failure = request.get(SALVAGE_FAILURE_KEY)
     return failure if isinstance(failure, str) and failure else None
 
@@ -855,7 +879,8 @@ def task_is_complete(task: Dict[str, Any], phase_dir: str) -> bool:
     if not target.exists() or target.stat().st_size == 0:
         return False
     try:
-        data = json.loads(target.read_text(encoding="utf-8"))
+        raw = target.read_bytes()
+        data = json.loads(raw.decode("utf-8"))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return False
     # Read as every lane reads it: an absent schema_version is the one
@@ -863,7 +888,15 @@ def task_is_complete(task: Dict[str, Any], phase_dir: str) -> bool:
     supply_result_version(str(task.get("kind", "")), data)
     if validate_result(str(task.get("kind", "")), data):
         return False
-    return not _result_names_foreign_groups(task, data)
+    if _result_names_foreign_groups(task, data):
+        return False
+    # The bytes judged complete, for a review round that dispatched this task
+    # to read instead of the file (docs/development/review-results.md,
+    # "Consuming checked bytes").
+    from .review_round import record_checked_result
+
+    record_checked_result(phase_dir, target.name, raw, dispatched=False)
+    return True
 
 
 def _result_names_foreign_groups(task: Dict[str, Any], data: Any) -> bool:

@@ -18,6 +18,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [Reaggregation and result identity](#reaggregation-and-result-identity)
 - [Withheld slot answers](#withheld-slot-answers)
 - [Round identity](#round-identity)
+- [Consuming checked bytes](#consuming-checked-bytes)
 - [Malformed result entries](#malformed-result-entries)
 - [Report payload](#report-payload)
 - [Report regeneration](#report-regeneration)
@@ -662,20 +663,20 @@ So no reader trusts a file there, and the rule needs no window closed:
   in-process salvage and adopts nothing, and the model just fails; the run completes partial with
   a warning. A host-written repair is a file on disk like any other: there is no salvage in a
   recovered phase, so move the folder aside to start clean.
-- **The round counts what it holds in memory.** review-code groups its slots' issues, never the
-  files (it always did); review-plan and review-tasks group what each slot's save wrote, kept in
-  memory (`BaseReviewLane.saved`) when the close says the phase is recovered
-  (`FanoutOutcome.recovered`), never the files they just saved. The report is built from those
-  groups too, an empty grouping included: the base lane's `aggregate_results` never reads
-  `grouped.json` back for a recovered round (`read_grouped_file=False`; `[]` is zero groups,
-  never a missing answer).
+- **The round counts what it holds in memory**, as every round does ("Consuming checked bytes"
+  below): review-code groups its slots' issues, review-plan and review-tasks what each slot's
+  save wrote (`BaseReviewLane.saved`), never the files they just saved. The report is built from
+  those groups too, an empty grouping included: the fan-out's `aggregate_results` never reads
+  `grouped.json` back (`read_grouped_file=False`; `[]` is zero groups, never a missing answer).
 - **No validation is handed to the host**: the `--reaggregate` that would read the verdicts back
   refuses, so without `--exec-subagents` the round completes unvalidated, as under
   `--skip-validation`, with a warning (and a `result_notes` entry) naming `--exec-subagents`, which
   validates in the run's own process, and moving the folder aside
   (`materialize_fanout_round`). The round's groups, without verdicts, still reach the report and
   the HIGH-group count, so `--fail-on-high` exits 3 over a HIGH group exactly as under an explicit
-  `--skip-validation`.
+  `--skip-validation`. Under `--exec-subagents` every batch is dispatched again and only the
+  verdicts this run's dispatch wrote are merged; without them the round ends the same unvalidated
+  way ("Consuming checked bytes").
 
 `accepted` is the operator's own override, ask's `--accept-partial`
 (`result_files.clear_withheld_model`, read back before `[ACCEPTED]` is printed): it never says
@@ -831,6 +832,82 @@ captures): a task file or `validation.json` recording another round is refused a
 `--force` re-run, and nothing is changed. Before it, a reaggregate after a `--force` stopped right
 past its stamp merged the previous round's files and wrote a report claiming the new round.
 Files with no id on either side keep the reaggregate's content checks, as before round ids.
+
+## Consuming checked bytes
+
+**A run uses the bytes it checked, wrote or validated, never a later read of the same file**
+(code health U91). The phase lock keeps a second run out, not a provider process a crashed run
+left behind, and that process can replace a file between a check and the read after it. So each
+consumer reads a file once and uses the bytes it checked, or takes them from where they were
+produced:
+
+- **The fan-out's grouping.** Every lane groups its slots' answers as it holds them: review-code
+  its slots' issues; review-plan and review-tasks what each slot's save wrote
+  (`BaseReviewLane.saved`, filled by `save_model_result`) and what an adopted salvage parsed to
+  (`BaseReviewLane.adopt_salvaged`). The report is built from those groups, validated or not
+  (`aggregate_results` with `read_grouped_file=False`). A base-lane `--reaggregate` whose
+  validation was skipped, or whose verdicts could not be read, reports the grouping
+  `bind_grouping` holds, as review-code's always did.
+- **What the executor checked.** While a dispatch is bound to the round's claim
+  (`review_round.results_bound_to`), the executor leaves on the claim each result file it
+  persisted after its checks (`task_result.persist_result`: the bytes
+  `failure_capture._atomic_write_json` wrote) or found complete and did not dispatch again
+  (`task_result.task_is_complete`: the bytes it validated), through
+  `review_round.record_checked_result`; `Claim.checked_result` reads them back, and each
+  dispatch starts with none. The validation merge (`merge_validation_batches`) takes each batch
+  from there and otherwise reads it once (`_held_batch_bytes`): the digest bound into
+  `validation.json` (`batch_sha256`), the verdicts merged and the runner credited all come from
+  those bytes. The in-process salvage hands the lane the repair the same way
+  (`adopt_salvaged(data=...)`); a dispatch that reported none leaves the lane to read the file
+  once.
+- **A recovered round's batches.** A phase whose damaged checkpoint a fresh run replaced
+  (`result_files.RECOVERED_KEY`) trusts no file on disk, so under `--exec-subagents` its
+  validation dispatch runs without resume (`dispatch_subagent_tasks` passes `resume=False`):
+  every batch is dispatched again, never skipped because a file of that name validates, which a
+  surviving earlier run may have written. The claim records which bytes the dispatch wrote itself
+  (`record_checked_result(dispatched=True)`; a file found complete never displaces them), and
+  `materialize_fanout_round` merges only those (`merge_validation_batches(dispatched_only=True)`).
+  When any batch has none, validation is not run, with the recovered phase's warning and result
+  note, and the report and `--fail-on-high` count the groups the run holds, as without
+  `--exec-subagents` ("Recovering a damaged one").
+- **The grouping a round binds.** The `grouped.json` a round writes or reads is held on its
+  claim as text (`Claim.hold_grouping`, `Claim.grouping_text`). The task file's
+  `inputs.grouped_sha256` (`ValidationRound.grouped_text`, `build_inputs(grouped_text=...)`),
+  `validation.json`'s `metadata.grouped_sha256` (`save_validation_results`) and a reaggregate's
+  input check (`current_inputs`) hash that text, never the file read again, so a `grouped.json`
+  replaced after the round wrote it is refused by every later reader instead of becoming bound.
+- **A reaggregate's verdicts.** `resolve_validation_round` reads `validation.json` once:
+  `validation_source_decision` judges those bytes against the grouping the claim holds, and
+  `_reuse_verdicts` reports from the same bytes (`Claim.hold_verdicts`), which the report's seal
+  binds. When that read fails, nothing was checked: the file is retired as one the decision
+  cannot read, and reuse never falls back to a read of its own. The task file is read once too
+  (`_read_round_document`): the decision compares the verdicts' round and contract against that
+  document (`task_document=`), and `_round_behind_verdicts` checks the same document's version,
+  schema and inputs (`subagent_tasks.check_task_document`) before its snapshots are verified and
+  its context is republished, so a task file replaced between those steps cannot pair one
+  round's manifest with another's inputs.
+- **review-code's heal.** The partial-completion guard reads the report's seal once with the
+  `validation.json` bytes it hashed (`review_round.sealed_verdicts`), requires the round both
+  record to be the round on record, and hands those bytes to `heal_unrecorded_completion`: the
+  grouping digest the HIGH count is checked against comes from them (`_sealed_grouping`), and
+  `grouped.json` is read once, its hashed text parsed. A pair replaced after the seal check does
+  not check out, and the heal refuses (exit 3), never counting zero HIGH groups.
+- **The salvage request.** The executor checks the request against the task's
+  `inputs.salvage_request_sha256` before it dispatches the task file's own prompt;
+  `task_result.salvage_failure_of` then reads the request once and compares its text with that
+  digest before parsing it. A bound request that is gone, unreadable, undecodable, replaced or not
+  a JSON object is read as a timed-out run's, which refuses a salvaged `[]` and nothing else;
+  only a task that binds no request keeps the old reading (no failure kind, `[]` persists).
+- **Ask's close** keeps each checked slot's answer text ([workflows](workflows.md#ask-mode)).
+
+A held text is what a read of the file would have returned (a text-mode read of the bytes,
+`atomic_io.read_back_text`), so a run that nothing interferes with writes the same reports,
+result files and markers as before. Read from disk on purpose, once each: a model's result file
+in a healthy `--reaggregate` (`resolve_result_files_by_model`; bringing in a host's or a
+salvage's file is what a healthy reaggregate is for), batches a host wrote, and a file the
+executor found complete under resume (its check reads the file, and the merge then uses those
+bytes), outside a recovered phase. `tests/test_checked_bytes_consumed.py` replaces each file at the old re-read, on both
+lanes.
 
 ## Malformed result entries
 

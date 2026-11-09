@@ -2344,7 +2344,12 @@ class TestATimedOutRunsEmptySalvageIsRefused:
 
         assert executor.salvage_failure_of(task, str(tmp_path)) == "timeout"
         (tmp_path / "salvage_codex_gpt-5_5.json").unlink()
-        assert executor.salvage_failure_of(task, str(tmp_path)) is None
+        # A request the task binds, gone: its failure kind is unknown, read as
+        # a timeout; a task that binds none keeps the old reading.
+        assert executor.salvage_failure_of(task, str(tmp_path)) == "timeout"
+        unbound = {**task, "inputs": {
+            k: v for k, v in task["inputs"].items() if k != "salvage_request_sha256"}}
+        assert executor.salvage_failure_of(unbound, str(tmp_path)) is None
         assert executor.salvage_failure_of(
             {**task, "kind": "validation"}, str(tmp_path)) is None
 

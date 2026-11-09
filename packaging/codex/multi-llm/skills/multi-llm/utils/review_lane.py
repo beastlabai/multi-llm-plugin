@@ -49,6 +49,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Sequence, Tuple
 
 from . import cli_common
+from .atomic_io import read_back_text
 from . import detach as _detach
 from . import held_folder as _held_folder
 from . import interactive as _interactive
@@ -1316,8 +1317,9 @@ class FanoutOutcome:
     slot salvage made them. ``failed_models``: ``{model_spec: reason}``, the
     deadline losses included. ``salvaged``: the models this run's in-process
     salvage recovered. ``recovered``: the phase's checkpoint carries
-    ``result_files.RECOVERED_KEY``, so grouping reads the answers in *slots*,
-    never the files the close saved.
+    ``result_files.RECOVERED_KEY``. Grouping reads the answers the lane holds
+    (*slots*, the base lane's ``saved``), never the files the close saved
+    (docs/development/review-results.md, "Consuming checked bytes").
     """
 
     slots: Dict[str, SlotResult]
@@ -1700,7 +1702,15 @@ async def _salvage_in_process(
         if withheld is not None:
             withheld.set_aside(recovered, model_spec)
             continue
-        adopted = lane.adopt_salvaged(model_spec, recovered)
+        # The repair as the dispatch persisted it after its checks, never the
+        # file read again (docs/development/review-results.md, "Consuming
+        # checked bytes"); a dispatch that reported none leaves the lane to
+        # read the file once.
+        persisted = claim.checked_result(recovered.name)
+        adopted = lane.adopt_salvaged(
+            model_spec, recovered,
+            **({"data": persisted} if persisted is not None else {}),
+        )
         if adopted is None:
             continue
         print(f"[{model_spec}] recovered by salvage: {recovered}")
@@ -1816,8 +1826,11 @@ def bind_grouping(
     )
     reuse = bool(records) and has_existing_validation and os.path.exists(grouped_path)
     if reuse:
+        # Read once: the digest the verdicts are checked against is this
+        # text's, never a second read's (Claim.hold_grouping).
         with open(grouped_path, 'r', encoding='utf-8') as handle:
-            grouped = load_groups_payload(json.load(handle))
+            grouped_text = handle.read()
+        grouped = load_groups_payload(json.loads(grouped_text))
         gap = steps.grouped_coverage_gap(grouped, dict(records_by_model))
         if gap:
             print(
@@ -1833,6 +1846,7 @@ def bind_grouping(
 
     if reuse:
         print("Using existing grouped.json (preserves validation alignment)")
+        claim.hold_grouping(grouped_text)
         return BoundGrouping(
             groups=grouped, reused=True,
             annotation=annotate(grouped) if annotate is not None else None,
@@ -1851,10 +1865,30 @@ def bind_grouping(
         steps.retire_stale_validation(
             phase_dir, reason="grouped.json rewritten by reaggregate",
         )
-        _review_round.replace_file(
-            grouped_path, json.dumps(save_groups_payload(grouped), indent=2))
+        _hold_grouping(claim, _review_round.replace_file(
+            grouped_path, json.dumps(save_groups_payload(grouped), indent=2)))
     print(f"Grouped {noun} saved to: {grouped_path}")
     return BoundGrouping(groups=grouped, reused=False, annotation=annotation)
+
+
+def _on_held_grouping(claim: _review_round.Claim, round_: Any) -> Any:
+    """*round_* bound to the ``grouped.json`` text *claim* holds
+    (``ValidationRound.grouped_text``), so its task file records the digest
+    of the grouping its prompts were built from, never of the file read
+    again; as it is when the claim holds none."""
+    text = claim.grouping_text
+    if text is None or not isinstance(round_, ValidationRound):
+        return round_
+    return replace(round_, grouped_text=text)
+
+
+def _hold_grouping(claim: _review_round.Claim, written: Any) -> None:
+    """The ``grouped.json`` bytes just written, held on *claim* as a text-mode
+    read of them returns them (``Claim.hold_grouping``), for the round's task
+    file and verdicts to bind (docs/development/review-results.md, "Consuming
+    checked bytes")."""
+    if isinstance(written, bytes):
+        claim.hold_grouping(read_back_text(written))
 
 
 @dataclass(frozen=True)
@@ -1951,14 +1985,31 @@ async def resolve_validation_round(
         os.path.exists(validation_path) and not args.skip_validation
     )
     use_note = ""
+    validation_bytes = b""
+    round_document = _RoundDocument(present=False)
     if honour_validation_file:
         # §7.1: bound to the exact batch bytes it merged (`batch_sha256` +
         # `batch_manifest`), so a rewritten, restored or missing batch retires
         # it by content; only a file without the binding falls back to the
-        # legacy mtime test. Both outcomes name what was checked.
-        stale_reason, use_note = validation_source_decision(
-            Path(validation_path), Path(grouped_path), Path(validation_tasks_path),
-        )
+        # legacy mtime test. Both outcomes name what was checked. Read once
+        # each: the validation.json bytes judged here, the task file its round
+        # is judged against, and the grouping this run holds
+        # (`Claim.grouping_text`) are the ones the reuse below checks and the
+        # report is built from. A validation.json that cannot be read now has
+        # had nothing checked, so it is retired as the decision retires one it
+        # cannot read (docs/development/review-results.md, "Consuming checked
+        # bytes").
+        try:
+            validation_bytes = Path(validation_path).read_bytes()
+        except OSError as exc:
+            stale_reason = f"could not read {Path(validation_path).name}: {exc}"
+        else:
+            round_document = _read_round_document(validation_tasks_path)
+            stale_reason, use_note = validation_source_decision(
+                Path(validation_path), Path(grouped_path), Path(validation_tasks_path),
+                validation_bytes=validation_bytes, grouped_text=claim.grouping_text,
+                task_document=round_document.document,
+            )
         if stale_reason:
             print(f"\nNot using validation.json: {stale_reason}")
             steps.retire_stale_validation(phase_dir, reason=stale_reason)
@@ -1967,12 +2018,14 @@ async def resolve_validation_round(
     if grouped and honour_validation_file:
         reuse, reused_round = _round_behind_verdicts(
             phase_dir=phase_dir, validation_tasks_path=validation_tasks_path,
+            round_document=round_document,
             current_inputs=current_inputs if reuse_checks_inputs else None,
         )
         if reuse:
             return _reuse_verdicts(
                 claim, steps, phase_dir=phase_dir, grouped=grouped,
                 validation_path=validation_path,
+                validation_bytes=validation_bytes,
                 validation_tasks_path=validation_tasks_path,
                 reused_round=reused_round, use_note=use_note,
                 scope_round_policy=scope_round_policy,
@@ -2004,26 +2057,70 @@ async def resolve_validation_round(
     )
 
 
+@dataclass(frozen=True)
+class _RoundDocument:
+    """``validation_tasks.json`` as one read found it: absent (not *present*),
+    unreadable (*error*), or parsed (*document*). A reaggregate that reuses
+    verdicts judges their round, checks its inputs and verifies its snapshots
+    on this one read, so a task file replaced in between cannot pair one
+    round's checks with another's (docs/development/review-results.md,
+    "Consuming checked bytes")."""
+
+    present: bool
+    document: Any = None
+    error: Optional[BaseException] = None
+
+    def checked(
+        self, path: str, *, phase_dir: str, current_inputs: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """The document, through ``read_task_file``'s checks; raises the
+        ``TaskFileError`` that read would."""
+        if self.error is not None:
+            raise _subagent_tasks.unreadable_task_file(path, phase_dir, self.error)
+        return _subagent_tasks.check_task_document(
+            self.document, path, phase_dir=phase_dir, current_inputs=current_inputs,
+        )
+
+
+def _read_round_document(path: str) -> _RoundDocument:
+    """*path* read once (:class:`_RoundDocument`)."""
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            text = handle.read()
+    except FileNotFoundError:
+        return _RoundDocument(present=False)
+    except (OSError, ValueError) as exc:
+        return _RoundDocument(present=True, error=exc)
+    try:
+        return _RoundDocument(present=True, document=json.loads(text))
+    except ValueError as exc:
+        return _RoundDocument(present=True, error=exc)
+
+
 def _round_behind_verdicts(
     *,
     phase_dir: str,
     validation_tasks_path: str,
+    round_document: _RoundDocument,
     current_inputs: Optional[Callable[[], Dict[str, Any]]],
 ) -> Tuple[bool, Optional[Dict[str, Any]]]:
     """Whether a bound ``validation.json``'s verdicts may be reused, and the
     task file of the round they came from (``None`` when there is none).
 
-    *current_inputs* is the lane's when its reuse checks them
-    (``ReviewLane.reuse_checks_inputs``), else ``None``. The task file is then
-    read against them exactly as a resume reads it, so an input that moved is
-    refused (exit 3) with the resume's message. Reuse also needs the task file
-    to record every one of them: with no task file, or one that records fewer,
-    nothing ties the verdicts to those inputs, so they are not reused and the
-    round goes on as if no ``validation.json`` were there (merged again, or
-    built anew). Without *current_inputs*, the verdicts are bound by their
-    round's snapshots alone, and a dir with no task file has none to verify.
+    *round_document* is the task file as the caller read it once, the read
+    its verdicts were judged against (:class:`_RoundDocument`); nothing here
+    reads the file again. *current_inputs* is the lane's when its reuse
+    checks them (``ReviewLane.reuse_checks_inputs``), else ``None``. The task
+    file is then checked against them exactly as a resume reads it, so an
+    input that moved is refused (exit 3) with the resume's message. Reuse also
+    needs the task file to record every one of them: with no task file, or one
+    that records fewer, nothing ties the verdicts to those inputs, so they are
+    not reused and the round goes on as if no ``validation.json`` were there
+    (merged again, or built anew). Without *current_inputs*, the verdicts are
+    bound by their round's snapshots alone, and a dir with no task file has
+    none to verify.
     """
-    if not os.path.exists(validation_tasks_path):
+    if not round_document.present:
         if current_inputs is None:
             return True, None
         print(
@@ -2033,7 +2130,7 @@ def _round_behind_verdicts(
         return False, None
     inputs = current_inputs() if current_inputs is not None else None
     try:
-        document = _subagent_tasks.read_task_file(
+        document = round_document.checked(
             validation_tasks_path, phase_dir=phase_dir, current_inputs=inputs,
         )
     except TaskFileError as task_file_error:
@@ -2063,13 +2160,17 @@ def _reuse_verdicts(
     use_note: str,
     scope_round_policy: Any,
     scope_baseline: Optional[Mapping[str, Any]],
+    validation_bytes: bytes,
 ) -> RoundOutcome:
     """The verdicts a bound ``validation.json`` holds, applied to *grouped*.
 
-    *reused_round* is the task file :func:`_round_behind_verdicts` read (its
-    inputs already checked when the lane's reuse checks them). The snapshots
-    its prompts named are re-hashed (exit 3 on a missing or changed one) and a
-    moved phase dir is rebound before the verdicts are reused.
+    *reused_round* is the task file :func:`_round_behind_verdicts` checked,
+    the same read :func:`validation_source_decision` judged the verdicts'
+    round against (its inputs already checked when the lane's reuse checks
+    them). The snapshots its prompts named are re-hashed (exit 3 on a missing
+    or changed one) and a moved phase dir is rebound before the verdicts are
+    reused. *validation_bytes* are the bytes :func:`validation_source_decision`
+    judged: the verdicts come from them, never from the file read again.
     """
     if reused_round is not None:
         steps.verify_round_context(reused_round, phase_dir, validation_tasks_path)
@@ -2079,9 +2180,9 @@ def _reuse_verdicts(
     )
     try:
         # Read once: the report built from these verdicts binds these exact
-        # bytes (`claim.verdicts`).
+        # bytes (`claim.verdicts`), the ones judged bound above.
         validation_results = load_validation_results(
-            Path(validation_path), raw=claim.read_verdicts(validation_path),
+            Path(validation_path), raw=claim.hold_verdicts(validation_bytes),
         )
         validated_groups = apply_validation_to_groups(
             [g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
@@ -2210,7 +2311,8 @@ async def _materialize_round(
     # A new round binds its own snapshot, from one read of the plan as it is now.
     plan_document = steps.bind_plan_for_validation(str(plan_path), phase_dir)
     with host_views_lock(phase_dir):
-        batched_tasks = materialize_validation_round(build_round(plan_document))
+        batched_tasks = materialize_validation_round(
+            _on_held_grouping(claim, build_round(plan_document)))
         batched_tasks["format_version"] = CURRENT_FORMAT_VERSION
         claim.publish(validation_tasks_path, json.dumps(batched_tasks, indent=2),
                       "write validation_tasks.json")
@@ -2299,8 +2401,8 @@ def group_findings(
         with claim.held("retire the previous validation and regroup"):
             steps.retire_stale_validation_round(
                 grouped_dir, reason=f"review returned no {noun}")
-            _review_round.replace_file(
-                grouped_path, json.dumps(save_groups_payload([]), indent=2))
+            _hold_grouping(claim, _review_round.replace_file(
+                grouped_path, json.dumps(save_groups_payload([]), indent=2)))
         print(f"Grouped {noun} saved to: {grouped_path} (no {noun})")
         claim.publish(validation_path, "[]\n", "write validation.json")
         return BoundGrouping(groups=[], reused=False)
@@ -2314,8 +2416,8 @@ def group_findings(
     with claim.held("retire the previous validation and regroup"):
         steps.retire_validation_for_regroup(
             grouped_dir, grouped, reason="grouped.json rewritten by a re-run")
-        _review_round.replace_file(
-            grouped_path, json.dumps(save_groups_payload(grouped), indent=2))
+        _hold_grouping(claim, _review_round.replace_file(
+            grouped_path, json.dumps(save_groups_payload(grouped), indent=2)))
     print(f"Grouped {noun} saved to: {grouped_path}")
     steps.update_status(phase_dir, {
         "state": "grouping_complete",
@@ -2359,26 +2461,30 @@ async def materialize_fanout_round(
     review: the :class:`RoundOutcome` carries *grouped* as it stands, with no
     verdicts, so the report and ``--fail-on-high`` count the groups this run
     holds and nothing is read back from disk.
+
+    Under ``--exec-subagents`` such a phase merges only the batches its own
+    dispatch wrote: the executor dispatches every batch again rather than
+    take a file on disk as done (``dispatch_subagent_tasks``), and a batch it
+    holds no bytes of its own for, a surviving earlier run's file, leaves the
+    round unvalidated with the same warning and outcome
+    (docs/development/review-results.md, "Consuming checked bytes").
     """
     phase_dir = str(lane.phase_dir)
     plan_path = str(lane.plan_path)
-    if (not lane.fanout_steps().exec_subagents_requested(args)
-            and _result_files.phase_recovered(phase_dir)):
-        note = (
-            f"validation was not run: {phase_dir}'s damaged checkpoint was replaced, "
-            f"and the --reaggregate that reads a host's verdicts back refuses that "
-            f"folder; run the phase with --exec-subagents to validate in its own "
-            f"process, or move the whole phase folder aside to start clean"
-        )
-        print(f"WARNING: {note}.", file=sys.stderr)
-        _result_files.append_result_note(phase_dir, note)
-        return RoundOutcome(groups=list(grouped))
+    recovered = _result_files.phase_recovered(phase_dir)
+    if not lane.fanout_steps().exec_subagents_requested(args) and recovered:
+        return _recovered_round_unvalidated(phase_dir, grouped, (
+            "the --reaggregate that reads a host's verdicts back refuses that "
+            "folder; run the phase with --exec-subagents to validate in its own "
+            "process"
+        ))
     validation_tasks_path = os.path.join(phase_dir, "validation_tasks.json")
     # Host-neutral: printed on every host that dispatches subagent validation.
     print("\nPreparing batched validation for subagent execution...")
     document = plan_document()
     with host_views_lock(phase_dir):
-        batched_tasks = steps.materialize_validation_round(build_round(document))
+        batched_tasks = steps.materialize_validation_round(
+            _on_held_grouping(claim, build_round(document)))
         batched_tasks["format_version"] = CURRENT_FORMAT_VERSION
         with claim.held("write validation_tasks.json"):
             _review_round.replace_file(
@@ -2413,8 +2519,24 @@ async def materialize_fanout_round(
         label="validation",
         retry_command=lane.round_follow_up(batched_tasks),
     ):
+        if not recovered:
+            groups = steps.merge_validation_batches(
+                phase_dir, batched_tasks, grouped, validation_path, claim=claim,
+            )
+            return RoundOutcome(groups=groups, verdicts=claim.verdicts)
+        undispatched = [
+            name for name in _batch_names(batched_tasks)
+            if claim.checked_result(name, dispatched=True) is None
+        ]
+        if undispatched:
+            return _recovered_round_unvalidated(phase_dir, grouped, (
+                f"this run's dispatch wrote no verdicts of its own for "
+                f"{', '.join(undispatched)}, and a batch file it did not write is "
+                f"never merged there; run the phase again with --exec-subagents"
+            ))
         groups = steps.merge_validation_batches(
             phase_dir, batched_tasks, grouped, validation_path, claim=claim,
+            dispatched_only=True,
         )
         return RoundOutcome(groups=groups, verdicts=claim.verdicts)
 
@@ -2437,6 +2559,29 @@ async def materialize_fanout_round(
     })
     steps.report_progress(phase_dir, step="validation_pending")
     return RoundOutcome(handed_off=True)
+
+
+def _batch_names(document: Mapping[str, Any]) -> List[str]:
+    """The ``validation_batch_<n>.json`` names a round's task file expects."""
+    return [
+        f"validation_batch_{batch.get('batch_index')}.json"
+        for batch in document.get("batches", [])
+    ]
+
+
+def _recovered_round_unvalidated(
+    phase_dir: str, grouped: List[Dict[str, Any]], why: str,
+) -> RoundOutcome:
+    """A recovered phase's round left unvalidated, *why* naming the cause: the
+    warning, the result note, and *grouped* as it stands with no verdicts, for
+    the report and ``--fail-on-high`` to count (:func:`materialize_fanout_round`)."""
+    note = (
+        f"validation was not run: {phase_dir}'s damaged checkpoint was replaced, "
+        f"and {why}, or move the whole phase folder aside to start clean"
+    )
+    print(f"WARNING: {note}.", file=sys.stderr)
+    _result_files.append_result_note(phase_dir, note)
+    return RoundOutcome(groups=list(grouped))
 
 
 # ---------------------------------------------------------------------------

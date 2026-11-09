@@ -17,6 +17,7 @@ Functions cover:
 import argparse
 import asyncio
 import contextvars
+import hashlib
 import json
 import os
 import shutil
@@ -31,6 +32,7 @@ from pathlib import Path
 from typing import Any, Callable, ClassVar, Dict, FrozenSet, List, Mapping, NamedTuple, Optional, Sequence, Tuple, Union
 
 from . import detach as _detach
+from .atomic_io import read_back_text
 from . import status_file as _status_file
 from . import validation_context as _validation_context
 from . import cli_common
@@ -390,6 +392,11 @@ def _batch_self_reported_model(batch_file: str) -> Optional[str]:
             data = json.load(f)
     except (OSError, ValueError):
         return None
+    return _self_reported_model_of(data)
+
+
+def _self_reported_model_of(data: Any) -> Optional[str]:
+    """A parsed batch's own ``metadata.model``, or ``None``."""
     if not isinstance(data, dict):
         return None
     metadata = data.get("metadata")
@@ -397,8 +404,46 @@ def _batch_self_reported_model(batch_file: str) -> Optional[str]:
     return str(model) if model else None
 
 
+def _held_batch_bytes(
+    phase_dir: str, index: Any, claim: Optional["_review_round.Claim"],
+    *, dispatched_only: bool = False,
+) -> Any:
+    """``validation_batch_<index>.json`` as the merge reads it, once: the bytes
+    the dispatch bound to *claim* persisted or found complete
+    (``Claim.checked_result``), else the file's bytes read now; ``None`` when
+    it is missing and the ``OSError`` when it cannot be read. With
+    *dispatched_only*, only bytes that dispatch wrote itself, never the file
+    (``None`` without them) (docs/development/review-results.md, "Consuming
+    checked bytes")."""
+    name = f"validation_batch_{index}.json"
+    held = (
+        claim.checked_result(name, dispatched=dispatched_only)
+        if claim is not None else None
+    )
+    if held is not None or dispatched_only:
+        return held
+    try:
+        return Path(phase_dir, name).read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return exc
+
+
+def _held_batch_data(held: Any) -> Any:
+    """The JSON a held batch (:func:`_held_batch_bytes`) parses to, or ``None``."""
+    if not isinstance(held, bytes):
+        return None
+    try:
+        return json.loads(read_back_text(held))
+    except ValueError:
+        return None
+
+
 def _authoritative_validator_runner(
-    phase_dir: str, batch_metadata: Dict[str, Any]
+    phase_dir: str,
+    batch_metadata: Dict[str, Any],
+    batch_hashes: Optional[Dict[str, str]] = None,
 ) -> Dict[int, Optional[str]]:
     """Per batch, the runner the executor verifiably dispatched it to (F3, §7.3a).
 
@@ -421,6 +466,10 @@ def _authoritative_validator_runner(
       ``metadata.model``;
     - no report at all (the host-native Claude Code Task tool path, whose
       batches this process never dispatched) → ``None`` for every batch.
+
+    *batch_hashes* (``{str(batch_index): sha256}``) are the digests of the
+    bytes the merge read, compared in place of the files' current ones; a
+    batch they do not name has no bytes to credit.
 
     **Legacy fallback only:** a report written before ``batch_provenance``
     existed carries just the per-row ``runner``; that row is used as before.
@@ -449,14 +498,18 @@ def _authoritative_validator_runner(
         index = batch.get("batch_index")
         row = provenance.get(str(batch.get("task_id") or f"{kind}-batch-{index}"))
         runner: Optional[str] = None
+        current = (
+            batch_hashes.get(str(index), "") if batch_hashes is not None
+            else file_bytes_sha256(
+                os.path.join(phase_dir, f"validation_batch_{index}.json")
+            )
+        )
         if (
             row
             and row.get("kind") == manifest["kind"]
             and row.get("round") == manifest["round"]
             and row.get("sha256")
-            and row.get("sha256") == file_bytes_sha256(
-                os.path.join(phase_dir, f"validation_batch_{index}.json")
-            )
+            and row.get("sha256") == current
         ):
             runner = str(row.get("runner") or "") or None
         result[index] = runner
@@ -469,6 +522,8 @@ def merge_validation_batches(
     grouped: List[Any],
     validation_path: str,
     claim: Optional["_review_round.Claim"] = None,
+    *,
+    dispatched_only: bool = False,
 ) -> List[Dict[str, Any]]:
     """Merge ``validation_batch_N.json`` files into ``validation.json`` + groups.
 
@@ -497,30 +552,38 @@ def merge_validation_batches(
     ``validation.json`` is published under *claim*, the merging invocation's
     round (``review_round.Claim.publish``): a run another round took over
     stops instead of writing it.
+
+    Each batch is read once (:func:`_held_batch_bytes`): under *claim*, a batch
+    its dispatch persisted or found complete is taken as those bytes, and the
+    file is not read at all. The recorded hash, the verdicts merged and the
+    runner credited all come from the same bytes, so a batch a concurrent
+    writer replaces after the dispatch, or between two reads, never reaches
+    the report (docs/development/review-results.md, "Consuming checked bytes").
+    With *dispatched_only* (a recovered phase's round) only bytes the dispatch
+    wrote itself are merged; a batch without them is missing, never read from
+    disk.
     """
     try:
-        from .subagent_tasks import batch_manifest, file_bytes_sha256
+        from .subagent_tasks import batch_manifest
         from .validation import join_model_names
     except ImportError:  # pragma: no cover - direct script runs
-        from subagent_tasks import batch_manifest, file_bytes_sha256  # type: ignore
+        from subagent_tasks import batch_manifest  # type: ignore
         from validation import join_model_names  # type: ignore
-    # Hashed before the merge reads the files: a batch rewritten in between is
-    # then recorded under its *old* hash, which the next reaggregate sees as a
-    # change and re-merges — the safe direction.
+    held: Dict[Any, Any] = {}
     batch_hashes: Dict[str, str] = {}
     for batch in batch_metadata.get("batches", []):
         index = batch.get("batch_index")
-        digest = file_bytes_sha256(
-            os.path.join(phase_dir, f"validation_batch_{index}.json")
-        )
-        if digest:
-            batch_hashes[str(index)] = digest
+        held[index] = _held_batch_bytes(
+            phase_dir, index, claim, dispatched_only=dispatched_only)
+        if isinstance(held[index], bytes):
+            batch_hashes[str(index)] = hashlib.sha256(held[index]).hexdigest()
     host_groups = [g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped]
     validation_results = merge_batched_validation_results(
         output_dir=phase_dir,
         batch_metadata=batch_metadata,
         total_groups=len(grouped),
         groups=host_groups,
+        batch_bytes=held,
     )
     scope_meta = _scope_round.task_scope(batch_metadata)
     validated = apply_validation_to_groups(host_groups, validation_results)
@@ -534,7 +597,7 @@ def merge_validation_batches(
     # the single attribution, or the sorted comma-joined list. `runner` carries
     # only the executor-verified attributions, and is omitted when there are
     # none (host-native path).
-    recorded = _authoritative_validator_runner(phase_dir, batch_metadata)
+    recorded = _authoritative_validator_runner(phase_dir, batch_metadata, batch_hashes)
     runners: Dict[str, str] = {}
     for batch in batch_metadata.get("batches", []):
         index = batch.get("batch_index")
@@ -542,9 +605,7 @@ def merge_validation_batches(
             continue
         runners[str(index)] = (
             recorded.get(index)
-            or _batch_self_reported_model(
-                os.path.join(phase_dir, f"validation_batch_{index}.json")
-            )
+            or _self_reported_model_of(_held_batch_data(held[index]))
             or "unknown"
         )
     model = join_model_names(v for v in runners.values() if v != "unknown")
@@ -1455,6 +1516,13 @@ def dispatch_subagent_tasks(
         _detach.report_progress(
             phase_dir, step=_DISPATCH_STEPS.get(label, f"dispatching {label}")
         )
+        # A phase whose damaged checkpoint a fresh run replaced trusts no file
+        # on disk: its validation batches are all dispatched again, never
+        # skipped as complete because a file of that name validates (it may be
+        # a surviving earlier run's) (docs/development/review-results.md,
+        # "Consuming checked bytes").
+        fresh = (label in ("validation", "revalidation")
+                 and _result_files.phase_recovered(phase_dir))
         return continue_past_marker(
             args,
             task_file=task_file,
@@ -1465,6 +1533,7 @@ def dispatch_subagent_tasks(
             cwd=project_root,
             label=label,
             retry_command=retry_command,
+            **({"resume": False} if fresh else {}),
         )
     except BatchFailed as failure:
         print(failure.message, file=sys.stderr)
@@ -7710,6 +7779,8 @@ async def reaggregate_from_existing_files(
             current_inputs=lambda: build_inputs(
                 plan_file=str(plan_path),
                 grouped_file=grouped_path,
+                # The grouping this reaggregate reports, as it holds it.
+                grouped_text=claim.grouping_text,
                 tasks_file=(extra_validation_metadata or {}).get("tasks_file"),
             ),
             reuse_checks_inputs=BaseReviewLane.reuse_checks_inputs,
@@ -7742,9 +7813,15 @@ async def reaggregate_from_existing_files(
         # checkpoint (§3.6's attribution and the D6 override's `sandbox: bypassed`,
         # 2026-09-17): the per-model files carry neither, so without this read a
         # reaggregated report named a bypassed slot as if it had run sandboxed.
+        # With validation skipped (or its verdicts unreadable) the report
+        # shows the grouping above as it is held, never grouped.json read
+        # back, as review-code's reaggregate does (docs/development/
+        # review-results.md, "Consuming checked bytes").
         report_path = aggregate_results(
             prefix, out_dir, phase_dir, phase_name,
-            successful_models, failed_models_map, validated_groups_for_report,
+            successful_models, failed_models_map,
+            validated_groups_for_report if validated_groups_for_report is not None
+            else grouped,
             plan_path=plan_path,
             base_ref=base_ref,
             tasks_path=tasks_path,
@@ -7913,9 +7990,11 @@ class BaseReviewLane:
     # Reused verdicts are bound by their round's snapshots alone
     # (`ReviewLane.reuse_checks_inputs`).
     reuse_checks_inputs: ClassVar[bool] = False
-    # Each model's suggestions as `save_slot` wrote them: what grouping reads
-    # in a recovered phase, which trusts no file on disk.
-    saved: Dict[str, List[Dict[str, Any]]] = field(
+    # Each model's suggestions as `save_slot` wrote them, and a salvaged
+    # model's as `adopt_salvaged` took them: what the fan-out groups, never a
+    # re-read of the files (docs/development/review-results.md, "Consuming
+    # checked bytes").
+    saved: Dict[str, Any] = field(
         default_factory=dict, compare=False, repr=False,
     )
 
@@ -7952,12 +8031,24 @@ class BaseReviewLane:
         )
 
     def adopt_salvaged(
-        self, model_spec: str, path: Path,
+        self, model_spec: str, path: Path, *, data: Optional[bytes] = None,
     ) -> Optional["_review_lane.SlotResult"]:
-        # Grouping reads the file itself, so a non-empty one is the recovery.
-        if os.path.exists(path) and os.path.getsize(path) > 0:
-            return _review_lane.SlotResult(model_spec, True, source="salvage")
-        return None
+        # A non-empty repair is the recovery: the bytes the salvage dispatch
+        # persisted (*data*), or the file read once here when it reported none.
+        # What they parse to is held for grouping (`saved`), which never reads
+        # the file again; a repair that does not parse adds nothing.
+        if data is None:
+            try:
+                data = Path(path).read_bytes()
+            except OSError:
+                return None
+        if not data:
+            return None
+        try:
+            self.saved[model_spec] = json.loads(read_back_text(data))
+        except ValueError:
+            self.saved.pop(model_spec, None)
+        return _review_lane.SlotResult(model_spec, True, source="salvage")
 
     def fanout_steps(self) -> "_review_lane.FanoutSteps":
         return _review_lane.FanoutSteps(
@@ -8451,34 +8542,20 @@ async def _review_orchestration(
     # be the fan-out's rather than the phase's terminal step.
     await asyncio.sleep(0)
     try:
-        # Group similar suggestions
+        # Group similar suggestions: each model's answers as this run holds
+        # them (saved, or adopted from its salvage), never a re-read of the
+        # files it has just written, which a concurrent writer could have
+        # replaced since (docs/development/review-results.md, "Consuming
+        # checked bytes").
         all_suggestions = []
         for model_spec in model_specs:
             if model_spec in failed_models:
                 continue
-            if closed.recovered:
-                # A recovered phase trusts no file on disk, the ones this run
-                # has just saved included: its answers as this run holds them
-                # (docs/development/review-results.md, "Recovering a damaged one").
-                for s in drop_non_record_entries(
-                    list(lane.saved.get(model_spec) or []), model_spec, noun="suggestions",
-                ):
-                    s["source_model"] = model_spec
-                    all_suggestions.append(s)
-                continue
-            sanitized_model = sanitize_model_name(model_spec)
-            result_path = os.path.join(phase_dir, f"{sanitized_model}.json")
-            if os.path.exists(result_path):
-                try:
-                    with open(result_path, 'r', encoding='utf-8') as f:
-                        suggestions = drop_non_record_entries(
-                            json.load(f), model_spec, noun="suggestions"
-                        )
-                        for s in suggestions:
-                            s["source_model"] = model_spec
-                        all_suggestions.extend(suggestions)
-                except (json.JSONDecodeError, IOError):
-                    pass
+            for s in drop_non_record_entries(
+                lane.saved.get(model_spec), model_spec, noun="suggestions",
+            ):
+                s["source_model"] = model_spec
+                all_suggestions.append(s)
 
         validated_groups_for_report: Optional[List[Dict]] = None
         # The validation.json bytes the report's verdicts come from, when they do.
@@ -8526,10 +8603,14 @@ async def _review_orchestration(
             validated_groups_for_report = outcome.groups
             verdicts = outcome.verdicts
 
-        # Aggregate results
+        # Aggregate results: the groups this run holds, never a grouped.json
+        # read back (docs/development/review-results.md, "Consuming checked
+        # bytes").
         report_path = aggregate_results(
             prefix, out_dir, phase_dir, phase_name,
-            model_specs, failed_models, validated_groups_for_report,
+            model_specs, failed_models,
+            validated_groups_for_report if validated_groups_for_report is not None
+            else grouped,
             plan_path=plan_path,
             base_ref=base_ref,
             tasks_path=tasks_path,
@@ -8541,10 +8622,7 @@ async def _review_orchestration(
             requested_models=len(model_specs),
             claim=claim,
             verdicts=verdicts,
-            # A recovered phase trusts no file on disk: its report shows the
-            # groups above, never a grouped.json read back
-            # (docs/development/review-results.md, "Recovering a damaged one").
-            read_grouped_file=not closed.recovered,
+            read_grouped_file=False,
         )
 
         # Handle consolidation recommendation (only for phases that support it).
