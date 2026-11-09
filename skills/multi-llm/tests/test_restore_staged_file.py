@@ -262,14 +262,22 @@ def test_another_name_given_to_the_staged_file_is_refused(
     file's own where it had one, named."""
     snapshot, target, payload, tmp = _rolled_back(env)
     extra = tmp_path / "another-name"
+    refused_link = []
 
     def link(handle):
-        os.link(_reach(tmp, handle), extra, follow_symlinks=True)
+        try:
+            os.link(_reach(tmp, handle), extra, follow_symlinks=True)
+        except OSError as exc:
+            # Python before 3.11 links /proc/self/fd/<n> itself rather than
+            # following it (EXDEV): the writer this test plays cannot act.
+            refused_link.append(exc)
 
     ran = _at_the_flush(monkeypatch, link)
     report = snapshot.restore()
 
     assert ran
+    if refused_link:
+        pytest.skip(f"this Python cannot give an unnamed file a name: {refused_link[0]}")
     state = _refused(report, target, payload, snapshot)
     assert "was given another name" in state
     assert not os.path.samefile(target, extra)
