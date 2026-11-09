@@ -643,6 +643,52 @@ class TestProvenanceIsOfTheBytesTheDispatchHeld:
         else:
             assert set(from_disk["runners"].values()) == {MOCK_RUNNER}
 
+    @pytest.mark.parametrize("report", ["legacy-other-runner", "deleted", "emptied"])
+    def test_a_replaced_report_cannot_change_the_credit_of_held_bytes(
+        self, tmp_path, runner_env, monkeypatch, report
+    ):
+        """The credit comes from the provenance the dispatch recorded beside
+        the bytes it holds, not from the report file the merge finds later."""
+        runner_env.use(MOCK_RUNNER)
+        runner_env.echo("validation")
+        phase_dir = tmp_path / "review-plan"
+        phase_dir.mkdir()
+        groups = [_validation_group(i) for i in range(8)]
+        document = prepare_batched_validation_tasks(
+            groups=groups, context="ctx", output_dir=str(phase_dir),
+            plan_file="/path/to/plan.md", max_per_batch=4,
+        )
+        claim = self._dispatch(
+            phase_dir, document, monkeypatch, replace=False, resume=False)
+
+        report_path = phase_dir / "subagent_batch_report.json"
+        if report == "deleted":
+            report_path.unlink()
+        else:
+            rows = [
+                {"task_id": b["task_id"], "kind": "validation",
+                 "runner": "claude-code:someone-else", "status": "ok",
+                 "output_path": b["output_path"]}
+                for b in document["batches"]
+            ]
+            replacement = {"report_version": 1, "kind": "validation", "tasks": rows}
+            if report == "emptied":
+                replacement["batch_provenance"] = {}
+            report_path.write_text(json.dumps(replacement), encoding="utf-8")
+
+        rob.merge_validation_batches(
+            str(phase_dir), document, groups, str(phase_dir / "validation.json"), claim,
+        )
+        metadata = json.loads(
+            (phase_dir / "validation.json").read_text(encoding="utf-8"))["metadata"]
+        assert set(metadata["runners"].values()) == {MOCK_RUNNER}
+        assert metadata["runner"] == MOCK_RUNNER
+
+        # No held bytes (an offline merge): the report on disk is the record.
+        offline = _merge(phase_dir, groups, document)
+        assert "claude-code:someone-else" in offline["runners"].values() or (
+            report != "legacy-other-runner")
+
 
 # ---------------------------------------------------------------------------
 # §7.2: consolidation_recommended is recomputed on every completion path

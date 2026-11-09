@@ -29,7 +29,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, ClassVar, Dict, FrozenSet, List, Mapping, NamedTuple, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, ClassVar, Collection, Dict, FrozenSet, List, Mapping, NamedTuple, Optional, Sequence, Tuple, Union
 
 from . import detach as _detach
 from .atomic_io import read_back_text
@@ -444,6 +444,8 @@ def _authoritative_validator_runner(
     phase_dir: str,
     batch_metadata: Dict[str, Any],
     batch_hashes: Optional[Dict[str, str]] = None,
+    held_provenance: Optional[Dict[str, Dict[str, Any]]] = None,
+    held_indexes: Collection[Any] = (),
 ) -> Dict[int, Optional[str]]:
     """Per batch, the runner the executor verifiably dispatched it to.
 
@@ -471,6 +473,13 @@ def _authoritative_validator_runner(
     bytes the merge read, compared in place of the files' current ones; a
     batch they do not name has no bytes to credit.
 
+    *held_provenance* is the ``batch_provenance`` the dispatch that persisted
+    the bytes of the batches in *held_indexes* recorded in its own report
+    (``Claim.batch_provenance``). Those batches are credited from it, never
+    from the report file, which a concurrent writer may have replaced or
+    rewritten in the legacy shape since; without held bytes the file on disk
+    is the only record there is.
+
     **Legacy fallback only:** a report written before ``batch_provenance``
     existed carries just the per-row ``runner``; that row is used as before.
 
@@ -486,17 +495,27 @@ def _authoritative_validator_runner(
     kind = batch_metadata.get("kind") or "validation"
     batches = batch_metadata.get("batches", [])
     result: Dict[int, Optional[str]] = {}
-    provenance = _recorded_provenance(phase_dir)
-    if provenance is None:
-        legacy = _recorded_runners(phase_dir)
-        for batch in batches:
-            index = batch.get("batch_index")
-            result[index] = legacy.get(batch.get("task_id") or f"{kind}-batch-{index}")
-        return result
     manifest = batch_manifest(batch_metadata)
+
+    def task_id_of(batch: Dict[str, Any]) -> str:
+        return str(batch.get("task_id") or f"{kind}-batch-{batch.get('batch_index')}")
+
+    def held_by_dispatch(batch: Dict[str, Any]) -> bool:
+        return held_provenance is not None and batch.get("batch_index") in held_indexes
+
+    # The report file is read only for a batch whose bytes no dispatch held.
+    on_disk = (
+        _recorded_provenance(phase_dir)
+        if not all(held_by_dispatch(batch) for batch in batches) else {}
+    )
+    legacy = _recorded_runners(phase_dir) if on_disk is None else {}
     for batch in batches:
         index = batch.get("batch_index")
-        row = provenance.get(str(batch.get("task_id") or f"{kind}-batch-{index}"))
+        if not held_by_dispatch(batch) and on_disk is None:
+            result[index] = legacy.get(task_id_of(batch))
+            continue
+        provenance = held_provenance if held_by_dispatch(batch) else on_disk
+        row = provenance.get(task_id_of(batch))
         runner: Optional[str] = None
         current = (
             batch_hashes.get(str(index), "") if batch_hashes is not None
@@ -556,7 +575,9 @@ def merge_validation_batches(
     Each batch is read once (:func:`_held_batch_bytes`): under *claim*, a batch
     its dispatch persisted or found complete is taken as those bytes, and the
     file is not read at all. The recorded hash, the verdicts merged and the
-    runner credited all come from the same bytes, so a batch a concurrent
+    runner credited all come from the same bytes (the credit from the
+    provenance that dispatch recorded for them, ``Claim.batch_provenance``, not
+    from the report on disk), so a batch a concurrent
     writer replaces after the dispatch, or between two reads, never reaches
     the report (docs/development/review-results.md, "Consuming checked bytes").
     With *dispatched_only* (a recovered phase's round) only bytes the dispatch
@@ -571,12 +592,17 @@ def merge_validation_batches(
         from validation import join_model_names  # type: ignore
     held: Dict[Any, Any] = {}
     batch_hashes: Dict[str, str] = {}
+    held_indexes: set = set()
     for batch in batch_metadata.get("batches", []):
         index = batch.get("batch_index")
         held[index] = _held_batch_bytes(
             phase_dir, index, claim, dispatched_only=dispatched_only)
         if isinstance(held[index], bytes):
             batch_hashes[str(index)] = hashlib.sha256(held[index]).hexdigest()
+            if claim is not None and claim.checked_result(
+                    f"validation_batch_{index}.json",
+                    dispatched=dispatched_only) is not None:
+                held_indexes.add(index)
     host_groups = [g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped]
     validation_results = merge_batched_validation_results(
         output_dir=phase_dir,
@@ -597,7 +623,11 @@ def merge_validation_batches(
     # the single attribution, or the sorted comma-joined list. `runner` carries
     # only the executor-verified attributions, and is omitted when there are
     # none (host-native path).
-    recorded = _authoritative_validator_runner(phase_dir, batch_metadata, batch_hashes)
+    recorded = _authoritative_validator_runner(
+        phase_dir, batch_metadata, batch_hashes,
+        held_provenance=(claim.batch_provenance() or {}) if claim is not None else None,
+        held_indexes=held_indexes,
+    )
     runners: Dict[str, str] = {}
     for batch in batch_metadata.get("batches", []):
         index = batch.get("batch_index")

@@ -483,6 +483,11 @@ def run_tasks(
     report.batch_provenance = _batch_provenance(
         report.outcomes, tasks, kind=kind, previous=previous_provenance,
     )
+    # The credit belongs to the bytes this dispatch holds: a round bound to it
+    # merges from these rows, never from the report file.
+    from .review_round import record_batch_provenance
+
+    record_batch_provenance(phase_dir, kind, report.batch_provenance)
 
     if write_report:
         report.write()

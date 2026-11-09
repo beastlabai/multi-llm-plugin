@@ -831,6 +831,51 @@ class TestTheJudgeIsNamed:
                             fallback="claude-code host agent") == {
             GROUP_A: "claude-code host agent"}
 
+    def test_the_label_follows_the_bytes_ingested_not_a_file_restored_after(
+        self, tmp_path, monkeypatch
+    ):
+        """B is ingested, then the file the executor recorded (A) is put back
+        before labelling: B's decision never gets A's verified runner."""
+        from utils import apply_orchestrator_base as base
+
+        orch, phase_dir = TestOrchestratorHook()._orchestrator(tmp_path)
+        orch.args.exec_subagents = True
+        orch.needs_human = [_group(GROUP_A)]
+        path = _write_verdicts(phase_dir, 0, [_verdict(GROUP_A, DECISION_APPROVE, "A")])
+        original = path.read_bytes()
+        _write_judge_report(phase_dir, path, self.RUNNER)
+        replacement = _write_verdicts(
+            phase_dir, 0, [_verdict(GROUP_A, DECISION_SKIP, "B")])
+        assert replacement.read_bytes() != original
+
+        real_ingest = base.ingest_verdicts
+
+        def ingest_then_restore(**kwargs):
+            ingested = real_ingest(**kwargs)
+            path.write_bytes(original)
+            return ingested
+
+        monkeypatch.setattr(base, "ingest_verdicts", ingest_then_restore)
+        orch._ingest_judge_verdicts(orch.needs_human, str(phase_dir), [GROUP_A])
+
+        assert [g["group_hash"] for g in orch.skipped] == [GROUP_A]
+        assert orch.skipped[0]["judge"] == "unrecorded"
+        record = orch.state.get_human_decision("apply-suggestions", GROUP_A)
+        assert record["decision"] == "skipped"
+        assert record["batch_context"]["judge"] == "unrecorded"
+
+    def test_the_declared_judge_is_the_one_parsed_at_ingestion(self, tmp_path):
+        path = _write_verdicts(tmp_path, 0, [_verdict(GROUP_A, DECISION_APPROVE, "ok")])
+        document = json.loads(path.read_text(encoding="utf-8"))
+        document["judge"] = "model-at-ingestion"
+        path.write_text(json.dumps(document), encoding="utf-8")
+        ingest = ingest_verdicts(phase_dir=str(tmp_path), expected_group_ids=[GROUP_A])
+        document["judge"] = "model-written-later"
+        path.write_text(json.dumps(document), encoding="utf-8")
+        assert judge_labels(str(tmp_path), ingest.sources,
+                            fallback="claude-code host agent", ingest=ingest) == {
+            GROUP_A: "model-at-ingestion (claude-code host agent)"}
+
     def test_native_label(self):
         assert native_judge_label("claude-code") == "claude-code host agent"
         assert native_judge_label(None) == "host agent"

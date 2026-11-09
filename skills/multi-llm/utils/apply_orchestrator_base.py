@@ -2721,17 +2721,20 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                     {gid: path for gid, path in ingest.sources.items()
                      if gid not in dispatched},
                     fallback=fallback_judge,
+                    ingest=ingest,
                 )
                 judges.update(judge_labels(
                     phase_dir,
                     {gid: path for gid, path in ingest.sources.items()
                      if gid in dispatched},
                     fallback="executor (runner unrecorded)",
+                    ingest=ingest,
                 ))
             else:
                 fallback_judge = native_judge_label(self._host_id())
                 judges = judge_labels(
-                    phase_dir, ingest.sources, fallback=fallback_judge
+                    phase_dir, ingest.sources, fallback=fallback_judge,
+                    ingest=ingest,
                 )
             if self.state is not None:
                 record_verdicts(

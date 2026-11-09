@@ -859,7 +859,11 @@ produced:
   `validation.json` (`batch_sha256`), the verdicts merged and the runner credited all come from
   those bytes. The batch report's `batch_provenance` hash, which that credit is checked against,
   is of the bytes the dispatch persisted or found complete (`TaskOutcome.result_sha256`), never
-  of the file hashed once the batch settled. The in-process salvage hands the lane the repair
+  of the file hashed once the batch settled, and the merge takes those rows from the claim
+  (`review_round.record_batch_provenance`, `Claim.batch_provenance`), never from the report file;
+  only a batch with no held bytes reads the report on disk. The apply lane's judge labels
+  likewise compare the digest and declared judge `ingest_verdicts` took (`VerdictIngest.digests`).
+  The in-process salvage hands the lane the repair
   the same way (`adopt_salvaged(data=...)`); a dispatch that reported none leaves the lane to
   read the file once.
 - **A recovered round's batches.** A phase whose damaged checkpoint a fresh run replaced

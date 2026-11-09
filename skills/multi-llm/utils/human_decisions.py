@@ -32,6 +32,7 @@ invokers apart from the ``judge`` they name.
 from __future__ import annotations
 
 import glob
+import hashlib
 import json
 import os
 import sys
@@ -369,6 +370,11 @@ class VerdictIngest:
     files_read: List[str] = field(default_factory=list)
     #: ``group_id -> the verdict file it was read from``.
     sources: Dict[str, str] = field(default_factory=dict)
+    #: ``verdict file -> sha256 of the bytes ingested from it``, and the judge
+    #: the file declared of itself, so labelling never reads a file again
+    #: (:func:`judge_labels`).
+    digests: Dict[str, str] = field(default_factory=dict)
+    declared: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -390,13 +396,24 @@ def read_verdict_files(phase_dir: str) -> List[Tuple[str, Any, List[str]]]:
         ``[(path, document_or_None, errors)]`` sorted by path, so ingest order is
         deterministic regardless of filesystem enumeration order.
     """
-    results: List[Tuple[str, Any, List[str]]] = []
+    return [(path, doc, errors) for path, doc, errors, _digest
+            in _read_verdict_files(phase_dir)]
+
+
+def _read_verdict_files(
+    phase_dir: str,
+) -> List[Tuple[str, Any, List[str], Optional[str]]]:
+    """:func:`read_verdict_files`, each file read once, with the sha256 of the
+    bytes parsed (``None`` for a file that could not be read)."""
+    results: List[Tuple[str, Any, List[str], Optional[str]]] = []
     for path in sorted(glob.glob(os.path.join(phase_dir, VERDICT_FILE_PATTERN))):
         try:
-            with open(path, "r", encoding="utf-8") as handle:
-                document = json.load(handle)
-        except (OSError, json.JSONDecodeError) as exc:
-            results.append((path, None, [f"{path}: could not be read as JSON ({exc})"]))
+            with open(path, "rb") as handle:
+                raw = handle.read()
+            document = json.loads(raw.decode("utf-8"))
+        except (OSError, ValueError) as exc:
+            results.append(
+                (path, None, [f"{path}: could not be read as JSON ({exc})"], None))
             continue
         # Fix round 28: a host's copy of the judge's reply that left out
         # "schema_version" is read as the one version there is, said once
@@ -413,7 +430,8 @@ def read_verdict_files(phase_dir: str) -> List[Tuple[str, Any, List[str]]]:
             f"{path}: {message}"
             for message in validate_human_decision_verdicts(document)
         ]
-        results.append((path, document if not errors else None, errors))
+        results.append((path, document if not errors else None, errors,
+                        hashlib.sha256(raw).hexdigest()))
     return results
 
 
@@ -437,11 +455,14 @@ def ingest_verdicts(
     expected = list(expected_group_ids)
     expected_set = set(expected)
 
-    for path, document, errors in read_verdict_files(phase_dir):
+    for path, document, errors, digest in _read_verdict_files(phase_dir):
         result.files_read.append(path)
         if errors:
             result.errors.extend(errors)
             continue
+        result.digests[path] = digest or ""
+        result.declared[path] = (
+            document.get("judge") if isinstance(document, dict) else None)
         for index, verdict in enumerate(document.get("verdicts", [])):
             group_id = verdict["group_id"]
             if expected_set and group_id not in expected_set:
@@ -483,6 +504,7 @@ def judge_labels(
     sources: Dict[str, str],
     *,
     fallback: str = NATIVE_JUDGE,
+    ingest: Optional[VerdictIngest] = None,
 ) -> Dict[str, str]:
     """``group_id -> the runner spec that wrote its verdict file``.
 
@@ -491,6 +513,12 @@ def judge_labels(
     hash to what the executor recorded, so a report left over from an earlier
     executor run never names the judge of a file the host agent rewrote since;
     every other verdict gets *fallback*.
+
+    With *ingest* (the :class:`VerdictIngest` *sources* came from), a file is
+    compared by the digest of the bytes ingested from it and its declared
+    judge is the one parsed then; no verdict file is read again, so a file
+    replaced after ingestion never takes another file's credit. Without it
+    (offline callers) the files are read now.
     """
     try:
         from .task_outcome import batch_report_path
@@ -516,7 +544,7 @@ def judge_labels(
             prov = provenance.get(str(row.get("task_id")))
             if not isinstance(prov, dict) or not prov.get("sha256"):
                 continue
-            if file_bytes_sha256(path) != prov["sha256"]:
+            if _ingested_digest(path, ingest) != prov["sha256"]:
                 continue
             runner = prov.get("runner") or runner
             runner_by_path[os.path.realpath(path)] = str(runner)
@@ -524,12 +552,26 @@ def judge_labels(
     for group_id, path in sources.items():
         runner = runner_by_path.get(os.path.realpath(path))
         if runner is None:
-            runner = _with_declared_model(fallback, path)
+            runner = _with_declared_model(fallback, path, ingest)
         labels[group_id] = runner
     return labels
 
 
-def _with_declared_model(fallback: str, path: str) -> str:
+def _ingested_digest(path: str, ingest: Optional[VerdictIngest]) -> str:
+    """sha256 of the bytes of *path* that were ingested, or of the file now
+    when there was no ingestion; ``""`` for a file that was not ingested."""
+    if ingest is None:
+        return file_bytes_sha256(path)
+    real = os.path.realpath(path)
+    for known, digest in ingest.digests.items():
+        if os.path.realpath(known) == real:
+            return digest
+    return ""
+
+
+def _with_declared_model(
+    fallback: str, path: str, ingest: Optional[VerdictIngest] = None,
+) -> str:
     """A native judge's label, plus the model it says it is, when it said.
 
     "claude-code host agent" names no model (2026-10-01). The verdict file's
@@ -538,11 +580,14 @@ def _with_declared_model(fallback: str, path: str) -> str:
     """
     if not str(fallback).endswith("host agent"):
         return fallback
-    try:
-        with open(path, "r", encoding="utf-8") as handle:
-            declared = (json.load(handle) or {}).get("judge")
-    except (OSError, json.JSONDecodeError, AttributeError):
-        return fallback
+    if ingest is not None:
+        declared = ingest.declared.get(path)
+    else:
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                declared = (json.load(handle) or {}).get("judge")
+        except (OSError, json.JSONDecodeError, AttributeError):
+            return fallback
     declared = str(declared or "").strip()
     return f"{declared} ({fallback})" if declared and len(declared) <= 80 else fallback
 

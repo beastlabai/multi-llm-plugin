@@ -221,6 +221,10 @@ class Claim:
     #: it wrote them itself (:func:`record_checked_result`).
     _results: Dict[str, Tuple[bytes, bool]] = field(
         default_factory=dict, compare=False, repr=False)
+    #: The ``batch_provenance`` rows the latest dispatch's report recorded for
+    #: those result files, by report kind (:func:`record_batch_provenance`).
+    _provenance: Dict[str, Dict[str, Dict[str, Any]]] = field(
+        default_factory=dict, compare=False, repr=False)
     #: The ``grouped.json`` text this invocation last wrote or read
     #: (:meth:`hold_grouping`).
     _grouping: List[str] = field(default_factory=list, compare=False, repr=False)
@@ -351,6 +355,21 @@ class Claim:
             return None
         return held[0]
 
+    def batch_provenance(self) -> Optional[Dict[str, Dict[str, Any]]]:
+        """The ``batch_provenance`` the latest dispatch bound to this claim
+        recorded in its report, by ``task_id``, or ``None`` when it recorded
+        none (:func:`record_batch_provenance`): the merge credits the held
+        result bytes from these rows, never from the report file, which a
+        concurrent writer may have replaced since."""
+        with _BOUND_LOCK:
+            if not self._provenance:
+                return None
+            return {
+                task_id: dict(row)
+                for rows in self._provenance.values()
+                for task_id, row in rows.items()
+            }
+
     def _remember(self, verdicts: Verdicts) -> Verdicts:
         self._verdicts[:] = [verdicts]
         return verdicts
@@ -430,6 +449,7 @@ def results_bound_to(claim: Claim) -> Iterator[None]:
     key = _bound_key(claim.phase_dir)
     with _BOUND_LOCK:
         claim._results.clear()
+        claim._provenance.clear()
         _BOUND.setdefault(key, []).append(claim)
     try:
         yield
@@ -466,6 +486,25 @@ def record_checked_result(
         held = results.get(name)
         if dispatched or held is None or not held[1]:
             results[name] = (bytes(data), dispatched)
+
+
+def record_batch_provenance(
+    phase_dir: PathLike, kind: str, provenance: Dict[str, Dict[str, Any]],
+) -> None:
+    """Remember the ``batch_provenance`` a dispatch into *phase_dir* recorded
+    for its report of *kind*, on the claim it is bound to, beside the result
+    bytes it holds (:func:`record_checked_result`): the runner credit belongs
+    to those bytes, not to whatever report is on disk when the round merges
+    (docs/development/review-results.md, "Consuming checked bytes"). A phase
+    dir no dispatch is bound to remembers nothing."""
+    key = _bound_key(phase_dir)
+    with _BOUND_LOCK:
+        claims = _BOUND.get(key)
+        if not claims:
+            return
+        claims[-1]._provenance[str(kind)] = {
+            str(task_id): dict(row) for task_id, row in provenance.items()
+        }
 
 
 def bound(claim: Claim, func: Callable[..., Any]) -> Callable[..., Any]:
