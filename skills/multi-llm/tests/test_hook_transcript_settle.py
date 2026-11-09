@@ -28,6 +28,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import signal
+import stat
 import subprocess
 import sys
 import time
@@ -92,14 +95,65 @@ def run_wakeup_check(capsys, tmp_path: Path, payload: Dict[str, Any]) -> str:
     return captured.out
 
 
-def run_script(script: Path, tmp_path: Path, payload: Dict[str, Any]):
-    env = {
+def script_env(tmp_path: Path) -> Dict[str, str]:
+    return {
         "PATH": "/usr/bin:/bin", "HOME": str(tmp_path),
         "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT), "ARGV_LOG": str(tmp_path / "argv.txt"),
         "REAL_PYTHON": sys.executable, "MULTI_LLM_UV": str(_fake_uv(tmp_path)),
     }
-    return subprocess.run(["/bin/sh", str(script)], input=json.dumps(payload), env=env,
-                          capture_output=True, text=True, timeout=60)
+
+
+def run_script(script: Path, tmp_path: Path, payload: Dict[str, Any]):
+    return subprocess.run(["/bin/sh", str(script)], input=json.dumps(payload),
+                          env=script_env(tmp_path), capture_output=True, text=True, timeout=60)
+
+
+def run_script_publishing_once_it_waits(script: Path, tmp_path: Path, payload: Dict[str, Any],
+                                        path: Path, text: str):
+    """Run *script* on a transcript that does not exist, and publish *text* at *path*
+    only once the script is sleeping in its wait for the file: a `sleep` stand-in
+    leaves a marker, so the file is provably missing when the script first looks
+    and no timer decides which side of the check the write lands on. The file
+    arrives whole (written aside, renamed into place). Returns (completed, waited)."""
+    assert not path.exists()
+    real_sleep = shutil.which("sleep", path="/usr/bin:/bin")
+    assert real_sleep, "no sleep on the hook's PATH"
+    waiting = tmp_path / "script-is-waiting"
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    stub = stubs / "sleep"
+    stub.write_text(f'#!/bin/sh\n: > "{waiting}"\nexec {real_sleep} "$@"\n', encoding="utf-8")
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    env = script_env(tmp_path)
+    env["PATH"] = f"{stubs}:{env['PATH']}"
+    proc = subprocess.Popen(["/bin/sh", str(script)], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+                            text=True, start_new_session=True)
+    try:
+        assert proc.stdin is not None
+        proc.stdin.write(json.dumps(payload))
+        proc.stdin.close()
+        # 30 s only bounds a script that never sleeps nor exits; the normal wait is
+        # the script's own start-up. A script that exits instead skips the publish.
+        give_up = time.monotonic() + 30.0
+        while not waiting.exists() and proc.poll() is None and time.monotonic() < give_up:
+            time.sleep(0.005)
+        waited = waiting.exists()
+        if waited:
+            aside = path.with_name(path.name + ".part")
+            aside.write_text(text, encoding="utf-8")
+            os.replace(aside, path)
+        out, err = proc.communicate(timeout=60)
+        return subprocess.CompletedProcess(proc.args, proc.returncode, out, err), waited
+    finally:
+        # Unconditional: also after a failed assertion or a timeout, and for the
+        # script's own children (sleep, the util), which share its process group.
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        proc.kill()
+        proc.communicate()
 
 
 # ---------------------------------------------------------------------------
@@ -214,9 +268,10 @@ class TestTheStopScriptDoesNotExitBeforeTheBlockIsWritten:
         path = tmp_path / "t.jsonl"
         transcript = (Transcript().prompt("go").bash(block_output())
                       .say("Implement stopped. Done."))
-        write_later(path, "".join(line(entry) for entry in transcript.entries))
-        completed = run_script(REPORT_CHECK_SH, tmp_path,
-                               stop_input(path, "Implement stopped. Done."))
+        completed, waited = run_script_publishing_once_it_waits(
+            REPORT_CHECK_SH, tmp_path, stop_input(path, "Implement stopped. Done."), path,
+            "".join(line(entry) for entry in transcript.entries))
+        assert waited, f"the script left before waiting for the file: {completed.stdout!r}"
         assert completed.returncode == 0, completed.stderr
         assert json.loads(completed.stdout)["decision"] == "block"
 
