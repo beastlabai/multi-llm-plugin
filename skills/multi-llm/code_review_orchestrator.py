@@ -24,6 +24,7 @@ Usage:
 import argparse
 import asyncio
 import contextlib
+import dataclasses
 import hashlib
 import json
 import os
@@ -32,7 +33,7 @@ import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Sequence, Set, Tuple
 
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
@@ -5528,13 +5529,182 @@ async def main(argv: Optional[List[str]] = None) -> int:
 
 
 async def _main(argv: Optional[List[str]], run: PhaseRun) -> int:
-    """The review: a fan-out, or a ``--reaggregate`` of the round on record."""
+    """The review: a fan-out, or a ``--reaggregate`` of the round on record.
+
+    A fan-out is a sequence of named stages over one :class:`RunScope`.
+    Everything before :func:`_cross_detach_boundary` is pre-flight, run in the
+    invoker so a failure lands on the caller's terminal; nothing after that
+    stage's ``maybe_detach`` runs there. ``intent_to_add_untracked`` wraps the
+    diff set, the reviewer run and the round built on them, and
+    :func:`_group_validate_and_report` stops its phase ticker only after the
+    terminal ``progress.step`` (docs/development/review-results.md, "The
+    shared review lane").
+    """
     # Line buffering + UTF-8/replace stream encoding (Windows-safe output);
     # see utils/stream_bootstrap.py for the full rationale.
     bootstrap_streams()
 
     args = parse_args(argv)
+    plan_path, prefix, out_dir = _locate_plan(args)
 
+    # Handle --reaggregate mode: skip model invocation, just re-process existing results
+    if args.reaggregate:
+        return await _reaggregate_entry(
+            args, run, plan_path=plan_path, out_dir=out_dir, prefix=prefix,
+        )
+
+    # One writer per phase dir, as on the reaggregate path: taken before this
+    # run reads state.json or the phase's files. A `--detach` launcher whose
+    # dir a live run holds re-attaches, takes it over or refuses right here,
+    # before any of its pre-flight (`detach.take_for_launch`).
+    run.take(get_phase_dir(plan_path, 'code-review'), mode="review-code",
+             plan_file=str(plan_path), args=args, phase="code-review")
+    pinned = _guard_phase_state(args, plan_path)
+
+    # Model selection, one rule for every review lane: CLI --models >
+    # --interactive > --quick > the mode's YAML defaults > interactive
+    # selection; under --yes it stops at defaults.models (D6 row 2).
+    model_specs, unattended = _review_lane.select_review_models(
+        args, mode='code-review', anchor=str(plan_path),
+    )
+    _announce_fanout(args, plan_path, out_dir, model_specs)
+
+    # Get tracked files and base ref from state (if available from implementation phase)
+    state = get_or_create_state(plan_path)
+    scope = _resolve_base_and_scope(args, state, plan_path=plan_path, pinned=pinned)
+    scope_round_policy, plan_bytes = _resolve_round_policy_and_plan_bytes(
+        args, state, plan_path=plan_path,
+    )
+
+    detach_phase_dir, claim, scope, plan_bytes = _cross_detach_boundary(
+        args, state, scope, plan_path=plan_path, model_specs=model_specs,
+        plan_bytes=plan_bytes,
+    )
+    plan_document_at_load, opening = _open_fanout_round(
+        args, state, scope, claim, plan_path=plan_path,
+        detach_phase_dir=detach_phase_dir,
+        model_specs=model_specs, plan_bytes=plan_bytes,
+        scope_round_policy=scope_round_policy, unattended=unattended,
+    )
+
+    # Two commits need no intent-to-add marking: the working tree is not in
+    # their diff (plans/review-commits.md §2.5).
+    with (
+        contextlib.nullcontext() if scope.pinned is not None
+        else intent_to_add_untracked(scope.changed_files, cwd=scope.git_root)
+    ):
+        diff_set = _write_diff_set(
+            args, state, scope, detach_phase_dir=detach_phase_dir,
+            model_specs=model_specs,
+        )
+        slots = await _run_reviews_and_save(
+            args, scope, claim, diff_set, plan_path=plan_path, out_dir=out_dir,
+            prefix=prefix, detach_phase_dir=detach_phase_dir, model_specs=model_specs,
+            scope_round_policy=scope_round_policy, unattended=unattended,
+            opening=opening,
+        )
+        outcome = await _group_validate_and_report(
+            args, state, scope, claim, diff_set, slots, plan_path=plan_path,
+            out_dir=out_dir, model_specs=model_specs,
+            plan_document_at_load=plan_document_at_load,
+            scope_round_policy=scope_round_policy,
+        )
+        if outcome is None:
+            return  # the host runs the round and comes back with --reaggregate
+
+    # Summary, HIGH-group record and gate: the ending `--reaggregate` shares.
+    exit_code = finish_code_review(
+        slots.phase_dir, outcome.groups, args, total_issues=len(outcome.all_issues),
+    )
+    _announce_fix_tasks(args, outcome)
+    _announce_pending_salvage(slots.phase_dir, plan_path, slots.salvaged_models)
+
+    # `finish_code_review`'s exit: 0 whatever the review found, 3 under
+    # `--fail-on-high` with a HIGH group.
+    return exit_code
+
+
+# ---------------------------------------------------------------------------
+# The stages of `_main`, in the order it runs them
+# ---------------------------------------------------------------------------
+
+@dataclasses.dataclass(frozen=True)
+class RunScope:
+    """What one review-code fan-out reviews, resolved once in its pre-flight.
+
+    :func:`_resolve_base_and_scope` builds it before the detach boundary, and
+    every stage past the boundary reads it rather than a local of its own.
+
+    * ``base_ref``: the old side every git call takes.
+    * ``review_scope``: the resolved :class:`ReviewScope`, labelled with the
+      branch that picked it.
+    * ``changed_files``: that scope in review order, what every reviewer's
+      prompt lists, what ``intent_to_add_untracked`` marks and what the report
+      counts.
+    * ``pinned``: the pair a review pinned to two commits diffs, with its drift
+      list, or ``None``.
+    * ``plan_snapshot``, ``plan_sha256``: a commit brief's frozen context plan.
+    * ``git_root``: where every git call over the (root-relative) scope runs;
+      ``project_root``: what an issue's relative ``file`` is resolved against.
+    * ``collapse_paths``: the one read of ``code_review.collapse_paths`` the
+      prompt's order and the diff set's groups share.
+    * ``scope_files``: the ``--files``/``--files-from`` list, or ``None``,
+      staged on the in-memory state; ``files_record_moved`` says staging it
+      changed that record, which the phase then saves past the boundary.
+
+    A front door's stage can land inside the boundary; :meth:`refresh`
+    re-derives what depends on it.
+    """
+
+    base_ref: Optional[str]
+    review_scope: ReviewScope
+    changed_files: List[str]
+    pinned: Optional[PinnedRange]
+    plan_snapshot: Optional[str]
+    plan_sha256: Optional[str]
+    git_root: Optional[str]
+    project_root: Optional[str]
+    collapse_paths: Dict[str, List[str]]
+    scope_files: Optional[List[str]]
+    files_record_moved: bool
+
+    @property
+    def pinned_kw(self) -> Dict[str, Any]:
+        """``{"pinned": pinned}`` for a review pinned to two commits, else ``{}``."""
+        return {"pinned": self.pinned} if self.pinned is not None else {}
+
+    def refresh(self, state: Any, *, args: Any, plan_path: Path) -> "RunScope":
+        """This scope re-derived past a landed stage (:func:`landed_stage`).
+
+        *state* is reloaded, its staged ``--files`` record redone, the pinned
+        pair (and a fronted run's drift list) re-resolved and the context plan
+        read again from the reloaded state; the base ref and the ordered paths
+        are kept. A pair that no longer resolves is exit 3 here, like the
+        pre-flight's (:class:`RangeError`).
+        """
+        state.reload()
+        files_record_moved = stage_scope_files_record(state, self.scope_files)
+        try:
+            pinned = refresh_pinned_after_stage(
+                state, self.pinned, args, cwd=self.git_root or os.getcwd(),
+                plan_path=plan_path,
+            )
+        except RangeError as exc:
+            print(exc.message)
+            sys.exit(exc.exit_code)
+        plan_snapshot, plan_sha256 = _context_plan(getattr(state, "state", None))
+        return dataclasses.replace(
+            self, pinned=pinned, plan_snapshot=plan_snapshot,
+            plan_sha256=plan_sha256, files_record_moved=files_record_moved,
+        )
+
+
+def _locate_plan(args: argparse.Namespace) -> Tuple[Path, str, Path]:
+    """``(plan_path, prefix, out_dir)``, with this run's anchor set.
+
+    A plan that does not exist is exit 1. The anchor is captured here, before
+    anything can chdir.
+    """
     # Validate plan file (resolve to absolute path first to handle
     # uv --directory which changes the working directory)
     plan_path = Path(args.plan_file).resolve()
@@ -5556,175 +5726,209 @@ async def _main(argv: Optional[List[str]], run: PhaseRun) -> int:
         out_dir = base_dir
     else:
         out_dir = base_dir / prefix
+    return plan_path, prefix, out_dir
 
-    # Handle --reaggregate mode: skip model invocation, just re-process existing results
-    if args.reaggregate:
-        print("=== REAGGREGATE MODE ===")
-        print(f"{_plan_file_label(plan_path, args)}: {plan_path}")
-        print(f"Output directory: {out_dir}")
-        # `--files`/`--files-from` are not re-read here: the results on disk
-        # were reviewed against the scope their fan-out recorded, so that is
-        # the scope this pass reports. Said, not dropped silently — an explicit
-        # scope request ignored without a word is the fallback the flags exist
-        # to remove. A line, not an exit: every reaggregate command this
-        # orchestrator prints replays the fan-out's own flags, `--files`
-        # included, so refusing them would break its own recovery path.
-        # Never parsed either, so `--files-from -` reads no stdin.
-        ignored_scope_flags = [
-            flag
-            for flag, given in (
-                ("--files", bool(getattr(args, "files", None))),
-                ("--files-from", getattr(args, "files_from", None) is not None),
-            )
-            if given
-        ]
-        if ignored_scope_flags:
-            print(
-                f"[SCOPE_FLAGS_IGNORED] --reaggregate does not re-resolve "
-                f"{' or '.join(ignored_scope_flags)}; it uses the scope recorded "
-                f"in state.json ({REVIEW_SCOPE_FILES_KEY}, else tracked_files, "
-                f"else the git diff). Run a fan-out with the flag to review "
-                f"another scope."
-            )
-        print("")
 
-        if not out_dir.is_dir():
-            print(f"ERROR: Output directory does not exist: {out_dir}")
-            sys.exit(1)
-
-        # One writer per phase dir: held from here until this run exits, so a
-        # second run is refused before it reads or changes anything (a
-        # launcher hands it to its worker at the boundary).
-        run.take(get_phase_dir(plan_path, 'code-review'), mode="review-code",
-                 plan_file=str(plan_path), args=args, phase="code-review")
-
-        # The review on record's two commits, when state pins them (a commit
-        # brief's `commit_range`, a direct round's `head_ref`): resolved
-        # strictly here, before the detach boundary and before anything is
-        # written, so a pruned SHA is `[RANGE_UNRESOLVED]` exit 3 on the
-        # caller's terminal and never a `HEAD~1` stand-in, and a typed ref
-        # that resolves elsewhere is refused (plans/review-commits.md §2.4,
-        # §2.5).
-        try:
-            reaggregate_pinned = resolve_pinned_range(
-                getattr(get_or_create_state(plan_path), "state", None), args,
-                cwd=review_git_root(get_project_root(str(plan_path))) or os.getcwd(),
-                plan_path=plan_path, reaggregate=True,
-            )
-        except RangeError as exc:
-            print(exc.message)
-            sys.exit(exc.exit_code)
-        if reaggregate_pinned is not None:
-            pin_recorded_refs(reaggregate_pinned)
-
-        # The stale guard the fan-out path applies below, applied here too. A
-        # review completed before the latest implement judged an earlier state
-        # of the code (2026-10-02: the empty repository); the fan-out takes
-        # `--force` on it, but this path ran no model and ended in
-        # `mark_phase_completed`, which re-stamped the stale review newer than
-        # implement, so apply-code-fixes then applied the empty-repo findings
-        # (adversarial review, 2026-10-02). Refused, not re-run: a reaggregate
-        # is a promise to run no model. Before the detach boundary, so the
-        # refusal lands on the caller's terminal with no child and no log.
-        if get_or_create_state(plan_path).phase_completion_is_stale("code-review"):
-            print("ERROR: code-review was completed before the latest implement, "
-                  "so its results judge an earlier state of the code; "
-                  "--reaggregate would only re-stamp them.")
-            print("  Re-run the review instead: "
-                  + commit_spelling.spell_retry_command(
-                      "review-code", plan_path, "--force",
-                      flags=cli_common.current_replay_flags(mode="review-code"),
-                  ))
-            sys.exit(EXIT_NEEDS_HUMAN)
-
-        # The round on record keeps its scope policy: a differing explicit
-        # `--scope-policy` is refused here, before the boundary (plan §4).
-        resolve_scope_round(
-            get_or_create_state(plan_path), "code-review", args, same_round=True,
-            phase_dir=str(get_phase_dir(plan_path, 'code-review')),
+def _resolve_pinned_or_exit(
+    state: Any, args: argparse.Namespace, plan_path: Path, **kwargs: Any,
+) -> Optional[PinnedRange]:
+    """:func:`resolve_pinned_range` over *state* at the plan's repository root,
+    or the :class:`RangeError`'s message and exit code (``[RANGE_UNRESOLVED]``
+    is exit 3). *kwargs* go to the resolver (``reaggregate=True``)."""
+    try:
+        return resolve_pinned_range(
+            getattr(state, "state", None), args,
+            cwd=review_git_root(get_project_root(str(plan_path))) or os.getcwd(),
+            plan_path=plan_path, **kwargs,
         )
-        # Another round's validation files are refused here too, before the
-        # boundary, so a `--reaggregate --detach` refusal reaches the caller
-        # (the worker checks again against the round it captures).
-        _review_round.refuse_foreign_round(
-            _review_round.continue_round(get_phase_dir(plan_path, 'code-review')),
-            commit_spelling.spell_retry_command(
-                "review-code", plan_path, "--force",
-                flags=cli_common.current_replay_flags(mode="review-code"),
+    except RangeError as exc:
+        print(exc.message)
+        sys.exit(exc.exit_code)
+
+
+async def _reaggregate_entry(
+    args: argparse.Namespace, run: PhaseRun, *, plan_path: Path, out_dir: Path,
+    prefix: str,
+) -> int:
+    """``--reaggregate``: the round on record re-processed, no model run.
+
+    :func:`_reaggregate_preflight` runs in the invoker; the boundary follows,
+    and past it the re-dispatch runs under the phase-scoped ticker. Returns
+    ``reaggregate_from_existing_files``' exit code.
+    """
+    reaggregate_pinned = _reaggregate_preflight(
+        args, run, plan_path=plan_path, out_dir=out_dir,
+    )
+
+    # The detach boundary, crossed here as well as on the fan-out path
+    # (`_cross_detach_boundary`): a `--reaggregate --detach` launch must
+    # print its run banner and hand the re-dispatch to a worker, or the host
+    # that composed `--detach` has nothing to poll (see the same branch in
+    # `utils/review_orchestrator_base.main`).
+    detach_outcome = maybe_detach(
+        args=args,
+        mode='review-code',
+        phase_dir=str(get_phase_dir(plan_path, 'code-review')),
+        plan_file=str(plan_path),
+        phase='code-review',
+    )
+    if detach_outcome is not None:
+        sys.exit(detach_outcome)
+    # A front door's stage lands inside that boundary (§2.1): the pair and
+    # its drift list come from the state it left, not the one the pre-flight
+    # read.
+    if landed_stage(args):
+        reaggregate_pinned = _resolve_pinned_or_exit(
+            get_or_create_state(plan_path), args, plan_path, reaggregate=True,
+        )
+
+    # T5: this path has no fan-out at all, and it is not short — it
+    # regroups, re-materializes or merges a validation round (dispatching it
+    # in-process under `--exec-subagents`) and rebuilds the report. The
+    # fan-out's ticker cannot cover a window it does not run in, so the
+    # caller starts the phase-scoped one, which prints the step, the elapsed
+    # since it started and whatever counters the current step already
+    # publishes (`progress.subagents`). Stopped in a `finally` because
+    # `reaggregate_from_existing_files` ends by writing its terminal
+    # `progress.step` — and, on the `TaskFileError` branch, by `sys.exit`.
+    phase_ticker = PhaseProgress(
+        str(get_phase_dir(plan_path, 'code-review')), anchor=str(plan_path)
+    )
+    phase_ticker.start_ticker()
+    # See the fan-out path's copy of this: one turn so the task enters its
+    # body, because `await`ing a coroutine is not itself a suspension point
+    # and a never-scheduled task loses the teardown line.
+    await asyncio.sleep(0)
+    # A refusal (`sys.exit` on a stale task file or changed snapshot) wrote
+    # no step of its own, so its teardown line would re-print the previous
+    # run's `step: complete` (dogfood 2026-09-25): dropped on that ending.
+    refused = False
+    try:
+        reaggregate_exit = await reaggregate_from_existing_files(
+            prefix, out_dir, plan_path, args,
+            template_style=args.report_style,
+            **(
+                {"pinned": reaggregate_pinned}
+                if reaggregate_pinned is not None else {}
             ),
         )
+    except SystemExit:
+        refused = True
+        raise
+    finally:
+        await phase_ticker.stop_ticker(final_line=not refused)
+    return reaggregate_exit
 
-        # The detach boundary, crossed here as well as on the fan-out path
-        # below: a `--reaggregate --detach` launch must print its run banner
-        # and hand the re-dispatch to a worker, or the host that composed
-        # `--detach` has nothing to poll (see the same branch in
-        # `utils/review_orchestrator_base.main`).
-        detach_outcome = maybe_detach(
-            args=args,
-            mode='review-code',
-            phase_dir=str(get_phase_dir(plan_path, 'code-review')),
-            plan_file=str(plan_path),
-            phase='code-review',
+
+def _reaggregate_preflight(
+    args: argparse.Namespace, run: PhaseRun, *, plan_path: Path, out_dir: Path,
+) -> Optional[PinnedRange]:
+    """A ``--reaggregate``'s pre-flight, on the caller's terminal: the phase
+    dir's lock, the pinned pair on record, and the refusals (a stale review,
+    another scope policy, another round's validation files). Returns the
+    pair, or ``None`` for a review pinned to nothing."""
+    print("=== REAGGREGATE MODE ===")
+    print(f"{_plan_file_label(plan_path, args)}: {plan_path}")
+    print(f"Output directory: {out_dir}")
+    # `--files`/`--files-from` are not re-read here: the results on disk
+    # were reviewed against the scope their fan-out recorded, so that is
+    # the scope this pass reports. Said, not dropped silently — an explicit
+    # scope request ignored without a word is the fallback the flags exist
+    # to remove. A line, not an exit: every reaggregate command this
+    # orchestrator prints replays the fan-out's own flags, `--files`
+    # included, so refusing them would break its own recovery path.
+    # Never parsed either, so `--files-from -` reads no stdin.
+    ignored_scope_flags = [
+        flag
+        for flag, given in (
+            ("--files", bool(getattr(args, "files", None))),
+            ("--files-from", getattr(args, "files_from", None) is not None),
         )
-        if detach_outcome is not None:
-            sys.exit(detach_outcome)
-        # A front door's stage lands inside that boundary (§2.1): the pair and
-        # its drift list come from the state it left, not the one read above.
-        if landed_stage(args):
-            try:
-                reaggregate_pinned = resolve_pinned_range(
-                    getattr(get_or_create_state(plan_path), "state", None), args,
-                    cwd=review_git_root(get_project_root(str(plan_path))) or os.getcwd(),
-                    plan_path=plan_path, reaggregate=True,
-                )
-            except RangeError as exc:
-                print(exc.message)
-                sys.exit(exc.exit_code)
-
-        # T5: this path has no fan-out at all, and it is not short — it
-        # regroups, re-materializes or merges a validation round (dispatching it
-        # in-process under `--exec-subagents`) and rebuilds the report. The
-        # fan-out's ticker cannot cover a window it does not run in, so the
-        # caller starts the phase-scoped one, which prints the step, the elapsed
-        # since it started and whatever counters the current step already
-        # publishes (`progress.subagents`). Stopped in a `finally` because
-        # `reaggregate_from_existing_files` ends by writing its terminal
-        # `progress.step` — and, on the `TaskFileError` branch, by `sys.exit`.
-        phase_ticker = PhaseProgress(
-            str(get_phase_dir(plan_path, 'code-review')), anchor=str(plan_path)
+        if given
+    ]
+    if ignored_scope_flags:
+        print(
+            f"[SCOPE_FLAGS_IGNORED] --reaggregate does not re-resolve "
+            f"{' or '.join(ignored_scope_flags)}; it uses the scope recorded "
+            f"in state.json ({REVIEW_SCOPE_FILES_KEY}, else tracked_files, "
+            f"else the git diff). Run a fan-out with the flag to review "
+            f"another scope."
         )
-        phase_ticker.start_ticker()
-        # See the fan-out path's copy of this: one turn so the task enters its
-        # body, because `await`ing a coroutine is not itself a suspension point
-        # and a never-scheduled task loses the teardown line.
-        await asyncio.sleep(0)
-        # A refusal (`sys.exit` on a stale task file or changed snapshot) wrote
-        # no step of its own, so its teardown line would re-print the previous
-        # run's `step: complete` (dogfood 2026-09-25): dropped on that ending.
-        refused = False
-        try:
-            reaggregate_exit = await reaggregate_from_existing_files(
-                prefix, out_dir, plan_path, args,
-                template_style=args.report_style,
-                **(
-                    {"pinned": reaggregate_pinned}
-                    if reaggregate_pinned is not None else {}
-                ),
-            )
-        except SystemExit:
-            refused = True
-            raise
-        finally:
-            await phase_ticker.stop_ticker(final_line=not refused)
-        return reaggregate_exit
+    print("")
 
-    # One writer per phase dir, as on the reaggregate path: taken before this
-    # run reads state.json or the phase's files. A `--detach` launcher whose
-    # dir a live run holds re-attaches, takes it over or refuses right here,
-    # before any of its pre-flight (`detach.take_for_launch`).
+    if not out_dir.is_dir():
+        print(f"ERROR: Output directory does not exist: {out_dir}")
+        sys.exit(1)
+
+    # One writer per phase dir: held from here until this run exits, so a
+    # second run is refused before it reads or changes anything (a
+    # launcher hands it to its worker at the boundary).
     run.take(get_phase_dir(plan_path, 'code-review'), mode="review-code",
              plan_file=str(plan_path), args=args, phase="code-review")
 
+    # The review on record's two commits, when state pins them (a commit
+    # brief's `commit_range`, a direct round's `head_ref`): resolved
+    # strictly here, before the detach boundary and before anything is
+    # written, so a pruned SHA is `[RANGE_UNRESOLVED]` exit 3 on the
+    # caller's terminal and never a `HEAD~1` stand-in, and a typed ref
+    # that resolves elsewhere is refused (plans/review-commits.md §2.4,
+    # §2.5).
+    reaggregate_pinned = _resolve_pinned_or_exit(
+        get_or_create_state(plan_path), args, plan_path, reaggregate=True,
+    )
+    if reaggregate_pinned is not None:
+        pin_recorded_refs(reaggregate_pinned)
+
+    # The stale guard the fan-out path applies (`_guard_phase_state`),
+    # applied here too. A review completed before the latest implement
+    # judged an earlier state of the code (2026-10-02: the empty
+    # repository); the fan-out takes
+    # `--force` on it, but this path ran no model and ended in
+    # `mark_phase_completed`, which re-stamped the stale review newer than
+    # implement, so apply-code-fixes then applied the empty-repo findings
+    # (adversarial review, 2026-10-02). Refused, not re-run: a reaggregate
+    # is a promise to run no model. Before the detach boundary, so the
+    # refusal lands on the caller's terminal with no child and no log.
+    if get_or_create_state(plan_path).phase_completion_is_stale("code-review"):
+        print("ERROR: code-review was completed before the latest implement, "
+              "so its results judge an earlier state of the code; "
+              "--reaggregate would only re-stamp them.")
+        print("  Re-run the review instead: "
+              + commit_spelling.spell_retry_command(
+                  "review-code", plan_path, "--force",
+                  flags=cli_common.current_replay_flags(mode="review-code"),
+              ))
+        sys.exit(EXIT_NEEDS_HUMAN)
+
+    # The round on record keeps its scope policy: a differing explicit
+    # `--scope-policy` is refused here, before the boundary (plan §4).
+    resolve_scope_round(
+        get_or_create_state(plan_path), "code-review", args, same_round=True,
+        phase_dir=str(get_phase_dir(plan_path, 'code-review')),
+    )
+    # Another round's validation files are refused here too, before the
+    # boundary, so a `--reaggregate --detach` refusal reaches the caller
+    # (the worker checks again against the round it captures).
+    _review_round.refuse_foreign_round(
+        _review_round.continue_round(get_phase_dir(plan_path, 'code-review')),
+        commit_spelling.spell_retry_command(
+            "review-code", plan_path, "--force",
+            flags=cli_common.current_replay_flags(mode="review-code"),
+        ),
+    )
+    return reaggregate_pinned
+
+
+def _guard_phase_state(args: argparse.Namespace, plan_path: Path) -> Optional[PinnedRange]:
+    """A fan-out's guards over the phase on record, in pre-flight.
+
+    The pinned pair is resolved first, strictly, because the guards may write
+    ``state.json`` and a pair that no longer resolves must be refused before
+    anything is written; it is returned. Then ``state.json`` is materialized,
+    a stale completion re-runs as ``--force``, a completed phase is reported
+    done, and :func:`_guard_partial_completion` judges the files of a round
+    that stopped part way. Each refusal exits.
+    """
     # Guard against re-running already-completed phase (expensive LLM calls)
     state_guard = get_or_create_state(plan_path)
     # A review pinned to two commits (`--head-ref`, or a commit brief's
@@ -5735,15 +5939,7 @@ async def _main(argv: Optional[List[str]], run: PhaseRun) -> int:
     # §2.5). The recorded invocation then carries the pair as full SHAs, so a
     # detached child, a resume line and a next command replay the same pair
     # after a branch moves.
-    try:
-        pinned = resolve_pinned_range(
-            getattr(state_guard, "state", None), args,
-            cwd=review_git_root(get_project_root(str(plan_path))) or os.getcwd(),
-            plan_path=plan_path,
-        )
-    except RangeError as exc:
-        print(exc.message)
-        sys.exit(exc.exit_code)
+    pinned = _resolve_pinned_or_exit(state_guard, args, plan_path)
     if pinned is not None:
         pin_recorded_refs(pinned)
     # A `--detach` launcher writes no state before the boundary: its launch can
@@ -5788,121 +5984,134 @@ async def _main(argv: Optional[List[str]], run: PhaseRun) -> int:
     # Under the phase lock, so no other run can be writing the files it judges
     # or completes the phase on.
     if not args.force:
-        phase_dir_check = get_phase_dir(plan_path, 'code-review')
-        validation_tasks_path = phase_dir_check / "validation_tasks.json"
-        grouped_path = phase_dir_check / "grouped.json"
-        validation_path = phase_dir_check / "validation.json"
-        report_path_check = phase_dir_check / "report.md"
+        _guard_partial_completion(args, plan_path, state_guard)
+    return pinned
 
-        if validation_tasks_path.exists():
-            # Only the round on record's own files may complete the phase or
-            # be resumed (utils/review_round.py). A `--force` re-run stamps a
-            # new round before it replaces anything, so one stopped early
-            # leaves the previous round's task file, validation.json and
-            # report.md beside a checkpoint that names another round.
-            status_check = read_status(str(phase_dir_check))
-            rounds = _review_round.round_files(phase_dir_check, status_check)
-            unproven = rounds.stale()
-            if not _review_round.tasks_file_is_this_rounds(rounds, status_check):
-                unproven = (_review_round.TASKS_NAME,) + tuple(
-                    name for name in unproven if name != _review_round.TASKS_NAME
-                )
-            if unproven:
-                print("ERROR: Partial completion detected for 'code-review'.")
-                print(f"  {', '.join(unproven)} may not be this round's: "
-                      f"{_review_round.evidence(rounds, unproven, status_check)}.")
-                print("  Files a re-run stopped before replacing look exactly like "
-                      "this, so they neither complete this phase nor resume it.")
-                print("  Re-run with --force: it keeps each reusable model result "
-                      "([SKIP]), regroups and validates again:")
-                print("  " + commit_spelling.spell_retry_command(
-                    "review-code", plan_path, "--force",
-                    flags=cli_common.current_replay_flags(mode="review-code"),
-                ))
-                sys.exit(EXIT_NEEDS_HUMAN)
-            seal = _review_round.report_seal(phase_dir_check)
-            if validation_path.exists() and report_path_check.exists() and (
-                rounds.owner(_review_round.VALIDATION_NAME) == _review_round.OWNED
-                and rounds.owner(_review_round.REPORT_NAME) == _review_round.OWNED
-                and seal.whole and seal.binds_validation
-            ):
-                # Auto-heal: this round's verdicts and report are both on disk
-                # (both record the round on record, and the report is whole and
-                # was built from this very validation.json: its seal), so only
-                # the completion is missing, and it is finished the way the run
-                # would have finished it: the HIGH groups recorded and the
-                # `--fail-on-high` gate applied. The heal counts them from the
-                # grouped.json that validation.json binds, or refuses (exit 3).
-                sys.exit(heal_unrecorded_completion(
-                    phase_dir_check, state_guard, args, report_path=report_path_check,
-                    plan_path=plan_path,
-                ))
-            elif validation_path.exists() and report_path_check.exists():
-                # This round's task file, but a validation.json or report.md
-                # that does not record this round, or a report cut short or
-                # built from another validation.json (its seal): a report
-                # rebuilt from the verdicts the reaggregate checks against this
-                # task file, never a completion taken from the files as they are.
-                unrecorded = (_review_round.VALIDATION_NAME, _review_round.REPORT_NAME)
-                print("ERROR: Partial completion detected for 'code-review'.")
-                if (rounds.owner(_review_round.VALIDATION_NAME) == _review_round.OWNED
-                        and rounds.owner(_review_round.REPORT_NAME) == _review_round.OWNED):
-                    print("  validation.json and report.md record this round, but "
-                          "report.md is not the whole report built from this "
-                          "validation.json (it was cut short, edited, or written "
-                          "before the verdicts were merged again).")
-                else:
-                    print("  validation.json and report.md are on disk, but "
-                          f"{_review_round.evidence(rounds, unrecorded, status_check)}.")
-                print("  Run: --reaggregate, which checks validation.json against this "
-                      "round's task file and rebuilds the report.")
-                sys.exit(3)
-            elif validation_path.exists():
-                print("ERROR: Partial completion detected for 'code-review'.")
-                print(f"  validation.json exists but report is missing.")
-                print(f"  Run: --reaggregate to regenerate the report.")
-                sys.exit(3)
-            else:
-                # Check for batch files. A retired round's
-                # `validation_batch_<n>.<stamp>.stale.json` (D7) still matches
-                # the glob and is not validation in progress.
-                batch_files = [
-                    path for path in phase_dir_check.glob("validation_batch_*.json")
-                    if not path.name.endswith(".stale.json")
-                ]
-                if batch_files:
-                    print("ERROR: Partial completion detected for 'code-review'.")
-                    print(f"  Found {len(batch_files)} validation batch file(s).")
-                    print(f"  Check if all batches are complete, then run: --reaggregate")
-                    sys.exit(3)
-                else:
-                    print("ERROR: Partial completion detected for 'code-review'.")
-                    print(f"  validation_tasks.json exists but validation has not started.")
-                    print(f"  Resume it: for each task in that file, run task.prompt")
-                    print(f"  (or the file at task.prompt_path, whose bytes are the same)")
-                    print(f"  as a subagent and write the JSON it returns to task.output_path.")
-                    sys.exit(3)
-        elif grouped_path.exists():
+
+def _guard_partial_completion(
+    args: argparse.Namespace, plan_path: Path, state_guard: Any,
+) -> None:
+    """The files of a round that stopped part way, judged without ``--force``.
+
+    Returns when the phase dir holds none. Otherwise it exits: the round on
+    record's verdicts and sealed report are finished by
+    :func:`heal_unrecorded_completion`; every other leftover is exit 3 naming
+    the command that continues it (``--reaggregate``, the task file's own
+    resume, or ``--force`` for files that may be another round's).
+    """
+    phase_dir_check = get_phase_dir(plan_path, 'code-review')
+    validation_tasks_path = phase_dir_check / "validation_tasks.json"
+    grouped_path = phase_dir_check / "grouped.json"
+    validation_path = phase_dir_check / "validation.json"
+    report_path_check = phase_dir_check / "report.md"
+
+    if validation_tasks_path.exists():
+        # Only the round on record's own files may complete the phase or
+        # be resumed (utils/review_round.py). A `--force` re-run stamps a
+        # new round before it replaces anything, so one stopped early
+        # leaves the previous round's task file, validation.json and
+        # report.md beside a checkpoint that names another round.
+        status_check = read_status(str(phase_dir_check))
+        rounds = _review_round.round_files(phase_dir_check, status_check)
+        unproven = rounds.stale()
+        if not _review_round.tasks_file_is_this_rounds(rounds, status_check):
+            unproven = (_review_round.TASKS_NAME,) + tuple(
+                name for name in unproven if name != _review_round.TASKS_NAME
+            )
+        if unproven:
             print("ERROR: Partial completion detected for 'code-review'.")
-            print(f"  grouped.json exists but no validation_tasks.json.")
-            print(f"  Run: --reaggregate to continue from grouping.")
+            print(f"  {', '.join(unproven)} may not be this round's: "
+                  f"{_review_round.evidence(rounds, unproven, status_check)}.")
+            print("  Files a re-run stopped before replacing look exactly like "
+                  "this, so they neither complete this phase nor resume it.")
+            print("  Re-run with --force: it keeps each reusable model result "
+                  "([SKIP]), regroups and validates again:")
+            print("  " + commit_spelling.spell_retry_command(
+                "review-code", plan_path, "--force",
+                flags=cli_common.current_replay_flags(mode="review-code"),
+            ))
+            sys.exit(EXIT_NEEDS_HUMAN)
+        seal = _review_round.report_seal(phase_dir_check)
+        if validation_path.exists() and report_path_check.exists() and (
+            rounds.owner(_review_round.VALIDATION_NAME) == _review_round.OWNED
+            and rounds.owner(_review_round.REPORT_NAME) == _review_round.OWNED
+            and seal.whole and seal.binds_validation
+        ):
+            # Auto-heal: this round's verdicts and report are both on disk
+            # (both record the round on record, and the report is whole and
+            # was built from this very validation.json: its seal), so only
+            # the completion is missing, and it is finished the way the run
+            # would have finished it: the HIGH groups recorded and the
+            # `--fail-on-high` gate applied. The heal counts them from the
+            # grouped.json that validation.json binds, or refuses (exit 3).
+            sys.exit(heal_unrecorded_completion(
+                phase_dir_check, state_guard, args, report_path=report_path_check,
+                plan_path=plan_path,
+            ))
+        elif validation_path.exists() and report_path_check.exists():
+            # This round's task file, but a validation.json or report.md
+            # that does not record this round, or a report cut short or
+            # built from another validation.json (its seal): a report
+            # rebuilt from the verdicts the reaggregate checks against this
+            # task file, never a completion taken from the files as they are.
+            unrecorded = (_review_round.VALIDATION_NAME, _review_round.REPORT_NAME)
+            print("ERROR: Partial completion detected for 'code-review'.")
+            if (rounds.owner(_review_round.VALIDATION_NAME) == _review_round.OWNED
+                    and rounds.owner(_review_round.REPORT_NAME) == _review_round.OWNED):
+                print("  validation.json and report.md record this round, but "
+                      "report.md is not the whole report built from this "
+                      "validation.json (it was cut short, edited, or written "
+                      "before the verdicts were merged again).")
+            else:
+                print("  validation.json and report.md are on disk, but "
+                      f"{_review_round.evidence(rounds, unrecorded, status_check)}.")
+            print("  Run: --reaggregate, which checks validation.json against this "
+                  "round's task file and rebuilds the report.")
+            sys.exit(3)
+        elif validation_path.exists():
+            print("ERROR: Partial completion detected for 'code-review'.")
+            print(f"  validation.json exists but report is missing.")
+            print(f"  Run: --reaggregate to regenerate the report.")
             sys.exit(3)
         else:
-            # Check for per-model result files
-            model_files = leftover_model_results(phase_dir_check)
-            if model_files:
+            # Check for batch files. A retired round's
+            # `validation_batch_<n>.<stamp>.stale.json` (D7) still matches
+            # the glob and is not validation in progress.
+            batch_files = [
+                path for path in phase_dir_check.glob("validation_batch_*.json")
+                if not path.name.endswith(".stale.json")
+            ]
+            if batch_files:
                 print("ERROR: Partial completion detected for 'code-review'.")
-                print(f"  Found {len(model_files)} per-model result file(s) but no grouped.json.")
-                print(f"  Run: --reaggregate to aggregate results.")
+                print(f"  Found {len(batch_files)} validation batch file(s).")
+                print(f"  Check if all batches are complete, then run: --reaggregate")
                 sys.exit(3)
+            else:
+                print("ERROR: Partial completion detected for 'code-review'.")
+                print(f"  validation_tasks.json exists but validation has not started.")
+                print(f"  Resume it: for each task in that file, run task.prompt")
+                print(f"  (or the file at task.prompt_path, whose bytes are the same)")
+                print(f"  as a subagent and write the JSON it returns to task.output_path.")
+                sys.exit(3)
+    elif grouped_path.exists():
+        print("ERROR: Partial completion detected for 'code-review'.")
+        print(f"  grouped.json exists but no validation_tasks.json.")
+        print(f"  Run: --reaggregate to continue from grouping.")
+        sys.exit(3)
+    else:
+        # Check for per-model result files
+        model_files = leftover_model_results(phase_dir_check)
+        if model_files:
+            print("ERROR: Partial completion detected for 'code-review'.")
+            print(f"  Found {len(model_files)} per-model result file(s) but no grouped.json.")
+            print(f"  Run: --reaggregate to aggregate results.")
+            sys.exit(3)
 
-    # Model selection, one rule for every review lane: CLI --models >
-    # --interactive > --quick > the mode's YAML defaults > interactive
-    # selection; under --yes it stops at defaults.models (D6 row 2).
-    model_specs, unattended = _review_lane.select_review_models(
-        args, mode='code-review', anchor=str(plan_path),
-    )
 
+def _announce_fanout(
+    args: argparse.Namespace, plan_path: Path, out_dir: Path, model_specs: List[str],
+) -> None:
+    """The fan-out's header lines, and its output directory created."""
     print(f"{_plan_file_label(plan_path, args)}: {plan_path}")
     print(f"Output directory: {out_dir}")
     print(f"Models: {', '.join(model_specs)}")
@@ -5914,9 +6123,18 @@ async def _main(argv: Optional[List[str]], run: PhaseRun) -> int:
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Get tracked files and base ref from state (if available from implementation phase)
-    state = get_or_create_state(plan_path)
 
+def _resolve_base_and_scope(
+    args: argparse.Namespace, state: Any, *, plan_path: Path,
+    pinned: Optional[PinnedRange],
+) -> RunScope:
+    """The fan-out's :class:`RunScope`, resolved in pre-flight.
+
+    The roots, the ``--files`` list (staged on *state* in memory, saved only
+    past the boundary), the base ref, the scope in review order, a pinned
+    pair's drift check and a commit brief's context plan. A ``--files`` path
+    outside the repository is exit 1 here, on the caller's terminal.
+    """
     # The root an issue's relative `file` is resolved against when the
     # validation prompt embeds the code at the lines it cites.
     project_root = get_project_root(str(plan_path))
@@ -5929,7 +6147,7 @@ async def _main(argv: Optional[List[str]], run: PhaseRun) -> int:
     # of `tracked_files` and the git fallback. Parsed here, in pre-flight, so a
     # path outside the repository fails on the caller's terminal naming it.
     # Staged on the in-memory state now — `resolve_review_scope` reads it from
-    # there — and saved only past the detach boundary below.
+    # there — and saved only past the detach boundary.
     try:
         scope_files = read_scope_files_flags(args, git_root or os.getcwd())
     except ScopeFilesError as exc:
@@ -5940,8 +6158,9 @@ async def _main(argv: Optional[List[str]], run: PhaseRun) -> int:
     # Get the git base reference - this is the commit when implementation started
     # Used by agents to run: git diff <base_ref> -- <file>
     if pinned is not None:
-        # The pinned pair, resolved strictly above: never `head_before_implement`,
-        # `head_at_start` or `HEAD~1`, and never a `validate_git_ref` fallback.
+        # The pinned pair, resolved strictly in `_guard_phase_state`: never
+        # `head_before_implement`, `head_at_start` or `HEAD~1`, and never a
+        # `validate_git_ref` fallback.
         base_ref = pinned.base_ref
         print(f"Git base reference: {base_ref}")
         # "as committed", not "two commits": a one-commit range is one commit,
@@ -5955,42 +6174,11 @@ async def _main(argv: Optional[List[str]], run: PhaseRun) -> int:
         base_ref = validate_git_ref(base_ref)
         print(f"Git base reference: {base_ref or '(empty - validation will lack diff context)'}")
 
-    # Best-effort base-ref staleness visibility. Wrapped so it can NEVER fail the
-    # run: surface the resolved commit, and warn if the base ref lags behind HEAD
-    # (a common foot-gun when only the latest uncommitted work was meant to be
-    # reviewed). Skipped for a pinned review: its `is-ancestor <base> HEAD` and
+    # Skipped for a pinned review: its `is-ancestor <base> HEAD` and
     # `rev-list <base>..HEAD` are about an implement base, and two commits are
     # reviewed whatever HEAD is.
     if base_ref and pinned is None:
-        try:
-            if is_empty_tree(base_ref):
-                # `git log` names no commit for a tree, so say what it is.
-                print(
-                    "Base ref is the empty tree: the repository had no commit "
-                    "when this workflow started, so every file under review is new"
-                )
-            log_out, _, log_rc = run_git(
-                "log", "-1", "--format=%h %s", base_ref, check=False
-            )
-            if log_rc == 0 and log_out.strip():
-                print(f"Base ref commit: {log_out.strip()}")
-
-            _, _, anc_rc = run_git(
-                "merge-base", "--is-ancestor", base_ref, "HEAD", check=False
-            )
-            if anc_rc == 0:
-                count_out, _, count_rc = run_git(
-                    "rev-list", "--count", f"{base_ref}..HEAD", check=False
-                )
-                ahead = int(count_out.strip()) if count_rc == 0 and count_out.strip() else 0
-                if ahead > 0:
-                    print(
-                        f"NOTE: base ref is {ahead} commit(s) behind HEAD. If you "
-                        f"intend to review only the latest (uncommitted) work, pass "
-                        f"--base-ref HEAD."
-                    )
-        except Exception:
-            pass
+        _note_base_ref_lag(base_ref)
 
     # The scope, labelled by the branch that picked it, then put in review
     # order: source, tests, fixtures, generated, by path within each. The
@@ -6023,11 +6211,74 @@ async def _main(argv: Optional[List[str]], run: PhaseRun) -> int:
         # included: its record arrives with the stage, past the boundary.
         pinned = drift_check(pinned, changed_files, repo_root=git_root,
                              staged=landed_stage(args))
-    pinned_kw: Dict[str, Any] = {"pinned": pinned} if pinned is not None else {}
     plan_snapshot, plan_sha256 = _context_plan(getattr(state, "state", None))
     print("Running code review in agent exploration mode...")
     print("")
+    return RunScope(
+        base_ref=base_ref, review_scope=review_scope, changed_files=changed_files,
+        pinned=pinned, plan_snapshot=plan_snapshot, plan_sha256=plan_sha256,
+        git_root=git_root, project_root=project_root, collapse_paths=collapse_paths,
+        scope_files=scope_files, files_record_moved=scope_record_moved,
+    )
 
+
+def _note_base_ref_lag(base_ref: str) -> None:
+    """Best-effort base-ref staleness visibility. Wrapped so it can NEVER fail
+    the run: surface the resolved commit, and warn if the base ref lags behind
+    HEAD (a common foot-gun when only the latest uncommitted work was meant to
+    be reviewed)."""
+    try:
+        if is_empty_tree(base_ref):
+            # `git log` names no commit for a tree, so say what it is.
+            print(
+                "Base ref is the empty tree: the repository had no commit "
+                "when this workflow started, so every file under review is new"
+            )
+        log_out, _, log_rc = run_git(
+            "log", "-1", "--format=%h %s", base_ref, check=False
+        )
+        if log_rc == 0 and log_out.strip():
+            print(f"Base ref commit: {log_out.strip()}")
+
+        _, _, anc_rc = run_git(
+            "merge-base", "--is-ancestor", base_ref, "HEAD", check=False
+        )
+        if anc_rc == 0:
+            count_out, _, count_rc = run_git(
+                "rev-list", "--count", f"{base_ref}..HEAD", check=False
+            )
+            ahead = int(count_out.strip()) if count_rc == 0 and count_out.strip() else 0
+            if ahead > 0:
+                print(
+                    f"NOTE: base ref is {ahead} commit(s) behind HEAD. If you "
+                    f"intend to review only the latest (uncommitted) work, pass "
+                    f"--base-ref HEAD."
+                )
+    except Exception:
+        pass
+
+
+def _read_plan_bytes(plan_path: Path) -> bytes:
+    """The plan's bytes, checked to decode; an undecodable plan prints its
+    error to stderr and exits with the error's code."""
+    try:
+        plan_bytes = plan_path.read_bytes()
+        decode_document(plan_bytes, str(plan_path))
+    except ValidationContextError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(exc.exit_code)
+    return plan_bytes
+
+
+def _resolve_round_policy_and_plan_bytes(
+    args: argparse.Namespace, state: Any, *, plan_path: Path,
+) -> Tuple["_scope_round.RoundPolicy", Optional[bytes]]:
+    """The round's scope policy and the plan's bytes, both in pre-flight.
+
+    The plan is read only when validation will run (``None`` under
+    ``--skip-validation``); it is bound to the phase's snapshot past the
+    boundary, by :func:`_open_fanout_round`.
+    """
     # The round's scope policy, resolved before the boundary (plan §4): it
     # decides the reviewer and validator prompts alike, and a same-round
     # resume keeps the recorded one. A change that would mix reviewer outputs
@@ -6050,17 +6301,27 @@ async def _main(argv: Optional[List[str]], run: PhaseRun) -> int:
     # and a repeated `--detach` never replaces an active run's snapshot.
     plan_bytes: Optional[bytes] = None
     if not args.skip_validation:
-        try:
-            plan_bytes = plan_path.read_bytes()
-            decode_document(plan_bytes, str(plan_path))
-        except ValidationContextError as exc:
-            print(f"ERROR: {exc}", file=sys.stderr)
-            sys.exit(exc.exit_code)
+        plan_bytes = _read_plan_bytes(plan_path)
+    return scope_round_policy, plan_bytes
 
+
+def _cross_detach_boundary(
+    args: argparse.Namespace, state: Any, scope: RunScope, *, plan_path: Path,
+    model_specs: List[str], plan_bytes: Optional[bytes],
+) -> Tuple[Path, "_review_round.Claim", RunScope, Optional[bytes]]:
+    """The detach boundary, and the round this process opens past it.
+
+    ``maybe_detach`` hands a ``--detach`` launch to its worker (and exits the
+    launcher); nothing after it runs in the invoker. Past it a new round is
+    claimed, a landed front-door stage re-derives the scope
+    (:meth:`RunScope.refresh`) and re-reads the plan, and a commit brief's
+    frozen context plan is checked. Returns ``(phase_dir, claim, scope,
+    plan_bytes)``.
+    """
     # --- the detach boundary (see utils/review_orchestrator_base.maybe_detach) --
-    # Late on purpose: everything above is pre-flight that must fail on the
-    # caller's terminal — models resolved, base ref validated, changed files
-    # discovered — and nothing below runs in the invoker.
+    # Late on purpose: every stage before this one is pre-flight that must
+    # fail on the caller's terminal — models resolved, base ref validated,
+    # changed files discovered — and nothing below runs in the invoker.
     detach_phase_dir = get_phase_dir(plan_path, 'code-review')
     detach_outcome = maybe_detach(
         args=args,
@@ -6077,59 +6338,62 @@ async def _main(argv: Optional[List[str]], run: PhaseRun) -> int:
     # anything: from here on the previous round's validation files and report
     # read as another round's, so neither the partial-completion guard nor a
     # resume answer completes this phase on them (utils/review_round.py). The
-    # opening checkpoint write below carries it, every file this run writes
-    # records it, and each publication checks that the checkpoint still does
-    # (`claim.held`).
+    # opening checkpoint write (`_open_fanout_round`) carries it, every file
+    # this run writes records it, and each publication checks that the
+    # checkpoint still does (`claim.held`).
     claim = _review_round.start_round(detach_phase_dir)
 
     # A detached worker takes its lock inside `maybe_detach`, and a commit
     # front door's stage (the new header, `commit_range`, a context-plan
     # snapshot; plans/review-commits.md §2.1) is applied there — after the
-    # pre-flight above loaded `state`, read the brief and resolved the pair.
+    # pre-flight loaded `state`, read the brief and resolved the pair.
     # Saved as loaded, `state` would put the old `commit_range` back (or, on a
     # new brief, drop it) and the validation snapshot would bind the old
     # header. So everything derived from either is derived again: `state`
     # reloaded, its staged `--files` record redone, the pair (and a fronted
     # run's drift list and context plan) re-resolved, the brief re-read.
     if landed_stage(args):
-        state.reload()
-        scope_record_moved = stage_scope_files_record(state, scope_files)
-        try:
-            pinned = refresh_pinned_after_stage(
-                state, pinned, args, cwd=git_root or os.getcwd(), plan_path=plan_path,
-            )
-        except RangeError as exc:
-            print(exc.message)
-            sys.exit(exc.exit_code)
-        pinned_kw = {"pinned": pinned} if pinned is not None else {}
-        plan_snapshot, plan_sha256 = _context_plan(getattr(state, "state", None))
+        scope = scope.refresh(state, args=args, plan_path=plan_path)
         if plan_bytes is not None:
-            try:
-                plan_bytes = plan_path.read_bytes()
-                decode_document(plan_bytes, str(plan_path))
-            except ValidationContextError as exc:
-                print(f"ERROR: {exc}", file=sys.stderr)
-                sys.exit(exc.exit_code)
+            plan_bytes = _read_plan_bytes(plan_path)
 
-    if plan_snapshot and plan_sha256 and (
-        context_plan_snapshot_sha256(plan_snapshot, git_root) != plan_sha256
+    if scope.plan_snapshot and scope.plan_sha256 and (
+        context_plan_snapshot_sha256(scope.plan_snapshot, scope.git_root)
+        != scope.plan_sha256
     ):
         print(
-            f"[CONTEXT_PLAN_SNAPSHOT_CHANGED] {plan_snapshot} is missing or differs from "
-            "the frozen context plan. Restore the snapshot, or re-run --review-commits "
-            "with --context-plan <path> to capture it again.", file=sys.stderr,
+            f"[CONTEXT_PLAN_SNAPSHOT_CHANGED] {scope.plan_snapshot} is missing or "
+            "differs from the frozen context plan. Restore the snapshot, or re-run "
+            "--review-commits with --context-plan <path> to capture it again.",
+            file=sys.stderr,
         )
         sys.exit(EXIT_NEEDS_HUMAN)
+    return detach_phase_dir, claim, scope, plan_bytes
 
+
+def _open_fanout_round(
+    args: argparse.Namespace, state: Any, scope: RunScope,
+    claim: "_review_round.Claim", *, plan_path: Path, detach_phase_dir: Path,
+    model_specs: List[str], plan_bytes: Optional[bytes],
+    scope_round_policy: "_scope_round.RoundPolicy", unattended: bool,
+) -> Tuple[Optional[BoundDocument], "_review_lane.RoundOpening"]:
+    """What this process records before the fan-out, as the phase's owner.
+
+    The ``--files`` record saved (or cleared), the plan bound to the phase's
+    validation snapshot, the round's scope baseline, and the round's opening
+    checkpoint (:func:`utils.review_lane.open_round`). Returns the bound plan
+    (``None`` under ``--skip-validation``) and what the opening read of the
+    previous attempt.
+    """
     # The fan-out starts here, so its `--files` scope is recorded here — or a
     # previous run's is cleared — for a later `--reaggregate` to resolve the
     # same scope. Below the boundary, like the plan snapshot: only the process
     # that owns the phase writes it.
-    if scope_record_moved:
+    if scope.files_record_moved:
         state.save()
-        if scope_files is not None:
+        if scope.scope_files is not None:
             print(
-                f"Recorded the --files scope ({len(scope_files)} files) as "
+                f"Recorded the --files scope ({len(scope.scope_files)} files) as "
                 f"{REVIEW_SCOPE_FILES_KEY} in state.json"
             )
         else:
@@ -6149,12 +6413,15 @@ async def _main(argv: Optional[List[str]], run: PhaseRun) -> int:
     # review's brief) from the same bytes the validation snapshot holds, the
     # task list and the pinned range as evidence, a frozen context plan by its
     # recorded hash. Recorded through `state`, the instance this phase saves.
-    retire_scope_round_results(str(detach_phase_dir), state, "code-review", scope_round_policy)
+    retire_scope_round_results(
+        str(detach_phase_dir), state, "code-review", scope_round_policy,
+    )
     _scope_round.record_round(
         state, "code-review", scope_round_policy,
         code_review_scope_baseline(
             state, plan_path, plan_document_at_load,
-            base_ref=base_ref, head_ref=pinned.head if pinned is not None else None,
+            base_ref=scope.base_ref,
+            head_ref=scope.pinned.head if scope.pinned is not None else None,
         ),
     )
 
@@ -6190,9 +6457,78 @@ async def _main(argv: Optional[List[str]], run: PhaseRun) -> int:
         model_specs=model_specs, scope_round_policy=scope_round_policy,
         unattended=unattended, after_opening=models_requested_landed,
     )
-    prior_usage, prior_served = opening.prior_usage, opening.prior_served
+    return plan_document_at_load, opening
 
-    fix_tasks_path = None
+
+def _write_diff_set(
+    args: argparse.Namespace, state: Any, scope: RunScope, *,
+    detach_phase_dir: Path, model_specs: List[str],
+) -> Any:
+    """The diff set (``write_review_diff``'s ``ReviewDiffSet``) and the
+    round's start, the first thing inside the intent-to-add block."""
+    # The scope manifest and one whole diff per source or test file, the
+    # FIRST thing inside the intent-to-add block (D2.2): inside it because
+    # `git diff` shows a new untracked file only once it is intent-to-add, and
+    # before the fan-out because every reviewer's prompt names these two
+    # paths — a slot that started first would find them missing, or holding
+    # the previous run's set. Into `detach_phase_dir`, resolved up front: the
+    # `get_phase_dir` call in `_run_reviews_and_save` runs only after the
+    # fan-out returns. A git failure degrades the set (`[DIFF_FAILED]`,
+    # coverage partial) and the fan-out goes on. At `git_root`, like the
+    # intent-to-add marking: the paths are root-relative, and from a
+    # subdirectory every diff came back empty and the manifest called that
+    # complete coverage with no net change.
+    diff_set = write_review_diff(
+        scope.base_ref, scope.changed_files, detach_phase_dir, scope.collapse_paths,
+        scope_source=describe_scope_source(
+            scope.review_scope.source, scope.base_ref, scope.pinned,
+        ),
+        cwd=scope.git_root,
+        **({"head_ref": scope.pinned.head} if scope.pinned is not None else {}),
+    )
+
+    # A new round (not a resume of the missing models) records which
+    # review is on record, through this phase's own `state`, the instance
+    # it saves at the end (plans/review-commits.md §2.1): a commit brief's
+    # `reviewed_header_sha256` (and its apply guard cleared), a direct
+    # round's `head_ref`, or — a round with neither — no `head_ref`.
+    if round_starts(
+        detach_phase_dir, model_specs, diff_set.scope_id,
+        rerun_all=bool(getattr(args, "rerun_all", False)),
+    ) and record_round_start(state, scope.pinned):
+        state.save()
+    return diff_set
+
+
+@dataclasses.dataclass(frozen=True)
+class _ClosedFanout:
+    """What :func:`_run_reviews_and_save` hands the round: the phase dir, the
+    lane, each slot's ``(success, issues, details)`` after the fan-out's close
+    (a salvaged model holds its repaired issues), the failed and salvaged
+    models, and the served-model and usage maps the report prints."""
+
+    phase_dir: Path
+    lane: CodeLane
+    results: Dict[str, Tuple[bool, Any, Any]]
+    failed_models: Dict[str, Any]
+    salvaged_models: Set[str]
+    served_models: Dict[str, Dict[str, Any]]
+    usage: Dict[str, Dict[str, Any]]
+
+
+async def _run_reviews_and_save(
+    args: argparse.Namespace, scope: RunScope, claim: "_review_round.Claim",
+    diff_set: Any, *, plan_path: Path, out_dir: Path, prefix: str,
+    detach_phase_dir: Path, model_specs: List[str],
+    scope_round_policy: "_scope_round.RoundPolicy", unattended: bool,
+    opening: "_review_lane.RoundOpening",
+) -> _ClosedFanout:
+    """The fan-out over the diff set, closed by the shared lane.
+
+    ``run_all_reviews`` runs the slots; :func:`utils.review_lane.close_fanout`
+    saves each, names the losses, salvages in-process under
+    ``--exec-subagents`` and exits 3 when no model answered.
+    """
     # §3.6: filled per slot by run_single_review when a configured fallback
     # served the turn; empty under the shipped config, which is what keeps the
     # report identical.
@@ -6209,328 +6545,399 @@ async def _main(argv: Optional[List[str]], run: PhaseRun) -> int:
     # collector idiom, and the same reason, as `served_models` and `usage`
     # above: `run_all_reviews`' return value is destructured by every caller.
     fanout_trackers: List[FanoutProgress] = []
-    # Two commits need no intent-to-add marking: the working tree is not in
-    # their diff (plans/review-commits.md §2.5).
-    with (
-        contextlib.nullcontext() if pinned is not None
-        else intent_to_add_untracked(changed_files, cwd=git_root)
-    ):
-        # The scope manifest and one whole diff per source or test file, the
-        # FIRST thing inside this block (D2.2): inside it because `git diff`
-        # shows a new untracked file only once it is intent-to-add, and before
-        # the fan-out because every reviewer's prompt names these two paths — a
-        # slot that started first would find them missing, or holding the
-        # previous run's set. Into `detach_phase_dir`, resolved up front: the
-        # `get_phase_dir` call below runs only after the fan-out returns. A git
-        # failure degrades the set (`[DIFF_FAILED]`, coverage partial) and the
-        # fan-out goes on. At `git_root`, like the marking above: the paths are
-        # root-relative, and from a subdirectory every diff came back empty and
-        # the manifest called that complete coverage with no net change.
-        diff_set = write_review_diff(
-            base_ref, changed_files, detach_phase_dir, collapse_paths,
-            scope_source=describe_scope_source(review_scope.source, base_ref, pinned),
-            cwd=git_root,
-            **({"head_ref": pinned.head} if pinned is not None else {}),
-        )
 
-        # A new round (not a resume of the missing models) records which
-        # review is on record, through this phase's own `state`, the instance
-        # it saves at the end (plans/review-commits.md §2.1): a commit brief's
-        # `reviewed_header_sha256` (and its apply guard cleared), a direct
-        # round's `head_ref`, or — a round with neither — no `head_ref`.
-        if round_starts(
-            detach_phase_dir, model_specs, diff_set.scope_id,
-            rerun_all=bool(getattr(args, "rerun_all", False)),
-        ) and record_round_start(state, pinned):
-            state.save()
+    # A model whose spec changed since the last run (`codex:x` becoming
+    # `codex:x:high`) has no slot in this run to retire its old files, and a
+    # later `--reaggregate` would read them back into this run's report (#30).
+    retire_unselected_results(str(detach_phase_dir), model_specs)
 
-        # A model whose spec changed since the last run (`codex:x` becoming
-        # `codex:x:high`) has no slot in this run to retire its old files, and a
-        # later `--reaggregate` would read them back into this run's report (#30).
-        retire_unselected_results(str(detach_phase_dir), model_specs)
-
-        # Run reviews - agents receive the resolved, ordered scope (labelled
-        # with its source), the diff set, and the base ref
-        results = await run_all_reviews(
-            model_specs,
-            plan_path,
-            out_dir,
-            args.timeout,  # May be None - run_all_reviews will use per-provider defaults
-            args.max_parallel,
-            changed_files,
-            base_ref,
-            skip_existing=not args.rerun_all,
-            served_models=served_models,
-            usage=usage,
-            prior_usage=prior_usage,
-            tracker_out=fanout_trackers,
-            scope_source=review_scope.source,
-            task_ids=review_scope.task_ids,
-            scope_file=diff_set.scope_file,
-            diff_dir=diff_set.diff_dir,
-            scope_id=diff_set.scope_id,
-            diff_coverage=diff_set.coverage,
-            **pinned_kw,
-            **(
-                {"scope_policy": scope_round_policy.policy}
-                if scope_round_policy.policy != _sp.DEFAULT_POLICY else {}
-            ),
-        )
-
-        # Get the phase directory for code review outputs
-        phase_dir = get_phase_dir(plan_path, 'code-review')
-        phase_dir.mkdir(parents=True, exist_ok=True)
-
-        # Everything between the fan-out and grouping, written once for both
-        # review lanes (utils/review_lane.py): each slot saved, the deadline's
-        # losses named, the round checked, the bypassed slots recorded, salvage
-        # run in-process under `--exec-subagents` (a repaired model's issues
-        # join the round), and the exit 3 of a run where no model answered.
-        lane = CodeLane(plan_path=plan_path, phase_dir=phase_dir, prefix=prefix)
-        closed = await _review_lane.close_fanout(
-            lane,
-            claim, args,
-            model_specs=model_specs, results=results,
-            served_models=served_models, usage=usage, prior_served=prior_served,
-            tracker=fanout_trackers[0] if fanout_trackers else None,
-            unattended=unattended,
-        )
-        failed_models = closed.failed_models
-        # The round is aggregated from these slots, not from the files: a slot
-        # whose issues could not be saved is failed here, a salvaged one holds
-        # its repaired issues.
-        results = {spec: slot.as_review() for spec, slot in closed.slots.items()}
-        salvaged_models = {sanitize_model_name(spec) for spec in closed.salvaged}
-
-        # T5: the fan-out is not the phase. `run_all_reviews` returned the
-        # moment its last slot did, and everything below keeps this phase
-        # working for minutes — grouping, the reviewed-code and plan excerpts,
-        # validation-batch preparation, and under `--exec-subagents` the whole
-        # validation dispatch and merge in-process. Without a second ticker that
-        # window is where the log goes quiet, now at the *end* of the run instead
-        # of throughout it.
-        #
-        # Started here rather than hoisted around the fan-out: lifetime rule 1
-        # requires the fan-out's own ticker to be cancelled and awaited before
-        # its per-model summary is printed (above), and this one must not
-        # interleave with that summary either.
-        #
-        # It has no per-model map and never touches `models`: it prints the step,
-        # its own elapsed, and whatever counters the current step already
-        # publishes — `progress.subagents`, which
-        # `subagent_executor._mirror_status` writes straight through
-        # `update_status` on every outcome. So the map the sweep froze stays
-        # frozen, and a table rendered while validation runs still shows each
-        # model's real duration rather than a clock that kept ticking after the
-        # model finished.
-        #
-        # Cancelled *and awaited* in the `finally`, after the phase has written
-        # its terminal `progress.step`, so the log's last `[PROGRESS]` reads
-        # `step: complete` rather than trailing off at whatever step the last
-        # interval caught. The `finally` is what covers the other two endings
-        # this block has: the `return` that hands validation to the host
-        # ("Exit early - Claude Code handles validation"), and a `sys.exit` out
-        # of a refused task file.
-        phase_ticker = PhaseProgress(str(phase_dir), anchor=str(plan_path))
-        phase_ticker.start_ticker()
-        # One loop turn, so the task actually enters its body. A task cancelled
-        # before it has ever been scheduled is closed without running its
-        # `finally`, and that `finally` is where the teardown line carrying the
-        # terminal step comes from — the whole reason this ticker is stopped
-        # *after* `progress.step` is written.
-        #
-        # It is no longer the ONLY turn the loop gets, but most of this stretch
-        # still does not yield (F6, 2026-09-20). `dispatch_subagent_tasks` is
-        # the long one — it blocks in `_run_sync`'s
-        # `pool.submit(asyncio.run, …).result()` for the whole validation
-        # window, which used to pin this loop and leave the executor lane with
-        # exactly one `[PROGRESS]` line, the teardown one — and it is awaited
-        # off the loop (`phase_thread`) below, so the ticker gets its interval
-        # for those minutes. Everything around it — grouping, the excerpts,
-        # `materialize_validation_round`, the merge — is still synchronous,
-        # so an interval expiring inside them is serviced only once they
-        # return. Moving those off the loop as well is a larger change than
-        # this one.
-        await asyncio.sleep(0)
-        try:
-            # Save raw issues as JSON
-            all_issues = []
-            for model_spec, (success, issues, _) in results.items():
-                if success and issues:
-                    for issue in drop_non_record_entries(
-                        issues, model_spec, noun="issues"
-                    ):
-                        issue["model"] = model_spec
-                        all_issues.append(issue)
-            # An in-process salvage's file reaches `results` in the case it
-            # was written in.
-            _importance.canonicalize(all_issues)
-
-            # An empty successful review replaces the previous findings too.
-            # Otherwise --force can report zero issues while apply-code-fixes
-            # still reads and applies the previous run's groups.
-            issues_path = get_output_paths(plan_path, "code_review_issues", phase='code-review')
-            issues_path = issues_path.with_suffix(".json")
-            with open(issues_path, "w", encoding="utf-8") as f:
-                json.dump(all_issues, f, indent=2)
-            print(f"Issues JSON saved to: {issues_path}")
-
-            # Group similar issues and validate
-            validated_groups_for_report = None
-            # The validation.json bytes the report's verdicts come from, when they do.
-            verdicts: Optional[_review_round.Verdicts] = None
-            # The slot that returned an issue is its reviewer, whatever
-            # `source_model` the reply claims: grouping attributes by it and the
-            # reports print it (docs/development.md#vendored-report-scripts).
-            for issue in all_issues:
-                issue["source_model"] = issue["model"]
-            grouped_path = get_output_paths(plan_path, "code_review_grouped", phase='code-review')
-            validation_path = get_output_paths(plan_path, "code_review_validation", phase='code-review')
-            steps = code_round_steps()
-            # The grouping and its round, one rule for every review lane
-            # (utils/review_lane.py): grouped.json replaced with the previous
-            # verdicts retired in the same step, or, for zero issues, a
-            # finished review with zero groups whose whole previous round
-            # retires (otherwise --force could report zero issues while
-            # apply-code-fixes still applied the previous run's groups). §2.6:
-            # a commit review names the commit behind each group, as sibling
-            # fields written before grouped.json (off the hash).
-            grouping = _review_lane.group_findings(
-                claim, steps, phase_dir=str(phase_dir), grouped_path=str(grouped_path),
-                validation_path=str(validation_path), records=all_issues,
-                noun="issues",
-                annotate=lambda groups: attribute_review_groups(
-                    groups, state, repo_root=git_root or project_root
-                ),
-            )
-            # The stamped groups (`group_hash`, `display_label`) grouped.json was
-            # written from: the decisions overlay joins on `group_hash`, so every
-            # group reported downstream must carry it.
-            grouped_list = grouping.groups
-            commit_attribution_pass = grouping.annotation
-
-            if not grouped_list:
-                validated_groups_for_report = []
-            elif args.skip_validation:
-                print("\nSkipping validation (--skip-validation flag set)")
-                # The groups on disk, so `--apply-fixes` and the HIGH-group count
-                # see them.
-                validated_groups_for_report = grouped_list
-            else:
-                outcome = await _review_lane.materialize_fanout_round(
-                    lane, claim, args, steps,
-                    grouped=grouped_list, validation_path=str(validation_path),
-                    # The plan bound at load, before the fan-out, to this phase
-                    # dir's own `validation-snapshot.md` (§2.3 step 5), never a
-                    # re-read of a plan edited while the models ran.
-                    plan_document=lambda: plan_document_at_load or bind_plan_for_validation(
-                        str(plan_path), str(phase_dir)
-                    ),
-                    build_round=lambda document: code_review_validation_round(
-                        grouped_list,
-                        args=args, plan_path=plan_path, phase_dir=phase_dir,
-                        plan_document=document, base_ref=base_ref,
-                        project_root=project_root, git_root=git_root, pinned=pinned,
-                        plan_snapshot=plan_snapshot, plan_sha256=plan_sha256,
-                        scope_round_policy=scope_round_policy, state=state,
-                        round_id=claim.round_id,
-                    ),
-                )
-                if outcome.handed_off:
-                    return  # the host runs the round and comes back with --reaggregate
-                validated_groups_for_report = outcome.groups
-                verdicts = outcome.verdicts
-
-            # Prepare fix tasks for Claude Code subagents if requested
-            if args.apply_fixes and validated_groups_for_report:
-                fix_tasks_path = prepare_fixes_for_subagents(
-                    validated_groups_for_report,
-                    plan_path,
-                    out_dir
-                )
-
-            # Generate report (after validation so we can include validation status)
-            # F10: `failed_models` is this run's own authoritative post-salvage map
-            # (and, since F11, includes any model that never returned at all) —
-            # passed in rather than left for the function to re-derive.
-            report = generate_review_report(
-                plan_path, results, changed_files, validated_groups_for_report,
-                # §2.10: the commit header, "Introduced by" lines and filter.
-                commit_review=commit_report.report_context(
-                    state, commit_attribution_pass, changed_files,
-                    repo_root=git_root or project_root,
-                ),
-                phase_dir=phase_dir, base_ref=base_ref, template_style=args.report_style,
-                served_models=served_models or None,
-                usage=usage or None,
-                failed_models=failed_models,
-                # Plan §5 T5.2: "N of M requested" counts this run's own specs.
-                requested_models=len(model_specs),
-                # D2.2: the diff set this fan-out wrote before dispatch.
-                review_scope=review_scope_record(
-                    phase_dir,
-                    scope_id=diff_set.scope_id,
-                    base_ref=diff_set.base_ref,
-                    base_commit=diff_set.base_commit,
-                    written_by=diff_set.written_by,
-                    coverage=diff_set.coverage,
-                    omitted=list(diff_set.omitted),
-                    # Every result here was either run against this set or
-                    # reused because the ledger ties it to this set, so even
-                    # a set an earlier reaggregate wrote (left untouched,
-                    # same id) is the one the reviewers were shown.
-                    results_match=True,
-                ),
-                **({"pinned": pinned, "repo_root": git_root} if pinned is not None else {}),
-            )
-
-            # Save report: published whole and sealed with this round's line
-            # (utils/review_round.py, "the report's seal").
-            report_path = get_output_paths(plan_path, "code_review", phase='code-review')
-            report_path = report_path.with_suffix(".md")
-            _review_round.publish_report(report_path, report, claim=claim,
-                                         verdicts=verdicts)
-            print(f"\nReport saved to: {report_path}")
-
-            # The report's files handed back on both channels, one rule for
-            # every review lane (utils/review_lane.py). validation.json and
-            # issues.json are included (F3): apply-code-fixes reads exactly
-            # those two files, and a missing validation.json makes it treat
-            # every group as needs-human-decision.
-            _review_lane.hand_back_report(
-                steps, phase_dir, report=report_path,
-                grouped=phase_dir / "grouped.json",
-                validation=phase_dir / "validation.json",
-                issues=phase_dir / "issues.json",
-            )
-
-            # The phase recorded complete in this run's `state`, while the round
-            # on record is still this run's, and the in-phase machine's
-            # terminal word, which `status` renders.
-            _review_lane.record_phase_complete(
-                claim, steps, state=state, phase_name="code-review",
-                phase_dir=str(phase_dir),
-            )
-        finally:
-            await phase_ticker.stop_ticker()
-            # Plan codex-sandbox-unavailable F1 (2026-09-30): every
-            # `[CODEX_HOME_CHECK]` and `[JAIL_DENIED]` line of this run's
-            # slots, repeated — on every ending this `finally` covers.
-            print_closing_summary(str(phase_dir))
-
-    # Summary, HIGH-group record and gate: the ending `--reaggregate` shares.
-    exit_code = finish_code_review(
-        phase_dir, validated_groups_for_report, args, total_issues=len(all_issues),
+    # Run reviews - agents receive the resolved, ordered scope (labelled
+    # with its source), the diff set, and the base ref
+    results = await run_all_reviews(
+        model_specs,
+        plan_path,
+        out_dir,
+        args.timeout,  # May be None - run_all_reviews will use per-provider defaults
+        args.max_parallel,
+        scope.changed_files,
+        scope.base_ref,
+        skip_existing=not args.rerun_all,
+        served_models=served_models,
+        usage=usage,
+        prior_usage=opening.prior_usage,
+        tracker_out=fanout_trackers,
+        scope_source=scope.review_scope.source,
+        task_ids=scope.review_scope.task_ids,
+        scope_file=diff_set.scope_file,
+        diff_dir=diff_set.diff_dir,
+        scope_id=diff_set.scope_id,
+        diff_coverage=diff_set.coverage,
+        **scope.pinned_kw,
+        **(
+            {"scope_policy": scope_round_policy.policy}
+            if scope_round_policy.policy != _sp.DEFAULT_POLICY else {}
+        ),
     )
 
+    # Get the phase directory for code review outputs
+    phase_dir = get_phase_dir(plan_path, 'code-review')
+    phase_dir.mkdir(parents=True, exist_ok=True)
+
+    # Everything between the fan-out and grouping, written once for both
+    # review lanes (utils/review_lane.py): each slot saved, the deadline's
+    # losses named, the round checked, the bypassed slots recorded, salvage
+    # run in-process under `--exec-subagents` (a repaired model's issues
+    # join the round), and the exit 3 of a run where no model answered.
+    lane = CodeLane(plan_path=plan_path, phase_dir=phase_dir, prefix=prefix)
+    closed = await _review_lane.close_fanout(
+        lane,
+        claim, args,
+        model_specs=model_specs, results=results,
+        served_models=served_models, usage=usage, prior_served=opening.prior_served,
+        tracker=fanout_trackers[0] if fanout_trackers else None,
+        unattended=unattended,
+    )
+    failed_models = closed.failed_models
+    # The round is aggregated from these slots, not from the files: a slot
+    # whose issues could not be saved is failed here, a salvaged one holds
+    # its repaired issues.
+    results = {spec: slot.as_review() for spec, slot in closed.slots.items()}
+    salvaged_models = {sanitize_model_name(spec) for spec in closed.salvaged}
+    return _ClosedFanout(
+        phase_dir=phase_dir, lane=lane, results=results,
+        failed_models=failed_models, salvaged_models=salvaged_models,
+        served_models=served_models, usage=usage,
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class _ReviewOutcome:
+    """A finished round, for the run's ending: the groups the report
+    carries, every raw issue, and the fix tasks file (``--apply-fixes``)."""
+
+    groups: Optional[List[Dict[str, Any]]]
+    all_issues: List[Dict[str, Any]]
+    fix_tasks_path: Any
+
+
+async def _group_validate_and_report(
+    args: argparse.Namespace, state: Any, scope: RunScope,
+    claim: "_review_round.Claim", diff_set: Any, slots: _ClosedFanout, *,
+    plan_path: Path, out_dir: Path, model_specs: List[str],
+    plan_document_at_load: Optional[BoundDocument],
+    scope_round_policy: "_scope_round.RoundPolicy",
+) -> Optional[_ReviewOutcome]:
+    """Everything after the fan-out, under the phase-scoped ticker.
+
+    The raw issues saved, grouped and validated (:func:`_group_and_validate`),
+    the fix tasks prepared under ``--apply-fixes``, the report published and
+    the phase recorded complete (:func:`_publish_report`). ``None`` when the
+    validation round was handed to the host, which comes back with
+    ``--reaggregate``. The ticker is stopped, and the closing summary
+    printed, on every ending, after the terminal ``progress.step``.
+    """
+    phase_dir = slots.phase_dir
+    # T5: the fan-out is not the phase. `run_all_reviews` returned the
+    # moment its last slot did, and everything below keeps this phase
+    # working for minutes — grouping, the reviewed-code and plan excerpts,
+    # validation-batch preparation, and under `--exec-subagents` the whole
+    # validation dispatch and merge in-process. Without a second ticker that
+    # window is where the log goes quiet, now at the *end* of the run instead
+    # of throughout it.
+    #
+    # Started here rather than hoisted around the fan-out: lifetime rule 1
+    # requires the fan-out's own ticker to be cancelled and awaited before
+    # its per-model summary is printed (in the fan-out), and this one must not
+    # interleave with that summary either.
+    #
+    # It has no per-model map and never touches `models`: it prints the step,
+    # its own elapsed, and whatever counters the current step already
+    # publishes — `progress.subagents`, which
+    # `subagent_executor._mirror_status` writes straight through
+    # `update_status` on every outcome. So the map the sweep froze stays
+    # frozen, and a table rendered while validation runs still shows each
+    # model's real duration rather than a clock that kept ticking after the
+    # model finished.
+    #
+    # Cancelled *and awaited* in the `finally`, after the phase has written
+    # its terminal `progress.step`, so the log's last `[PROGRESS]` reads
+    # `step: complete` rather than trailing off at whatever step the last
+    # interval caught. The `finally` is what covers the other two endings
+    # this block has: the `return` that hands validation to the host
+    # ("Exit early - Claude Code handles validation"), and a `sys.exit` out
+    # of a refused task file.
+    phase_ticker = PhaseProgress(str(phase_dir), anchor=str(plan_path))
+    phase_ticker.start_ticker()
+    # One loop turn, so the task actually enters its body. A task cancelled
+    # before it has ever been scheduled is closed without running its
+    # `finally`, and that `finally` is where the teardown line carrying the
+    # terminal step comes from — the whole reason this ticker is stopped
+    # *after* `progress.step` is written.
+    #
+    # It is no longer the ONLY turn the loop gets, but most of this stretch
+    # still does not yield (F6, 2026-09-20). `dispatch_subagent_tasks` is
+    # the long one — it blocks in `_run_sync`'s
+    # `pool.submit(asyncio.run, …).result()` for the whole validation
+    # window, which used to pin this loop and leave the executor lane with
+    # exactly one `[PROGRESS]` line, the teardown one — and it is awaited
+    # off the loop (`phase_thread`) below, so the ticker gets its interval
+    # for those minutes. Everything around it — grouping, the excerpts,
+    # `materialize_validation_round`, the merge — is still synchronous,
+    # so an interval expiring inside them is serviced only once they
+    # return. Moving those off the loop as well is a larger change than
+    # this one.
+    await asyncio.sleep(0)
+    try:
+        all_issues = _save_raw_issues(slots.results, plan_path=plan_path)
+        validated = await _group_and_validate(
+            args, state, scope, claim, slots, all_issues, plan_path=plan_path,
+            plan_document_at_load=plan_document_at_load,
+            scope_round_policy=scope_round_policy,
+        )
+        if validated is None:
+            return None  # the host runs the round and comes back with --reaggregate
+
+        fix_tasks_path = None
+        # Prepare fix tasks for Claude Code subagents if requested
+        if args.apply_fixes and validated.groups:
+            fix_tasks_path = prepare_fixes_for_subagents(
+                validated.groups,
+                plan_path,
+                out_dir
+            )
+
+        _publish_report(
+            args, state, scope, claim, diff_set, slots, validated,
+            plan_path=plan_path, model_specs=model_specs,
+        )
+    finally:
+        await phase_ticker.stop_ticker()
+        # Plan codex-sandbox-unavailable F1 (2026-09-30): every
+        # `[CODEX_HOME_CHECK]` and `[JAIL_DENIED]` line of this run's
+        # slots, repeated — on every ending this `finally` covers.
+        print_closing_summary(str(phase_dir))
+    return _ReviewOutcome(
+        groups=validated.groups, all_issues=all_issues, fix_tasks_path=fix_tasks_path,
+    )
+
+
+def _save_raw_issues(
+    results: Mapping[str, Tuple[bool, Any, Any]], *, plan_path: Path,
+) -> List[Dict[str, Any]]:
+    """Every answering slot's issues, stamped with the slot's spec, written to
+    ``issues.json`` (an empty list too) and returned."""
+    # Save raw issues as JSON
+    all_issues = []
+    for model_spec, (success, issues, _) in results.items():
+        if success and issues:
+            for issue in drop_non_record_entries(
+                issues, model_spec, noun="issues"
+            ):
+                issue["model"] = model_spec
+                all_issues.append(issue)
+    # An in-process salvage's file reaches `results` in the case it
+    # was written in.
+    _importance.canonicalize(all_issues)
+
+    # An empty successful review replaces the previous findings too.
+    # Otherwise --force can report zero issues while apply-code-fixes
+    # still reads and applies the previous run's groups.
+    issues_path = get_output_paths(plan_path, "code_review_issues", phase='code-review')
+    issues_path = issues_path.with_suffix(".json")
+    with open(issues_path, "w", encoding="utf-8") as f:
+        json.dump(all_issues, f, indent=2)
+    print(f"Issues JSON saved to: {issues_path}")
+    return all_issues
+
+
+@dataclasses.dataclass(frozen=True)
+class _ValidatedRound:
+    """The grouping's outcome for the report: the groups it carries, the
+    ``validation.json`` bytes their verdicts come from (``None`` when none
+    do), the round's steps and the commit-attribution pass."""
+
+    groups: Optional[List[Dict[str, Any]]]
+    verdicts: Optional["_review_round.Verdicts"]
+    steps: "_review_lane.RoundSteps"
+    commit_attribution: Any
+
+
+async def _group_and_validate(
+    args: argparse.Namespace, state: Any, scope: RunScope,
+    claim: "_review_round.Claim", slots: _ClosedFanout,
+    all_issues: List[Dict[str, Any]], *, plan_path: Path,
+    plan_document_at_load: Optional[BoundDocument],
+    scope_round_policy: "_scope_round.RoundPolicy",
+) -> Optional[_ValidatedRound]:
+    """The issues grouped and their validation round resolved.
+
+    Zero groups need no round, ``--skip-validation`` reports the groups as
+    grouped, and otherwise the shared lane publishes, dispatches or hands out
+    the round (:func:`utils.review_lane.materialize_fanout_round`). ``None``
+    when it was handed to the host.
+    """
+    phase_dir = slots.phase_dir
+    # Group similar issues and validate
+    validated_groups_for_report = None
+    # The validation.json bytes the report's verdicts come from, when they do.
+    verdicts: Optional[_review_round.Verdicts] = None
+    # The slot that returned an issue is its reviewer, whatever
+    # `source_model` the reply claims: grouping attributes by it and the
+    # reports print it (docs/development.md#vendored-report-scripts).
+    for issue in all_issues:
+        issue["source_model"] = issue["model"]
+    grouped_path = get_output_paths(plan_path, "code_review_grouped", phase='code-review')
+    validation_path = get_output_paths(plan_path, "code_review_validation", phase='code-review')
+    steps = code_round_steps()
+    # The grouping and its round, one rule for every review lane
+    # (utils/review_lane.py): grouped.json replaced with the previous
+    # verdicts retired in the same step, or, for zero issues, a
+    # finished review with zero groups whose whole previous round
+    # retires (otherwise --force could report zero issues while
+    # apply-code-fixes still applied the previous run's groups). §2.6:
+    # a commit review names the commit behind each group, as sibling
+    # fields written before grouped.json (off the hash).
+    grouping = _review_lane.group_findings(
+        claim, steps, phase_dir=str(phase_dir), grouped_path=str(grouped_path),
+        validation_path=str(validation_path), records=all_issues,
+        noun="issues",
+        annotate=lambda groups: attribute_review_groups(
+            groups, state, repo_root=scope.git_root or scope.project_root
+        ),
+    )
+    # The stamped groups (`group_hash`, `display_label`) grouped.json was
+    # written from: the decisions overlay joins on `group_hash`, so every
+    # group reported downstream must carry it.
+    grouped_list = grouping.groups
+    commit_attribution_pass = grouping.annotation
+
+    if not grouped_list:
+        validated_groups_for_report = []
+    elif args.skip_validation:
+        print("\nSkipping validation (--skip-validation flag set)")
+        # The groups on disk, so `--apply-fixes` and the HIGH-group count
+        # see them.
+        validated_groups_for_report = grouped_list
+    else:
+        outcome = await _review_lane.materialize_fanout_round(
+            slots.lane, claim, args, steps,
+            grouped=grouped_list, validation_path=str(validation_path),
+            # The plan bound at load, before the fan-out, to this phase
+            # dir's own `validation-snapshot.md` (§2.3 step 5), never a
+            # re-read of a plan edited while the models ran.
+            plan_document=lambda: plan_document_at_load or bind_plan_for_validation(
+                str(plan_path), str(phase_dir)
+            ),
+            build_round=lambda document: code_review_validation_round(
+                grouped_list,
+                args=args, plan_path=plan_path, phase_dir=phase_dir,
+                plan_document=document, base_ref=scope.base_ref,
+                project_root=scope.project_root, git_root=scope.git_root,
+                pinned=scope.pinned,
+                plan_snapshot=scope.plan_snapshot, plan_sha256=scope.plan_sha256,
+                scope_round_policy=scope_round_policy, state=state,
+                round_id=claim.round_id,
+            ),
+        )
+        if outcome.handed_off:
+            return None  # the host runs the round and comes back with --reaggregate
+        validated_groups_for_report = outcome.groups
+        verdicts = outcome.verdicts
+    return _ValidatedRound(
+        groups=validated_groups_for_report, verdicts=verdicts, steps=steps,
+        commit_attribution=commit_attribution_pass,
+    )
+
+
+def _publish_report(
+    args: argparse.Namespace, state: Any, scope: RunScope,
+    claim: "_review_round.Claim", diff_set: Any, slots: _ClosedFanout,
+    validated: _ValidatedRound, *, plan_path: Path, model_specs: List[str],
+) -> None:
+    """The report generated, published sealed with this round's line, its
+    files handed back, and the phase recorded complete (the terminal
+    ``progress.step``)."""
+    phase_dir = slots.phase_dir
+    # Generate report (after validation so we can include validation status)
+    # F10: `failed_models` is this run's own authoritative post-salvage map
+    # (and, since F11, includes any model that never returned at all) —
+    # passed in rather than left for the function to re-derive.
+    report = generate_review_report(
+        plan_path, slots.results, scope.changed_files, validated.groups,
+        # §2.10: the commit header, "Introduced by" lines and filter.
+        commit_review=commit_report.report_context(
+            state, validated.commit_attribution, scope.changed_files,
+            repo_root=scope.git_root or scope.project_root,
+        ),
+        phase_dir=phase_dir, base_ref=scope.base_ref, template_style=args.report_style,
+        served_models=slots.served_models or None,
+        usage=slots.usage or None,
+        failed_models=slots.failed_models,
+        # Plan §5 T5.2: "N of M requested" counts this run's own specs.
+        requested_models=len(model_specs),
+        # D2.2: the diff set this fan-out wrote before dispatch.
+        review_scope=review_scope_record(
+            phase_dir,
+            scope_id=diff_set.scope_id,
+            base_ref=diff_set.base_ref,
+            base_commit=diff_set.base_commit,
+            written_by=diff_set.written_by,
+            coverage=diff_set.coverage,
+            omitted=list(diff_set.omitted),
+            # Every result here was either run against this set or
+            # reused because the ledger ties it to this set, so even
+            # a set an earlier reaggregate wrote (left untouched,
+            # same id) is the one the reviewers were shown.
+            results_match=True,
+        ),
+        **(
+            {"pinned": scope.pinned, "repo_root": scope.git_root}
+            if scope.pinned is not None else {}
+        ),
+    )
+
+    # Save report: published whole and sealed with this round's line
+    # (utils/review_round.py, "the report's seal").
+    report_path = get_output_paths(plan_path, "code_review", phase='code-review')
+    report_path = report_path.with_suffix(".md")
+    _review_round.publish_report(report_path, report, claim=claim,
+                                 verdicts=validated.verdicts)
+    print(f"\nReport saved to: {report_path}")
+
+    # The report's files handed back on both channels, one rule for
+    # every review lane (utils/review_lane.py). validation.json and
+    # issues.json are included (F3): apply-code-fixes reads exactly
+    # those two files, and a missing validation.json makes it treat
+    # every group as needs-human-decision.
+    _review_lane.hand_back_report(
+        validated.steps, phase_dir, report=report_path,
+        grouped=phase_dir / "grouped.json",
+        validation=phase_dir / "validation.json",
+        issues=phase_dir / "issues.json",
+    )
+
+    # The phase recorded complete in this run's `state`, while the round
+    # on record is still this run's, and the in-phase machine's
+    # terminal word, which `status` renders.
+    _review_lane.record_phase_complete(
+        claim, validated.steps, state=state, phase_name="code-review",
+        phase_dir=str(phase_dir),
+    )
+
+
+def _announce_fix_tasks(args: argparse.Namespace, outcome: _ReviewOutcome) -> None:
+    """The ``--apply-fixes`` hand-off: the fix tasks file and what the invoker
+    must do with it, when tasks were prepared."""
     # Report fix tasks if prepared
-    if args.apply_fixes and fix_tasks_path:
-        valid_count = len([g for g in (validated_groups_for_report or []) if g.get("validation_status") == "valid"])
+    if args.apply_fixes and outcome.fix_tasks_path:
+        valid_count = len([
+            g for g in (outcome.groups or []) if g.get("validation_status") == "valid"
+        ])
         print(f"\n{'='*60}")
         print("IMPORTANT: SUBAGENT DELEGATION REQUIRED")
         print(f"{'='*60}")
         print(f"\nValid issues to fix: {valid_count}")
-        print(f"Fix tasks file: {fix_tasks_path}")
+        print(f"Fix tasks file: {outcome.fix_tasks_path}")
         # Host-neutral: the invoker runs task.prompt and persists what comes
         # back. No agent-type vocabulary, which is also what keeps the
         # forbidden-token lint green on printed text.
@@ -6543,6 +6950,13 @@ async def _main(argv: Optional[List[str]], run: PhaseRun) -> int:
         print("5. Update the original plan file to reference the code review")
         print(f"{'='*60}\n")
 
+
+def _announce_pending_salvage(
+    phase_dir: Path, plan_path: Path, salvaged_models: Set[str],
+) -> None:
+    """The salvage requests still pending, and the ``--reaggregate`` that
+    follows them (``[REAGGREGATE_AFTER_SALVAGE]``, also the result line's
+    ``next``)."""
     # Check for salvage requests and print reaggregate command
     import glob as glob_module
     salvage_pattern = str(phase_dir / "salvage_*.json")
@@ -6595,10 +7009,6 @@ async def _main(argv: Optional[List[str]], run: PhaseRun) -> int:
         # F13: host-neutral — this prints into the run log of whatever host is
         # driving, not only Claude Code.
         print("After all salvage subagents complete, run the above command to regenerate grouped/validation/report files.")
-
-    # `finish_code_review`'s exit: 0 whatever the review found, 3 under
-    # `--fail-on-high` with a HIGH group.
-    return exit_code
 
 
 if __name__ == "__main__":

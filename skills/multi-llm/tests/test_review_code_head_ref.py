@@ -1168,6 +1168,54 @@ class TestALandedStage:
         access = diff_access_of(reviewer.prompts[0])
         assert "`b.py`" in access.split("have changed since", 1)[1].split("\n", 1)[0]
 
+    def test_run_scope_refresh_rederives_only_what_a_stage_moves(self, ranged):
+        """``RunScope.refresh`` on its own, no fan-out: past a landed stage the
+        reloaded state's pair (fronted now, with the stage's drift list) and
+        context plan, and the staged ``--files`` record redone against it;
+        the scope's narrowing, the base ref and the ordered paths kept."""
+        brief = seed_commit_brief(ranged)
+        sm = StateManager(brief)
+        landed = dict(sm.state.pop("commit_range"))
+        sm.save()
+        args = cro.parse_args([
+            "--plan-file", str(brief), "--base-ref", ranged.base,
+            "--head-ref", ranged.head,
+        ])
+        state = cro.get_or_create_state(brief)
+        typed = cro.resolve_pinned_range(
+            state.state, args, cwd=str(ranged.root), plan_path=brief,
+        )._replace(narrowed=True, not_in_range=("old.py",))
+        assert not typed.fronted
+        scope = cro.RunScope(
+            base_ref=typed.base_ref,
+            review_scope=cro.ReviewScope(["a.py"], cro.SCOPE_SOURCE_FILES_FLAG, {}),
+            changed_files=["a.py"], pinned=typed, plan_snapshot=None,
+            plan_sha256=None, git_root=str(ranged.root),
+            project_root=str(ranged.root), collapse_paths={}, scope_files=["a.py"],
+            files_record_moved=True,
+        )
+        # The stage lands: the brief's record, with its own drift list and a
+        # frozen context plan, and the `--files` record already in state.
+        landed.update(drifted=["b.py"], plan_snapshot="docs/context.md",
+                      plan_sha256="f" * 64)
+        writer = StateManager(brief)
+        writer.state["commit_range"] = landed
+        writer.state["review_scope_files"] = ["a.py"]
+        writer.save()
+
+        refreshed = scope.refresh(state, args=args, plan_path=brief)
+
+        assert state.state["commit_range"]["drifted"] == ["b.py"]  # reloaded in place
+        assert refreshed.pinned.fronted
+        assert refreshed.pinned.drifted == ("b.py",)
+        assert (refreshed.pinned.narrowed, refreshed.pinned.not_in_range) == (True, ("old.py",))
+        assert (refreshed.plan_snapshot, refreshed.plan_sha256) == ("docs/context.md", "f" * 64)
+        assert refreshed.files_record_moved is False  # the landed state holds it already
+        for kept in ("base_ref", "review_scope", "changed_files", "git_root",
+                     "project_root", "collapse_paths", "scope_files"):
+            assert getattr(refreshed, kept) == getattr(scope, kept), kept
+        assert scope.pinned is typed  # frozen: the pre-flight's scope is unchanged
+
     def test_a_new_briefs_launch_calls_it_the_commit_brief(self, ranged, monkeypatch, capsys):
         # Live run 2026-10-26 (codex, opencode): a detached first launch's
         # log read "Plan file: <brief>". A launcher writes no state, so the

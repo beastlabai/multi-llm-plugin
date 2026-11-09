@@ -424,6 +424,22 @@ consolidation (review-plan) and the tasks document (review-tasks). Still written
 lane: the slot functions (`run_single_model`, `run_single_review`) and the report each
 lane renders from its groups.
 
+**review-code's run, stage by stage.** `code_review_orchestrator._main` is a sequence of
+named stages over one frozen `RunScope`: the base ref, the resolved scope and its review
+order, the pinned pair, a commit brief's frozen context plan, the git and project roots,
+and the `--files` record. The pre-flight runs on the caller's terminal:
+`_guard_phase_state` (the pinned pair resolved before anything is written, then the
+completed-phase and partial-completion guards), the model selection,
+`_resolve_base_and_scope` and `_resolve_round_policy_and_plan_bytes`.
+`_cross_detach_boundary` calls `maybe_detach`, and nothing after it runs in the invoker.
+Past it, a front door's landed stage reloads `state`, and `RunScope.refresh` re-derives
+the pair, its drift list and the context plan (the base ref and the paths are kept).
+`_open_fanout_round` saves the `--files` record, binds the plan and opens the round.
+`_write_diff_set`, `_run_reviews_and_save` and `_group_validate_and_report` run inside
+`intent_to_add_untracked`, and the last stops its phase ticker only after the terminal
+`progress.step`. `--reaggregate` is `_reaggregate_entry`: its own pre-flight, the same
+boundary, and the phase-scoped ticker around `reaggregate_from_existing_files`.
+
 ## Reaggregation and result identity
 
 Reaggregation reads `{phase_dir}/*.json` and treats each file as a per-model result list. Which
