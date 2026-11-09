@@ -864,6 +864,82 @@ class TestTheJudgeIsNamed:
         assert record["decision"] == "skipped"
         assert record["batch_context"]["judge"] == "unrecorded"
 
+    def _two_files(self, phase_dir):
+        """Batch 0 approves A (the executor's, provenance recorded); batch 1
+        skips B (no provenance)."""
+        first = _write_verdicts(phase_dir, 0, [_verdict(GROUP_A, DECISION_APPROVE, "A")])
+        second = _write_verdicts(phase_dir, 1, [_verdict(GROUP_B, DECISION_SKIP, "B")])
+        _write_judge_report(phase_dir, first, self.RUNNER)
+        return first, second
+
+    @staticmethod
+    def _replace_with_link(path, target):
+        path.unlink()
+        try:
+            path.symlink_to(target)
+        except OSError:  # pragma: no cover - no symlinks on this platform
+            pytest.skip("symlinks unavailable")
+
+    def test_a_source_replaced_by_a_link_to_another_takes_no_credit(self, tmp_path):
+        first, second = self._two_files(tmp_path)
+        ingest = ingest_verdicts(phase_dir=str(tmp_path),
+                                 expected_group_ids=[GROUP_A, GROUP_B])
+        self._replace_with_link(second, first)
+        assert judge_labels(str(tmp_path), ingest.sources,
+                            fallback="unrecorded", ingest=ingest) == {
+            GROUP_A: self.RUNNER, GROUP_B: "unrecorded"}
+
+    def test_a_source_replaced_by_a_link_takes_no_credit_through_the_hook(
+        self, tmp_path, monkeypatch
+    ):
+        from utils import apply_orchestrator_base as base
+
+        orch, phase_dir = TestOrchestratorHook()._orchestrator(tmp_path)
+        orch.args.exec_subagents = True
+        orch.needs_human = [_group(GROUP_A), _group(GROUP_B)]
+        first, second = self._two_files(phase_dir)
+        real_ingest = base.ingest_verdicts
+
+        def ingest_then_replace(**kwargs):
+            ingested = real_ingest(**kwargs)
+            self._replace_with_link(second, first)
+            return ingested
+
+        monkeypatch.setattr(base, "ingest_verdicts", ingest_then_replace)
+        orch._ingest_judge_verdicts(orch.needs_human, str(phase_dir),
+                                    [GROUP_A, GROUP_B])
+
+        assert [g["group_hash"] for g in orch.skipped] == [GROUP_B]
+        assert orch.skipped[0]["judge"] == "unrecorded"
+        record = orch.state.get_human_decision("apply-suggestions", GROUP_B)
+        assert record["decision"] == "skipped"
+        assert record["batch_context"]["judge"] == "unrecorded"
+        approved = orch.state.get_human_decision("apply-suggestions", GROUP_A)
+        assert approved["batch_context"]["judge"] == self.RUNNER
+
+    def test_a_batch_file_that_was_already_a_link_keeps_its_credit(self, tmp_path):
+        """Batch 0 was a link to batch 1 before ingestion: both read the same
+        bytes, A's source is batch 0, and the executor's provenance names
+        batch 1. Both had one identity at ingestion, so A keeps the credit."""
+        target = _write_verdicts(tmp_path, 1, [_verdict(GROUP_A, DECISION_APPROVE, "A")])
+        alias = tmp_path / target.name.replace("_1.", "_0.")
+        try:
+            alias.symlink_to(target)
+        except OSError:  # pragma: no cover - no symlinks on this platform
+            pytest.skip("symlinks unavailable")
+        _write_judge_report(tmp_path, target, self.RUNNER)
+        ingest = ingest_verdicts(phase_dir=str(tmp_path), expected_group_ids=[GROUP_A])
+        assert judge_labels(str(tmp_path), ingest.sources,
+                            fallback="unrecorded", ingest=ingest) == {GROUP_A: self.RUNNER}
+
+    def test_healthy_two_file_labels_keep_their_own_identity(self, tmp_path):
+        self._two_files(tmp_path)
+        ingest = ingest_verdicts(phase_dir=str(tmp_path),
+                                 expected_group_ids=[GROUP_A, GROUP_B])
+        assert judge_labels(str(tmp_path), ingest.sources,
+                            fallback="unrecorded", ingest=ingest) == {
+            GROUP_A: self.RUNNER, GROUP_B: "unrecorded"}
+
     def test_the_declared_judge_is_the_one_parsed_at_ingestion(self, tmp_path):
         path = _write_verdicts(tmp_path, 0, [_verdict(GROUP_A, DECISION_APPROVE, "ok")])
         document = json.loads(path.read_text(encoding="utf-8"))

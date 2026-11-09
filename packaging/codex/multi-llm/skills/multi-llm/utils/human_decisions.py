@@ -375,6 +375,10 @@ class VerdictIngest:
     #: (:func:`judge_labels`).
     digests: Dict[str, str] = field(default_factory=dict)
     declared: Dict[str, Any] = field(default_factory=dict)
+    #: ``verdict file -> its realpath when it was read``: the identity each
+    #: source had at ingestion, which labelling matches report rows against
+    #: instead of resolving paths again (:func:`judge_labels`).
+    identities: Dict[str, str] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -461,6 +465,7 @@ def ingest_verdicts(
             result.errors.extend(errors)
             continue
         result.digests[path] = digest or ""
+        result.identities[path] = os.path.realpath(path)
         result.declared[path] = (
             document.get("judge") if isinstance(document, dict) else None)
         for index, verdict in enumerate(document.get("verdicts", [])):
@@ -524,6 +529,8 @@ def judge_labels(
         from .task_outcome import batch_report_path
     except ImportError:  # pragma: no cover
         from utils.task_outcome import batch_report_path
+    # With *ingest* the key is the source path as ingested; without it (offline
+    # callers) the file's realpath now, as before.
     runner_by_path: Dict[str, str] = {}
     try:
         with open(batch_report_path(phase_dir, "human_decision_judge"),
@@ -544,17 +551,51 @@ def judge_labels(
             prov = provenance.get(str(row.get("task_id")))
             if not isinstance(prov, dict) or not prov.get("sha256"):
                 continue
-            if _ingested_digest(path, ingest) != prov["sha256"]:
+            key = path if ingest is None else _ingested_source(path, ingest)
+            if key is None or _ingested_digest(key, ingest) != prov["sha256"]:
                 continue
             runner = prov.get("runner") or runner
-            runner_by_path[os.path.realpath(path)] = str(runner)
+            if ingest is None:
+                runner_by_path[os.path.realpath(key)] = str(runner)
+                continue
+            # Every ingested source that had the matched source's identity at
+            # ingestion (a batch file that was already a link to it) shares
+            # the credit, each on its own ingested digest; nothing is equated
+            # by what a path resolves to now.
+            identity = ingest.identities.get(key)
+            for known, digest in ingest.digests.items():
+                same = known == key or (
+                    identity is not None and ingest.identities.get(known) == identity)
+                if same and digest == prov["sha256"]:
+                    runner_by_path[known] = str(runner)
     labels: Dict[str, str] = {}
     for group_id, path in sources.items():
-        runner = runner_by_path.get(os.path.realpath(path))
+        runner = runner_by_path.get(os.path.realpath(path) if ingest is None else path)
         if runner is None:
             runner = _with_declared_model(fallback, path, ingest)
         labels[group_id] = runner
     return labels
+
+
+def _ingested_source(path: str, ingest: VerdictIngest) -> Optional[str]:
+    """The ingested source a report row's *path* names, or ``None``.
+
+    Matched by the path as given, then its absolute form, then the identity the
+    source had at ingestion. Two ingested sources are never equated by what
+    their paths resolve to now: a file replaced by a link to another keeps its
+    own ingested digest (:func:`_ingested_digest`).
+    """
+    if path in ingest.digests:
+        return path
+    absolute = os.path.abspath(path)
+    for known in ingest.digests:
+        if os.path.abspath(known) == absolute:
+            return known
+    real = os.path.realpath(path)
+    for known, identity in ingest.identities.items():
+        if identity == real:
+            return known
+    return None
 
 
 def _ingested_digest(path: str, ingest: Optional[VerdictIngest]) -> str:
@@ -562,11 +603,7 @@ def _ingested_digest(path: str, ingest: Optional[VerdictIngest]) -> str:
     when there was no ingestion; ``""`` for a file that was not ingested."""
     if ingest is None:
         return file_bytes_sha256(path)
-    real = os.path.realpath(path)
-    for known, digest in ingest.digests.items():
-        if os.path.realpath(known) == real:
-            return digest
-    return ""
+    return ingest.digests.get(path, "")
 
 
 def _with_declared_model(
