@@ -839,7 +839,7 @@ def render_home_text(text: Optional[str]) -> str:
     if not text or not home or home in ("~", os.sep):
         return text or ""
     # The quoted case needs the opening quote too, or a path that merely ends
-    # in $HOME (`'/mnt/backup/home/u'`) would lose its head (U37c review).
+    # in $HOME (a backup copy of the home folder) would lose its head (U37c review).
     return text.replace(home + os.sep, "~" + os.sep).replace(f"'{home}'", "'~'")
 
 
