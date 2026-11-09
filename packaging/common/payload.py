@@ -984,7 +984,7 @@ DISTRIBUTION_BUDGETS: Dict[str, Tuple[int, int]] = {
     # 11,217,795. Byte budgets raised the same day: codex had 82 KB left, and the
     # split modules each carry their docstrings; a development file leaking in
     # still shows first in the file count.
-    "claude-code": (340, 12_200_000),
+    "claude-code": (340, 12_000_000),     # the review target: past it is a decision
     "codex": (330, 12_000_000),
     "opencode": (330, 12_100_000),     # unpacked; tracks the codex tree
 }
