@@ -79,6 +79,9 @@ def _fake_commit_review(calls):
 
     module.is_commit_brief = is_commit_brief
     module.brief_for_pinned = brief_for_pinned
+    # A worker is handed the real stage applier at each front-door main; the
+    # fake stands for the front door, so it takes the call and does nothing.
+    module.hand_worker_the_stage_applier = lambda argv=None: None
     return module
 
 
