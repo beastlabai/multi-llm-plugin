@@ -408,10 +408,10 @@ class TestTheFirstRunEtaCountsWhatItDispatches:
         test (here the grant check) leaves the total, as the native leg's
         `util batch-done` withdraws one; nothing finished, and the line says
         so."""
-        from utils.write_batch_scheduler import WriteBatchScheduler
+        from utils.write_grant import WriteGrant
 
         monkeypatch.setattr(
-            WriteBatchScheduler, "_grant_mismatch",
+            WriteGrant, "grant_mismatch",
             lambda self, task: (
                 "the grant does not match" if task.get("task_id") == "T001" else None
             ),

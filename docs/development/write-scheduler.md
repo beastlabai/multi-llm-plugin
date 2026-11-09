@@ -23,11 +23,11 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 ## Where the scheduler's helpers live
 
 **`utils/write_batch_scheduler.py` is the loop; what both legs share, and the parts of the loop
-that stand on their own, live in seventeen modules below it.** The scheduler holds `WriteBatchScheduler`,
+that stand on their own, live in twenty modules below it.** The scheduler holds `WriteBatchScheduler`,
 `SchedulerResult`, `run_write_phase` and the constants and helpers only the loop reads. The helpers
 that the executor's loop, `util write-prompt`, `util batch-done`, implement's native handoff and
 `status` all call live in the first seven modules, lowest first; `write_context` holds what the
-collaborators share, and the last nine are the scheduler's collaborators (below the table). Each imports only the ones before it, and none
+collaborators share, and the last twelve are the scheduler's collaborators (below the table). Each imports only the ones before it, and none
 imports the scheduler:
 
 | Module | What it owns |
@@ -49,6 +49,9 @@ imports the scheduler:
 | `utils/write_commit_leg.py` | `CommitGuardLeg`, the commit write policy's leg (plans/review-commits.md §2.7): the guard's protected set and context plan as the policy's exact-path deny layer (`protect`), each batch's pre-dispatch re-check and the batches it stopped (`recheck`, `stale`), the watched paths read before a dispatch and compared after it (`watch_begin`, `watch_after`, `restore_watched`, `protected_unclassified`), and the re-pin after a completed batch (`repin`). A no-op without a guard. |
 | `utils/write_check_holds.py` | `CheckHolds`, what implement's checks hold back: a check's dependents (`dependents_of`), the tasks a check with findings holds in this run or an earlier one (`check_holds`, `block_dependents_of_checks`, `hold_on_recorded_checks`), whether a resumed check runs again (`check_findings_rerun`, `unchanged_since_failure`, `tree_fingerprint`, `restamp_check_trees`), and the `[CHECK_FINDINGS]` and `[BATCH_CHECK_*]` lines (`check_findings_lines`, `check_findings_fate`, `batch_check_lines`). Stateless: a hold is on the result. |
 | `utils/write_resume.py` | `ResumeEvidence`, what an earlier run left: whether a result counts as done (`done_evidence`, `result_counts_as_done`, `sibling_results`, `retire_foreign_result`), the inputs binding (`task_fingerprint`, `record_fingerprint`, `WRITE_FINGERPRINT_FILENAME`), the earlier report's rows of this review cycle (`earlier_report_rows`, `review_completed_at`, `REVIEW_PHASE_BY_WRITE_KIND`), the `--human-task <batch>=skip` answers it can keep (`check_partial_skips`, `partial_skip_evidence`, `kept_at_request`, `refused_skips`), and the `resume: kept` line (`report_resume_tally`, `resume_kept_rows`, `resume_answered_ids`). Writes only its inputs binding. |
+| `utils/write_grant.py` | `WriteGrant`, what the phase does with its one grant (plan step 3, F1 "How a dispatch receives its grant"): the target and the request made at construction (`checked_write_target`, `build_jail_request`), the pre-dispatch check that a task declares exactly the grant (`grant_mismatch`), the runner preflight under the request and the rung it recorded (`preflight`, `recorded_rung`, `announce_rung`), the replaced-target check (`target_replacement`, `record_replaced_target`, `replaced_target_unclassified`), the jail's denials as the verdict reads them (`jail_facts`, `jail_scope_sentence`, `in_grant`) and the warn-only `[GIT_CONFIG_CHANGED]` line (`warn_git_metadata_changed`). Its per-dispatch records (`target_identity_before`, `jail_notes`, `jail_denials`, `jail_failed`, `replaced_targets`) are its own. |
+| `utils/write_snapshots.py` | `PreBatchSnapshots`, each dispatch's mandatory pre-batch snapshot, its rollback point (D3h): taken, or reused from the batch's first dispatch on a resume (`take`, `reusable`; another batch's or a previous review cycle's is set aside, never deleted), and, once per admitted group before any of its snapshots, whether a repo-wide phase's snapshots, rollback store and audit log must live outside the phase dir (`decide_rollback_storage`). The snapshots it took (`taken`) and which were reused (`reused`, read by the classification) are its own. |
+| `utils/write_dry_run.py` | `DryRunReport`, `--dry-run-subagents`' report (D3l): the phase's batches walked as the loop would, each task's runner, rendered argv with the prompt replaced by its hash (`_redacted_argv`), prompt transport, co-schedule group, preflight under the grant and recorded rung, and the write policy's verdict, then the ceilings, written to `subagent_dry_run.json` (`write`). Starts no child and writes nothing else. |
 
 **The scheduler re-exports every moved name for reading only** (`write_batch_scheduler._MOVED`, the
 contract `git_utils` and `run_status` already follow): `write_batch_scheduler.X` returns the owner's
@@ -64,7 +67,8 @@ builds one `RunContext` in `__init__` and hands it to each collaborator it owns:
 (`VerifyStep`), `self._verify_command` (`VerifyCommand`), `self._stop` (`StopAccount`),
 `self._eta` (`EtaLines`), `self._sweep` (`ContainmentSweep`), `self._reports` (`WriteReports`),
 `self._prompts` (`BatchPromptBuilder`), `self._commit` (`CommitGuardLeg`), `self._checks`
-(`CheckHolds`) and `self._evidence` (`ResumeEvidence`). The context holds the scheduler's own
+(`CheckHolds`), `self._evidence` (`ResumeEvidence`), `self._grant` (`WriteGrant`),
+`self._snapshots` (`PreBatchSnapshots`) and `self._dry_run_report` (`DryRunReport`). The context holds the scheduler's own
 objects, not copies. Five rules hold across the split:
 
 - **One writer of `state.json`.** `ctx.state` is the run's one `StateManager`. A collaborator
@@ -83,7 +87,9 @@ objects, not copies. Five rules hold across the split:
 - **What the collaborator calls back is named.** Each collaborator gets the methods it calls
   as constructor arguments (`VerifyStep`: `VerifyCommand.run`, `_unverified_text`,
   `_task_by_id` and `StopAccount.set_stop_headline`; `CommitGuardLeg`: `_refused`, which records
-  a batch its re-check stopped; `ResumeEvidence`: `CommitGuardLeg.guard`), callables bound at each call
+  a batch its re-check stopped; `ResumeEvidence`: `CommitGuardLeg.guard`; `PreBatchSnapshots`:
+  `_runner_for`; `DryRunReport`: `_batch_runners_and_ceiling`, `_render_argv` and
+  `_ceiling_record`), callables bound at each call
   (`WriteBatchScheduler._late`, which takes a dotted name such as `"_stop.accounting"` for
   another collaborator's), so an instance or class patch of the method still applies; and
   `ctx.log` reaches the scheduler's current `log`, so `_dispatch_walk`'s quieted log quiets them
@@ -102,15 +108,18 @@ A test drives the sweep on the collaborator (`scheduler._sweep.census()`, `.reta
 collaborator's own calls never pass through the scheduler, which keeps no forwarder for them. `_begin_sweep` and
 `_undeclared_writes` stay the scheduler's seams: `_begin_sweep` publishes the dispatch in flight
 after the census, and `_classify` calls `_undeclared_writes`, which
-`tests/test_write_verdict_table.py` stands in for. The write grant (`_build_jail_request`,
-`_grant_mismatch`, the replaced-target and jail facts `_classify` reads), `_decide_rollback_storage`
-and `_write_dry_run`, the dispatch preview that preflights through the grant, stay on the
-scheduler for now; so do the pre-batch snapshot (`_snapshot`, `_reusable_snapshot`, which reads
-`ResumeEvidence.review_completed_at`) and `_keep_at_request`, both steps of a dispatch, and
-`_stop_on_manual_gate`, which calls the collaborators. A test calls a moved method on its
-collaborator (`scheduler._reports.mirror_status(result)`, `scheduler._verify_command.run(...)`,
-`scheduler._evidence.task_fingerprint(task)`), and a class patch goes on the collaborator's class
-(`write_check_holds.CheckHolds.tree_fingerprint`): no collaborator has a forwarder on the scheduler.
+`tests/test_write_verdict_table.py` stands in for (over a real `WriteGrant` and
+`PreBatchSnapshots`, the target's inode and the jail's path resolution traced on the grant).
+`PreBatchSnapshots` reads the preflight through the run's `WriteGrant` and an earlier run's
+results through its `ResumeEvidence`, and `DryRunReport` the preflight and the prompt through
+the `WriteGrant` and `BatchPromptBuilder`: the objects themselves, so a class or instance patch
+of either reaches them. `_keep_at_request`, a step of a dispatch, and `_stop_on_manual_gate`,
+which calls the collaborators, stay on the scheduler. A test
+calls a moved method on its collaborator (`scheduler._reports.mirror_status(result)`, `scheduler._verify_command.run(...)`,
+`scheduler._evidence.task_fingerprint(task)`, `scheduler._snapshots.take(task)`), a class patch
+goes on the collaborator's class (`write_check_holds.CheckHolds.tree_fingerprint`,
+`write_grant.WriteGrant.recorded_rung`), and a patch of a function it calls on the module that
+calls it (`write_grant.preflight_runner`): no collaborator has a forwarder on the scheduler.
 
 ## Write scheduler contract
 
@@ -143,7 +152,7 @@ spelled out in prompt order, because the prompt never names them and an omitted 
 partial application) — the batchers' prompts end in the prose "Return Format" the native markdown
 flow compresses into a summary line, and measured 2026-09-15 a real runner applied a batch, reported
 it exactly as asked, and was recorded `unparseable_result` four attempts running; a resumed batch
-**reuses** its pre-batch snapshot (`_reusable_snapshot`, same declared set and, when the manifest
+**reuses** its pre-batch snapshot (`PreBatchSnapshots.reusable`, same declared set and, when the manifest
 records them, the same `expected_ids` — after a selection change an apply id names other
 items, and the snapshot it holds is set aside as `pre_batch/<id>.items-<sha8>`, never deleted, while the
 new batch takes its own — and moved back into the slot when those items return to the id

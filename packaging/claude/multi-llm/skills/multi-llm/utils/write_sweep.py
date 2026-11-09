@@ -497,7 +497,8 @@ class ContainmentSweep:
         * **A path ``driver.write_paths`` denies** (``.env``, ``**/*.pem``,
           ``**/.ssh/**``) is never copied. The deny list exists precisely to keep
           that material out of executor-owned artifacts — it is why the
-          pre-dispatch policy check runs *before* ``_snapshot`` — and a rollback
+          pre-dispatch policy check runs *before* the snapshot
+          (``write_snapshots.PreBatchSnapshots.take``) — and a rollback
           store that quietly mirrors every secret in the repo into the phase dir
           would be a new vulnerability rather than a control. Such a write is
           still observed, still fails the post-run check and still stops the loop;

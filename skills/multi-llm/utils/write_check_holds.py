@@ -23,13 +23,13 @@ result file, never in ``state.json``.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from . import check_records as _check_records
 from . import git_utils as _git_utils
 from . import write_context as _write_context
+from .atomic_io import atomic_write_text
 from .subagent_executor import (
     STATUS_BATCH_FAILED,
     STATUS_OK,
@@ -454,9 +454,9 @@ class CheckHolds:
                 if verdict.get("tree_fingerprint") == current:
                     continue
                 verdict["tree_fingerprint"] = current
-                temp = path.with_name(path.name + ".tmp")
-                temp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-                os.replace(str(temp), str(path))
+                # Owner-only, as the executor wrote it (docs/development/
+                # runtime.md#atomic-file-writes).
+                atomic_write_text(path, json.dumps(data, indent=2), mode=0o600)
             except (OSError, ValueError) as exc:  # noqa: BLE001 - bookkeeping
                 self._ctx.log(
                     f"[write-subagents] warning: could not re-stamp the tree on "

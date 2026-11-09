@@ -15,7 +15,7 @@ def test_completed_parallel_sibling_is_not_adopted_for_rollback(env, first_finis
         for index, label in enumerate(("A", "B"))
     }
     scheduler = env.scheduler(list(tasks.values()))
-    snapshots = {label: scheduler._snapshot(task) for label, task in tasks.items()}
+    snapshots = {label: scheduler._snapshots.take(task) for label, task in tasks.items()}
     for label in tasks:
         scheduler._begin_sweep(label, [f"src/{label.lower()}.py"])
     for label in tasks:
@@ -29,7 +29,7 @@ def test_completed_parallel_sibling_is_not_adopted_for_rollback(env, first_finis
 
     # A later, non-overlapping task must still observe a write to either file.
     later = env.apply_task(2, task_id="later")
-    snapshot = scheduler._snapshot(later)
+    snapshot = scheduler._snapshots.take(later)
     scheduler._begin_sweep("later", ["plans/p.md"])
     (env.root / "src" / "a.py").write_text("unexpected = 3\n")
     assert scheduler._undeclared_writes("later", snapshot).paths == ["src/a.py"]
@@ -79,7 +79,7 @@ def _classify(scheduler, task, snapshot):
 def test_a_stray_a_running_sibling_also_saw_does_not_make_a_task_applied(env, first):
     tasks = _code_tasks(env)
     scheduler = env.scheduler(list(tasks.values()), kind="implement", finalize=False)
-    snapshots = {label: scheduler._snapshot(task) for label, task in tasks.items()}
+    snapshots = {label: scheduler._snapshots.take(task) for label, task in tasks.items()}
     for label in tasks:
         scheduler._begin_sweep(label, [f"src/{label.lower()}.py"])
     # While both run: B edits its own file and leaves a stray; A edits nothing.
@@ -100,7 +100,7 @@ def test_a_stray_a_running_sibling_also_saw_does_not_make_a_task_applied(env, fi
 def test_a_stray_written_before_the_sibling_started_is_still_the_tasks_own(env):
     tasks = _code_tasks(env)
     scheduler = env.scheduler(list(tasks.values()), kind="implement", finalize=False)
-    snapshots = {label: scheduler._snapshot(task) for label, task in tasks.items()}
+    snapshots = {label: scheduler._snapshots.take(task) for label, task in tasks.items()}
     scheduler._begin_sweep("A", ["src/a.py"])
     (env.root / "src" / "a_helper.py").write_text("x = 1\n", encoding="utf-8")
     scheduler._begin_sweep("B", ["src/b.py"])

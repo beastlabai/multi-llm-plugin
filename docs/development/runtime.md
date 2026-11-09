@@ -777,8 +777,8 @@ A call site states only how it differs, through a parameter:
 
 | Parameter | Default | Who changes it |
 |-----------|---------|----------------|
-| `keep_mode` | on: an existing file's bits carry over | no caller turns it off |
-| `mode` | none | 0600: executor results, ask records, the version cache, `state.json`, `.status.json`, the dispatched prompts, the write-safety records (`write_safety._atomic_write`), the Landlock change lists, shims; codex's and cursor's config keep the mode they had |
+| `keep_mode` | on: an existing file's bits carry over | off where a writer has always made a fresh file under the current umask: the run registry's entries, a detached worker's refusal record, the write scheduler's inputs binding (`ResumeEvidence.record_fingerprint`) |
+| `mode` | none | 0600: executor results and the write scheduler's rewrites of them (the verdict stamp, the own-check re-record, the check tree re-stamp), ask records, the version cache, `state.json`, `.status.json`, the dispatched prompts, the write-safety records (`write_safety._atomic_write`), the Landlock change lists, shims; codex's and cursor's config keep the mode they had |
 | `fsync` | on | off for `state.json` (rewritten dozens of times a run, under its lock), `.status.json` (rewritten by every heartbeat, under the checkpoint lock), the dispatched prompts (`utils/prompt_files.py`) and doctor's version cache (inside the startup budget) |
 | `follow_symlinks` | off: a symlink is replaced by a file | `update_plan_tasks.replace_file`, for the plan alone: a plan kept elsewhere and linked in stays linked. The outputs beside it never follow a link ([plan output containment](write-safety.md#plan-output-containment)) |
 | `newline` (text) | `\n` | `os.linesep` where a writer has always written what `write_text` does (`update_plan_tasks`, `review_round`, the HTML report, ask's records) |

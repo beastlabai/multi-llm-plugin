@@ -43,8 +43,12 @@ sweep and its rollback store), ``write_eta.EtaLines`` (the ``[ETA]`` lines),
 ``write_stop.StopAccount`` (how a stop is worded and recorded),
 ``batch_prompt_builder.BatchPromptBuilder`` (the dispatched prompt),
 ``write_commit_leg.CommitGuardLeg`` (the commit write policy's leg),
-``write_check_holds.CheckHolds`` (what implement's checks hold back) and
-``write_resume.ResumeEvidence`` (what an earlier run left for a resume).
+``write_check_holds.CheckHolds`` (what implement's checks hold back),
+``write_resume.ResumeEvidence`` (what an earlier run left for a resume),
+``write_grant.WriteGrant`` (what the phase does with its one write grant) and
+``write_snapshots.PreBatchSnapshots`` (each dispatch's pre-batch snapshot and
+where the phase stores them) and ``write_dry_run.DryRunReport``
+(``--dry-run-subagents``' report).
 What a run refused before dispatch is on its result (``result.refusals``).
 Every name that moved there is still readable here (:data:`_MOVED`), **for
 reading only**: ``write_batch_scheduler.X`` and ``from .write_batch_scheduler
@@ -90,6 +94,10 @@ from . import batch_prompt_builder as _batch_prompt_builder
 from . import write_commit_leg as _write_commit_leg
 from . import write_check_holds as _write_check_holds
 from . import write_resume as _write_resume
+from . import write_grant as _write_grant
+from . import write_snapshots as _write_snapshots
+from . import write_dry_run as _write_dry_run
+from .atomic_io import atomic_write_text
 from .cli_common import EXIT_NEEDS_HUMAN, EXIT_OK
 from .batch_ledger import (
     outcome_from_verdict,
@@ -108,10 +116,6 @@ from .text_clip import (
 from .providers.base import (
     SANDBOX_RUNG_PLUGIN_LANDLOCK,
     host_write_posture_consent,
-    WRITE_SCOPE_REPO_WIDE,
-    WRITE_SCOPE_TASKS,
-    WRITE_SCOPES_ON_RUNG,
-    JailRequest,
 )
 from .provider_registry import (
     get_max_concurrent_write_subagents,
@@ -120,7 +124,6 @@ from .provider_registry import (
     parse_model_spec,
 )
 from .subagent_executor import (
-    STATUS_BATCH_FAILED,
     STATUS_OK,
     STATUS_REJECTED,
     WRITE_APPLIED,
@@ -130,10 +133,8 @@ from .subagent_executor import (
     ExecutorError,
     ResultRejected,
     TaskOutcome,
-    _atomic_write_json,
     _host_ceiling,
     dispatch_task,
-    preflight_runner,
     profile_for_kind,
     resolve_task_runner,
     batch_check_findings,
@@ -157,17 +158,13 @@ from .subagent_tasks import (
     SHARED_ARTIFACT_WRITE_KINDS,
     WRITE_KINDS,
     declared_file_set,
-    snapshot_file_set,
 )
 from .state_manager import (
     PROCESSED_LEG_EXECUTOR,
 )
 from .write_safety import (
-    PRE_BATCH_DIRNAME,
-    DRY_RUN_FILENAME,
     AuditLog,
     PolicyViolation,
-    contain_under_root,
     TaskSnapshot,
     WritePolicy,
     WriteSafetyError,
@@ -176,23 +173,19 @@ from .write_safety import (
     overlapping_pairs,
     relative_to_root,
     resolve_repo_root,
-    claim_external_safety_dir,
     safety_dir,
 )
 from .write_record import BatchFacts, BatchRecord, record_batch_facts
 from .write_verdict import (
     DECLARED_NAMES_ROWS,
-    JailFacts,
     PolicyFacts,
     PolicyRestore,
-    TargetReplaced,
     VerdictRule,
     WriteFacts,
     decide,
     guard,
     jail_note,
     reason_for,
-    replaced_target_reason,
 )
 
 
@@ -508,6 +501,18 @@ _MOVED: Dict[str, Tuple[str, ...]] = {
         "WRITE_FINGERPRINT_FILENAME",
         "_RESULT_TOKEN",
         "review_completed_at",
+    ),
+    "write_grant": (
+        "WriteGrant",
+        "build_jail_request",
+        "checked_write_target",
+    ),
+    "write_snapshots": (
+        "PreBatchSnapshots",
+    ),
+    "write_dry_run": (
+        "DryRunReport",
+        "_redacted_argv",
     ),
 }
 _MOVED_TO: Dict[str, str] = {
@@ -971,9 +976,15 @@ class WriteBatchScheduler:
         # scope from the kind map, the target from the phase's own artifact —
         # never a per-task path, so nothing a task file says can widen it.
         self.write_scope = write_scope_for_kind(kind)
-        self.write_target = self._checked_write_target(write_target)
+        self.write_target = _write_grant.checked_write_target(
+            write_target, repo_root=self.repo_root, phase=self.phase,
+        )
         self.policy = WritePolicy.load(self.repo_root, anchor=self.anchor)
-        self.jail_request = self._build_jail_request()
+        self.jail_request = _write_grant.build_jail_request(
+            kind=self.kind, write_scope=self.write_scope, repo_root=self.repo_root,
+            output_dir=self.output_dir, write_target=self.write_target,
+            plan_file=self.plan_file,
+        )
         self.audit = AuditLog(self.phase_dir)
         #: What the collaborators below may read about this run (WRITE-5):
         #: these same objects, never copies; `log` reaches `self.log` at each
@@ -1026,19 +1037,6 @@ class WriteBatchScheduler:
             self._prompts.pinned_phase_dir()
         except OSError:
             pass  # named on the first prompt kept, with that task's id
-        #: Whether `_decide_rollback_storage` ran for the admitted group.
-        self._rollback_storage_decided = False
-        self._rollback_storage_lock = threading.Lock()
-        self._rollback_storage_candidates: Optional[Sequence[Dict[str, Any]]] = None
-        self.snapshots: Dict[str, TaskSnapshot] = {}
-        #: Task ids whose pre-batch snapshot was REUSED from an earlier
-        #: dispatch of this same batch (`_snapshot`/`_reusable_snapshot`),
-        #: rather than taken fresh at the top of this dispatch. `_classify`
-        #: reads this to tell "the diff is a killed attempt's, not this
-        #: dispatch's" apart from "this dispatch's own snapshot disagrees
-        #: with its no-op claim" (N2, 2026-09-16) — the two read identically
-        #: from the bytes alone.
-        self._snapshot_reused: set = set()
         self.invoker = "executor" if dispatcher is None else str(dispatcher.invoker)
         #: What implement's checks hold back and whether a resumed one runs
         #: again (`write_check_holds.CheckHolds`), stateless: a hold is
@@ -1117,31 +1115,27 @@ class WriteBatchScheduler:
         #: runner) — what names the rung on the batch's line, its verdict and
         #: the report whatever the outcome, a timeout included.
         self._dispatch_rungs: Dict[str, Optional[str]] = {}
-        #: The write target's ``(st_dev, st_ino)`` recorded right after this
-        #: dispatch's pre-batch snapshot — never the first run's, so a
-        #: ``util restore-batch`` between runs (whose ``os.replace`` leaves a
-        #: new inode) does not read as a replaced target (§8.3 item 14).
-        self._target_identity_before: Dict[str, Optional[Tuple[int, int]]] = {}
-        #: The jail-denial count that did not change a verdict (out-of-scope
-        #: denials, or a replacement the runner recovered from), for the
-        #: batch's line and its outcome's reason.
-        self._jail_notes: Dict[str, str] = {}
-        #: The denials themselves, for the report row.
-        self._jail_denials: Dict[str, Dict[str, Any]] = {}
-        #: Root grant (2026-10-05): ``task_id -> git_utils.git_metadata_fingerprint``
-        #: taken right before a repo-wide dispatch, compared after it for the
-        #: warn-only ``[GIT_CONFIG_CHANGED]`` line (never a copy, never a revert).
-        self._git_meta_before: Dict[str, Optional[Dict[str, Any]]] = {}
-        #: Tasks whose verdict came from the jail (a denied edit or a replaced
-        #: target) and failed the batch: never a success line in the
-        #: prior-changes log — the failed batch's own line, which the
-        #: ``--resume`` that re-dispatches it supersedes (fix round 15).
-        self._jail_failed: set = set()
-        #: The subset whose target was replaced under the batch: their failure
-        #: writes no prior-changes line at all (fix round 15).
-        self._replaced_targets: set = set()
-        #: Batch indexes whose stray-writes-only line was already printed.
-        self._rung_noticed: set = set()
+        #: What the phase does with its one grant (`write_grant.WriteGrant`):
+        #: the declared-set check, the runner preflight under the request and
+        #: the rung it recorded, the replaced-target check and the jail's
+        #: denials, with their per-dispatch records.
+        self._grant = _write_grant.WriteGrant(
+            self._ctx,
+            write_scope=self.write_scope,
+            write_target=self.write_target,
+            jail_request=self.jail_request,
+            dispatch_rungs=self._dispatch_rungs,
+        )
+        #: Each dispatch's pre-batch snapshot, its rollback point, and where
+        #: the phase stores them (`write_snapshots.PreBatchSnapshots`).
+        self._snapshots = _write_snapshots.PreBatchSnapshots(
+            self._ctx,
+            resume=self.resume,
+            executor_dispatch=self._executor_dispatch,
+            grant=self._grant,
+            evidence=self._evidence,
+            runner_for=self._late("_runner_for"),
+        )
         #: What reading each reply's ``listed`` against ``_told_checks`` gave.
         self._listed_outcomes: Dict[str, Any] = {}
         #: ``task id -> its outcomes so far`` (:meth:`_remember_outcome`).
@@ -1172,6 +1166,16 @@ class WriteBatchScheduler:
             accounting=self._late("_stop.accounting"),
             manual_gates=self._late("_stop.manual_gates"),
         )
+        #: `--dry-run-subagents`' report (`write_dry_run.DryRunReport`).
+        self._dry_run_report = _write_dry_run.DryRunReport(
+            self._ctx,
+            host_max=self.host_max,
+            grant=self._grant,
+            prompts=self._prompts,
+            batch_runners_and_ceiling=self._late("_batch_runners_and_ceiling"),
+            render_argv=self._late("_render_argv"),
+            ceiling_record=self._late("_ceiling_record"),
+        )
 
     def _late(self, name: str) -> Callable[..., Any]:
         """``self.<name>(...)`` as it is bound when called, for a collaborator
@@ -1188,7 +1192,7 @@ class WriteBatchScheduler:
 
         return call
 
-    # -- the write grant (plan step 3, 2026-09-30) ----------------------
+    # -- the phase's folders and root ----------------------------------
 
     @property
     def safety_dir(self) -> str:
@@ -1196,59 +1200,6 @@ class WriteBatchScheduler:
         log live (``write_safety.safety_dir``): the phase dir, or the
         out-of-grant directory a jailed repo-wide run claimed."""
         return safety_dir(self.phase_dir)
-
-    def _decide_rollback_storage(self, task: Dict[str, Any], profile: str) -> None:
-        """Choose storage for an admitted group's runners before snapshots start.
-
-        The first task can use another runner than a later or co-scheduled
-        jailed task. Resolving the group's runner set under this lock prevents
-        promotion while a sibling is already writing its snapshot or audit.
-        An inconclusive preflight conservatively requires external storage;
-        its actual dispatch still reports its own refusal, and a later
-        successful preflight cannot strand evidence inside a writable grant.
-        """
-        if self.dry_run or not self._executor_dispatch:
-            return
-        with self._rollback_storage_lock:
-            if self._rollback_storage_decided:
-                return
-            if self.write_scope != WRITE_SCOPE_REPO_WIDE:
-                self._rollback_storage_decided = True
-                return
-            needs_external = False
-            seen = set()
-            candidates = self._rollback_storage_candidates
-            for candidate in (candidates if candidates is not None else self.tasks or [task]):
-                if candidate.get("is_human") or candidate.get("executor_role") == "human":
-                    continue
-                if (candidate is not task and self.resume
-                        and not _batch_prompt.is_check_task(self.kind, candidate)
-                        and self._evidence.done_evidence(candidate) is not None):
-                    continue
-                try:
-                    runner = self._runner_for(candidate)
-                    candidate_profile = profile_for_kind(str(candidate.get("kind") or self.kind))
-                    key = (runner, candidate_profile)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    self._preflight(runner, candidate_profile)
-                    needs_external |= self._recorded_rung(runner, candidate_profile) == SANDBOX_RUNG_PLUGIN_LANDLOCK
-                except Exception:  # the task's own dispatch reports the preflight error
-                    needs_external = True
-            if needs_external:
-                external = claim_external_safety_dir(self.phase_dir, self.repo_root)
-                for snapshot in self.snapshots.values():
-                    snapshot.directory = os.path.join(
-                        external, PRE_BATCH_DIRNAME, Path(snapshot.directory).name,
-                    )
-                self.log(
-                    f"[write-subagents] this repo-wide phase may run batches on the "
-                    f"plugin's jail, which grants the phase dir too: pre-batch "
-                    f"snapshots, the rollback store and the audit log live outside "
-                    f"it, at {external} (a copy inside the phase dir is never read)."
-                )
-            self._rollback_storage_decided = True
 
     @staticmethod
     def _checked_repo_root(raw: str) -> str:
@@ -1264,217 +1215,6 @@ class WriteBatchScheduler:
                 f"dispatched."
             )
         return root
-
-    def _checked_write_target(self, raw: Optional[str]) -> Optional[str]:
-        """``raw`` ``realpath``-resolved, or refuse the phase at construction.
-
-        F1 "How a dispatch receives its grant": the target must exist, be a
-        regular file, not be a symlink (checked on the path as given, before
-        resolution) and lie under the repo root. A target that fails any of
-        these is a phase that cannot be granted, so it fails here with exit 3
-        and nothing dispatched, rather than as a jail refusal mid-run.
-        """
-        if raw is None or not str(raw).strip():
-            return None
-        given = os.path.abspath(str(raw))
-        problem = None
-        if os.path.islink(given):
-            problem = "is a symlink (a grant is never bound through one)"
-        elif not os.path.exists(given):
-            problem = "does not exist"
-        elif not os.path.isfile(given):
-            problem = "is not a regular file"
-        resolved = os.path.realpath(given)
-        root = os.path.realpath(self.repo_root)
-        if problem is None and not resolved.startswith(root.rstrip(os.sep) + os.sep):
-            problem = f"lies outside the repository root {root}"
-        if problem is not None:
-            raise ExecutorError(
-                f"The {self.phase} write target {given} {problem}, so this "
-                f"phase cannot be granted its one file. Nothing was dispatched."
-            )
-        return resolved
-
-    def _build_jail_request(self) -> Optional[JailRequest]:
-        """The phase's one :class:`JailRequest` (F1 "How a dispatch receives
-        its grant").
-
-        ``plan-file`` and ``tasks`` carry the target; ``tasks`` also carries a
-        ``target_dir`` — a dir rule — only when the tasks file sits in the
-        plan's default ``plans/<stem>/tasks/`` (``default_tasks_dir``), and a
-        file rule on the tasks file anywhere else. ``repo-wide`` (step 3b;
-        one dir rule on the root since 2026-10-05) carries no target but this
-        run's output folder, which the developer message names as hands-off.
-        """
-        if not self.write_scope:
-            return None
-        repo_root = os.path.realpath(self.repo_root)
-        if self.write_scope == WRITE_SCOPE_REPO_WIDE:
-            return JailRequest(
-                repo_root=repo_root, kind=self.kind, write_scope=self.write_scope,
-                output_dir=os.path.realpath(self.output_dir),
-            )
-        if self.write_scope not in WRITE_SCOPES_ON_RUNG:
-            return JailRequest(
-                repo_root=repo_root, kind=self.kind, write_scope=self.write_scope,
-            )
-        target_dir = None
-        if (
-            self.write_scope == WRITE_SCOPE_TASKS
-            and self.write_target and self.plan_file
-        ):
-            target_dir = _landlock.default_tasks_dir(
-                self.plan_file, self.write_target
-            )
-        return JailRequest(
-            repo_root=repo_root, kind=self.kind, write_scope=self.write_scope,
-            target=self.write_target, target_dir=target_dir,
-        )
-
-
-    # -- the repository metadata a repo-wide batch can write (root grant) ----
-
-    def _git_metadata_fingerprint(self) -> Optional[Dict[str, Any]]:
-        """``git_utils.git_metadata_fingerprint`` of the pinned root for a
-        ``repo-wide`` batch (a hash and a listing, never bytes); ``None`` for
-        the narrower scopes, whose grant never reaches ``.git/``, and on any
-        failure — a warning line may not fail a dispatch."""
-        if self.write_scope != WRITE_SCOPE_REPO_WIDE:
-            return None
-        try:
-            return _git_utils.git_metadata_fingerprint(self.repo_root)
-        except Exception:  # noqa: BLE001 - observability must not fail a phase
-            return None
-
-    def _warn_git_metadata_changed(self, task_id: str) -> None:
-        """One warn-only ``[GIT_CONFIG_CHANGED]`` line when ``.git/config`` or
-        the ``.git/hooks/`` listing moved across this dispatch (root grant,
-        2026-10-05: the sweep prunes ``.git/`` and nothing is backed up, so
-        this line is the one place a planted hook or config key is named).
-        The user's own git honours what was planted; the plugin's calls carry
-        ``git_utils.GIT_HARDENING_ARGS``. Never a failed batch."""
-        before = self._git_meta_before.pop(task_id, None)
-        if before is None:
-            return
-        try:
-            change = _git_utils.describe_git_metadata_change(
-                before, self._git_metadata_fingerprint()
-            )
-        except Exception:  # noqa: BLE001 - observability must not fail a phase
-            return
-        if change:
-            self.log(
-                f"{_git_utils.GIT_CONFIG_CHANGED_MARKER} {task_id}: the repository's "
-                f"git metadata changed during this batch ({change}). The jail "
-                f"grants the whole repository and nothing was backed up; "
-                f"inspect .git/config and .git/hooks/ before your next git "
-                f"command runs what a batch may have planted (warn-only)."
-            )
-
-    def _grant_mismatch(self, task: Dict[str, Any]) -> Optional[str]:
-        """Why ``task``'s declared set is not this phase's grant, or ``None``.
-
-        Under ``plan-file`` and ``tasks`` the declared set must resolve to
-        exactly the target, on every rung (F1 "How a dispatch receives its
-        grant"). ``materialize_write_tasks`` always declares exactly the target,
-        so only an edited task file differs — and the task file is re-read on
-        ``--resume``, so it is checked here and never supplies a grant.
-        """
-        if self.write_scope not in WRITE_SCOPES_ON_RUNG or not self.write_target:
-            return None
-        declared = declared_file_set(task)
-        resolved = set()
-        for path in declared:
-            candidate = path if os.path.isabs(path) else os.path.join(
-                self.repo_root, path
-            )
-            resolved.add(os.path.realpath(candidate))
-        if resolved == {self.write_target}:
-            return None
-        shown = ", ".join(declared) or "nothing"
-        return (
-            f"Refusing to dispatch write task {task.get('task_id')}: it declares "
-            f"{shown}, but a {self.kind} batch's grant ({self.write_scope}) is "
-            f"exactly this phase's write target {self.write_target}. Only an "
-            f"edited task file declares anything else, and a task file never "
-            f"supplies a grant. Nothing was snapshotted or dispatched."
-        )
-
-    def _identity_path(self) -> Optional[str]:
-        """What the replaced-target check watches: the target file under a
-        file rule, the tasks directory under the dir rule (F1 "Supported edits
-        under a file-only grant", "The target replaced during the dispatch")."""
-        request = self.jail_request
-        if request is None or request.write_scope not in WRITE_SCOPES_ON_RUNG:
-            return None
-        return request.target_dir or request.target
-
-    @staticmethod
-    def _identity_of(path: Optional[str]) -> Optional[Tuple[int, int]]:
-        """``(st_dev, st_ino)`` of ``path`` itself (``lstat``), or ``None``."""
-        if not path:
-            return None
-        try:
-            info = os.lstat(path)
-        except OSError:
-            return None
-        return (info.st_dev, info.st_ino)
-
-    def _target_label(self) -> str:
-        request = self.jail_request
-        if request is not None and request.target_dir:
-            return "the tasks directory"
-        if self.write_scope == WRITE_SCOPE_TASKS:
-            return "the tasks file"
-        return "the plan file"
-
-    def _preflight(
-        self, runner: str, profile: str, **extra: Any
-    ) -> Dict[str, Any]:
-        """``preflight_runner`` with this phase's request.
-
-        For ``agent-write`` the request's scope joins the executor's sandbox
-        decision key, so a ``plan-file`` decision is never replayed for a
-        ``repo-wide`` dispatch of the same runner.
-        """
-        return preflight_runner(
-            runner, profile=profile, anchor=self.anchor,
-            key="driver.subagent_runner", jail_request=self.jail_request,
-            **extra,
-        )
-
-    def _recorded_rung(self, runner: str, profile: str) -> Optional[str]:
-        """The fallback rung the preflight recorded for this runner, profile
-        and scope, or ``None`` (codex's own sandbox, or another runner)."""
-        try:
-            rung = _executor.sandbox_rung(
-                runner, profile, write_scope=self.write_scope or None
-            )
-        except Exception:  # noqa: BLE001 - a lookup must never fail a dispatch
-            return None
-        return str(rung) if rung else None
-
-    def _announce_rung(self, runner: str, batch_index: Optional[int]) -> None:
-        """Print the stray-writes-only line once before a batch on the rung.
-
-        The executor composes it (``write_rung_notice``, the same builder as
-        every ``[SANDBOX_INCIDENTAL]`` line): it names the scope, the target
-        and the open network, and it is ``None`` for a batch on codex's own
-        sandbox, which therefore prints nothing (§8.2 "The stray-writes-only
-        line").
-        """
-        if self.jail_request is None:
-            return
-        key = batch_index if batch_index is not None else runner
-        if key in self._rung_noticed:
-            return
-        try:
-            notice = _executor.write_rung_notice(runner, self.jail_request)
-        except Exception:  # noqa: BLE001 - a notice must never fail a dispatch
-            return
-        if notice:
-            self._rung_noticed.add(key)
-            self.log(str(notice))
 
     # -- ceilings -------------------------------------------------------
 
@@ -1872,7 +1612,7 @@ class WriteBatchScheduler:
 
         # 2. Dry run: full preflight, zero dispatch.
         if self.dry_run:
-            result.dry_run_path = self._write_dry_run(ordered, result.human_plan)
+            result.dry_run_path = self._dry_run_report.write(ordered, result.human_plan)
             result.messages.append(
                 f"[dry-run-subagents] {result.dry_run_path} — every command "
                 f"rendered, no child started, nothing changed."
@@ -2270,8 +2010,8 @@ class WriteBatchScheduler:
             # Earlier groups have settled; the next group's runnable candidates
             # alone can select a new storage location. Do this before any of its
             # threads takes a snapshot. Human/check-held tasks never get probed.
-            self._rollback_storage_candidates = group
-            self._rollback_storage_decided = False
+            self._snapshots.storage_candidates = group
+            self._snapshots.storage_decided = False
             if len(group) == 1:
                 outcomes.append(dispatch_and_mirror(group[0]))
             else:
@@ -2430,20 +2170,20 @@ class WriteBatchScheduler:
         # snapshot for the same reason: under `plan-file`/`tasks` the declared
         # set must be exactly the phase's write target, on every rung, or the
         # batch is refused with nothing snapshotted and nothing spawned.
-        mismatch = self._grant_mismatch(task)
+        mismatch = self._grant.grant_mismatch(task)
         if mismatch is not None:
             return self._refused(task, mismatch, batch_index, result)
 
         try:
-            self._decide_rollback_storage(task, profile)
-            snapshot = self._snapshot(task)
+            self._snapshots.decide_rollback_storage(task, profile)
+            snapshot = self._snapshots.take(task)
         except WriteSafetyError as exc:
             return self._refused(task, exc.message, batch_index, result)
         # The replaced-target check's "before": taken at THIS dispatch's
         # pre-batch snapshot (reused or fresh), so the identity compared after
         # the child is always the one this spawn saw (§8.3 item 14).
-        self._target_identity_before[task_id] = self._identity_of(
-            self._identity_path()
+        self._grant.target_identity_before[task_id] = self._grant.identity_of(
+            self._grant.identity_path()
         )
         # §2.7: the protected set's (and context plan's) "before" for this
         # dispatch's own post-run check, independent of the sweep below.
@@ -2457,17 +2197,17 @@ class WriteBatchScheduler:
         except WriteSafetyError as exc:
             # The census is this task's whole verdict and there is none: a
             # refusal, with nothing spawned (W1, adversarial review 2026-10-02).
-            self._target_identity_before.pop(task_id, None)
+            self._grant.target_identity_before.pop(task_id, None)
             self._commit.watch_before.pop(task_id, None)
             return self._refused(task, exc.message, batch_index, result)
         started = time.time()
-        self._git_meta_before[task_id] = self._git_metadata_fingerprint()
+        self._grant.git_meta_before[task_id] = self._grant.git_metadata_fingerprint()
         try:
             outcome = self._dispatcher(
                 self, task, prompt, snapshot, profile, declared,
                 batch_index=batch_index,
             )
-            self._warn_git_metadata_changed(task_id)
+            self._grant.warn_git_metadata_changed(task_id)
             outcome.snapshot_dir = snapshot.directory
             if not outcome.duration_seconds:
                 outcome.duration_seconds = time.time() - started
@@ -2490,7 +2230,7 @@ class WriteBatchScheduler:
             # so `.status.json` read `in flight: apply-batch-0 (since 0m 9s)`
             # for the rest of the dir's life. The dispatch is over either way.
             self._sweep.abandon(task_id)
-            self._target_identity_before.pop(task_id, None)
+            self._grant.target_identity_before.pop(task_id, None)
             self._commit.watch_before.pop(task_id, None)
         self._record_batch_effects(task, outcome, batch_index, result)
         return outcome
@@ -2671,7 +2411,7 @@ class WriteBatchScheduler:
             outcome.unrestorable = list(undeclared.unrecoverable)
         # After the fill, never before it: the fill is what would put the
         # replaced target back into the restore set.
-        if not self._replaced_target_unclassified(outcome, snapshot):
+        if not self._grant.replaced_target_unclassified(outcome, snapshot):
             self._partial_when_bytes_moved(outcome, snapshot)
         last = outcome.attempts[-1] if outcome.attempts else None
         self._audit_completion(
@@ -2744,16 +2484,16 @@ class WriteBatchScheduler:
         """
         task_id = str(task.get("task_id", ""))
         runner = self._runner_for(task)
-        info = self._preflight(runner, profile)
+        info = self._grant.preflight(runner, profile)
         # F12: `subagent_batch_report.json.runner_versions` was empty on this
         # path — the read half fills it from its own batch-start preflight
         # (`_preflight_batch_runners`); this call already runs one per
         # dispatch and its version was simply never kept.
         self._runner_versions[runner] = str(info.get("version") or "unknown")
-        rung = self._recorded_rung(runner, profile)
+        rung = self._grant.recorded_rung(runner, profile)
         self._dispatch_rungs[task_id] = rung
         request = self.jail_request
-        self._announce_rung(runner, batch_index)
+        self._grant.announce_rung(runner, batch_index)
 
         def before_attempt(context: Dict[str, Any]) -> None:
             # The prompt this attempt really sends: a report re-ask (the
@@ -2874,7 +2614,7 @@ class WriteBatchScheduler:
             argv = list(provider.build_agent_command(prompt, model, profile))
         except Exception:  # noqa: BLE001 - a log must never fail a dispatch
             return [provider_name, "<profile unsupported>"]
-        rung_id = self._recorded_rung(runner, profile)
+        rung_id = self._grant.recorded_rung(runner, profile)
         if rung_id and rung_id != SANDBOX_RUNG_PLUGIN_LANDLOCK:
             # Any other recorded rung (F5's uncontained one, plan step 6) is
             # rendered as the dispatch will render it, so the audit record
@@ -3019,7 +2759,7 @@ class WriteBatchScheduler:
             verification_only=outcome.verification_only,
             summary=summary,
             snapshot_dir=str(snapshot.directory),
-            snapshot_reused=task_id in self._snapshot_reused,
+            snapshot_reused=task_id in self._snapshots.reused,
             resent=resent,
             resend_note=resend_note,
             repo_root=str(self.repo_root),
@@ -3036,18 +2776,18 @@ class WriteBatchScheduler:
             )
         if guard(facts) is None:
             # This dispatch's "before", spent by every row past the policy's.
-            before = self._target_identity_before.pop(task_id, None)
+            before = self._grant.target_identity_before.pop(task_id, None)
             if sandbox_rung == SANDBOX_RUNG_PLUGIN_LANDLOCK:
-                facts = replace(facts, replaced=self._target_replacement(before))
+                facts = replace(facts, replaced=self._grant.target_replacement(before))
         if guard(facts) is None:
             denials = _as_jail_denials(jail_denials)
             if denials is not None:
                 # Kept before any of its paths is resolved.
-                self._jail_denials[task_id] = denials.to_dict()
-                facts = replace(facts, jail=self._jail_facts(task_id, denials, facts))
+                self._grant.jail_denials[task_id] = denials.to_dict()
+                facts = replace(facts, jail=self._grant.jail_facts(task_id, denials, facts))
                 note = jail_note(facts.jail) if guard(facts) is None else None
                 if note:
-                    self._jail_notes[task_id] = note
+                    self._grant.jail_notes[task_id] = note
         reply_check: Optional[_executor.CheckReply] = None
         if guard(facts) is None:
             reply_check = read_check_reply(result)
@@ -3086,9 +2826,9 @@ class WriteBatchScheduler:
                 for name in ("RESTORED_FROM_COPY", "DELETED_ABSENT_BEFORE")
             } - {None})
         elif verdict.rule is VerdictRule.REPLACED_TARGET:
-            self._record_replaced_target(outcome)
+            self._grant.record_replaced_target(outcome)
         elif verdict.rule is VerdictRule.JAIL_FAILED:
-            self._jail_failed.add(task_id)
+            self._grant.jail_failed.add(task_id)
         if (
             verdict.check_not_run and reply_check is not None
             and reply_check.findings and not outcome.runner_notes
@@ -3265,8 +3005,8 @@ class WriteBatchScheduler:
         if not looked:
             return None
         if context.get("sandbox_rung") == SANDBOX_RUNG_PLUGIN_LANDLOCK:
-            before = self._target_identity_before.get(task_id)
-            if before is not None and self._identity_of(self._identity_path()) != before:
+            before = self._grant.target_identity_before.get(task_id)
+            if before is not None and self._grant.identity_of(self._grant.identity_path()) != before:
                 return None
         if snapshot.changed():
             # A declared file moved: applied, whatever else moved beside it.
@@ -3404,189 +3144,6 @@ class WriteBatchScheduler:
         """Whether this dispatch declared no files at all (``implement`` only)."""
         return self.kind == "implement" and not snapshot.declared_entries()
 
-    def _relative(self, path: str) -> str:
-        """``path`` repo-relative when it lies under the root, else as given."""
-        return relative_to_root(path, self.repo_root)
-
-    def _in_grant(self, path: str, task_id: Optional[str] = None) -> bool:
-        """Whether the resolved ``path`` is inside this phase's write grant —
-        under ``repo-wide`` (one dir rule on the root, 2026-10-05), inside
-        the repository."""
-        request = self.jail_request
-        if request is not None and request.write_scope == WRITE_SCOPE_REPO_WIDE:
-            root = os.path.realpath(request.repo_root)
-            resolved = os.path.realpath(path)
-            return resolved == root or resolved.startswith(root.rstrip(os.sep) + os.sep)
-        if request is None or not request.target:
-            return False
-        resolved = os.path.realpath(path)
-        if request.target_dir:
-            base = os.path.realpath(request.target_dir)
-            return resolved == base or resolved.startswith(base.rstrip(os.sep) + os.sep)
-        return resolved == os.path.realpath(request.target)
-
-    def _target_replacement(
-        self, before: Optional[Tuple[int, int]],
-    ) -> Optional[TargetReplaced]:
-        """The replaced-target check (F1 "The target replaced during the
-        dispatch"): the watched target's identity now against *before*, the
-        one recorded at this dispatch's pre-batch snapshot. ``None`` when it
-        is the same file, or there is nothing to compare.
-
-        Detection only: the plugin never guesses which process swapped the
-        file, and never widens the grant to the directory to ride a swap out.
-        """
-        path = self._identity_path()
-        if path is None or before is None:
-            return None
-        after = self._identity_of(path)
-        if after == before:
-            return None
-        return TargetReplaced(
-            label=self._target_label(),
-            shown=self._relative(path),
-            before_inode=before[1],
-            after_inode=None if after is None else after[1],
-        )
-
-    def _record_replaced_target(self, outcome: TaskOutcome) -> None:
-        """A replaced target's records. No rollback over the new file:
-        ``files_touched`` is what ``util restore-batch`` restores, so the
-        target (and, under the dir rule, anything beneath it) leaves it; the
-        pre-batch snapshot stays on disk for comparison."""
-        outcome.files_touched = [
-            relative for relative in outcome.files_touched
-            if not self._in_grant(os.path.join(self.repo_root, relative))
-        ]
-        self._jail_failed.add(outcome.task_id)
-        self._replaced_targets.add(outcome.task_id)
-
-    def _replaced_target_unclassified(
-        self, outcome: TaskOutcome, snapshot: TaskSnapshot
-    ) -> bool:
-        """The replaced-target verdict for a plugin-landlock dispatch that
-        never reached ``_classify``. ``True`` when it decided the outcome.
-
-        ``_classify`` runs only on a schema-valid result. A timeout, a runner
-        error, a schema-invalid reply, a ``[JAIL_DENIED]`` rejection or a
-        T4.8 partial ends in :meth:`_audit_terminal` instead, whose
-        ``files_touched`` is the byte comparison against the snapshot. A target
-        saved over by rename differs from that snapshot, so without this check
-        the audit record, and the stop message's restore-batch command, would
-        overwrite the new file, which may be the user's. F1: a replaced target
-        is never restored. The verdict is the replaced-target row's
-        (:func:`write_verdict.replaced_target_reason`), naming the dispatch's
-        own ending in the claim's place, with its failure kept at the end.
-        """
-        task_id = outcome.task_id
-        if self._dispatch_rungs.get(task_id) != SANDBOX_RUNG_PLUGIN_LANDLOCK:
-            return False
-        replaced = self._target_replacement(
-            self._target_identity_before.pop(task_id, None)
-        )
-        if replaced is None:
-            return False
-        ended, detail = outcome.status, outcome.reason
-        self._record_replaced_target(outcome)
-        outcome.status = STATUS_BATCH_FAILED
-        outcome.write_outcome = WRITE_CLEAN_FAILURE
-        outcome.reason = replaced_target_reason(
-            replaced, str(snapshot.directory), "", ended=ended,
-        )
-        if detail:
-            outcome.reason = f"{outcome.reason} The dispatch's own failure: {detail}"
-        return True
-
-    def _jail_facts(
-        self, task_id: str, denials: Any, facts: WriteFacts,
-    ) -> JailFacts:
-        """The jail's denials (F1 "A denied edit is never recorded as
-        applied") as the verdict reads them, every path repo-relative.
-
-        The row's facts name no path. Each path is resolved after them, and
-        only for what *facts* with them land on: the denied paths and the
-        scope sentence when a jail row decides, the note's when none does.
-        """
-        replaced = list(denials.replacement_paths)
-        jail = JailFacts(
-            hard=bool(denials.failed_file_changes or denials.in_scope_paths),
-            replacements=len(replaced),
-        )
-        if guard(replace(facts, jail=jail)) is None:
-            return replace(
-                jail,
-                replacement=tuple(self._relative(p) for p in replaced),
-                out_of_scope_count=denials.out_of_scope_count,
-                out_of_scope=(
-                    tuple(self._relative(p) for p in denials.out_of_scope_paths)
-                    if denials.out_of_scope_count else ()
-                ),
-            )
-        denied = denials.denied_paths()
-        paths = [self._relative(p) for p in denied]
-        in_grant = [
-            self._relative(p) for p in denied
-            if self._in_grant(p, task_id) or p in replaced
-        ]
-        return replace(
-            jail,
-            denied=tuple(paths),
-            scope_sentence=self._jail_scope_sentence(
-                in_grant, [p for p in paths if p not in in_grant],
-            ),
-        )
-
-    def _jail_scope_sentence(
-        self, in_grant: Sequence[str], outside: Sequence[str]
-    ) -> str:
-        """The reason's second half: why an in-grant path was refused, what to
-        do instead, and F6 (the non-Codex runner)."""
-        request = self.jail_request
-        parts: List[str] = []
-
-        def verb(paths: Sequence[str], one: str, many: str) -> str:
-            return one if len(paths) == 1 else many
-
-        if in_grant and request is not None and request.write_scope == WRITE_SCOPE_REPO_WIDE:
-            parts.append(
-                f"{', '.join(in_grant)} {verb(in_grant, 'lies', 'lie')} inside "
-                f"the repository, which the jail granted whole (one rule on "
-                f"its root, 2026-10-05): a denial there is the jail's own "
-                f"failure, not a write shape the grant withholds."
-            )
-        elif in_grant:
-            target = self._relative(request.target) if request and request.target else "the target"
-            if request is not None and request.target_dir:
-                parts.append(
-                    f"{', '.join(in_grant)} {verb(in_grant, 'lies', 'lie')} "
-                    f"inside this batch's grant (the "
-                    f"tasks directory {self._relative(request.target_dir)}), so "
-                    f"the allow-list may not grant the write shape the runner "
-                    f"used (a new sibling file, a rename)."
-                )
-            else:
-                parts.append(
-                    f"{', '.join(in_grant)} {verb(in_grant, 'belongs', 'belong')} "
-                    f"to this batch's "
-                    f"{self.write_scope} grant, which admits in-place edits of "
-                    f"{target} only: the allow-list does not grant the write "
-                    f"shape the runner used (a new sibling file, a rename — "
-                    f"sed -i, perl -i, a temp-file save, mv over it). Edit it in "
-                    f"place with apply_patch (or a shell redirect); the grant "
-                    f"never widens to its directory."
-                )
-        if outside:
-            parts.append(
-                f"{', '.join(outside)} {verb(outside, 'lies', 'lie')} outside "
-                f"this batch's grant: the runner tried an edit its scope does "
-                f"not grant."
-            )
-        parts.append(
-            "To run this batch without the jail, set `driver.subagent_runner` "
-            "to a runner that is not Codex (F6)."
-        )
-        return " ".join(parts) + " "
-
     def _audit_completion(
         self,
         outcome: TaskOutcome,
@@ -3600,7 +3157,7 @@ class WriteBatchScheduler:
         self._audited.add(outcome.task_id)
         # Plan step 3: a jail-denial count that left the verdict alone still
         # goes on the outcome (and, through it, the report and the stamp).
-        note = self._jail_notes.get(outcome.task_id)
+        note = self._grant.jail_notes.get(outcome.task_id)
         if note and note not in (outcome.reason or ""):
             outcome.reason = (
                 f"{outcome.reason} {note}" if outcome.reason else note
@@ -3612,8 +3169,8 @@ class WriteBatchScheduler:
         # once its positional id belongs to another batch; a terminal record
         # (no `_classify`) reads them off the snapshot the dispatch took.
         expected_ids = outcome.expected_ids or (
-            (self.snapshots.get(outcome.task_id).expected_ids or [])
-            if self.snapshots.get(outcome.task_id) is not None else []
+            (self._snapshots.taken.get(outcome.task_id).expected_ids or [])
+            if self._snapshots.taken.get(outcome.task_id) is not None else []
         )
         self.audit.completed(
             task_id=outcome.task_id, kind=self.kind, attempt=attempt,
@@ -3713,9 +3270,9 @@ class WriteBatchScheduler:
                 }
             else:
                 verdict.pop("batch_check_repeats", None)
-            temp = path.with_name(path.name + ".tmp")
-            temp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-            os.replace(str(temp), str(path))
+            # Owner-only, as the executor wrote it (docs/development/
+            # runtime.md#atomic-file-writes).
+            atomic_write_text(path, json.dumps(data, indent=2), mode=0o600)
         except (OSError, ValueError) as exc:  # noqa: BLE001 - bookkeeping
             self.log(
                 f"[write-subagents] warning: could not re-record the own check "
@@ -3763,9 +3320,9 @@ class WriteBatchScheduler:
                 tree_fingerprint=self._checks.tree_fingerprint,
                 sandbox_rung=self._dispatch_rungs.get(outcome.task_id),
             )
-            temp = path.with_name(path.name + ".tmp")
-            temp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-            os.replace(str(temp), str(path))
+            # Owner-only, as the executor wrote it (docs/development/
+            # runtime.md#atomic-file-writes).
+            atomic_write_text(path, json.dumps(data, indent=2), mode=0o600)
         except (OSError, ValueError) as exc:  # noqa: BLE001 - bookkeeping must not fail a phase
             self.log(
                 f"[write-subagents] warning: could not record the verdict on "
@@ -3878,7 +3435,7 @@ class WriteBatchScheduler:
             )
         else:
             summary = None
-        if not outcome.ok or task_id in self._jail_failed or outcome.not_rerun:
+        if not outcome.ok or task_id in self._grant.jail_failed or outcome.not_rerun:
             # A batch that is not done gets the line the native leg appends
             # for it (fix round 15: the executor wrote none, so later prompts
             # differed between the legs for the same history). Safe since fix
@@ -3896,11 +3453,11 @@ class WriteBatchScheduler:
         rung = self._dispatch_rungs.get(task_id)
         if rung:
             record: Dict[str, Any] = {"sandbox_rung": rung}
-            if task_id in self._jail_denials:
-                record["jail_denials"] = self._jail_denials[task_id]
+            if task_id in self._grant.jail_denials:
+                record["jail_denials"] = self._grant.jail_denials[task_id]
             result.sandbox_records[task_id] = record
         rung_text = f" [on {rung}]" if rung else ""
-        note = self._jail_notes.get(task_id)
+        note = self._grant.jail_notes.get(task_id)
         if note:
             rung_text += f" {note}"
 
@@ -4056,7 +3613,7 @@ class WriteBatchScheduler:
         dispatch gets none either (the caller's ``dispatched``): the native
         emit records it, and no host appends for a task it never ran.
         """
-        if outcome.not_rerun or outcome.task_id in self._replaced_targets:
+        if outcome.not_rerun or outcome.task_id in self._grant.replaced_targets:
             # A replaced target: the file at the path changed under the batch,
             # and not by it — no line can say what it left.
             return None
@@ -4066,7 +3623,7 @@ class WriteBatchScheduler:
         if outcome.applied_without_changes:
             what = "said applied, but its change did not land"
         elif outcome.write_outcome == WRITE_CLEAN_FAILURE and not is_check:
-            if outcome.task_id in self._jail_failed:
+            if outcome.task_id in self._grant.jail_failed:
                 what = "the write jail refused its edit"
             elif last is not None and last.exit_code not in (0, None):
                 what = f"the runner exited {last.exit_code}"
@@ -4085,171 +3642,7 @@ class WriteBatchScheduler:
             return None
         return f"(batch failed — {what}, verified no file changes)"
 
-    # -- snapshots ------------------------------------------------------
-
-    def _snapshot(self, task: Dict[str, Any]) -> TaskSnapshot:
-        """Take (or reuse) this task's mandatory pre-batch snapshot (D3h).
-
-        Mandatory, and refused when there is nothing to snapshot: a write task with
-        no declared or snapshottable file gives the classification nothing to
-        compare, which would make every outcome read as "clean failure".
-        """
-        task_id = str(task.get("task_id", ""))
-        files = snapshot_file_set(task)
-        if not files and self.kind == "implement":
-            # A verification-only task: generate-tasks emits an agent task with
-            # no files to create or modify when the work is a check ("Inline
-            # module syntax gate", 2026-10-01, which this refusal used to dead-end
-            # on at batch 12, with `--resume` hitting it again). The refusal's
-            # reason does not apply to it: the byte comparison has nothing to
-            # compare because the task is promised to change nothing, and the
-            # undeclared-write sweep is then the whole verdict — see
-            # `_verification_only` and `write_verdict.decide`. Only `implement`
-            # materializes such a task; the three apply kinds always declare
-            # their one artifact, so an empty set there is still a bug.
-            self.log(
-                f"[write-subagents] {task_id}: declares no files, so it runs as "
-                f"a verification-only task: any file it changes is a partial "
-                f"application, not an edit."
-            )
-        elif not files:
-            raise WriteSafetyError(
-                f"Refusing to dispatch write task {task_id}: it declares no files "
-                f"to snapshot, so the post-run byte comparison would have nothing "
-                f"to compare and every outcome would read as a clean failure. "
-                f"Populate `declared_files`/`snapshot_files` on the materialized "
-                f"task (D3h). Nothing was dispatched."
-            )
-        expected_ids = [str(i) for i in (task.get("expected_ids") or [])]
-        reused = (
-            self._reusable_snapshot(task_id, files, expected_ids)
-            if self.resume else None
-        )
-        if reused is not None:
-            self.log(
-                f"[write-subagents] {task_id}: reusing the pre-batch snapshot a "
-                f"previous run took at {reused.directory} — the rollback point "
-                f"stays the bytes from before this batch's FIRST dispatch"
-            )
-            self.snapshots[task_id] = reused
-            self._snapshot_reused.add(task_id)
-            return reused
-        if not self.resume:
-            # `--fresh` (and implement's plain run) reuses no snapshot — but a
-            # slot an earlier run filled is that run's rollback point, and
-            # `take` would copy today's bytes over it (adversarial review,
-            # 2026-10-02: a `--fresh` on an un-reverted target left every
-            # slot holding already-applied bytes). Set aside, never deleted.
-            existing = TaskSnapshot.load(
-                self.phase_dir, task_id, expected_root=self.repo_root,
-            )
-            if existing is not None:
-                moved_to = existing.set_aside()
-                self.log(
-                    f"[write-subagents] {task_id}: an earlier run's pre-batch "
-                    f"snapshot under that id is kept at {moved_to}; this run "
-                    f"takes its own."
-                )
-        snapshot = TaskSnapshot.take(
-            phase_dir=self.phase_dir, task_id=task_id, files=files,
-            root=self.repo_root, expected_ids=expected_ids,
-        )
-        self.snapshots[task_id] = snapshot
-        return snapshot
-
-    def _reusable_snapshot(
-        self, task_id: str, files: Sequence[str],
-        expected_ids: Sequence[str] = (),
-    ) -> Optional[TaskSnapshot]:
-        """A previous run's snapshot for this batch, when it still applies.
-
-        A batch reaching ``_snapshot`` under resume is one that has not
-        succeeded yet (``ResumeEvidence.already_done`` skips the rest), and its half-applied
-        edits are deliberately left on disk for a human to inspect. Retaking
-        the snapshot over them would make *those* bytes the rollback point:
-        measured 2026-09-15 across four resumed runs of one failed batch, each
-        run re-snapshotted the previous run's partial edits, so ``util
-        restore-batch`` could no longer reach the file as it was before the
-        batch, and the "pre-batch snapshots are intact" line was untrue.
-
-        Reused only when the manifest names the same declared set, byte for
-        byte; a batch whose file set changed (the D2g resume guard should have
-        refused it first) takes a fresh snapshot.
-
-        And only when it was taken for the same items, the rule
-        :func:`_same_batch_row` applies to report rows. An apply batch always
-        declares its one artifact and its id is positional, so after a
-        selection change the batch now holding ``apply-batch-1`` inherited the
-        stopped ``apply-batch-1``'s rollback point, and ``util restore-batch``
-        of the new batch also reverted the edits the stopped batch left in
-        place (#28 follow-up). That snapshot is another batch's: it is set
-        aside (renamed, never deleted) and this batch takes its own. A
-        manifest that records no items (written before they were recorded)
-        falls back to the id, as before.
-        """
-        existing = TaskSnapshot.load(
-            self.phase_dir, task_id, expected_root=self.repo_root,
-        )
-        # The same cutoff `ResumeEvidence.earlier_report_rows` applies: a snapshot taken
-        # before the review this phase applies completed belongs to the
-        # previous cycle — the bytes before THAT cycle's batch, so restoring
-        # from it would roll that cycle's applied edit back too (follow-up to
-        # the 2026-10-02 adversarial review). Set aside, never deleted.
-        # `taken_before` applies the rule to the second, as the manifest is
-        # stamped.
-        reviewed_at = self._evidence.review_completed_at()
-        if existing is not None and existing.taken_before(reviewed_at):
-            moved_to = existing.set_aside()
-            self.log(
-                f"[write-subagents] {task_id}: the pre-batch snapshot under "
-                f"that id was taken at {existing.taken_at or 'an unknown time'}, "
-                f"before this phase's review completed "
-                f"({reviewed_at.isoformat(timespec='seconds')}), so it is a "
-                f"previous review cycle's rollback point; kept at {moved_to}."
-            )
-            existing = None
-        recorded_ids = (existing.expected_ids or []) if existing else []
-        if existing is not None and recorded_ids and expected_ids and (
-            sorted(recorded_ids) != sorted(str(i) for i in expected_ids)
-        ):
-            moved_to = existing.set_aside()
-            self.log(
-                f"[write-subagents] {task_id}: the pre-batch snapshot under "
-                f"that id was taken for other items (an earlier run's batch); "
-                f"kept at {moved_to}."
-            )
-            existing = None
-        if existing is None and expected_ids and self.kind != "implement":
-            # The items may have held this id before and been set aside when
-            # the id went to others (B deselected, C takes `apply-batch-1`,
-            # B re-selected): their own pre-first-dispatch snapshot comes
-            # back into the slot rather than a fresh one being taken over
-            # every run's edits since.
-            existing = TaskSnapshot.reinstate(
-                self.phase_dir, task_id, [str(i) for i in expected_ids],
-                not_before=reviewed_at,
-            )
-            if existing is not None:
-                self.log(
-                    f"[write-subagents] {task_id}: the snapshot an earlier run "
-                    f"took for these same items was set aside when the id "
-                    f"went to other items; moved back to {existing.directory}."
-                )
-        if existing is None:
-            return None
-        try:
-            wanted = sorted(
-                relative_to_root(str(contain_under_root(
-                    candidate, self.repo_root, what="snapshot target"
-                )), self.repo_root)
-                for candidate in files
-            )
-        except WriteSafetyError:  # a path outside the root: `take` refuses it
-            return None
-        recorded = sorted(e.relative for e in existing.declared_entries())
-        if wanted != recorded:
-            return None
-        return existing
+    # -- tasks ----------------------------------------------------------
 
     def _task_by_id(self, task_id: str) -> Optional[Dict[str, Any]]:
         for task in self.tasks:
@@ -4465,133 +3858,6 @@ class WriteBatchScheduler:
             outcome.skipped or outcome.not_rerun or outcome.skipped_items
             or outcome.task_id in refusals.before_dispatch
         )
-
-    # -- reports and status ---------------------------------------------
-
-    # -- dry run --------------------------------------------------------
-
-    def _write_dry_run(
-        self,
-        ordered: Sequence[Tuple[int, List[Dict[str, Any]]]],
-        plan: _human_task_plan.HumanTaskPlan,
-    ) -> str:
-        """``--dry-run-subagents``: full preflight, zero dispatch (D3l).
-
-        Resolves the runner, renders the exact argv per task, checks the prompt
-        transport, applies the profile, the disjointness admission and the write
-        policy — then writes the report and starts no child. It is what makes
-        "would this batch have been refused?" answerable *before* a model is handed
-        edit access.
-        """
-        from .subagent_tasks import preferred_prompt_transport, utf16_units
-
-        entries: List[Dict[str, Any]] = []
-        for batch_index, batch_tasks in ordered:
-            # As `_run_batch`: one resolution per batch, for its ceiling and
-            # each entry's runner.
-            runners, ceiling = self._batch_runners_and_ceiling(batch_tasks)
-            groups = admit_disjoint_groups(
-                batch_tasks, ceiling=ceiling, root=self.repo_root,
-            )
-            group_of = {
-                str(task.get("task_id", "")): position
-                for position, group in enumerate(groups)
-                for task in group
-            }
-            for task in batch_tasks:
-                task_id = str(task.get("task_id", ""))
-                entry: Dict[str, Any] = {
-                    "task_id": task_id,
-                    "kind": self.kind,
-                    "batch_index": batch_index,
-                    "co_schedule_group": group_of.get(task_id),
-                    "profile": profile_for_kind(self.kind),
-                    "cwd": self.repo_root,
-                    "sandbox_root": self.repo_root,
-                    "declared_files": [
-                        relative_to_root(p, self.repo_root)
-                        for p in declared_file_set(task)
-                    ],
-                    "snapshot_files": [
-                        relative_to_root(p, self.repo_root)
-                        for p in snapshot_file_set(task)
-                    ],
-                }
-                if plan.is_skipped(task_id) or task.get("executor_role") == "human":
-                    entry["would_dispatch"] = False
-                    entry["reason"] = plan.skipped.get(
-                        task_id, "executor_role: human — never dispatched"
-                    )
-                    entries.append(entry)
-                    continue
-                try:
-                    prompt = self._prompts.dispatched_prompt(task)
-                except ResultRejected as exc:
-                    entry["would_dispatch"] = False
-                    entry["reason"] = exc.message
-                    entries.append(entry)
-                    continue
-                runner = runners[task_id]
-                entry["runner"] = runner
-                provider_name, _ = parse_model_spec(runner, anchor=self.anchor)
-                entry["prompt_transport"] = preferred_prompt_transport(provider_name)
-                entry["prompt_utf16_units"] = utf16_units(prompt)
-                try:
-                    info = self._preflight(
-                        runner, entry["profile"],
-                        # D3l: this flag renders commands and starts no child, so
-                        # the nested-exec preflight keeps the declared verdict
-                        # (a `denied` host is still refused) and skips its
-                        # throwaway dispatch, which is a real turn.
-                        probe_nested=False,
-                    )
-                    entry["runner_version"] = info["version"]
-                    rung = self._recorded_rung(runner, entry["profile"])
-                    if rung:
-                        entry["sandbox_rung"] = rung
-                except ExecutorError as exc:
-                    entry["would_dispatch"] = False
-                    entry["reason"] = exc.message
-                    entries.append(entry)
-                    continue
-                entry["argv"] = _redacted_argv(
-                    self._render_argv(runner, prompt, entry["profile"]), prompt
-                )
-                try:
-                    self.policy.check(entry["declared_files"], when="pre-dispatch")
-                except PolicyViolation as exc:
-                    entry["would_dispatch"] = False
-                    entry["reason"] = exc.message
-                    entries.append(entry)
-                    continue
-                entry["would_dispatch"] = True
-                entries.append(entry)
-
-        path = os.path.join(self.phase_dir, DRY_RUN_FILENAME)
-        effective, configured, provider_limits = self._ceiling_record()
-        # Same containment as every other executor write (see ``WriteReports.write_report``).
-        _atomic_write_json(path, {
-            "dry_run_version": 1,
-            "kind": self.kind,
-            "phase": self.phase,
-            "repo_root": self.repo_root,
-            "ceilings": {
-                "effective_write_parallelism": effective,
-                "driver_max_concurrent_write_subagents": configured,
-                "provider_max_concurrent": provider_limits,
-                "host_max_concurrent_subagents": self.host_max,
-                "shared_artifact_phase": self.kind in SHARED_ARTIFACT_WRITE_KINDS,
-            },
-            "write_paths": self.policy.to_dict(),
-            "human_task_strategy": plan.strategy,
-            "tasks": entries,
-        })
-        return path
-
-
-def _redacted_argv(argv: Sequence[str], prompt: str) -> List[str]:
-    from .write_safety import redact_argv
-    return redact_argv(argv, prompt)
 
 
 # ---------------------------------------------------------------------------

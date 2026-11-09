@@ -27,6 +27,7 @@ from utils import subagent_executor as executor  # noqa: E402
 from utils import dispatch_spawn  # noqa: E402
 from utils import subagent_prompts  # noqa: E402
 from utils import write_batch_scheduler as wbs  # noqa: E402
+from utils import write_grant  # noqa: E402
 
 APPLIED_S0 = {"status": "applied", "ids": ["s0"], "files_touched": ["plans/p.md"],
               "summary": "added the step"}
@@ -128,7 +129,7 @@ class TestTheDispatchSeam:
         def no_runner(*args, **kwargs):
             raise AssertionError("an injected dispatcher starts no runner")
 
-        monkeypatch.setattr(wbs, "preflight_runner", no_runner)
+        monkeypatch.setattr(write_grant, "preflight_runner", no_runner)
         monkeypatch.setattr(dispatch_spawn, "_spawn", no_runner)
 
         def respond(task, prompt):

@@ -14,7 +14,8 @@ helper modules split out of it (stated in the scheduler's module docstring):
   `verification_lines`, `human_task_plan`, `stop_answers`, `batch_prompt`,
   `write_outcomes`, `write_context`, `write_verify`, `write_sweep`, `write_eta`,
   `write_reports`, `write_stop`, `batch_prompt_builder`, `write_commit_leg`,
-  `write_check_holds`, `write_resume`, and none of them imports the scheduler.
+  `write_check_holds`, `write_resume`, `write_grant`, `write_snapshots`,
+  `write_dry_run`, and none of them imports the scheduler.
 """
 
 import ast
@@ -49,6 +50,9 @@ from utils import (  # noqa: E402
     write_commit_leg,
     write_check_holds,
     write_resume,
+    write_grant,
+    write_snapshots,
+    write_dry_run,
 )
 
 #: Lowest first: each module may import only the ones before it.
@@ -70,6 +74,9 @@ OWNERS = {
     "write_commit_leg": write_commit_leg,
     "write_check_holds": write_check_holds,
     "write_resume": write_resume,
+    "write_grant": write_grant,
+    "write_snapshots": write_snapshots,
+    "write_dry_run": write_dry_run,
 }
 SCHEDULER = "write_batch_scheduler"
 

@@ -48,6 +48,7 @@ from utils import provider_registry as registry  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
 from utils import probe_state  # noqa: E402
 from utils import write_batch_scheduler as scheduler_mod  # noqa: E402
+from utils import write_grant  # noqa: E402
 from utils.providers.base import PROFILE_AGENT_WRITE  # noqa: E402
 from utils.subagent_tasks import (  # noqa: E402
     PRIOR_CHANGES_TOKEN,
@@ -452,7 +453,7 @@ class _Bodies:
 
         monkeypatch.setattr(scheduler_mod, "ThreadPoolExecutor", RecordingPool)
         monkeypatch.setattr(scheduler_mod, "dispatch_task", self.dispatch)
-        monkeypatch.setattr(scheduler_mod, "preflight_runner",
+        monkeypatch.setattr(write_grant, "preflight_runner",
                             lambda spec, **kwargs: {"version": "test"})
         monkeypatch.setattr(probe_state, "sandbox_rung", lambda *a, **kw: None)
         monkeypatch.setattr(WriteBatchScheduler, "_render_argv",

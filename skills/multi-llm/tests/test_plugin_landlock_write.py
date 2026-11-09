@@ -21,8 +21,8 @@ approved"; §8.3 items 8-11, 13, 14; §5 I11):
 
 The executor's side (the rung walk, the probe, the wrap, the stream reading)
 belongs to ``subagent_executor`` and is stubbed here: ``dispatch_task`` and
-``preflight_runner`` are replaced in the scheduler's namespace and
-``sandbox_rung``/``write_rung_notice`` on the executor module, so these tests
+``preflight_runner`` are replaced in the namespaces that call them (the
+scheduler's and ``write_grant``'s) and ``sandbox_rung``/``write_rung_notice`` on the executor module, so these tests
 hold whichever executor is installed. The denials themselves are computed by
 the real ``landlock_dispatch.jail_denied_edits`` over a codex-shaped JSONL
 stream, so the classifier and the verdict are exercised together. No real
@@ -48,6 +48,7 @@ from utils import subagent_executor as executor  # noqa: E402
 from utils import runner_selection  # noqa: E402
 from utils import probe_state, sandbox_walk  # noqa: E402
 from utils import write_batch_scheduler as wbs  # noqa: E402
+from utils import write_grant  # noqa: E402
 from utils.providers.base import (  # noqa: E402
     PROFILE_AGENT_WRITE,
     SANDBOX_RUNG_PLUGIN_LANDLOCK,
@@ -224,7 +225,7 @@ class FakeExecutor:
         self.notices: List[Any] = []
         self.rung_queries: List[Optional[str]] = []
         monkeypatch.setattr(wbs, "dispatch_task", self.dispatch_task)
-        monkeypatch.setattr(wbs, "preflight_runner", self.preflight_runner)
+        monkeypatch.setattr(write_grant, "preflight_runner", self.preflight_runner)
         monkeypatch.setattr(probe_state, "sandbox_rung", self.sandbox_rung)
         monkeypatch.setattr(sandbox_walk, "write_rung_notice",
                             self.write_rung_notice, raising=False)
@@ -936,7 +937,7 @@ class TestABatchZeroRefusalLeavesNothingInFlight:
                 reason_code="sandbox_unavailable",
             )
 
-        monkeypatch.setattr(wbs, "preflight_runner", refusing_preflight)
+        monkeypatch.setattr(write_grant, "preflight_runner", refusing_preflight)
         return repo.scheduler([repo.task(0), repo.task(1)]).run()
 
     def test_status_json_lists_no_batch_in_flight_and_names_the_refusal(

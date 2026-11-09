@@ -46,7 +46,7 @@ cannot be narrowed by this map: choose by the file names or run the CI command.
 | `review_plan_orchestrator.py` | 27 | `test_review_plan_orchestrator.py`, `test_e2e_code_review.py`, `test_e2e_exec_subagents.py`, `test_e2e_failures.py`, `test_e2e_full_chain.py`, `test_e2e_html_report.py`, `test_e2e_improve_modes.py`, `test_e2e_validation.py`, `test_e2e_validation_edge_cases.py`, `test_e2e_workflow.py`, `test_duplicate_run_prevention.py`, `test_bypassed_slot_failure_provenance.py`, +15 more |
 | `review_tasks_orchestrator.py` | 7 | `test_review_tasks_orchestrator.py`, `test_e2e_failures.py`, `test_e2e_improve_modes.py`, `test_review_tasks_integration.py`, `test_scope_policy_cli.py`, `test_scope_prompts_and_validation.py`, `test_validation_subagent_orchestrators.py` |
 | `update_plan_tasks.py` | 6 | `test_update_plan_tasks.py`, `test_executor_role_sweep.py`, `test_task_decomposer.py`, `test_tasks_graph_check.py`, `test_text_regex_linearity.py`, `test_generate_tasks_orchestrator.py` |
-| `utils/__init__.py` | 325 | **hub**, cannot narrow: `test_git_utils.py`, `test_git_utils_moved_names.py`, `test_abort_signal_handlers.py`, `test_accepted_findings_scope.py`, `test_advisory.py`, `test_aider_provider.py`, `test_an_answer_answers_one_stop.py`, `test_answer_text.py`, `test_applied_without_changes.py`, `test_apply_fix_known_checks.py`, `test_apply_json_output.py`, `test_apply_orchestrator_base.py`, +313 more |
+| `utils/__init__.py` | 326 | **hub**, cannot narrow: `test_git_utils.py`, `test_git_utils_moved_names.py`, `test_abort_signal_handlers.py`, `test_accepted_findings_scope.py`, `test_advisory.py`, `test_aider_provider.py`, `test_an_answer_answers_one_stop.py`, `test_answer_text.py`, `test_applied_without_changes.py`, `test_apply_fix_known_checks.py`, `test_apply_json_output.py`, `test_apply_orchestrator_base.py`, +314 more |
 | `utils/advisory.py` | 2 | `test_advisory.py`, `test_env_vars.py` |
 | `utils/apply_orchestrator_base.py` | 15 | `test_apply_orchestrator_base.py`, `test_apply_json_output.py`, `test_batch_snapshot.py`, `test_human_decisions.py`, `test_prior_changes.py`, `test_subagent_executor.py`, `test_unattended.py`, `test_validation_subagent_orchestrators.py`, `test_write_executor.py`, `test_batch_own_check.py`, `test_completion_predates.py`, `test_host_index.py`, +3 more |
 | `utils/apply_output_helpers.py` | 2 | `test_apply_orchestrator_base.py`, `test_host_index.py` |
@@ -54,7 +54,7 @@ cannot be narrowed by this map: choose by the file names or run the CI command.
 | `utils/apply_report.py` | 2 | `test_apply_report.py`, `test_relay_says_it_once.py` |
 | `utils/apply_selection_helpers.py` | 4 | `test_apply_code_fixes_unit.py`, `test_apply_orchestrator_base.py`, `test_apply_task_suggestions.py`, `test_scope_policy_apply.py` |
 | `utils/apply_suggestion_phase.py` | 1 | `test_apply_orchestrator_base.py` |
-| `utils/atomic_io.py` | 2 | `test_atomic_io.py`, `test_batched_validation.py` |
+| `utils/atomic_io.py` | 3 | `test_atomic_io.py`, `test_batched_validation.py`, `test_scheduler_record_writers.py` |
 | `utils/attempt_classifier.py` | 3 | `test_attempt_backpressure.py`, `test_probe_output_redaction.py`, `test_subagent_executor_moved_names.py` |
 | `utils/backup.py` | 1 | `test_backup.py` |
 | `utils/batch_done.py` | 23 | `test_batch_done.py`, `test_accepted_finding_restate.py`, `test_commit_apply.py`, `test_selected_tasks_and_check_trees.py`, `test_apply_fix_known_checks.py`, `test_batch_snapshot.py`, `test_check_always_reported.py`, `test_clipped_previews.py`, `test_declined_reason_punctuation.py`, `test_empty_review_outcomes.py`, `test_implement_continues_a_started_run.py`, `test_native_apply_count_over_the_run.py`, +11 more |
@@ -85,7 +85,7 @@ cannot be narrowed by this map: choose by the file names or run the CI command.
 | `utils/dispatch_spawn.py` | 21 | `test_applied_without_changes.py`, `test_attempt_backpressure.py`, `test_dispatch_executor_hooks.py`, `test_doctor.py`, `test_failure_classifier.py`, `test_fx_provider.py`, `test_generate_tasks_orchestrator.py`, `test_lane_a_ladder.py`, `test_lane_b_structured_output.py`, `test_opencode_config_providers.py`, `test_opencode_hermetic.py`, `test_opencode_permission_block.py`, +9 more |
 | `utils/doctor.py` | 6 | `test_doctor.py`, `test_cli_version_cache.py`, `test_failure_classifier.py`, `test_plugin_landlock_surfaces.py`, `test_provider_omp.py`, `test_result_contract.py` |
 | `utils/env_vars.py` | 2 | `test_env_vars.py`, `test_codex_package.py` |
-| `utils/failure_capture.py` | 3 | `test_probe_output_redaction.py`, `test_reaggregate_identity.py`, `test_subagent_executor_moved_names.py` |
+| `utils/failure_capture.py` | 4 | `test_scheduler_record_writers.py`, `test_probe_output_redaction.py`, `test_reaggregate_identity.py`, `test_subagent_executor_moved_names.py` |
 | `utils/file_discovery.py` | 1 | `test_file_discovery.py` |
 | `utils/filtering.py` | 6 | `test_filtering.py`, `test_apply_code_fixes_unit.py`, `test_apply_task_suggestions.py`, `test_importance_lanes.py`, `test_judge_vocab.py`, `test_unattended.py` |
 | `utils/git_diff.py` | 1 | `test_git_utils_moved_names.py` |
@@ -196,7 +196,7 @@ cannot be narrowed by this map: choose by the file names or run the CI command.
 | `utils/stop_answers.py` | 1 | `test_write_batch_scheduler_moved_names.py` |
 | `utils/stream_bootstrap.py` | 2 | `test_stream_bootstrap.py`, `test_eta_closes_every_ending.py` |
 | `utils/structured_output.py` | 3 | `test_structured_output.py`, `test_lane_b_structured_output.py`, `test_strict_schema_subset.py` |
-| `utils/subagent_executor.py` | 179 | **hub**, cannot narrow: `test_subagent_executor.py`, `test_subagent_executor_moved_names.py`, `test_accepted_finding_note.py`, `test_accepted_finding_restate.py`, `test_apply_fix_known_checks.py`, `test_batch_ledger.py`, `test_bypassed_slot_failure_provenance.py`, `test_check_task_findings.py`, `test_clipped_previews.py`, `test_declined_reason_punctuation.py`, `test_e2e_exec_subagents.py`, `test_envelope_locator.py`, +167 more |
+| `utils/subagent_executor.py` | 180 | **hub**, cannot narrow: `test_subagent_executor.py`, `test_subagent_executor_moved_names.py`, `test_accepted_finding_note.py`, `test_accepted_finding_restate.py`, `test_apply_fix_known_checks.py`, `test_batch_ledger.py`, `test_bypassed_slot_failure_provenance.py`, `test_check_task_findings.py`, `test_clipped_previews.py`, `test_declined_reason_punctuation.py`, `test_e2e_exec_subagents.py`, `test_envelope_locator.py`, +168 more |
 | `utils/subagent_prompts.py` | 14 | `test_subagent_prompts.py`, `test_accepted_finding_restate.py`, `test_check_always_reported.py`, `test_code_review_orchestrator.py`, `test_generate_tasks_orchestrator.py`, `test_lane_b_structured_output.py`, `test_report_repair_preserves_checks.py`, `test_review_code_head_ref.py`, `test_scope_prompts_and_validation.py`, `test_validation_reply_printed_once.py`, `test_write_executor.py`, `test_applied_without_changes.py`, +2 more |
 | `utils/subagent_tasks.py` | 45 | **hub**, cannot narrow: `test_subagent_tasks.py`, `test_applied_without_changes.py`, `test_apply_fix_known_checks.py`, `test_attempt_backpressure.py`, `test_batch_own_check.py`, `test_batch_snapshot.py`, `test_clipped_previews.py`, `test_code_fix_prior_batches.py`, `test_code_review_orchestrator.py`, `test_commit_write_policy.py`, `test_e2e_failures.py`, `test_executor_role_sweep.py`, +33 more |
 | `utils/suggestion_batcher.py` | 7 | `test_suggestion_batcher.py`, `test_apply_task_suggestions.py`, `test_e2e_batching.py`, `test_subagent_tasks.py`, `test_tasks_graph_check.py`, `test_write_executor_orchestrators.py`, `test_text_regex_linearity.py` |
@@ -220,17 +220,20 @@ cannot be narrowed by this map: choose by the file names or run the CI command.
 | `utils/verification_lines.py` | 1 | `test_write_batch_scheduler_moved_names.py` |
 | `utils/wakeup_check.py` | 3 | `test_wakeup_check.py`, `test_hook_transcript_settle.py`, `test_report_check_composite.py` |
 | `utils/write_batch_scheduler.py` | 54 | **hub**, cannot narrow: `test_write_batch_scheduler_moved_names.py`, `test_accepted_check_rerun.py`, `test_accepted_finding_note.py`, `test_accepted_finding_restate.py`, `test_accepted_findings_scope.py`, `test_apply_fix_known_checks.py`, `test_apply_orchestrator_base.py`, `test_batch_own_check.py`, `test_check_always_reported.py`, `test_check_repeats_finding.py`, `test_code_fix_prior_batches.py`, `test_commit_write_policy.py`, +42 more |
-| `utils/write_check_holds.py` | 2 | `test_resume_why.py`, `test_write_batch_scheduler_moved_names.py` |
+| `utils/write_check_holds.py` | 3 | `test_resume_why.py`, `test_scheduler_record_writers.py`, `test_write_batch_scheduler_moved_names.py` |
 | `utils/write_commit_leg.py` | 3 | `test_commit_apply.py`, `test_write_batch_scheduler_moved_names.py`, `test_write_verdict_table.py` |
 | `utils/write_context.py` | 1 | `test_write_batch_scheduler_moved_names.py` |
+| `utils/write_dry_run.py` | 1 | `test_write_batch_scheduler_moved_names.py` |
 | `utils/write_eta.py` | 1 | `test_write_batch_scheduler_moved_names.py` |
+| `utils/write_grant.py` | 8 | `test_dispatch_counts.py`, `test_dispatch_executor_hooks.py`, `test_external_rollback_storage.py`, `test_plugin_landlock_write.py`, `test_write_batch_scheduler_moved_names.py`, `test_write_ceiling_cache.py`, `test_write_executor.py`, `test_write_verdict_table.py` |
 | `utils/write_outcomes.py` | 2 | `test_write_outcomes.py`, `test_write_batch_scheduler_moved_names.py` |
 | `utils/write_phase_bridge.py` | 45 | **hub**, cannot narrow: `test_apply_code_fixes_unit.py`, `test_apply_fix_known_checks.py`, `test_apply_suggestions_integration.py`, `test_batch_done.py`, `test_batch_snapshot.py`, `test_clipped_previews.py`, `test_code_fix_prior_batches.py`, `test_commit_write_policy.py`, `test_implement_continues_a_started_run.py`, `test_implement_orchestrator.py`, `test_native_apply_count_over_the_run.py`, `test_native_apply_view_names_declined_items.py`, +33 more |
 | `utils/write_prompt.py` | 11 | `test_write_prompt.py`, `test_selected_tasks_and_check_trees.py`, `test_apply_fix_known_checks.py`, `test_apply_suggestions_integration.py`, `test_batch_snapshot.py`, `test_code_fix_prior_batches.py`, `test_commit_write_policy.py`, `test_prior_batches_named_by_id.py`, `test_prompt_files_stay_inside.py`, `test_scope_policy_apply.py`, `test_write_executor_orchestrators.py` |
 | `utils/write_record.py` | 1 | `test_write_record.py` |
 | `utils/write_reports.py` | 1 | `test_write_batch_scheduler_moved_names.py` |
-| `utils/write_resume.py` | 2 | `test_completion_predates.py`, `test_write_batch_scheduler_moved_names.py` |
+| `utils/write_resume.py` | 3 | `test_scheduler_record_writers.py`, `test_completion_predates.py`, `test_write_batch_scheduler_moved_names.py` |
 | `utils/write_safety.py` | 29 | `test_batch_ledger.py`, `test_check_gate_fixture.py`, `test_commit_apply.py`, `test_commit_write_policy.py`, `test_cursor_auth_probe.py`, `test_implement_continues_a_started_run.py`, `test_next_step_relay_rules.py`, `test_plugin_landlock_acceptance.py`, `test_policy_way_forward.py`, `test_probe_output_redaction.py`, `test_redaction.py`, `test_redaction_pem_scanner.py`, +17 more |
+| `utils/write_snapshots.py` | 2 | `test_write_batch_scheduler_moved_names.py`, `test_write_verdict_table.py` |
 | `utils/write_stop.py` | 1 | `test_write_batch_scheduler_moved_names.py` |
 | `utils/write_sweep.py` | 6 | `test_applied_without_changes.py`, `test_commit_write_policy.py`, `test_stop_resume_wording.py`, `test_write_batch_scheduler_moved_names.py`, `test_write_executor.py`, `test_write_verdict_table.py` |
 | `utils/write_verdict.py` | 1 | `test_write_verdict_table.py` |

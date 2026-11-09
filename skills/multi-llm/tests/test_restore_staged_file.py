@@ -1095,7 +1095,7 @@ def _batch(env, task_id, declared):
     scheduler and pre-batch snapshot."""
     task = env.apply_task(0, task_id=task_id)
     scheduler = env.scheduler([task])
-    snapshot = scheduler._snapshot(task)
+    snapshot = scheduler._snapshots.take(task)
     scheduler._begin_sweep(task_id, declared)
     return scheduler, snapshot
 

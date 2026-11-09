@@ -119,7 +119,7 @@ class JailFacts:
     #: A jail row's: every denied path, repo-relative.
     denied: Tuple[str, ...] = ()
     #: A jail row's: why an in-grant path was refused and what to do instead,
-    #: ending in a space (``WriteBatchScheduler._jail_scope_sentence``).
+    #: ending in a space (``write_grant.WriteGrant.jail_scope_sentence``).
     scope_sentence: str = ""
     #: The note's (:func:`jail_note`), when no jail row decides: the
     #: ``replacement`` denials and the out-of-scope ones, repo-relative.

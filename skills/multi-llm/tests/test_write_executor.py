@@ -1326,7 +1326,7 @@ class TestVerificationOnlyImplementTask:
         """A runner refused before a later batch ends the run like every other
         stop: the partial summary is written first, so the `Check findings:`
         line names it, as a stop on a failed batch does."""
-        import utils.write_batch_scheduler as wbs
+        import utils.write_grant as write_grant
 
         env.edits([], result=self._check_reply())
         later = env.apply_task(
@@ -1334,7 +1334,7 @@ class TestVerificationOnlyImplementTask:
             output_name="implement_batch_T010.json",
             declared_files=[str(env.root / "src" / "a.py")],
         )
-        preflight = wbs.preflight_runner
+        preflight = write_grant.preflight_runner
 
         def refused_once_the_check_ran(spec, **kwargs):
             if (env.phase_dir / "implement_batch_T009.json").exists():
@@ -1345,7 +1345,7 @@ class TestVerificationOnlyImplementTask:
                 )
             return preflight(spec, **kwargs)
 
-        env.monkeypatch.setattr(wbs, "preflight_runner", refused_once_the_check_ran)
+        env.monkeypatch.setattr(write_grant, "preflight_runner", refused_once_the_check_ran)
         summary = env.out_dir / "implement" / "implementation_summary.md"
         result = env.scheduler(
             [self._task(env), later], kind="implement",
@@ -5195,7 +5195,7 @@ class TestTheInFlightMirrorNamesADispatchInProgress:
         # `_begin_sweep`'s patch preserves whatever this last wrote.
         scheduler._reports.mirror_status(result)
 
-        snapshot = scheduler._snapshot(task)
+        snapshot = scheduler._snapshots.take(task)
         scheduler._begin_sweep("apply-batch-0", ["plans/p.md"])
 
         mirror = status_file.read_status(
@@ -5228,7 +5228,7 @@ class TestTheSweepLeavesGitignoredPathsOut:
         (env.root / "logs").mkdir()
         task = env.apply_task(0, task_id="T-A")
         scheduler = env.scheduler([task])
-        snapshot = scheduler._snapshot(task)
+        snapshot = scheduler._snapshots.take(task)
         scheduler._begin_sweep("T-A", ["plans/p.md"])
         (env.root / "logs" / "01-host.jsonl").write_text("{}\n", encoding="utf-8")
         (env.root / "notes.txt").write_text("real stray\n", encoding="utf-8")
@@ -5241,7 +5241,7 @@ class TestTheSweepLeavesGitignoredPathsOut:
         (env.root / ".gitignore").write_text(".env\n", encoding="utf-8")
         task = env.apply_task(0, task_id="T-A")
         scheduler = env.scheduler([task])
-        snapshot = scheduler._snapshot(task)
+        snapshot = scheduler._snapshots.take(task)
         scheduler._begin_sweep("T-A", ["plans/p.md"])
         (env.root / ".env").write_text("TOKEN=x\n", encoding="utf-8")
 
@@ -5352,7 +5352,7 @@ class TestTheSweepLeavesGitignoredPathsOut:
         task = env.apply_task(0, task_id="T-A")
         scheduler = env.scheduler([task])
         assert scheduler.policy.allow == ["src/**", "plans/**"]
-        snapshot = scheduler._snapshot(task)
+        snapshot = scheduler._snapshots.take(task)
         scheduler._begin_sweep("T-A", ["plans/p.md"])
         (env.root / "logs" / "run.jsonl").write_text("{}\n", encoding="utf-8")
         (env.root / ".env").write_text("TOKEN=x\n", encoding="utf-8")
@@ -5384,7 +5384,7 @@ class TestTheContainmentSweepIgnoresOnlyInFlightDeclarations:
 
         # T-A dispatches, declares .env, edits it (its OWN declared write —
         # correctly never flagged), and is classified: no longer in flight.
-        snap_a = scheduler._snapshot(task_a)
+        snap_a = scheduler._snapshots.take(task_a)
         scheduler._begin_sweep("T-A", [".env"])
         secret.write_text("TOKEN=updated-by-A\n", encoding="utf-8")
         undeclared_a = scheduler._undeclared_writes("T-A", snap_a)
@@ -5393,7 +5393,7 @@ class TestTheContainmentSweepIgnoresOnlyInFlightDeclarations:
         # T-B dispatches later, declares only the plan — but its runner
         # touches `.env` too: a genuine containment failure T-B never
         # declared, and T-A is long done by now.
-        snap_b = scheduler._snapshot(task_b)
+        snap_b = scheduler._snapshots.take(task_b)
         scheduler._begin_sweep("T-B", ["plans/p.md"])
         secret.write_text("TOKEN=leaked-by-B\n", encoding="utf-8")
         undeclared_b = scheduler._undeclared_writes("T-B", snap_b)
@@ -5418,8 +5418,8 @@ class TestTheContainmentSweepIgnoresOnlyInFlightDeclarations:
                                  snapshot_files=[str(file_b)])
         scheduler = env.scheduler([task_a, task_b])
 
-        snap_a = scheduler._snapshot(task_a)
-        snap_b = scheduler._snapshot(task_b)
+        snap_a = scheduler._snapshots.take(task_a)
+        snap_b = scheduler._snapshots.take(task_b)
         # Both dispatched into the same disjoint group: both in flight.
         scheduler._begin_sweep("T-A", ["src/a.py"])
         scheduler._begin_sweep("T-B", ["src/b.py"])

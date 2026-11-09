@@ -107,7 +107,7 @@ def test_undeclared_writes_are_observed_and_the_existing_ones_restorable(env, tm
     _plant(env, tmp_path)
     task = env.apply_task(0, task_id="T-A")
     scheduler = env.scheduler([task])
-    snapshot = scheduler._snapshot(task)
+    snapshot = scheduler._snapshots.take(task)
     before = {
         "src/a.py": (env.root / "src" / "a.py").read_bytes(),
         "src/b.py": (env.root / "src" / "b.py").read_bytes(),
@@ -173,7 +173,7 @@ def test_an_applied_reply_is_named_only_when_its_files_did_not_move(env, tmp_pat
     scheduler = env.scheduler(tasks)
     # Each snapshot is taken just before its own dispatch, as `_dispatch_one`
     # takes it (an earlier one of the same batch would be reused).
-    snapshots = {"T-0": scheduler._snapshot(tasks[0])}
+    snapshots = {"T-0": scheduler._snapshots.take(tasks[0])}
 
     # Declared change: applied, nothing to name.
     scheduler._begin_sweep("T-0", ["plans/p.md"])
@@ -183,7 +183,7 @@ def test_an_applied_reply_is_named_only_when_its_files_did_not_move(env, tmp_pat
     scheduler._undeclared_writes("T-0", snapshots["T-0"])
 
     # Nothing moved at all: named.
-    snapshots["T-1"] = scheduler._snapshot(tasks[1])
+    snapshots["T-1"] = scheduler._snapshots.take(tasks[1])
     scheduler._begin_sweep("T-1", ["plans/p.md"])
     why, context = _applied(scheduler, tasks[1], snapshots["T-1"],
                             files_touched=["plans/p.md"])
@@ -193,7 +193,7 @@ def test_an_applied_reply_is_named_only_when_its_files_did_not_move(env, tmp_pat
 
     # A plan batch whose plan did not move but whose runner wrote elsewhere:
     # named, with the stray paths it moved, deletions included.
-    snapshots["T-2"] = scheduler._snapshot(tasks[2])
+    snapshots["T-2"] = scheduler._snapshots.take(tasks[2])
     scheduler._begin_sweep("T-2", ["plans/p.md"])
     (env.root / "src" / "a.py").write_text("a = 3\n", encoding="utf-8")
     (env.root / "src" / "deep" / "er" / "d.py").unlink()
@@ -215,7 +215,7 @@ def test_a_code_task_with_a_stray_write_is_not_named(env, tmp_path):
         prompt=f"Do T009\n\n## Changes Applied in Prior Batches\n\n{wbs.PRIOR_CHANGES_TOKEN}\n",
     )
     scheduler = env.scheduler([task], kind="implement", finalize=False)
-    snapshot = scheduler._snapshot(task)
+    snapshot = scheduler._snapshots.take(task)
     scheduler._begin_sweep("T009", ["src/a.py"])
     (env.root / "src" / "c.py").write_text("c = 2\n", encoding="utf-8")
     why, _context = _applied(scheduler, task, snapshot)

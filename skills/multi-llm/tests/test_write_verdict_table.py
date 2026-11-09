@@ -63,6 +63,8 @@ from utils import landlock_dispatch  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
 from utils import write_batch_scheduler as wbs  # noqa: E402
 from utils import write_commit_leg  # noqa: E402
+from utils import write_grant  # noqa: E402
+from utils import write_snapshots  # noqa: E402
 from utils import write_sweep  # noqa: E402
 from utils import write_verdict as verdict  # noqa: E402
 from utils.providers.base import SANDBOX_RUNG_PLUGIN_LANDLOCK  # noqa: E402
@@ -413,7 +415,7 @@ class FakeAudit:
 
 
 class Identities(dict):
-    """``_target_identity_before``, its spending named."""
+    """``WriteGrant.target_identity_before``, its spending named."""
 
     def __init__(self, items: Dict[str, Any], calls: Callable[[str], None]) -> None:
         super().__init__(items)
@@ -557,7 +559,11 @@ def _scheduler(case: Case, root: Path) -> Tuple[Any, Dict[str, Any]]:
     scheduler.write_target = (
         str(root / "plans" / "p.md") if case.kind == "apply_suggestions" else None
     )
-    scheduler.jail_request = scheduler._build_jail_request()
+    scheduler.jail_request = write_grant.build_jail_request(
+        kind=scheduler.kind, write_scope=scheduler.write_scope,
+        repo_root=scheduler.repo_root, output_dir=scheduler.output_dir,
+        write_target=scheduler.write_target, plan_file=scheduler.plan_file,
+    )
     scheduler.log = probes["log"].append
     scheduler.audit = FakeAudit(calls)
     scheduler.policy = FakePolicy(
@@ -565,29 +571,36 @@ def _scheduler(case: Case, root: Path) -> Tuple[Any, Dict[str, Any]]:
         else [WATCHED] if case.policy == "watched" else [],
         calls,
     )
-    scheduler.snapshots = {}
-    scheduler._snapshot_reused = {TASK_ID} if case.history == "reused" else set()
     scheduler._audited = set()
-    scheduler._jail_notes = {}
-    scheduler._jail_denials = {}
-    scheduler._jail_failed = set()
-    scheduler._replaced_targets = set()
     scheduler._told_checks = {}
     scheduler._listed_outcomes = {}
-    # The sweep's audit rows and the commit guard's restore run for real,
-    # over the same root; the sweep and the watch read below are faked.
-    run = SimpleNamespace(repo_root=str(root))
+    # The sweep's audit rows, the commit guard's restore and the write
+    # grant's records run for real, over the same root; the sweep, the watch
+    # read and the target's inode below are faked.
+    run = SimpleNamespace(repo_root=str(root), kind=case.kind, anchor=None,
+                          log=scheduler.log)
     scheduler._sweep = write_sweep.ContainmentSweep(run)
     scheduler._commit = write_commit_leg.CommitGuardLeg(
         run, effects_lock=threading.Lock(), refused=None,
     )
-    scheduler._target_identity_before = Identities({TASK_ID: (1, 100)}, calls)
+    scheduler._grant = write_grant.WriteGrant(
+        run, write_scope=scheduler.write_scope, write_target=scheduler.write_target,
+        jail_request=scheduler.jail_request, dispatch_rungs={},
+    )
+    scheduler._snapshots = write_snapshots.PreBatchSnapshots(
+        run, resume=False, executor_dispatch=False, grant=scheduler._grant,
+        evidence=None, runner_for=None,
+    )
+    if case.history == "reused":
+        scheduler._snapshots.reused.add(TASK_ID)
+    grant = scheduler._grant
+    grant.target_identity_before = Identities({TASK_ID: (1, 100)}, calls)
     after = {"none": (1, 100), "swapped": (1, 200), "gone": None,
              "off_rung": (1, 200)}[case.replaced]
-    scheduler._identity_of = _traced(lambda path: after, calls, "identity-read")
+    grant.identity_of = _traced(lambda path: after, calls, "identity-read")
     # Where a path is resolved, and can fail.
-    scheduler._relative = _traced(scheduler._relative, calls, "path-resolved")
-    scheduler._in_grant = _traced(scheduler._in_grant, calls, "path-resolved")
+    grant.relative = _traced(grant.relative, calls, "path-resolved")
+    grant.in_grant = _traced(grant.in_grant, calls, "path-resolved")
 
     undeclared = _undeclared(case)
 
@@ -696,11 +709,11 @@ def run_case(case: Case, root: Path) -> Dict[str, Any]:
                 and completions[-1]["write_outcome"] == outcome.write_outcome
                 and completions[-1]["files_touched"] == outcome.files_touched
             ),
-            "jail_failed": TASK_ID in scheduler._jail_failed,
-            "replaced_target": TASK_ID in scheduler._replaced_targets,
-            "jail_denials_recorded": TASK_ID in scheduler._jail_denials,
-            "jail_note": scheduler._jail_notes.get(TASK_ID),
-            "identity_popped": TASK_ID not in scheduler._target_identity_before,
+            "jail_failed": TASK_ID in scheduler._grant.jail_failed,
+            "replaced_target": TASK_ID in scheduler._grant.replaced_targets,
+            "jail_denials_recorded": TASK_ID in scheduler._grant.jail_denials,
+            "jail_note": scheduler._grant.jail_notes.get(TASK_ID),
+            "identity_popped": TASK_ID not in scheduler._grant.target_identity_before,
             "log": probes["log"],
         },
         "calls": list(probes["calls"]),
@@ -1118,7 +1131,7 @@ def test_a_jail_path_that_fails_to_resolve_never_stops_a_policy_restore(root):
     case = Case("apply_suggestions", 0, "applied", True, policy="own", jail="hard")
 
     def edit(scheduler: Any, snapshot: FakeSnapshot, outcome: Any) -> None:
-        scheduler._jail_facts = _resolving_fails
+        scheduler._grant.jail_facts = _resolving_fails
 
     scheduler, snapshot, outcome, probes = classify(case, root, edit)
     assert outcome.write_outcome == executor.WRITE_POLICY_VIOLATION
@@ -1133,14 +1146,14 @@ def test_a_jail_path_that_fails_to_resolve_never_stops_a_replaced_target(root):
     case = Case("apply_suggestions", 0, "applied", True, replaced="swapped", jail="hard")
 
     def edit(scheduler: Any, snapshot: FakeSnapshot, outcome: Any) -> None:
-        scheduler._jail_facts = _resolving_fails
+        scheduler._grant.jail_facts = _resolving_fails
 
     scheduler, snapshot, outcome, probes = classify(case, root, edit)
     assert outcome.reason.startswith("FAILED (target replaced)")
     assert outcome.write_outcome == executor.WRITE_CLEAN_FAILURE
     # Never restored over the file now at the path.
     assert DECLARED[case.kind] not in outcome.files_touched
-    assert TASK_ID in scheduler._replaced_targets
+    assert TASK_ID in scheduler._grant.replaced_targets
     assert len(scheduler.audit.completions) == 1
     assert "jail-read" not in probes["calls"]
 
@@ -1153,7 +1166,7 @@ def test_a_jail_path_that_fails_to_resolve_with_no_guard_matched_is_raised(root)
     seen: Dict[str, Any] = {}
 
     def edit(scheduler: Any, snapshot: FakeSnapshot, outcome: Any) -> None:
-        scheduler._jail_facts = _resolving_fails
+        scheduler._grant.jail_facts = _resolving_fails
         seen.update(scheduler=scheduler, outcome=outcome)
 
     with pytest.raises(RuntimeError, match="Symlink loop"):
@@ -1162,8 +1175,8 @@ def test_a_jail_path_that_fails_to_resolve_with_no_guard_matched_is_raised(root)
     assert outcome.write_outcome is None
     assert outcome.status == executor.STATUS_OK
     assert scheduler.audit.completions == []
-    assert TASK_ID in scheduler._jail_denials
-    assert TASK_ID not in scheduler._target_identity_before
+    assert TASK_ID in scheduler._grant.jail_denials
+    assert TASK_ID not in scheduler._grant.target_identity_before
 
 
 def test_a_restore_audit_that_fails_leaves_the_violation_classified(root):

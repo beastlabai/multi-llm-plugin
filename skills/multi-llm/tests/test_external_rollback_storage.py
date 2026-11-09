@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from tests.test_plugin_landlock_write import Repo, FakeExecutor, RUNG, claim, edit_file, stream
 from utils import provider_registry as registry
 from utils import restore_batch, subagent_executor as executor
-from utils import write_batch_scheduler as wbs, write_safety as safety
+from utils import write_batch_scheduler as wbs, write_grant, write_safety as safety
 from utils.providers.base import PROFILE_AGENT_WRITE
 
 
@@ -46,7 +46,7 @@ def test_mixed_runners_protect_evidence_before_jailed_dispatch(repo, monkeypatch
     monkeypatch.setattr(wbs, "resolve_task_runner", lambda task, **kw: task["model_hint"])
     monkeypatch.setattr(wbs.WriteBatchScheduler, "_render_argv", lambda *a, **kw: ["mock"])
     monkeypatch.setattr(
-        wbs.WriteBatchScheduler, "_recorded_rung",
+        write_grant.WriteGrant, "recorded_rung",
         lambda self, spec, profile: RUNG if spec.startswith("codex:") else None,
     )
     barrier = threading.Barrier(2) if parallel else None
@@ -103,10 +103,10 @@ def test_inconclusive_later_runner_preflight_cannot_leave_writable_evidence(repo
         if spec.startswith("codex:"):
             raise RuntimeError("probe could not conclude")
 
-    monkeypatch.setattr(scheduler, "_preflight", preflight)
-    scheduler._decide_rollback_storage(tasks[0], PROFILE_AGENT_WRITE)
+    monkeypatch.setattr(scheduler._grant, "preflight", preflight)
+    scheduler._snapshots.decide_rollback_storage(tasks[0], PROFILE_AGENT_WRITE)
     assert Path(safety.external_safety_dir(str(repo.phase_dir))).is_dir()
-    assert scheduler._snapshot(tasks[0]).directory.startswith(scheduler.safety_dir)
+    assert scheduler._snapshots.take(tasks[0]).directory.startswith(scheduler.safety_dir)
 
 
 def existing_evidence(repo):
@@ -147,10 +147,10 @@ def test_resumed_runner_switch_reuses_pre_first_dispatch_snapshot(repo, monkeypa
     FakeExecutor(repo, monkeypatch, rung=RUNG)
     task = repo.task(0, kind="implement", target=target, task_id="T001", expected_ids=["T001"])
     scheduler = repo.scheduler([task], kind="implement", write_target=None, finalize=False)
-    scheduler._decide_rollback_storage(task, PROFILE_AGENT_WRITE)
-    resumed = scheduler._snapshot(task)
+    scheduler._snapshots.decide_rollback_storage(task, PROFILE_AGENT_WRITE)
+    resumed = scheduler._snapshots.take(task)
     assert resumed.entries[0].sha256 == snapshot.entries[0].sha256
-    assert "T001" in scheduler._snapshot_reused
+    assert "T001" in scheduler._snapshots.reused
 
 
 @pytest.mark.parametrize("failure", ["payload", "copy", "symlink"])
