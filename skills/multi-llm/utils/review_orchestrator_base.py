@@ -36,6 +36,7 @@ from . import concurrency as _concurrency
 from . import detach as _detach
 from . import run_record as _run_record
 from .atomic_io import read_back_text
+from .clock import parse_iso
 from . import status_file as _status_file
 from . import validation_context as _validation_context
 from . import cli_common
@@ -3421,7 +3422,7 @@ def _iso_stamp(value: Any) -> Optional[datetime]:
     if not isinstance(value, str) or not value.strip():
         return None
     try:
-        return datetime.fromisoformat(value.strip())
+        return parse_iso(value.strip())
     except ValueError:
         return None
 

@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
+from .clock import parse_local
 from .git_utils import get_branch_name, head_or_empty_tree
 from .judge_vocab import upgrade_legacy
 from .schema_validator import validate_state_file
@@ -40,12 +41,9 @@ def _parse_completion_time(value) -> Optional[datetime]:
     if not isinstance(value, str) or not value:
         return None
     try:
-        parsed = datetime.fromisoformat(value)
+        return parse_local(value)
     except ValueError:
         return None
-    if parsed.tzinfo is not None:
-        parsed = parsed.astimezone().replace(tzinfo=None)
-    return parsed
 
 
 def predates_review(

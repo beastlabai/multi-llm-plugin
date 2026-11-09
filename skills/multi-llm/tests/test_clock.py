@@ -73,3 +73,166 @@ def test_the_seconds_writers_use_local_iso_seconds(name, function):
 ], ids=lambda value: value if isinstance(value, str) else "")
 def test_the_utc_writers_use_utc_iso_z(name, function):
     assert function is clock.utc_iso_z, name
+
+
+@pytest.mark.parametrize("text", [
+    "2026-09-21T10:00:10Z",
+    "2026-09-21T10:00:10z",
+    "2026-09-21T10:00:10+00:00",
+    "2026-09-21T10:00:10.250000Z",
+])
+def test_parse_iso_reads_utc_in_either_spelling_as_aware(text):
+    parsed = clock.parse_iso(text)
+    assert parsed.utcoffset() == timedelta(0)
+    assert parsed.replace(microsecond=0) == datetime(2026, 9, 21, 10, 0, 10, tzinfo=timezone.utc)
+
+
+def test_parse_iso_leaves_a_naive_stamp_naive():
+    assert clock.parse_iso("2026-09-21T10:00:10") == datetime(2026, 9, 21, 10, 0, 10)
+    assert clock.parse_iso("2026-09-21T10:00:10").tzinfo is None
+
+
+@pytest.mark.parametrize("text", [
+    "", "Z", "not a stamp",
+    # A UTC suffix is read only after a time, once, and only as the last character.
+    "2026-09-21Z", "2026-09-21z", "2026-09-21T10:00:10ZZ", "2026-09-21T10:00:10zz",
+    "2026-09-21T10:00:10Zz", "2026-09-21T10:00:10+00:00Z", "2026-09-21Z10:00:10",
+    "2026-09-21T10:00:10Z ", "2026-09-21T10:00:10Z+00:00",
+])
+def test_parse_iso_refuses_a_malformed_utc_stamp(text):
+    with pytest.raises(ValueError):
+        clock.parse_iso(text)
+
+
+def test_a_utc_stamp_is_never_a_fabricated_naive_midnight():
+    # ``2026-09-21+00:00`` reads as a date, a separator and a time of day.
+    assert datetime.fromisoformat("2026-09-21+00:00").tzinfo is None
+    with pytest.raises(ValueError):
+        clock.parse_local("2026-09-21Z")
+
+
+@pytest.mark.parametrize("text, expect_aware", [
+    ("2026-09-21T10:00:10Z", False),
+    ("2026-09-21T10:00:10+00:00", False),
+    ("2026-09-21T10:00:10", False),
+])
+def test_the_checkpoint_stamp_reader_gives_naive_local_time_for_every_spelling(text, expect_aware):
+    from utils import run_record
+
+    got = run_record._parse_stamp(text)
+    assert got is not None and (got.tzinfo is not None) is expect_aware
+    if text.endswith(("Z", "+00:00")):
+        want = datetime(2026, 9, 21, 10, 0, 10, tzinfo=timezone.utc).astimezone().replace(tzinfo=None)
+    else:
+        want = datetime(2026, 9, 21, 10, 0, 10)
+    assert got == want
+
+
+# -- stamps compared with each other, and at the edge of the range --------------
+
+_needs_tzset = pytest.mark.skipif(
+    not hasattr(__import__("time"), "tzset"), reason="time.tzset is POSIX-only")
+
+
+@pytest.fixture
+def berlin(monkeypatch):
+    """The process in a zone ahead of UTC, so a year-9999 UTC stamp overflows locally."""
+    import time
+    monkeypatch.setenv("TZ", "Europe/Berlin")
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
+
+
+@pytest.fixture
+def new_york(monkeypatch):
+    import time
+    monkeypatch.setenv("TZ", "America/New_York")
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
+
+
+def _unreadable_readers():
+    from utils import prior_changes, run_record, state_manager
+    return [
+        ("clock.parse_local", clock.parse_local, ValueError),
+        ("state_manager", state_manager._parse_completion_time, None),
+        ("prior_changes", prior_changes.parse_stamp, None),
+        ("run_record", run_record._parse_stamp, None),
+        ("scope_policy_runs", scope_policy_runs._parse, None),
+    ]
+
+
+@_needs_tzset
+@pytest.mark.parametrize("stamp, zone", [
+    ("9999-12-31T23:59:59Z", "berlin"),
+    ("9999-12-31T23:59:59+00:00", "berlin"),
+    ("0001-01-01T00:00:00Z", "new_york"),
+])
+def test_a_boundary_stamp_is_unreadable_not_an_overflow(stamp, zone, request):
+    request.getfixturevalue(zone)
+    for name, reader, raises in _unreadable_readers():
+        if raises is not None:
+            with pytest.raises(raises):
+                reader(stamp)
+        else:
+            assert reader(stamp) is None, name
+
+
+@_needs_tzset
+def test_a_stamp_inside_the_range_still_converts_to_local_time(berlin):
+    from utils import prior_changes, state_manager
+    want = datetime(2026, 9, 21, 12, 0, 10)  # CEST is UTC+2
+    for stamp in ("2026-09-21T10:00:10Z", "2026-09-21T10:00:10z", "2026-09-21T12:00:10+02:00"):
+        assert clock.parse_local(stamp) == want
+        assert state_manager._parse_completion_time(stamp) == want
+        assert prior_changes.parse_stamp(stamp) == want
+
+
+def _spellings(instant: datetime) -> dict:
+    """One instant as a naive local stamp, ``Z``, ``z`` and two offsets."""
+    return {
+        "naive": instant.astimezone().replace(tzinfo=None).isoformat(),
+        "Z": instant.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "z": instant.strftime("%Y-%m-%dT%H:%M:%Sz"),
+        "utc-offset": instant.isoformat(),
+        "offset": instant.astimezone(timezone(timedelta(hours=5, minutes=30))).isoformat(),
+    }
+
+
+_RECORD = datetime(2026, 9, 21, 10, 0, 0, tzinfo=timezone.utc)
+_KINDS = ["naive", "Z", "z", "utc-offset", "offset"]
+
+
+@pytest.mark.parametrize("completed_kind", _KINDS)
+@pytest.mark.parametrize("record_kind", _KINDS)
+@pytest.mark.parametrize("where", ["phases_completed", "phases_skipped"])
+def test_a_continuation_compares_any_two_stamp_spellings(where, record_kind, completed_kind):
+    """A scope-policy record and the phase stamp that may close it are two stamps
+    that two writers spelled: each in any of the spellings, they compare as instants."""
+    def state(offset_s: int) -> dict:
+        stamp = _spellings(_RECORD + timedelta(seconds=offset_s))[completed_kind]
+        phase = stamp if where == "phases_completed" else {"skipped_at": stamp}
+        return {
+            "scope_policy_runs": {"improve-code": {
+                "policy": "preserve", "recorded_at": _spellings(_RECORD)[record_kind]}},
+            where: {"apply-code-fixes": phase},
+        }
+
+    assert scope_policy_runs.resolve_run_choice(None, state(-10), "improve-code") == (
+        "preserve", "continuation")
+    assert scope_policy_runs.resolve_run_choice(None, state(10), "improve-code") is None
+
+
+def test_the_ordered_comparison_does_not_depend_on_the_zone_of_the_machine(new_york):
+    state = {
+        "scope_policy_runs": {"improve-code": {
+            "policy": "preserve", "recorded_at": "2026-09-21T10:00:00"}},
+        "phases_completed": {"apply-code-fixes": "2026-09-21T10:00:10Z"},
+    }
+    # 10:00:10Z is 06:00:10 in New York, earlier than a naive 10:00:00 local record.
+    assert scope_policy_runs.resolve_run_choice(None, state, "improve-code") == (
+        "preserve", "continuation")

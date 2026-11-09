@@ -71,17 +71,14 @@ def _parse_stamp(stamp: Any) -> Optional[Any]:
     normalisation F4 was about. Same failure modes, same answer: anything that
     does not parse is ``None``, never a raise.
     """
-    from datetime import datetime
+    from .clock import parse_local
 
     if not stamp:
         return None
     try:
-        when = datetime.fromisoformat(str(stamp))
-        if when.tzinfo is not None:
-            when = when.astimezone().replace(tzinfo=None)
+        return parse_local(str(stamp))
     except (ValueError, TypeError, OverflowError, OSError):
         return None
-    return when
 
 
 # ---------------------------------------------------------------------------

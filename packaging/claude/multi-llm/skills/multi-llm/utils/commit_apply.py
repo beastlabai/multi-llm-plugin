@@ -101,6 +101,7 @@ from .git_utils import (
     run_git_for_paths,
     subtract_baseline,
 )
+from .clock import parse_iso
 from .clock import utc_iso_z as _now_utc
 from .state_file import update as update_state
 from .text_clip import clip, plain_line
@@ -1355,7 +1356,7 @@ def _when(text: Any) -> datetime:
     the earliest instant for anything unreadable."""
     if isinstance(text, str) and text:
         try:
-            value = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            value = parse_iso(text)
             return value if value.tzinfo else value.astimezone()
         except ValueError:
             pass

@@ -808,6 +808,11 @@ The writers that once kept their own timestamp helper name a format in `utils/cl
 write-safety audit) or `utc_iso_z` (UTC with `Z`: the commit range and its guard). The three
 formats are kept as they were, because records on disk and their readers compare the strings. The
 commit modules' `1 file` / `2 files` is `utils/text_fmt.py`'s `plural`.
+A reader of a stamp another tool may have written calls `clock.parse_iso`, which reads a trailing
+`Z` or `z` as UTC on Python 3.10 too (its `fromisoformat` rejects it) and refuses a `Z` that is
+doubled, not last or not after a time. A reader that compares stamps calls `clock.parse_local`
+(naive local time; a stamp outside the platform's range is unreadable, a `ValueError`), so a naive,
+`Z` and offset stamp compare as instants on every Python.
 
 ## Durable retry commands
 

@@ -57,7 +57,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import scope_policy as sp
-from .clock import local_iso
+from .clock import local_iso, parse_local
 
 #: The ``state.json`` top-level key holding the run records.
 RUNS_KEY = "scope_policy_runs"
@@ -76,10 +76,11 @@ _now = local_iso
 
 
 def _parse(value: Any) -> Optional[datetime]:
+    """A stamp as a naive local datetime (naive, ``Z`` and offset stamps compare), or ``None``."""
     if not isinstance(value, str) or not value:
         return None
     try:
-        return datetime.fromisoformat(value)
+        return parse_local(value)
     except ValueError:
         return None
 

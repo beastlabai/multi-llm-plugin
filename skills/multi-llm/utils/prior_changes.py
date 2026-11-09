@@ -30,6 +30,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Collection, Iterable, List, Optional, Sequence, Tuple
 
+from .clock import parse_local
 from .stream_bootstrap import bootstrap_streams
 from .text_clip import plain_line
 
@@ -202,12 +203,9 @@ def parse_stamp(value: Any) -> Optional[datetime]:
     if not isinstance(value, str) or not value:
         return None
     try:
-        parsed = datetime.fromisoformat(value)
+        return parse_local(value)
     except ValueError:
         return None
-    if parsed.tzinfo is not None:
-        parsed = parsed.astimezone().replace(tzinfo=None)
-    return parsed
 
 
 def run_entries(

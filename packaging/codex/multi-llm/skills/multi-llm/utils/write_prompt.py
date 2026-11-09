@@ -84,6 +84,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import known_checks as _known_checks
+from .clock import parse_iso
 from . import process_control as _process_control
 from . import prior_changes as _prior_changes
 from . import prompt_files as _prompt_files
@@ -1098,7 +1099,7 @@ def _read_plan_state(phase_dir: str) -> Tuple[Optional[Dict[str, Any]], Optional
 
 def _parse_stamp(value: Any) -> Optional[datetime]:
     try:
-        return datetime.fromisoformat(str(value))
+        return parse_iso(str(value))
     except (TypeError, ValueError):
         return None
 
