@@ -271,7 +271,7 @@ class VerifyStep:
             for outcome in result.outcomes
         ):
             return True
-        if self._ctx.state is None or not hasattr(self._ctx.state, "get_all_task_statuses"):
+        if not hasattr(self._ctx.state, "get_all_task_statuses"):
             return False
         try:
             statuses = self._ctx.state.get_all_task_statuses()
@@ -368,11 +368,14 @@ class VerifyStep:
         subtracted along with the rest, ``tracked_files`` ends up naming only
         the noise, and ``review-code`` reviews the noise.
         """
+        state_file = getattr(self._ctx.state, "state_file", None)
+        if not state_file:
+            return  # no state.json to census (a run without a state)
         touched = self.touched_files(result)
         finalize_tracking = load_finalize_tracking()
         if finalize_tracking is None:
             return
-        argv = ["--state-file", str(self._ctx.state.state_file)]
+        argv = ["--state-file", str(state_file)]
         for path in touched:
             argv += ["--touched", path]
         argv += ["--phase", PHASE_BY_WRITE_KIND[self._ctx.kind]]
@@ -394,7 +397,7 @@ class VerifyStep:
                 f"WARNING: finalize_tracking exited {code}; tracked_files was "
                 f"NOT updated — `review-code` will read whatever the previous "
                 f"phase left. Re-run: util finalize-tracking --state-file "
-                f"{self._ctx.state.state_file}"
+                f"{state_file}"
             )
             self._ctx.log(f"[write-subagents] {message}")
             if result is not None:
@@ -426,7 +429,7 @@ class VerifyStep:
         ``StateManager`` (the one writer), quietly, and saved only when the
         list moved.
         """
-        if (self._ctx.dry_run or not self._finalize or self._ctx.state is None
+        if (self._ctx.dry_run or not self._finalize
                 or self._ctx.kind not in _batch_prompt.CODE_WRITE_KINDS):
             return
         recorded = getattr(self._ctx.state, "state", None)

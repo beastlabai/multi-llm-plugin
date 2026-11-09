@@ -1007,8 +1007,8 @@ class TestTheApplyBaseHandsOverItsArtifact:
             report_path = None
 
         class _Recorder:
-            def __init__(self, **kwargs):
-                seen.update(kwargs)
+            def __init__(self, options):
+                seen.update(vars(options))
 
             def run(self):
                 return _Result()

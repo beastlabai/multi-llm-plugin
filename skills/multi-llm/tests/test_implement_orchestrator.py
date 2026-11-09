@@ -2650,7 +2650,7 @@ class TestImplementTasksFileIsStamped:
             outcomes = []
 
         class _FakeScheduler:
-            def __init__(self, **kwargs):
+            def __init__(self, options):
                 pass
 
             def run(self):
@@ -2718,7 +2718,7 @@ class TestImplementTasksFileIsStamped:
             outcomes = []
 
         class _FakeScheduler:
-            def __init__(self, **kwargs):
+            def __init__(self, options):
                 pass
 
             def run(self):

@@ -202,7 +202,7 @@ class CheckHolds:
         can pass and release its dependents, while an omitted check (notably
         under ``--task``) cannot silently lose its hold.
         """
-        if self._ctx.kind != "implement" or self._ctx.state is None:
+        if self._ctx.kind != "implement":
             return
         held = _check_records.rerunnable_checks(self._ctx.state)
         graph = _check_records.decomposition_graph(self._ctx.tasks, self._ctx.state)
@@ -343,7 +343,9 @@ class CheckHolds:
                 f"running the check again whether or not the repository changed."
             )
             return None
-        if self._ctx.state is not None:
+        if _write_context.has_state(self._ctx.state):
+            # Without a state there is no status to go by: the result file
+            # alone decides.
             try:
                 if self._ctx.state.get_task_status(task_id) != "failed":
                     return None

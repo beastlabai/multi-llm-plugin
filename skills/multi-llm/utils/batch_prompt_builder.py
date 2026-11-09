@@ -73,14 +73,14 @@ class BatchPromptBuilder:
         state as it is at dispatch, as ``util write-prompt`` reads it.
         """
         accepted: List[Tuple[str, str, List[str]]] = []
-        state = self._ctx.state
-        if self._ctx.kind == "implement" and state is not None:
+        if self._ctx.kind == "implement":
             accepted = _check_records.accepted_upstream_checks(
-                self._ctx.tasks, str(task.get("task_id") or ""), state,
+                self._ctx.tasks, str(task.get("task_id") or ""), self._ctx.state,
             )
         return _batch_prompt.bind_prior_changes(
             task, output_dir=self._ctx.output_dir, phase=self._ctx.phase,
-            accepted_checks=accepted, state=state,
+            accepted_checks=accepted,
+            state=_write_context.manager_or_none(self._ctx.state),
         )
 
     def scope_refusal(self, task: Dict[str, Any]) -> Optional[str]:
@@ -113,7 +113,8 @@ class BatchPromptBuilder:
         write-prompt`` reads them on the native leg. Never run here."""
         return _known_checks.known_check_commands(
             self._ctx.output_dir, plan_file=self._plan_file,
-            repo_root=self._ctx.repo_root, state=self._ctx.state,
+            repo_root=self._ctx.repo_root,
+            state=_write_context.manager_or_none(self._ctx.state),
         )
 
     def known_checks_section(self, task: Dict[str, Any]) -> str:
@@ -127,7 +128,7 @@ class BatchPromptBuilder:
         task_id = str(task.get("task_id") or "")
         try:
             checks = self.known_checks()
-            state = self._ctx.state
+            state = _write_context.manager_or_none(self._ctx.state)
             earlier = _known_checks.earlier_batch_check_failures(
                 state if state is not None else _known_checks.read_state(self._ctx.output_dir),
                 self._ctx.tasks, task_id,

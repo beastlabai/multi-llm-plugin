@@ -14,9 +14,10 @@ The objects behind the fields are the scheduler's own, not copies, and the
 scheduler never rebinds one after construction. ``state`` is
 the run's one ``StateManager``, the only writer of ``state.json`` for the run: a
 collaborator writes through it, under the lock the scheduler hands it, and never
-reloads it. ``log`` calls the scheduler's current ``log`` at each line, so a
-caller that quiets the scheduler's log for a while (``_dispatch_walk``) quiets
-its collaborators with it.
+reloads it; a run without one holds a :class:`NullState`, never ``None``.
+``log`` calls the scheduler's current ``log`` at each line, so a caller that
+quiets the scheduler's log for a while (``_dispatch_walk``) quiets its
+collaborators with it.
 """
 
 from __future__ import annotations
@@ -32,6 +33,85 @@ from .write_safety import safety_dir
 #: a positional kind's result filenames have never been renamed, so there is
 #: no earlier naming to be stale relative to.
 _ID_KEYED_WRITE_KINDS = frozenset({"implement"})
+
+
+class NullState:
+    """The run's state when it has none: ``SchedulerOptions.state`` left
+    ``None``, which only a unit test does (a real phase always has a
+    ``StateManager``, WRITE-11).
+
+    It keeps nothing and writes nothing. Every write is a no-op and every read
+    is what a missing state read as: no ``state.json`` dict (``state``) and no
+    file (``state_file``), no task status, no phase started or completed, and
+    ``get`` gives the default, so ``check_records``' readers find nothing on
+    record. It has none of the metric methods, so ``EtaLines`` prints no
+    ``[ETA]`` line for it, as for any state that keeps no metrics. Where a
+    missing state means something other than an empty one, the reader asks
+    (:func:`has_state`, :func:`manager_or_none`): a reader the native leg
+    shares reads ``state.json`` on disk when handed ``None``
+    (docs/development/write-scheduler.md#where-the-schedulers-helpers-live).
+    """
+
+    #: No ``state.json`` dict and no file behind it.
+    state: Any = None
+    state_file: Any = None
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return default
+
+    def set(self, key: str, value: Any) -> None:
+        pass
+
+    def save(self) -> None:
+        pass
+
+    def reload(self) -> None:
+        pass
+
+    def get_task_status(self, task_id: str) -> Optional[str]:
+        return None
+
+    def get_all_task_statuses(self) -> Dict[str, str]:
+        return {}
+
+    def update_task_status(
+        self, task_id: str, status: str, reason: Optional[str] = None,
+    ) -> None:
+        pass
+
+    def record_dependency_override(self, task_id: str, overridden_deps: List[str]) -> None:
+        pass
+
+    def is_phase_started(self, phase: str) -> bool:
+        return False
+
+    def is_phase_completed(self, phase: str) -> bool:
+        return False
+
+    def completion_predates(self, apply: str, review: str) -> bool:
+        return False
+
+    def mark_phase_started(self, phase: str) -> None:
+        pass
+
+    def mark_phase_completed(self, phase: str) -> None:
+        pass
+
+    def refresh_plan_hash(self) -> None:
+        pass
+
+
+def has_state(state: Any) -> bool:
+    """Whether the run holds a state (anything but :class:`NullState`): for a
+    reader to which a missing state means something an empty one does not."""
+    return state is not None and not isinstance(state, NullState)
+
+
+def manager_or_none(state: Any) -> Any:
+    """*state* for a reader the native leg shares, which reads ``state.json``
+    on disk when it is handed ``None``: the run's own state, or ``None`` for a
+    run without one."""
+    return state if has_state(state) else None
 
 
 @dataclass(frozen=True)

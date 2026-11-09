@@ -1596,7 +1596,7 @@ def run_implement_write_phase(
             or getattr(args, "dry_run_subagents", False)):
         return None
 
-    from utils.write_batch_scheduler import WriteBatchScheduler
+    from utils.write_batch_scheduler import SchedulerOptions, WriteBatchScheduler
     from utils.check_records import write_result_notice
     from utils.write_phase_bridge import (
         materialize_write_tasks,
@@ -1629,7 +1629,7 @@ def run_implement_write_phase(
     _seed_pending_task_statuses(state, tasks)
 
     try:
-        scheduler = WriteBatchScheduler(
+        scheduler = WriteBatchScheduler(SchedulerOptions(
             tasks=tasks,
             phase_dir=phase_dir,
             kind="implement",
@@ -1644,7 +1644,7 @@ def run_implement_write_phase(
             human_task_strategy=human_task_strategy,
             human_task_decisions=human_task_decisions,
             user_commands=_stop_user_commands(args),
-        )
+        ))
     except _write_safety.WriteSafetyError as exc:
         # A repository root that cannot be pinned (a planted `core.worktree`,
         # review fixes 2026-10-05) is exit 3 with the resolver's own words.

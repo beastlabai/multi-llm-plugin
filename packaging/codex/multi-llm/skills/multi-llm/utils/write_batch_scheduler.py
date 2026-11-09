@@ -101,7 +101,6 @@ from .atomic_io import atomic_write_text
 from .cli_common import EXIT_NEEDS_HUMAN, EXIT_OK
 from .batch_ledger import (
     outcome_from_verdict,
-    read_verdict_checks,
     verdict_record,
 )
 from .task_ledger import (
@@ -111,7 +110,7 @@ from .task_ledger import (
     USER_DECLINED_REASON,
 )
 from .text_clip import (
-    clip, with_closing_mark,
+    clip,
 )
 from .providers.base import (
     SANDBOX_RUNG_PLUGIN_LANDLOCK,
@@ -149,7 +148,6 @@ from .subagent_executor import (
     row_batch_check_note,
     row_batch_check_repeats,
     row_check_findings,
-    row_declined,
 )
 from .subagent_tasks import (
     PHASE_BY_WRITE_KIND,
@@ -198,6 +196,7 @@ __all__ = [
     "STRATEGY_SKIP_CONTINUE",
     "STRATEGY_SKIP_DEPENDENTS",
     "WRITE_BATCH_REPORT_FILENAME",
+    "SchedulerOptions",
     "SchedulerResult",
     "HumanTaskPlan",
     "WriteBatchScheduler",
@@ -449,9 +448,12 @@ _MOVED: Dict[str, Tuple[str, ...]] = {
         "resume_why",
     ),
     "write_context": (
+        "NullState",
         "Refusals",
         "RunContext",
         "_ID_KEYED_WRITE_KINDS",
+        "has_state",
+        "manager_or_none",
         "refusals_of",
     ),
     "write_verify": (
@@ -820,104 +822,142 @@ PARTIAL_SUMMARY_LINE = "Partial implementation summary"
 FULL_SUMMARY_LINE = "Implementation summary"
 
 
+@dataclass(frozen=True, kw_only=True)
+class SchedulerOptions:
+    """What one ``WriteBatchScheduler`` is built from (WRITE-5).
+
+    The two orchestrators that drive a write phase build one and pass it
+    (``WriteBatchScheduler(options)``); a test may pass the same fields as
+    keywords instead. Frozen: the scheduler reads it once, in ``__init__``,
+    and keeps it as ``options``.
+    """
+
+    #: Materialized write tasks (any ``batch_index`` order — sorted here).
+    tasks: Sequence[Dict[str, Any]]
+    #: Where results, snapshots, the audit log and both reports land.
+    phase_dir: str
+    #: One of ``utils.subagent_tasks.WRITE_KINDS``.
+    kind: str
+    #: The plan's output dir, which owns ``prior_changes.jsonl``.
+    output_dir: str
+    #: The pinned root (D3h). Resolved from ``anchor`` when omitted.
+    repo_root: Optional[str] = None
+    #: The phase's name; ``PHASE_BY_WRITE_KIND[kind]`` when omitted.
+    phase: Optional[str] = None
+    #: A ``StateManager``, for task statuses, override records and the
+    #: phase-completed marker. Optional only so a unit test can drive the loop
+    #: without one; a real phase always has one.
+    state: Any = None
+    #: The plan the phase works for.
+    plan_file: Optional[str] = None
+    #: implement's summary, and its path as the plan's back-reference names it.
+    summary_file: Optional[str] = None
+    summary_file_relative: Optional[str] = None
+    #: What the repository root and the write policy are resolved from;
+    #: ``plan_file`` when omitted.
+    anchor: Optional[str] = None
+    #: The host's ``max_concurrent_subagents``. ``None`` means "look it
+    #: up from ``hosts/capabilities.yaml`` for the host this invocation
+    #: declared" (D5b) — the same seam, with the same meaning, as
+    #: ``subagent_executor.effective_ceiling``'s parameter of the same name.
+    #: No orchestrator passes it; a caller that already knows the number
+    #: still may.
+    host_max: Optional[int] = None
+    #: A runner every task is dispatched to, over each task's own.
+    runner: Optional[str] = None
+    #: ``--resume`` (``False`` for ``--fresh``).
+    resume: bool = True
+    #: ``--dry-run-subagents``. Renders every command, applies every
+    #: admission and policy check, writes ``subagent_dry_run.json`` and starts
+    #: **no** child.
+    dry_run: bool = False
+    #: ``--force-strategy`` and the ``--human-task`` answers.
+    human_task_strategy: Optional[str] = None
+    human_task_decisions: Optional[Dict[str, str]] = None
+    #: How each admitted task is dispatched, called as
+    #: ``dispatcher(scheduler, task, prompt, snapshot, profile, declared,
+    #: batch_index=...)``. ``None`` is ``WriteBatchScheduler._dispatch_executor``,
+    #: the executor under ``--exec-subagents``; no orchestrator passes another.
+    #: An injected one (the equivalence tests' simulated native invoker)
+    #: names itself in its ``invoker`` attribute and starts no runner, so
+    #: no runner preflight decides rollback storage for it. Containment,
+    #: classification and the prior-changes append are the loop's, the
+    #: same for either — which is what makes "either invoker, same
+    #: terminal state" a property of the code.
+    dispatcher: Optional[Callable[..., TaskOutcome]] = None
+    #: Whether a run whose batches all verified completes the phase.
+    finalize: bool = True
+    #: Where the run's lines go; ``print`` when omitted.
+    log: Optional[Callable[[str], None]] = None
+    #: The phase's one write target — ``write_phase_artifact()``,
+    #: the plan for apply-suggestions and the tasks file for
+    #: apply-task-suggestions (plan step 3, F1 "How a dispatch receives its
+    #: grant", 2026-09-30). ``realpath``-resolved and checked at
+    #: construction: it must exist, be a regular file, not be a symlink and
+    #: lie under the repo root, or nothing runs. For the ``plan-file`` and
+    #: ``tasks`` scopes it is the grant's target, and every task's declared
+    #: set must resolve to exactly it, on every rung, before its snapshot.
+    #: ``None`` for implement and apply-code-fixes (``repo-wide`` is one
+    #: dir rule on the repository root, with this run's output folder on
+    #: the request for the developer message, never a target); a
+    #: ``plan-file``/``tasks`` phase built without one carries no grant, and
+    #: the executor refuses it on the rung.
+    write_target: Optional[str] = None
+    #: The way forward after a stop, in this host's spelling.
+    user_commands: Optional[Dict[str, str]] = None
+    #: The apply batches answered ``--human-task <id>=skip`` on this resume.
+    partial_skips: Optional[Sequence[str]] = None
+    #: The scope policy an apply dispatch enforces, and its baseline.
+    scope_policy: Optional[str] = None
+    scope_baseline_id: Optional[str] = None
+
+
 class WriteBatchScheduler:
     """Drives one write phase's batches in ``batch_index`` order (D3n).
 
-    Args:
-        tasks: Materialized write tasks (any ``batch_index`` order — sorted here).
-        phase_dir: Where results, snapshots, the audit log and both reports land.
-        kind: One of ``utils.subagent_tasks.WRITE_KINDS``.
-        output_dir: The plan's output dir, which owns ``prior_changes.jsonl``.
-        repo_root: The pinned root (D3h). Resolved from ``anchor`` when omitted.
-        state: A ``StateManager``, for task statuses, override records and the
-            phase-completed marker. Optional only so a unit test can drive the loop
-            without one; a real phase always has one.
-        host_max: The host's ``max_concurrent_subagents``. ``None`` means "look it
-            up from ``hosts/capabilities.yaml`` for the host this invocation
-            declared" (D5b) — the same seam, with the same meaning, as
-            ``subagent_executor.effective_ceiling``'s parameter of the same name.
-            No orchestrator passes it; a caller that already knows the number
-            still may.
-        dispatcher: How each admitted task is dispatched, called as
-            ``dispatcher(scheduler, task, prompt, snapshot, profile, declared,
-            batch_index=...)``. ``None`` is :meth:`_dispatch_executor`, the
-            executor under ``--exec-subagents``; no orchestrator passes another.
-            An injected one (the equivalence tests' simulated native invoker)
-            names itself in its ``invoker`` attribute and starts no runner, so
-            no runner preflight decides rollback storage for it. Containment,
-            classification and the prior-changes append are the loop's, the
-            same for either — which is what makes "either invoker, same
-            terminal state" a property of the code.
-        dry_run: ``--dry-run-subagents``. Renders every command, applies every
-            admission and policy check, writes ``subagent_dry_run.json`` and starts
-            **no** child.
-        write_target: The phase's one write target — ``write_phase_artifact()``,
-            the plan for apply-suggestions and the tasks file for
-            apply-task-suggestions (plan step 3, F1 "How a dispatch receives its
-            grant", 2026-09-30). ``realpath``-resolved and checked here, at
-            construction: it must exist, be a regular file, not be a symlink and
-            lie under the repo root, or nothing runs. For the ``plan-file`` and
-            ``tasks`` scopes it is the grant's target, and every task's declared
-            set must resolve to exactly it, on every rung, before its snapshot.
-            ``None`` for implement and apply-code-fixes (``repo-wide`` is one
-            dir rule on the repository root, with this run's output folder on
-            the request for the developer message, never a target); a
-            ``plan-file``/``tasks`` phase
-            built without one carries no grant, and the executor refuses it on
-            the rung.
+    Built from one :class:`SchedulerOptions`, or from its fields as keywords
+    (``WriteBatchScheduler(tasks=..., phase_dir=..., kind=..., output_dir=...)``),
+    which is the same thing: the fields are documented there.
     """
 
     def __init__(
-        self,
-        *,
-        tasks: Sequence[Dict[str, Any]],
-        phase_dir: str,
-        kind: str,
-        output_dir: str,
-        repo_root: Optional[str] = None,
-        phase: Optional[str] = None,
-        state: Any = None,
-        plan_file: Optional[str] = None,
-        summary_file: Optional[str] = None,
-        summary_file_relative: Optional[str] = None,
-        anchor: Optional[str] = None,
-        host_max: Optional[int] = None,
-        runner: Optional[str] = None,
-        resume: bool = True,
-        dry_run: bool = False,
-        human_task_strategy: Optional[str] = None,
-        human_task_decisions: Optional[Dict[str, str]] = None,
-        dispatcher: Optional[Callable[..., TaskOutcome]] = None,
-        finalize: bool = True,
-        log: Optional[Callable[[str], None]] = None,
-        write_target: Optional[str] = None,
-        user_commands: Optional[Dict[str, str]] = None,
-        partial_skips: Optional[Sequence[str]] = None,
-        scope_policy: Optional[str] = None,
-        scope_baseline_id: Optional[str] = None,
+        self, options: Optional[SchedulerOptions] = None, /, **fields: Any,
     ) -> None:
-        if kind not in WRITE_KINDS:
+        if options is None:
+            options = SchedulerOptions(**fields)
+        elif fields or not isinstance(options, SchedulerOptions):
+            raise TypeError(
+                "WriteBatchScheduler takes one SchedulerOptions, or its fields "
+                "as keywords, not both"
+            )
+        #: What this scheduler was built from, as given (WRITE-5).
+        self.options = options
+        if options.kind not in WRITE_KINDS:
             raise ExecutorError(
-                f"{kind!r} is not a write kind (known: {', '.join(WRITE_KINDS)}). "
+                f"{options.kind!r} is not a write kind (known: {', '.join(WRITE_KINDS)}). "
                 f"Nothing was dispatched."
             )
-        self.tasks = list(tasks)
-        self.phase_dir = str(phase_dir)
-        self.kind = kind
-        self.phase = phase or PHASE_BY_WRITE_KIND[kind]
-        self.output_dir = str(output_dir)
-        self.anchor = anchor or plan_file
+        self.tasks = list(options.tasks)
+        self.phase_dir = str(options.phase_dir)
+        self.kind = options.kind
+        self.phase = options.phase or PHASE_BY_WRITE_KIND[options.kind]
+        self.output_dir = str(options.output_dir)
+        self.anchor = options.anchor or options.plan_file
         # An explicit root is checked the way the resolver pins one (review
         # fixes 2026-10-05): a planted `core.worktree` or a redirecting `.git`
         # refuses the phase at construction, before any snapshot or dispatch.
         self.repo_root = (
-            self._checked_repo_root(repo_root) if repo_root
+            self._checked_repo_root(options.repo_root) if options.repo_root
             else resolve_repo_root(self.anchor)
         )
-        self.state = state
-        self.plan_file = plan_file
-        self.summary_file = summary_file
-        self.summary_file_relative = summary_file_relative
+        #: The run's one ``StateManager``; a run built without one (a unit
+        #: test) holds a ``write_context.NullState``, which writes nothing.
+        self.state = (
+            options.state if options.state is not None else _write_context.NullState()
+        )
+        self.plan_file = options.plan_file
+        self.summary_file = options.summary_file
+        self.summary_file_relative = options.summary_file_relative
         # `host_max=None` means *look it up*, exactly as it does for the read
         # path's `subagent_executor.effective_ceiling` — never "this phase has no
         # host leg". Reading it as the latter cost the write half its host leg
@@ -927,7 +967,7 @@ class WriteBatchScheduler:
         # where the read half records a number. Resolved here rather than
         # per-call so `write_ceiling`, the batch report and the dry-run record
         # cannot disagree about which number bound the phase.
-        self.host_max = _host_ceiling() if host_max is None else host_max
+        self.host_max = _host_ceiling() if options.host_max is None else options.host_max
         # The phase's driver and provider legs of the same minimum, filled on
         # first use and kept as every batch's upper bound: see `_ceiling_legs`.
         self._ceiling_legs_cache: Optional[
@@ -939,45 +979,45 @@ class WriteBatchScheduler:
         self._admitted_ceilings: List[int] = []
         self._admitted_driver: Optional[int] = None
         self._admitted_limits: Dict[str, Optional[int]] = {}
-        self.forced_runner = runner
-        self.resume = resume
-        self.dry_run = dry_run
-        self.human_task_strategy = human_task_strategy
-        self.human_task_decisions = dict(human_task_decisions or {})
-        #: The dispatch seam (see ``dispatcher`` above), an unbound callable
+        self.forced_runner = options.runner
+        self.resume = options.resume
+        self.dry_run = options.dry_run
+        self.human_task_strategy = options.human_task_strategy
+        self.human_task_decisions = dict(options.human_task_decisions or {})
+        #: The dispatch seam (``SchedulerOptions.dispatcher``), an unbound callable
         #: taking this scheduler first.
         self._dispatcher: Callable[..., TaskOutcome] = (
-            dispatcher or WriteBatchScheduler._dispatch_executor
+            options.dispatcher or WriteBatchScheduler._dispatch_executor
         )
         #: True when dispatches go through the executor, which spawns runners.
-        self._executor_dispatch = dispatcher is None
-        self.finalize = finalize
-        self.log = log or (lambda line: print(line))
+        self._executor_dispatch = options.dispatcher is None
+        self.finalize = options.finalize
+        self.log = options.log or (lambda line: print(line))
         #: The way forward after a stop, spelled the way this host's user
         #: types it (the orchestrator builds them from the host's
         #: `next_command` template; the scheduler knows no host): `resume`,
         #: `review`, `fix`, and the two `--human-task` variants `accept` /
         #: `skip` with `{task_id}` left for the failed task. Absent (a direct
         #: invocation), the stop message names the flags instead.
-        self.user_commands: Dict[str, str] = dict(user_commands or {})
+        self.user_commands: Dict[str, str] = dict(options.user_commands or {})
         #: Fix round 18: the apply batches answered ``--human-task <id>=skip``
         #: on this resume — each stopped as a partial application whose report
         #: left items out, kept as it stands, those items recorded as skipped
         #: at the user's request (:meth:`ResumeEvidence.check_partial_skips`).
-        self.partial_skips: List[str] = [str(t) for t in (partial_skips or [])]
+        self.partial_skips: List[str] = [str(t) for t in (options.partial_skips or [])]
         #: The scope policy an apply dispatch enforces (plans/
         #: scope-policy-and-report-tags.md §5): the orchestrator's effective
         #: one, else the round's record in ``state.json`` at dispatch.
-        self.scope_policy = scope_policy
-        self.scope_baseline_id = scope_baseline_id
+        self.scope_policy = options.scope_policy
+        self.scope_baseline_id = options.scope_baseline_id
 
         # Plan step 3 (2026-09-30): the grant a write dispatch on the
         # plugin-landlock rung carries. ONE request for the whole phase — the
         # scope from the kind map, the target from the phase's own artifact —
         # never a per-task path, so nothing a task file says can widen it.
-        self.write_scope = write_scope_for_kind(kind)
+        self.write_scope = write_scope_for_kind(options.kind)
         self.write_target = _write_grant.checked_write_target(
-            write_target, repo_root=self.repo_root, phase=self.phase,
+            options.write_target, repo_root=self.repo_root, phase=self.phase,
         )
         self.policy = WritePolicy.load(self.repo_root, anchor=self.anchor)
         self.jail_request = _write_grant.build_jail_request(
@@ -1037,7 +1077,7 @@ class WriteBatchScheduler:
             self._prompts.pinned_phase_dir()
         except OSError:
             pass  # named on the first prompt kept, with that task's id
-        self.invoker = "executor" if dispatcher is None else str(dispatcher.invoker)
+        self.invoker = "executor" if options.dispatcher is None else str(options.dispatcher.invoker)
         #: What implement's checks hold back and whether a resumed one runs
         #: again (`write_check_holds.CheckHolds`), stateless: a hold is
         #: recorded on the result.
@@ -1425,7 +1465,7 @@ class WriteBatchScheduler:
         if self.kind != "apply_code_fixes":
             return None
         try:
-            state = self.state
+            state = _write_context.manager_or_none(self.state)
             if state is None:
                 state = _known_checks.read_state(self.output_dir)
             return _known_checks.checks_report(
@@ -1558,7 +1598,7 @@ class WriteBatchScheduler:
                 if self.kind == "implement" else None
             ),
         )
-        if self.kind == "implement" and self.state is not None:
+        if self.kind == "implement":
             try:
                 recorded = dict(self.state.get_all_task_statuses())
             except Exception:  # noqa: BLE001 - a state fake without the map
@@ -1844,9 +1884,7 @@ class WriteBatchScheduler:
         plan = result.human_plan
         # A dry run never persists the plan, so an accepted check can still
         # read as holding its dependents on record.
-        on_record = (
-            set(_check_records.rerunnable_checks(self.state)) if self.state is not None else set()
-        ) - set(plan.accepted)
+        on_record = set(_check_records.rerunnable_checks(self.state)) - set(plan.accepted)
         rerun: set = set()
         dispatched_checks: List[str] = []
         waiting: Dict[str, List[str]] = {}
@@ -2088,23 +2126,22 @@ class WriteBatchScheduler:
             # reporting `(13/14 tasks)` with one task still `pending`
             # (state-tracking F5, 2026-09-16). No metric: the duration was the
             # earlier run's to measure, and a fabricated one would average in.
-            if self.state is not None:
-                with self._effects_lock:
-                    self._remember_outcome(outcome)
-                    resumed_reason = (
-                        "not run again: nothing changed since its check "
-                        "reported problems" if kept_findings else
-                        f"resumed from {Path(outcome.output_path).name}"
-                    )
-                    # Its status and items again; its verdict stays as the
-                    # earlier run recorded it.
-                    self._write_record(task, replace(self._batch_facts(
-                        task, outcome, "completed", resumed_reason,
-                        dispatched=False, kept=False), resumed=True))
-                    # §2.7: its completion's identities, should the earlier
-                    # run have stopped before it saved them.
-                    self._commit.repin(task, outcome)
-                    self.state.save()
+            with self._effects_lock:
+                self._remember_outcome(outcome)
+                resumed_reason = (
+                    "not run again: nothing changed since its check "
+                    "reported problems" if kept_findings else
+                    f"resumed from {Path(outcome.output_path).name}"
+                )
+                # Its status and items again; its verdict stays as the
+                # earlier run recorded it.
+                self._write_record(task, replace(self._batch_facts(
+                    task, outcome, "completed", resumed_reason,
+                    dispatched=False, kept=False), resumed=True))
+                # §2.7: its completion's identities, should the earlier
+                # run have stopped before it saved them.
+                self._commit.repin(task, outcome)
+                self.state.save()
             return outcome
 
         # Past the resume skips, the task is this run's to handle.
@@ -2241,61 +2278,19 @@ class WriteBatchScheduler:
         """Keep a stopped batch as it stands, at the user's request (fix round 18).
 
         Answered ``--human-task <id>=skip`` and checked by
-        :meth:`ResumeEvidence.partial_skip_evidence`. Nothing is dispatched: the outcome is
-        the batch's own, ``applied``, with every item its report left out
-        recorded as skipped at the user's request (``skipped_items``, never
-        counted as applied) beside the items it declined. Its verdict is
-        stamped again and the audit gains a completion line, so a later
-        resume and ``util restore-batch`` read it as done (the pre-batch
-        snapshot stays its rollback point); its summary joins the
-        prior-changes log the next batch reads; and the loop goes on.
+        :meth:`ResumeEvidence.partial_skip_evidence`. Nothing is dispatched:
+        the outcome is the batch's own, read by
+        :meth:`ResumeEvidence.kept_outcome`, which writes nothing. Here it is
+        recorded: its verdict is stamped again and the audit gains a
+        completion line, so a later resume and ``util restore-batch`` read it
+        as done (the pre-batch snapshot stays its rollback point); its
+        summary joins the prior-changes log the next batch reads; and the
+        loop goes on.
         """
-        task_id = str(task.get("task_id", ""))
-        kept = self._evidence.kept_at_request.pop(task_id)
-        data, verdict = kept["data"], kept["verdict"]
-        expected = [str(i) for i in (task.get("expected_ids") or [])]
-        unapplied = [
-            str(i) for i in (verdict.get("unapplied_ids") or []) if str(i) in expected
-        ]
-        outcome = TaskOutcome(
-            task_id=task_id, kind=self.kind, runner=self.invoker,
-            status=STATUS_OK, profile=profile_for_kind(self.kind),
-            write_outcome=WRITE_APPLIED,
-            summary=(str(data.get("summary") or "").strip() or None),
-            runner_notes=(verdict.get("runner_notes") or None),
+        outcome = self._evidence.kept_outcome(
+            task, invoker=self.invoker, item_words=self._declined_words,
         )
-        outcome.output_path = kept["path"]
-        outcome.files_touched = [str(p) for p in (verdict.get("files_touched") or [])]
-        outcome.expected_ids = expected
-        outcome.returned_ids = [str(i) for i in (data.get("ids") or [])]
-        outcome.sha256_before = dict(verdict.get("sha256_before") or {})
-        outcome.sha256_after = dict(verdict.get("sha256_after") or {})
-        outcome.declined = row_declined(verdict)
-        outcome.skipped_items = {
-            item: (
-                f"--human-task {task_id}=skip: the batch did not report it "
-                f"applied, and you chose to keep the batch as it stood"
-            )
-            for item in unapplied
-        }
-        read_verdict_checks(outcome, verdict)
-        snapshot = os.path.join(self.safety_dir, "pre_batch", task_id)
-        if os.path.isdir(snapshot):
-            outcome.snapshot_dir = snapshot
-        # Fix round 27: the stop after the last reason only where it has no
-        # mark of its own (`with_closing_mark`).
-        outcome.reason = with_closing_mark(
-            f"KEPT AT YOUR REQUEST (--human-task {task_id}=skip): what it "
-            f"applied stays as it left it"
-            + (f" ({', '.join(outcome.files_touched)})" if outcome.files_touched else "")
-            + f"; not applied, skipped at your request: "
-            f"{self._declined_words(outcome.skipped_items)}"
-            + (
-                f"; declined by the batch: "
-                f"{self._declined_words(outcome.declined)}"
-                if outcome.declined else ""
-            )
-        ) + " It was not dispatched again."
+        task_id, expected = outcome.task_id, outcome.expected_ids
         recorded = self.audit.completion_for(task_id, expected_ids=expected) or {}
         self.audit.completed(
             task_id=task_id, kind=self.kind, attempt=0, runner=self.invoker,
@@ -3488,31 +3483,30 @@ class WriteBatchScheduler:
                 self._eta.record(task, outcome, result)
 
             self._remember_outcome(outcome)
-            if self.state is not None:
-                if self.kind == "implement" and isinstance(
-                    getattr(self.state, "state", None), dict
-                ):
-                    # Fix round 28: under this lock, so whichever of a code
-                    # task and a check task records second sees the other.
-                    self._split_check_repeats(task, outcome)
-                status = "completed" if outcome.ok else "failed"
-                reason = None if outcome.ok else (outcome.reason or outcome.status)
-                if kept:
-                    reason = (
-                        f"kept at your request (--human-task {task_id}=skip): "
-                        f"{len(outcome.skipped_items)} item(s) not applied"
-                    )
-                # The record `util batch-done` writes on the native leg.
-                record = self._write_record(task, self._batch_facts(
-                    task, outcome, status, reason, dispatched=dispatched, kept=kept))
-                if record.repeats_moved:
-                    self._move_repeats_of(task_id, record.repeats_moved, result)
-                # plans/review-commits.md §2.7: a completed batch re-pins its
-                # fix files to the bytes it left (no-op without a guard).
-                self._commit.repin(task, outcome)
-                # Persists the metric recorded just above too: it is a mutation
-                # of this object's dict now, not a second writer's file (F4).
-                self.state.save()
+            if self.kind == "implement" and isinstance(
+                getattr(self.state, "state", None), dict
+            ):
+                # Fix round 28: under this lock, so whichever of a code
+                # task and a check task records second sees the other.
+                self._split_check_repeats(task, outcome)
+            status = "completed" if outcome.ok else "failed"
+            reason = None if outcome.ok else (outcome.reason or outcome.status)
+            if kept:
+                reason = (
+                    f"kept at your request (--human-task {task_id}=skip): "
+                    f"{len(outcome.skipped_items)} item(s) not applied"
+                )
+            # The record `util batch-done` writes on the native leg.
+            record = self._write_record(task, self._batch_facts(
+                task, outcome, status, reason, dispatched=dispatched, kept=kept))
+            if record.repeats_moved:
+                self._move_repeats_of(task_id, record.repeats_moved, result)
+            # plans/review-commits.md §2.7: a completed batch re-pins its
+            # fix files to the bytes it left (no-op without a guard).
+            self._commit.repin(task, outcome)
+            # Persists the metric recorded just above too: it is a mutation
+            # of this object's dict now, not a second writer's file (F4).
+            self.state.save()
 
             # One line per batch, on the happy path (F7). Every other `self.log`
             # in the loop is exceptional, so a 25-minute five-batch run left an
@@ -3653,8 +3647,6 @@ class WriteBatchScheduler:
     # -- human plan persistence -----------------------------------------
 
     def _persist_human_plan(self, plan: _human_task_plan.HumanTaskPlan) -> None:
-        if self.state is None:
-            return
         _human_task_plan.persist_human_task_plan(self.state, plan)
 
     def _pending_human_message(self, plan: _human_task_plan.HumanTaskPlan) -> List[str]:
@@ -3737,68 +3729,66 @@ class WriteBatchScheduler:
                     f"Implementation summary: {result.summary_file}"
                 )
             return
-        if self.state is not None:
-            self._eta.finish(result)
-            # A resume of a phase already completed that dispatched nothing —
-            # `implement --resume --human-task T007=done` closing a deferred
-            # manual task — changed no code, so its completion keeps its date:
-            # re-stamping it made review-code and apply-code-fixes read stale,
-            # and the closing answer cost a review cycle (fix round 14). Fix
-            # round 15: "dispatched nothing" is read off the outcomes, not
-            # `batches_dispatched`, which a batch of resume skips joins too —
-            # a check whose findings stand, materialized again on every
-            # resume and kept without a dispatch, re-stamped the date.
-            # 2026-10-09: but never a date older than the review this apply
-            # phase applies. A `--force` round whose review re-reports every
-            # batch byte for byte keeps them all and dispatches nothing; the
-            # findings are applied, so the apply is stamped after the review
-            # (plan improve-plan-and-improve-code §2.5). Kept, the old date
-            # read as "review not applied yet" to `ImproveWorkflow`, and no
-            # later re-run of the composite reached `[ALREADY_COMPLETE]`.
-            ran = any(not outcome.skipped for outcome in result.outcomes)
-            review = _write_resume.REVIEW_PHASE_BY_WRITE_KIND.get(self.kind)
-            keeps_date = (
-                not ran
-                and self.state.is_phase_completed(self.phase)
-                and not (
-                    review is not None
-                    and self.state.completion_predates(self.phase, review)
-                )
+        self._eta.finish(result)
+        # A resume of a phase already completed that dispatched nothing —
+        # `implement --resume --human-task T007=done` closing a deferred
+        # manual task — changed no code, so its completion keeps its date:
+        # re-stamping it made review-code and apply-code-fixes read stale,
+        # and the closing answer cost a review cycle (fix round 14). Fix
+        # round 15: "dispatched nothing" is read off the outcomes, not
+        # `batches_dispatched`, which a batch of resume skips joins too —
+        # a check whose findings stand, materialized again on every
+        # resume and kept without a dispatch, re-stamped the date.
+        # 2026-10-09: but never a date older than the review this apply
+        # phase applies. A `--force` round whose review re-reports every
+        # batch byte for byte keeps them all and dispatches nothing; the
+        # findings are applied, so the apply is stamped after the review
+        # (plan improve-plan-and-improve-code §2.5). Kept, the old date
+        # read as "review not applied yet" to `ImproveWorkflow`, and no
+        # later re-run of the composite reached `[ALREADY_COMPLETE]`.
+        ran = any(not outcome.skipped for outcome in result.outcomes)
+        review = _write_resume.REVIEW_PHASE_BY_WRITE_KIND.get(self.kind)
+        keeps_date = (
+            not ran
+            and self.state.is_phase_completed(self.phase)
+            and not (
+                review is not None
+                and self.state.completion_predates(self.phase, review)
             )
-            if not keeps_date:
-                self.state.mark_phase_completed(self.phase)
-            # F5: re-stamp `plan_hash` to what this run actually left on disk.
-            # Every batch's edit is already written by the time `_finalize`
-            # runs, so without this the *next* `StateManager` built on this
-            # plan reads the run's own edit as a human editing the plan
-            # mid-workflow and sets `plan_changed`, which
-            # `implement_orchestrator.py` reports as "Plan has changed since
-            # last session" for a change the plugin made.
-            self.state.refresh_plan_hash()
-            self.state.save()
-            if self.kind in _batch_prompt.CODE_WRITE_KINDS:
-                # Only a code phase records `tracked_files`: the planning
-                # phases edit the plan and the task list, which are never
-                # code under review (2026-10-05, Codex racing run 3:
-                # apply-task-suggestions' census put both in review-code's
-                # scope).
-                self._verify.finalize_tracking(result)
-                # `finalize_tracking` is a file-level writer: it read the state
-                # we just saved, computed `tracked_files` and wrote it back.
-                # Adopt its file before touching the dict again, or the `save()`
-                # below dumps the pre-finalize dict over it and the phase's
-                # only deliverable is not tracked at all (F3, measured
-                # 2026-09-16).
-                self._reload_state()
+        )
+        if not keeps_date:
+            self.state.mark_phase_completed(self.phase)
+        # F5: re-stamp `plan_hash` to what this run actually left on disk.
+        # Every batch's edit is already written by the time `_finalize`
+        # runs, so without this the *next* `StateManager` built on this
+        # plan reads the run's own edit as a human editing the plan
+        # mid-workflow and sets `plan_changed`, which
+        # `implement_orchestrator.py` reports as "Plan has changed since
+        # last session" for a change the plugin made.
+        self.state.refresh_plan_hash()
+        self.state.save()
+        if self.kind in _batch_prompt.CODE_WRITE_KINDS:
+            # Only a code phase records `tracked_files`: the planning
+            # phases edit the plan and the task list, which are never
+            # code under review (2026-10-05, Codex racing run 3:
+            # apply-task-suggestions' census put both in review-code's
+            # scope).
+            self._verify.finalize_tracking(result)
+            # `finalize_tracking` is a file-level writer: it read the state
+            # we just saved, computed `tracked_files` and wrote it back.
+            # Adopt its file before touching the dict again, or the `save()`
+            # below dumps the pre-finalize dict over it and the phase's
+            # only deliverable is not tracked at all (F3, measured
+            # 2026-09-16).
+            self._reload_state()
         if self.summary_file:
             result.summary_file = self._reports.write_summary(result)
             self._reports.insert_plan_reference(result.summary_file)
-            if self.state is not None:
-                # `WriteReports.insert_plan_reference` is the one plan edit a run makes
-                # *after* the stamp above (implement's own back-reference
-                # insertion) — re-stamp once more so it is not left stale too.
-                self.state.refresh_plan_hash()
-                self.state.save()
+            # `WriteReports.insert_plan_reference` is the one plan edit a run makes
+            # *after* the stamp above (implement's own back-reference
+            # insertion) — re-stamp once more so it is not left stale too.
+            self.state.refresh_plan_hash()
+            self.state.save()
         # Fix round 15: a check whose findings stand and hold nothing back
         # lets the run finish; the run's own later edits (the tasks after it,
         # the plan's back-reference just above) are not a change the user
@@ -3832,7 +3822,7 @@ class WriteBatchScheduler:
         stamped it (``implement_orchestrator._start_over``). Best-effort.
         """
         if (
-            self.kind != "implement" or self.dry_run or self.state is None
+            self.kind != "implement" or self.dry_run
             or self._implement_started_marked
         ):
             return

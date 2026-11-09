@@ -113,13 +113,37 @@ after the census, and `_classify` calls `_undeclared_writes`, which
 `PreBatchSnapshots` reads the preflight through the run's `WriteGrant` and an earlier run's
 results through its `ResumeEvidence`, and `DryRunReport` the preflight and the prompt through
 the `WriteGrant` and `BatchPromptBuilder`: the objects themselves, so a class or instance patch
-of either reaches them. `_keep_at_request`, a step of a dispatch, and `_stop_on_manual_gate`,
-which calls the collaborators, stay on the scheduler. A test
+of either reaches them. A batch kept at the user's request is read by
+`ResumeEvidence.kept_outcome`, which writes nothing, and recorded by the scheduler's
+`_keep_at_request`, a step of a dispatch (the audit's completion line, the verdict stamp, the
+batch's effects, in that order); `_stop_on_manual_gate`, which calls the collaborators, stays on
+the scheduler too. A test
 calls a moved method on its collaborator (`scheduler._reports.mirror_status(result)`, `scheduler._verify_command.run(...)`,
 `scheduler._evidence.task_fingerprint(task)`, `scheduler._snapshots.take(task)`), a class patch
 goes on the collaborator's class (`write_check_holds.CheckHolds.tree_fingerprint`,
 `write_grant.WriteGrant.recorded_rung`), and a patch of a function it calls on the module that
 calls it (`write_grant.preflight_runner`): no collaborator has a forwarder on the scheduler.
+
+**The scheduler is built from one `SchedulerOptions`** (WRITE-5), a frozen keyword-only dataclass
+whose fields are the constructor's options and their documentation. The two orchestrators that
+drive a write phase build one and pass it (`WriteBatchScheduler(options)`); a test may pass the
+same fields as keywords, which builds the same record (`scheduler.options`), never both at once. A
+test stand-in for the scheduler takes the options object.
+
+**A run without a state holds a `NullState`** (`write_context.NullState`, WRITE-11), never `None`.
+Only a unit test leaves `state` unset; a real phase always has a `StateManager`. The null object
+writes nothing and reads as a missing state did: no `state.json` dict (`state`) or file
+(`state_file`), no task status, no phase started or completed, `get` gives the default (so the
+`check_records` readers find nothing on record), and it has none of the metric methods (so
+`EtaLines` prints no `[ETA]` line). The scheduler and its collaborators call it instead of asking
+whether there is a state. Two readers still ask, through `write_context.has_state`, because a
+missing state there is not an empty one: `CheckHolds.unchanged_since_failure` goes by the result
+file alone when there is no status to go by, and `StopAccount.manual_gate` has no record to gate
+on. A reader the native leg shares, which reads `state.json` on disk when it is handed `None`
+(`bind_prior_changes`, `known_check_commands`, the known checks' reports), is handed `None` for a
+run without one (`write_context.manager_or_none`). `VerifyStep.finalize_tracking` runs only with a
+state file to census. `tests/test_scheduler_null_state.py` holds the null object to the
+`StateManager`'s signatures and each reader to what `None` gave.
 
 ## Write scheduler contract
 
@@ -806,8 +830,9 @@ least one item in `ids` (fix round 19) and leaves others out
 verdict, the items, the inputs and the bytes on disk (`ResumeEvidence.check_partial_skips`, else exit 3 with
 nothing dispatched, recorded as an `answer-refused` stop whose headline is the result line's
 `error` and whose mirror drops the refused answer, fix round 19) and then keeps the
-batch as it stands (`_keep_at_request`: re-stamped verdict, audit completion line, prior-changes
-append, the left-out items as `skipped_items`, never counted as applied); an apply phase
+batch as it stands (`ResumeEvidence.kept_outcome`, then `_keep_at_request`: re-stamped verdict,
+audit completion line, prior-changes append, the left-out items as `skipped_items`, never counted
+as applied); an apply phase
 takes only `=skip`, only with `--resume` and `--exec-subagents`.
 
 On the native leg `util batch-done --declined <id>=<reason>` / `--skipped <id>` (refused when no item of the batch

@@ -34,6 +34,7 @@ from utils import subagent_prompts  # noqa: E402
 from utils import subagent_tasks  # noqa: E402
 from utils.schema_validator import validate_with_schema_file  # noqa: E402
 from utils.write_batch_scheduler import with_result_contract  # noqa: E402
+from utils import write_batch_scheduler as wbs  # noqa: E402
 from tests.support.declined_world import (  # noqa: E402
     CODEX_08_REPLY,
     REASON,
@@ -759,6 +760,76 @@ class TestThePartialApplicationOffersAWayForward:
             assert ("did not stop as a partial application whose report left "
                     "items out") in "\n".join(refused.messages)
             env.plan.write_text("# Plan\n\n## Step 1\nbody\n", encoding="utf-8")
+
+
+def _tree(root: Path):
+    """Every file under *root* with its bytes."""
+    return {str(p.relative_to(root)): p.read_bytes()
+            for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+class TestKeepingABatchIsReadThenRecorded:
+    """``ResumeEvidence.kept_outcome`` reads the kept batch and writes nothing;
+    the scheduler's ``_keep_at_request`` records it, in the order it always
+    has: the audit's completion line, the verdict stamp, the batch's effects."""
+
+    def _resumed(self, env, state, **over):
+        calls = []
+        env.scheduler(
+            _codex_08_tasks(env), respond=_codex_08_respond(env, calls), state=state,
+        ).run()
+        scheduler = env.scheduler(
+            _codex_08_tasks(env), respond=_codex_08_respond(env, calls),
+            state=state, resume=True, partial_skips=["apply-batch-0"], **over,
+        )
+        assert scheduler._evidence.check_partial_skips() == []
+        assert list(scheduler._evidence.kept_at_request) == ["apply-batch-0"]
+        return scheduler
+
+    def test_reading_it_writes_nothing(self, env):
+        state = FakeState(env.tmp_path / "state.json")
+        scheduler = self._resumed(env, state)
+        before = _tree(env.tmp_path)
+
+        outcome = scheduler._evidence.kept_outcome(
+            _codex_08_tasks(env)[0], invoker=scheduler.invoker,
+            item_words=scheduler._declined_words,
+        )
+
+        assert _tree(env.tmp_path) == before
+        assert scheduler._evidence.kept_at_request == {}
+        assert outcome.ok and outcome.write_outcome == executor.WRITE_APPLIED
+        assert outcome.runner == scheduler.invoker
+        assert list(outcome.skipped_items) == ["s0"]
+        assert outcome.snapshot_dir == str(env.phase_dir / "pre_batch" / "apply-batch-0")
+        assert outcome.reason.startswith(
+            "KEPT AT YOUR REQUEST (--human-task apply-batch-0=skip)")
+        assert outcome.reason.endswith(" It was not dispatched again.")
+
+    def test_the_scheduler_records_it_in_order(self, env, monkeypatch):
+        state = FakeState(env.tmp_path / "state.json")
+        scheduler = self._resumed(env, state)
+        order = []
+        for owner, name in ((scheduler.audit, "completed"),
+                            (scheduler, "_stamp_verdict"),
+                            (scheduler, "_record_batch_effects")):
+            real = getattr(owner, name)
+
+            def traced(*args, _real=real, _name=name, **kwargs):
+                order.append(_name)
+                return _real(*args, **kwargs)
+
+            monkeypatch.setattr(owner, name, traced)
+        result = wbs.SchedulerResult(kind=scheduler.kind, phase=scheduler.phase)
+
+        outcome = scheduler._keep_at_request(_codex_08_tasks(env)[0], 0, result)
+
+        assert order == ["completed", "_stamp_verdict", "_record_batch_effects"]
+        assert scheduler.audit.completion_for(
+            "apply-batch-0", expected_ids=outcome.expected_ids)["reason"] == outcome.reason
+        stamped = json.loads((env.phase_dir / "apply_batch_0.json").read_text())
+        assert [e["id"] for e in stamped["verdict"]["skipped_items"]] == ["s0"]
+        assert state.get_task_status("apply-batch-0") == "completed"
 
 
 class TestTheCodex08ShapeThroughTheApplyPhase(_PairRig):

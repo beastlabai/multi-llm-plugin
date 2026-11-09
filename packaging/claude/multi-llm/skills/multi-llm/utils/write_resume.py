@@ -17,9 +17,9 @@ It never writes ``state.json``: its one file of its own is the inputs binding,
 ``WRITE_FINGERPRINT_FILENAME``, beside the results.
 
 ``WriteBatchScheduler`` composes it with the run's ``RunContext``
-(docs/development/write-scheduler.md#where-the-schedulers-helpers-live). The
-pre-batch snapshot it may reuse, and keeping a batch at the user's request, stay
-the scheduler's: both are steps of a dispatch.
+(docs/development/write-scheduler.md#where-the-schedulers-helpers-live). A batch
+kept at the user's request is read here (:meth:`ResumeEvidence.kept_outcome`)
+and recorded by the scheduler's ``_keep_at_request``, a step of the dispatch.
 """
 
 from __future__ import annotations
@@ -38,6 +38,7 @@ from . import write_context as _write_context
 from . import write_outcomes as _write_outcomes
 from . import write_reports as _write_reports
 from .atomic_io import atomic_write_text
+from .batch_ledger import read_verdict_checks
 from .state_manager import _parse_completion_time, predates_review, stamp_or_mtime
 from .subagent_executor import (
     OUTPUT_NAME_PATTERN_BY_KIND,
@@ -47,11 +48,14 @@ from .subagent_executor import (
     WRITE_NO_OP,
     ResultRejected,
     TaskOutcome,
+    profile_for_kind,
     resolve_output_target,
+    row_declined,
     validate_result,
 )
 from .subagent_tasks import declared_file_set, write_output_name
 from .task_ledger import KEPT_WITH_FINDINGS_LABEL
+from .text_clip import with_closing_mark
 from .write_safety import TaskSnapshot, file_sha256
 
 
@@ -315,7 +319,7 @@ class ResumeEvidence:
         # ids this run still has materialized, for a state-less caller (e.g.
         # a dry run with no `state=`).
         known_ids = {str(task.get("task_id") or "") for task in self._ctx.tasks}
-        if self._ctx.state is not None and hasattr(self._ctx.state, "get_all_task_statuses"):
+        if hasattr(self._ctx.state, "get_all_task_statuses"):
             try:
                 known_ids |= set(self._ctx.state.get_all_task_statuses())
             except Exception:  # noqa: BLE001 - advisory only, never fatal
@@ -385,6 +389,71 @@ class ResumeEvidence:
                 "path": str(path), "data": data, "verdict": verdict,
             }
         return why
+
+    def kept_outcome(
+        self, task: Dict[str, Any], *, invoker: str,
+        item_words: Callable[[Dict[str, str]], str],
+    ) -> TaskOutcome:
+        """The outcome of a batch kept as it stands at the user's request
+        (fix round 18), taken out of ``kept_at_request``; writes nothing.
+
+        Answered ``--human-task <id>=skip`` and checked by
+        :meth:`partial_skip_evidence`. The outcome is the batch's own,
+        ``applied``, with every item its report left out recorded as skipped
+        at the user's request (``skipped_items``, never counted as applied)
+        beside the items it declined, and its pre-batch snapshot, should one
+        stand, as its rollback point. *invoker* is the run's, *item_words*
+        the scheduler's wording of an item map (``_declined_words``). The scheduler's
+        ``_keep_at_request`` records it: the audit's completion, the verdict
+        stamp and the batch's effects.
+        """
+        task_id = str(task.get("task_id", ""))
+        kept = self.kept_at_request.pop(task_id)
+        data, verdict = kept["data"], kept["verdict"]
+        expected = [str(i) for i in (task.get("expected_ids") or [])]
+        unapplied = [
+            str(i) for i in (verdict.get("unapplied_ids") or []) if str(i) in expected
+        ]
+        outcome = TaskOutcome(
+            task_id=task_id, kind=self._ctx.kind, runner=invoker,
+            status=STATUS_OK, profile=profile_for_kind(self._ctx.kind),
+            write_outcome=WRITE_APPLIED,
+            summary=(str(data.get("summary") or "").strip() or None),
+            runner_notes=(verdict.get("runner_notes") or None),
+        )
+        outcome.output_path = kept["path"]
+        outcome.files_touched = [str(p) for p in (verdict.get("files_touched") or [])]
+        outcome.expected_ids = expected
+        outcome.returned_ids = [str(i) for i in (data.get("ids") or [])]
+        outcome.sha256_before = dict(verdict.get("sha256_before") or {})
+        outcome.sha256_after = dict(verdict.get("sha256_after") or {})
+        outcome.declined = row_declined(verdict)
+        outcome.skipped_items = {
+            item: (
+                f"--human-task {task_id}=skip: the batch did not report it "
+                f"applied, and you chose to keep the batch as it stood"
+            )
+            for item in unapplied
+        }
+        read_verdict_checks(outcome, verdict)
+        snapshot = os.path.join(self._ctx.safety_dir, "pre_batch", task_id)
+        if os.path.isdir(snapshot):
+            outcome.snapshot_dir = snapshot
+        # Fix round 27: the stop after the last reason only where it has no
+        # mark of its own (`with_closing_mark`).
+        outcome.reason = with_closing_mark(
+            f"KEPT AT YOUR REQUEST (--human-task {task_id}=skip): what it "
+            f"applied stays as it left it"
+            + (f" ({', '.join(outcome.files_touched)})" if outcome.files_touched else "")
+            + f"; not applied, skipped at your request: "
+            f"{item_words(outcome.skipped_items)}"
+            + (
+                f"; declined by the batch: "
+                f"{item_words(outcome.declined)}"
+                if outcome.declined else ""
+            )
+        ) + " It was not dispatched again."
+        return outcome
 
     def task_fingerprint(self, task: Dict[str, Any]) -> str:
         """The D2g binding for one materialized write task, as one hash.
@@ -724,7 +793,6 @@ class ResumeEvidence:
             return False
         if (
             not sibling
-            and self._ctx.state is not None
             and hasattr(self._ctx.state, "get_task_status")
         ):
             # The same fact from `state.json`, for a result file that predates

@@ -903,7 +903,7 @@ class StopAccount:
         Only a task with no status or a ``pending`` one: a status an earlier
         run recorded (completed, failed, skipped) is never overwritten.
         """
-        if self._ctx.state is None or not result.not_run:
+        if not result.not_run:
             return
         with self._effects_lock:
             for task_id, reason in result.not_run.items():
@@ -978,7 +978,9 @@ class StopAccount:
         resume of a completed one that runs nothing keeps it completed, fix
         round 14), whose every code task left waits on a manual task not
         recorded done, one the user can do now among them."""
-        if self._ctx.kind != "implement" or self._ctx.dry_run or self._ctx.state is None:
+        if (self._ctx.kind != "implement" or self._ctx.dry_run
+                or not _write_context.has_state(self._ctx.state)):
+            # Without a state there is no record to gate on.
             return None
         if any(self._started_a_runner(o, result.refusals) for o in result.outcomes):
             return None
@@ -1087,7 +1089,7 @@ class StopAccount:
         ``task_titles``, else ``None``."""
         task = self._task_by_id(task_id) or {}
         title = task.get("task_title") or task.get("title")
-        if not title and self._ctx.state is not None:
+        if not title:
             try:
                 title = (self._ctx.state.get("task_titles") or {}).get(task_id)
             except Exception:  # noqa: BLE001 - a state fake without the map
@@ -1510,10 +1512,7 @@ class StopAccount:
         """:func:`plan_manual_gates` over this run's decomposition and
         ``state.json`` as recorded, or ``None`` when it cannot be read."""
         try:
-            statuses = (
-                dict(self._ctx.state.get_all_task_statuses())
-                if self._ctx.state is not None else {}
-            )
+            statuses = dict(self._ctx.state.get_all_task_statuses())
         except Exception:  # noqa: BLE001 - a state fake without the map
             statuses = {}
         try:

@@ -132,7 +132,7 @@ class EtaLines:
         18: not an accepted task, a manual one, or one a check holds; fix
         round 20: on implement, only what the run dispatches).
         """
-        if self._ctx.state is None or not hasattr(self._ctx.state, "record_metric"):
+        if not hasattr(self._ctx.state, "record_metric"):
             return
         usage = outcome.usage or {}
         label = (
@@ -465,7 +465,7 @@ class EtaLines:
         the run went on to print). Tasks, not batches, because that is the unit
         the numerator counts as well: see :meth:`record` (F3).
         """
-        if self._ctx.state is None or not hasattr(self._ctx.state, "start_metrics_phase"):
+        if not hasattr(self._ctx.state, "start_metrics_phase"):
             return
         total_batches = self.total(result)
         try:

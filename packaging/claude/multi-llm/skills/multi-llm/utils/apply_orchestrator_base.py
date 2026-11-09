@@ -3476,7 +3476,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
 
         from .task_outcome import ExecutorError
         from .write_safety import WriteSafetyError
-        from .write_batch_scheduler import WriteBatchScheduler
+        from .write_batch_scheduler import SchedulerOptions, WriteBatchScheduler
         from .write_phase_bridge import (
             materialize_write_tasks,
             write_task_file_for_phase,
@@ -3536,7 +3536,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             self.args, "resume", False
         )
         try:
-            scheduler = WriteBatchScheduler(
+            scheduler = WriteBatchScheduler(SchedulerOptions(
                 tasks=tasks,
                 phase_dir=phase_dir,
                 kind=self.write_kind,
@@ -3552,7 +3552,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 partial_skips=getattr(self, "partial_skips", None) or None,
                 user_commands=self._stop_user_commands(),
                 **self.scope_gate.scheduler_kwargs(),
-            )
+            ))
         except (ExecutorError, WriteSafetyError) as exc:
             # A target that cannot be granted (gone, a symlink, not a regular
             # file, outside the repo) — or a repository root that cannot be
