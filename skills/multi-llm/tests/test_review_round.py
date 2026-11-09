@@ -2277,16 +2277,25 @@ class TestRecoveryInputsAreReplacedWhole:
         runner, plan, phase_dir = _complete_round(
             tmp_path, "code_review", "code-review", CODE_ISSUES)
         names = ("grouped.json", "report.html", "report_data.json")
-        inodes = {name: (phase_dir / name).stat().st_ino for name in names}
+        # Held open on POSIX so their inode numbers cannot be reused by the
+        # files that replace them (a freed number can come back on ext4 under
+        # load); Windows refuses a rename over an open file, so it only reads.
+        held = {} if os.name == "nt" else {
+            name: open(phase_dir / name, "rb") for name in names}
+        try:
+            inodes = {name: (phase_dir / name).stat().st_ino for name in names}
 
-        _ok(_run(runner, "code_review", plan, "--force"))
-        runner.simulate_subagents(phase_dir / "validation_tasks.json")
-        _ok(runner.run_orchestrator("code_review", plan, "--reaggregate", "--yes",
-                                    timeout=120))
+            _ok(_run(runner, "code_review", plan, "--force"))
+            runner.simulate_subagents(phase_dir / "validation_tasks.json")
+            _ok(runner.run_orchestrator("code_review", plan, "--reaggregate", "--yes",
+                                        timeout=120))
 
-        for name in names:
-            assert (phase_dir / name).stat().st_ino != inodes[name], name
-        assert not list(phase_dir.glob(".*.tmp"))
+            for name in names:
+                assert (phase_dir / name).stat().st_ino != inodes[name], name
+            assert not list(phase_dir.glob(".*.tmp"))
+        finally:
+            for handle in held.values():
+                handle.close()
 
     def test_a_failed_html_write_keeps_the_old_page(self, tmp_path, monkeypatch):
         from utils import html_report_generator as html
