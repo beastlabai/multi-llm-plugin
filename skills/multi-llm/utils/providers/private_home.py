@@ -117,7 +117,7 @@ def _owner_verdict(pid: int, start: str, namespace: str) -> str:
         return process_control.UNKNOWN
     if _start_token(observed) == start:
         return process_control.ALIVE
-    # Only a clock-independent reading tells a reused pid apart: /proc's ticks
+    # Only a clock-independent reading tells a reused pid apart: the kernel's ticks
     # and Windows' FILETIME are; `ps`'s text follows the reader's time zone and
     # locale, so a mismatch there proves nothing.
     exact = (process_control.START_SOURCE_PROC, process_control.START_SOURCE_WINDOWS)
