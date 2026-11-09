@@ -500,7 +500,7 @@ def _unquote_porcelain_path(path: str) -> str:
     and C-escapes what is inside. Both halves have to come off: a census entry
     left as ``"sp ace.txt"`` (quotes included) matches no baseline entry, lands
     in ``tracked_files`` verbatim, and `review-code` then diffs a path that
-    does not exist (F6, 2026-09-16). An unquoted path is returned untouched —
+    does not exist. An unquoted path is returned untouched —
     a literal backslash in a bare porcelain path is not an escape.
     """
     if len(path) >= 2 and path.startswith('"') and path.endswith('"'):
@@ -586,7 +586,7 @@ def get_modified_files() -> List[str]:
         # Unquote here and not only in `subtract_baseline`: the census is what
         # gets STORED (in `tracked_files`, and handed to every consumer that
         # opens the file), so a path with a space has to leave this function as
-        # the path it really is (F6, 2026-09-16).
+        # the path it really is.
         filename = _unquote_porcelain_path(_porcelain_destination(line[3:]))
         if filename:
             files.append(filename)
@@ -701,7 +701,7 @@ def blobs_in_commit(
     """``{path: object id}`` for each of *paths* present in *ref*'s tree.
 
     The sibling of :func:`paths_in_commit` the apply guard saves its ``head``
-    expectations from (plans/review-commits.md §2.7): one ``git cat-file
+    expectations from: one ``git cat-file
     --batch-check=%(objectname)`` call over the same ``<sha>:<path>`` lines,
     under the same path rules, so its keys equal that function's set for a
     commit. A non-commit ref is ``None`` here; ``paths_in_commit`` also accepts
@@ -724,8 +724,7 @@ def read_at_commit(
     textconv, filter or eol conversion, which is what ``git show <ref>:<path>``
     prints for a file. *path* goes through :func:`git_path` first (relative to
     the repository at *cwd*), so a Windows ``pkg\\mod.py`` or an absolute path
-    reads ``pkg/mod.py`` (plans/review-commits.md §2.5, "Paths in git's
-    form"). ``None`` for a path absent at *ref*, a directory or submodule
+    reads ``pkg/mod.py``. ``None`` for a path absent at *ref*, a directory or submodule
     there, a *ref* that does not resolve, and a failed call: Python's reads at
     ``head`` treat each as "nothing to show", never as an error.
     """
@@ -755,8 +754,7 @@ def empty_tree_id(cwd: Optional[str] = None) -> str:
     ``git hash-object -t tree --stdin`` on empty input: ``4b825dc…`` in a
     SHA-1 repository, its own id in a SHA-256 one. Git knows this tree
     without storing it, but only by its full id, so the id is never
-    abbreviated (plans/review-commits.md §2.2, "Root ranges and the empty
-    tree"). Raises :class:`GitError` outside a repository.
+    abbreviated. Raises :class:`GitError` outside a repository.
     """
     key = os.path.realpath(cwd or os.getcwd())
     cached = _EMPTY_TREE_IDS.get(key)
@@ -800,7 +798,7 @@ def git_path(
     POSIX it is a legal name character and is left alone (``PurePosixPath``).
     A leading ``./`` is dropped. Paths outside the root are returned as given,
     made posix, so the caller's own lookup fails on them rather than this
-    helper guessing (plans/review-commits.md §2.5, "Paths in git's form").
+    helper guessing.
     """
     from pathlib import PurePosixPath, PureWindowsPath
 
@@ -836,10 +834,9 @@ def paths_changed_since(
 ) -> Set[str]:
     """The subset of *paths* whose disk entry is not what commit *head* holds.
 
-    THE change test of a commit review: §2.5's drift check runs it over the
-    scope files and §2.7's apply guard over the fix files, so the drift list
-    and the apply's skips never disagree about a file (plans/review-commits.md
-    §2.5 "Drift", §2.7 "What it compares"). It compares as git sees a file —
+    THE change test of a commit review: the drift check runs it over the
+    scope files and the apply guard over the fix files, so the drift list
+    and the apply's skips never disagree about a file. It compares as git sees a file —
     the content after the path's clean filters (eol, ``ident``, LFS), the mode
     and the kind — and hashes nothing itself, so a CRLF checkout of an
     unchanged file under ``* text=auto`` matches. Three reads, each one call
@@ -997,8 +994,7 @@ def rename_map(
     One ``git diff -M --name-status -z <base> <head>``, not limited to any
     scope, so both sides of a rename are seen. It labels a path absent at
     *head* (``renamed to <new>`` rather than ``deleted``) and nothing else:
-    the scope stays the ``--name-only`` list (plans/review-commits.md §2.5,
-    "Paths absent at ``head``"). ``None`` when the call fails, so the caller
+    the scope stays the ``--name-only`` list. ``None`` when the call fails, so the caller
     falls back to ``absent at <head7>``. An empty-tree *base_ref* (a root
     range) has no renames.
     """
@@ -1033,8 +1029,7 @@ def deleting_commit(
 
     ``git log -1 --diff-filter=D --format=%H <base>..<head> -- <path>`` (the
     newest such commit), for the fix prompt's ``git show <deleting>^:<path>``
-    on a file absent at ``head`` (plans/review-commits.md §2.7, "Historical
-    context for a deleted file"). ``--no-renames`` so a path renamed away
+    on a file absent at ``head``. ``--no-renames`` so a path renamed away
     counts as deleted by the commit that moved it. A root range (*base*
     ``None``, or the empty-tree id) has no ``<base>..`` side. ``None`` when no
     range commit deleted the path, or when the call fails.
@@ -1147,9 +1142,7 @@ def intent_to_add_untracked(
     the copy and sees the files as additions; the user's own ``.git/index`` is
     never written, so there is nothing to undo, an interrupted run cannot leave
     ``intent-to-add`` entries behind, and a ``git status`` the user runs in
-    another terminal meanwhile shows a clean tree (2026-10-02: the old
-    ``git add -N`` / ``git reset HEAD`` pair mutated the real index for the whole
-    review, flagged as a side effect of ``review-code``). On exit the variable is
+    another terminal meanwhile shows a clean tree. On exit the variable is
     restored (or removed) and the copy deleted. Files that were already in the
     index (staged, or already intent-to-add by the user) are never touched.
 
@@ -1386,9 +1379,8 @@ def head_is_unborn(cwd: Optional[str] = None) -> bool:
     A first-time user's project is exactly this (a new project, ``git init``,
     no commit), and every mode that opens ``state.json`` used to exit 1 on it
     with ``GitError: git rev-parse HEAD failed``, because the new state
-    recorded ``head_at_start`` through :func:`get_current_head` (found by the
-    Codex network rehearsal; plans/opencode-plugin-publish.md, "A new Git
-    repository is a separate case"). Anything else that fails the first
+    recorded ``head_at_start`` through :func:`get_current_head`. Anything
+    else that fails the first
     check — not a repository, a detached HEAD whose object is gone — is not
     unborn, and the caller's own git call reports it.
     """
@@ -1461,8 +1453,8 @@ def get_files_changed_since_ref(
 
     ``head_ref=None`` is ``git diff --name-only <base>``: the base against the
     working tree, as always. With a head it is ``git diff --name-only -z <base>
-    <head>``, the two commits alone, whatever the working tree holds
-    (plans/review-commits.md §2.5). Git's default rename detection is kept on
+    <head>``, the two commits alone, whatever the working tree holds. Git's default
+    rename detection is kept on
     purpose: a rename is listed under its new path only, which is the path the
     scope reviews. ``-z`` there hands back every path raw (decoded as
     :func:`_numstat_counts` decodes them), so a non-ASCII name is not C-quoted
@@ -1729,7 +1721,7 @@ def worktree_file_stats(
 
     The map :func:`worktree_fingerprint` digests, and what the native leg's
     check guard compares across one check's dispatch (``util write-prompt``
-    records it, ``util batch-done`` reads it back; fix round 13), so both
+    records it, ``util batch-done`` reads it back), so both
     see the same files the same way. *exclude_prefixes* are repo-relative
     files or directories whose contents are left out. ``None`` when git
     cannot answer.

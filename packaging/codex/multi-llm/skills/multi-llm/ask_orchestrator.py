@@ -22,7 +22,7 @@ Output layout (per question):
     └── .status.json          # resume detection + collision/freshness guard
 
 ``<model>`` is always ``sanitize_model_name(spec)``, the one stem every file of a
-model shares (plans/ask-answer-recovery-and-false-success.md D3.2).
+model shares.
 
 A slot counts as answered only when its run ended by itself at exit 0 with a
 finished answer (D3.1): a non-empty answer file (step 1), else the adapter's
@@ -222,8 +222,7 @@ def build_inline_plan(plan_content: str, plan_path: str) -> Tuple[str, bool]:
 # The shipped adapters that declare ``supports_file_output = False`` were being
 # told to write a file they can only answer with a refusal sentence. Nothing
 # downstream moves: step 2 of ``ask_one`` reads their stdout answer — the
-# adapter's reduced ``answer_text``, never the bounded log (plans/ask-answer-
-# recovery-and-false-success.md D2.3) — and persists it to ``answer_path``, so
+# adapter's reduced ``answer_text``, never the bounded log — and persists it to ``answer_path``, so
 # ``source: "fallback"`` stays the measured outcome, aggregation still reads a
 # file, and the origin record says ``stdout``, not a recovery (D7.1).
 #
@@ -306,7 +305,7 @@ def render_output_fields(provider_name: Optional[str], output_md_path: str) -> D
 
 # ---------------------------------------------------------------------------
 # The two plan fields of ``prompts/ask.txt``
-# (plans/ask-answer-recovery-and-false-success.md D4.2)
+#
 #
 # The same shape as the output fields above, read from the adapter's declared
 # :attr:`~utils.providers.base.LLMProvider.wants_inline_plan`. An adapter that
@@ -314,7 +313,6 @@ def render_output_fields(provider_name: Optional[str], output_md_path: str) -> D
 # duplicates it: aider attaches every absolute path its prompt names as a
 # ``--read`` file, and the inlined body also fed aider's mention scan, which
 # auto-added every repo path the plan named (1.08M tokens on 2026-09-26).
-#
 # The route is checked, not assumed: the path block is used only when the
 # adapter's own extractor finds ``plan_path`` in the COMPLETE rendered prompt —
 # the very string ``build_command`` receives — never in the block alone. A path
@@ -643,8 +641,7 @@ def recover_answer_text(
 ) -> Optional[str]:
     """Recover a usable plain-text answer from a provider result, or None.
 
-    **Once the caller has asked for the answer text, it is the only source**
-    (plans/ask-answer-recovery-and-false-success.md D2.3). *answer_text* is
+    **Once the caller has asked for the answer text, it is the only source**. *answer_text* is
     ``details["answer_text"]`` from ``invoke_with_provider(...,
     want_answer_text=True)``: the adapter's reduced answer (its ``salvage_text``
     hook, else ``generic_answer_text``) taken from the **full** stdout, redacted,
@@ -657,7 +654,7 @@ def recover_answer_text(
       first would save their answers unredacted and uncapped;
     - on a failed parse ``raw`` is sometimes the answer and sometimes the whole
       transport, which is how grok's ``{"type":"error",…}`` body was once saved
-      as an answer (§3.1).
+      as an answer.
 
     ``ask_one`` always asks, and passes the popped key (``""`` for a return that
     ran no child, which carries none).
@@ -689,7 +686,7 @@ def answer_finished(result: Any) -> bool:
 
     True for ``success`` True, or for ``error_code == PARSE_ERROR`` — the code
     ``invoke_with_provider`` stamps on *every* exit-0 ``success: False`` that
-    carries none, which is how a prose answer with no JSON in it arrives (§3.1),
+    carries none, which is how a prose answer with no JSON in it arrives,
     so a gate on ``success`` alone would fail every such answer. In both cases the
     adapter must not have reported ``details["incomplete"]``: pi's ``stopReason:
     "length"`` exits 0 with no code on purpose (so the review lanes' file channel
@@ -1503,8 +1500,7 @@ def answer_origins(
     ``{"answered", "file", "stdout", "fallback", "accepted", "unrecorded",
     "kept", "warn_all_fallback"}`` — the numbers of the counts line
     (:func:`answer_origins_line`) and the ``[WARN]``'s own predicate, so the
-    prose and ``MULTI_LLM_RESULT.answer_origins`` cannot disagree
-    (plans/ask-answer-recovery-and-false-success.md D7.2).
+    prose and ``MULTI_LLM_RESULT.answer_origins`` cannot disagree.
 
     - Counted by origin record (D7.1), never by this run's ``source``, so a
       resume of a run that met the warning's condition warns again.
@@ -2438,7 +2434,7 @@ def _resolve_inputs(args: argparse.Namespace) -> Union["AskInputs", int]:
         print(f"       Resolved path: {plan_path}")
         return 1
 
-    # §9.3.a/b: the anchor capture point — absolute, before anything can chdir
+    # The anchor capture point — absolute, before anything can chdir
     # and before any provider read that decides routing.
     set_run_anchor(plan_path)
 
@@ -2654,8 +2650,8 @@ def _record_launch(setup: AskSetup) -> Optional[int]:
                 "answers_md": os.path.join(question_dir, "answers.md"),
                 # Drop the predecessor's per-model map with the same move
                 # `claim_run` makes on the detached lane, and for the reason
-                # spelled out in the review base's copy of this write (F1,
-                # 2026-09-20): on the foreground lane nothing else ever drops
+                # spelled out in the review base's copy of this write: on the foreground
+                # lane nothing else ever drops
                 # it, so a re-asked question opened on the last run's rows and
                 # `just finished:` could never announce a model that the stale
                 # map already called terminal. `report_progress` below
@@ -2764,30 +2760,14 @@ class AskRun:
     def start(cls, setup: AskSetup) -> "AskRun":
         """The run for *setup*, with the fan-out's progress map built first."""
         args = setup.inputs.args
-        # The fan-out's per-model map, and the [PROGRESS] ticker that narrates it.
-        #
-        # Built against `question_dir` and **not** the `ask` phase dir the other
-        # three modes' pattern would predict: ask's checkpoint lives one level
-        # below, at `{plan}/ask/<slug>-<hash8>/.status.json` (see
-        # `resolve_question_dir`), because two different questions asked about one
-        # plan are two independent runs with two answer sets and two `.status.json`
-        # files. A tracker anchored on `{plan}/ask/` would merge both questions'
-        # models into a single map — and hand a poller a map it cannot attribute to
-        # either question. It is the same fact that makes the Layer 2 poll select by
-        # `--question` and never by `--phase ask`.
-        #
-        # `timeout=args.timeout` mirrors `ask_one`'s own budget rule (the CLI
-        # override when given, each provider's configured timeout otherwise), so a
-        # queued row renders `0m00s/30m` against the budget the slot will really
-        # get rather than a blank denominator.
-        #
-        # The division of labour with the helper: it seeds the map before the tasks
-        # exist, marks the stagger wait, turns every slot terminal from the result
-        # `ask_one` (or `skip_existing_answer`) returned, names the deadline as the
-        # sweep reason, and cancels *and awaits* the ticker in its `finally` before
-        # returning. What it cannot do is say when a slot left the queue for a
-        # provider — only the coroutine that dispatches sees that — which is why
-        # `ask_one` calls `tracker.running()` itself, exactly as
+        # The fan-out's per-model map and its [PROGRESS] ticker. Built against
+        # `question_dir`, not the `ask` phase dir: each question has its own
+        # `.status.json` one level below `{plan}/ask/`, and a tracker anchored on
+        # `{plan}/ask/` would merge two questions' models into one map (the same
+        # reason the status poll selects by `--question`, never `--phase ask`).
+        # `timeout=args.timeout` mirrors `ask_one`'s budget rule. The helper seeds
+        # the map, marks the stagger wait, turns every slot terminal and cancels
+        # *and awaits* the ticker; `ask_one` calls `tracker.running()` itself, as
         # `run_single_model` and `run_single_review` do on the other two lanes.
         tracker = FanoutProgress(
             setup.question_dir, setup.model_specs, anchor=setup.inputs.plan_path,
@@ -2823,26 +2803,18 @@ class AskRun:
         return results
 
     def skip_existing_answer(self, model_spec: str, index: int) -> Optional[Dict[str, Any]]:
-        # Cheap, synchronous resume check (runs before stagger/semaphores):
-        # short-circuit models that already have a non-empty answer so resume
+        # Cheap, synchronous resume check, before the stagger and the semaphores:
+        # a model that already has a non-empty answer short-circuits, so a resume
         # stays fast. Returns None when the model must (re)run.
         #
-        # The returned dict is also this slot's *progress transition*: the
-        # fan-out feeds it to `FanoutProgress.record_result`, which reads
-        # `success` and `source` and freezes the entry as `done` /
-        # `source: "resume"` with `attempt: 0` and `elapsed_s: 0` — terminal the
-        # moment it is seeded, because the answer exists and no attempt is ever
-        # dispatched. That is why a skipped model counts on **both** numbers,
-        # `models_done` and `models_succeeded`: it has finished its slot *and*
-        # it has a usable result, so a resumed run of four models that finds
-        # three on disk reads 3/4 at the first poll instead of 0/4. Leaving it
-        # `queued` would make the counts and the rendered table lie about a run
-        # with nothing left to do, and the write that claims the question dir
-        # drops the predecessor's `progress` wholesale, so there is no earlier
-        # entry to fall back on. (`claim_run` does that on the detached lane; on
-        # the foreground one the launch write does — F1, 2026-09-20.)
-        # There is no separate `skipped` state; the distinction lives in
-        # `source`.
+        # The dict is also the slot's progress transition: `FanoutProgress.
+        # record_result` freezes it as `done`, `source: "resume"`, `attempt: 0`,
+        # `elapsed_s: 0`, so a skipped model counts in both `models_done` and
+        # `models_succeeded` (a resume that finds three of four answers on disk
+        # reads 3/4 at the first poll). There is no `skipped` state; the
+        # distinction lives in `source`. The write that claims the question dir
+        # drops the predecessor's `progress`, so no earlier entry is left to fall
+        # back on.
         if not self.skip_existing:
             return None
         sanitized = sanitize_model_name(model_spec)
@@ -2944,27 +2916,19 @@ class AskRun:
                 return {"model": model_spec, "success": False, "error": error,
                         "source": "not-dispatched"}
 
-        # On both branches, and only past the sandbox gate (a refused slot is
-        # not a run and may not destroy the last run's evidence): from here on
-        # a partial, an origin record, and under --rerun-all an answer file,
-        # can only come from THIS dispatch. The stale partial goes so the
-        # partial a failed-model line names — and the one `--accept-partial`
-        # counts — is always the model's latest run's, and a re-ask that
-        # answers leaves none beside its answer (D3.2, D3.4); the stale origin
-        # goes so a re-ask that fails leaves no record, and one whose own
-        # record fails to write never shows the earlier answer's (D7.1);
-        # `--rerun-all` drops the stale answer so only content written during
-        # THIS run can count in steps 1 and 2 below. Each is removed directly,
-        # and one that cannot be removed (any error but FileNotFoundError) ends
-        # the slot `not-dispatched`, keeping the earlier answer: the answer,
-        # the one removal nothing can undo, goes last; a refusal over it puts
-        # the origin record back as it was read; and the partial, gone before
-        # either, is never the last run's text when they are there (a slot
-        # that answered removed it before it was asked). A model nothing
-        # withheld leaves the record its arm wrote taken out again: that
-        # answer is still one whose checks passed, which a resume keeps, and
-        # which `close` never counts as this run's under --rerun-all
-        # (docs/development/workflows.md#ask-mode).
+        # On both branches, and only past the sandbox gate (a refused slot is not
+        # a run and may not destroy the last run's evidence): from here on a
+        # partial, an origin record and, under --rerun-all, an answer file can come
+        # only from THIS dispatch. The stale partial goes so the one a failed-model
+        # line names (and `--accept-partial` counts) is the latest run's; the stale
+        # origin goes so a failed re-ask leaves no record; `--rerun-all` drops the
+        # stale answer. A removal that fails (any error but FileNotFoundError) ends
+        # the slot `not-dispatched` and keeps the earlier answer. The order is
+        # partial, origin, answer: the answer is the one removal nothing can undo,
+        # so a refusal over it puts the origin record back as it was read. A model
+        # nothing withheld takes the record its arm wrote out again: that answer's
+        # checks passed, so a resume keeps it and `close` never counts it as this
+        # run's under --rerun-all (docs/development/workflows.md#ask-mode).
         error = None
         earlier_origin = None if skip_existing else read_origin(question_dir, model_spec)
         if not remove_earlier_partial(question_dir, model_spec):
@@ -3061,7 +3025,7 @@ class AskRun:
         answer_text = details.pop("answer_text", "") if isinstance(details, dict) else ""
         if not isinstance(answer_text, str):
             answer_text = ""
-        # Plan §4.3: ask is single-shot, so its one attempt's verdicts are the
+        # Ask is single-shot, so its one attempt's verdicts are the
         # whole window's. A call that raised read nothing back: its `None` audit
         # never clears a change, and its home check is the read-back above.
         if raised is None:
@@ -3440,7 +3404,7 @@ class AskRun:
             # D2 row 6: the caller's flags.
             retry_flags=cli_common.current_replay_flags(mode="ask"),
         )
-        # Plan codex-sandbox-unavailable F1 (2026-09-30): every
+        # Every
         # `[CODEX_HOME_CHECK]` and `[JAIL_DENIED]` line of this run's slots,
         # repeated as its last word — a home change outlives the run.
         print_closing_summary(self.question_dir)

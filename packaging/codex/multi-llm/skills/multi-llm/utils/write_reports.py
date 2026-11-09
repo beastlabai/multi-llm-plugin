@@ -173,12 +173,12 @@ class WriteReports:
         """How to record the deferred manual tasks done, in the host's
         spelling (``user_commands["answers"]``), or ``None``.
 
-        Fix round 16 (live run 6): the how-to-close note rode implement's
+        The how-to-close note rode implement's
         result only, never its summary.md, on either leg. The manual tasks
         only: a code task skipped with one is not answerable ``done`` and
-        runs on that resume. Fix round 28: only the ones the user can do now
-        (:meth:`StopAccount.manual_gates`), and the note says what waits on them. Fix
-        round 29 (review of round 28 #2): a run that stopped on a manual-task
+        runs on that resume. Only the ones the user can do now
+        (:meth:`StopAccount.manual_gates`), and the note says what waits on them. A run
+        that stopped on a manual-task
         gate (*stop*) gives the gate's resume alone, the one command its stop
         names, and the note names the task(s) it records when the list above
         holds another manual task, which stays listed.
@@ -219,7 +219,7 @@ class WriteReports:
     def dispatched_sentence(self, result: Any) -> str:
         """summary.md's count of what this run dispatched: the tasks a
         runner was started for and the batches they ran in, then the ones
-        it handled without a runner (fix round 24, live run 10 #7: the stop
+        it handled without a runner (live run 10 #7: the stop
         fixture's summary said "5 batch task(s) dispatched across 4
         batch(es)" beside "Organized into 3 execution batches" and "task
         4/4", counting T005, refused before dispatch, and its batch). An
@@ -273,7 +273,7 @@ class WriteReports:
         settled without a runner: accepted (``=done`` on a failed task or a
         check), completed by hand (``=done`` on a manual task), and skipped
         at the user's request with the tasks skipped with them — in the
-        accounting line's words (fix round 26)."""
+        accounting line's words."""
         plan = result.human_plan
         out: Dict[str, Tuple[str, str]] = {}
         for task_id, reason in (plan.declined() or {}).items():
@@ -347,7 +347,7 @@ class WriteReports:
             )
             outcome_cell = row_outcome_label(row) or row.get("status")
             if row.get("status") == STATUS_OK and row_batch_check_findings(row):
-                # Fix round 14: never a plain success.
+                # Never a plain success.
                 outcome_cell = f"{outcome_cell}, " + (
                     "its check could not run"
                     if batch_check_could_not_run(row_batch_check_findings(row))
@@ -356,7 +356,7 @@ class WriteReports:
             notes = (row.get("reason") or row.get("summary") or "").replace("|", "/")
             answer = answered.get(str(row.get("task_id")))
             if answer is not None and row.get("from_earlier_run"):
-                # Fix round 26 (live run 11 #9, OpenCode fix 02): a task you
+                # A task you
                 # answered on this run reads as your answer, its earlier
                 # run's outcome named as what the answer was about; it read
                 # "(earlier run) policy-violation" here beside "## Skipped
@@ -387,7 +387,7 @@ class WriteReports:
             lines.append(f"| {task_id} | not run | — | {clip(reason.replace('|', '/'), 160)} |")
         findings_by_task = result.check_findings()
         if findings_by_task:
-            # Racing re-run 4 (2026-10-05): T007's two html-validate problems
+            # Racing re-run 4: T007's two html-validate problems
             # read VERIFIED here and lived only in the runner's notes. They
             # are listed whole, for the reader and for review-code, which is
             # given this file and state.json's record of them.
@@ -406,14 +406,14 @@ class WriteReports:
                 + "Review-code is told about them, and apply-code-fixes "
                 "applies the fixes review-code validates.", "",
             ]
-            # Fix round 22: a code task whose own check reported again only
+            # A code task whose own check reported again only
             # what you accepted for a check is named under that check.
             again: Dict[str, List[str]] = {}
             for task_id, matched in result.batch_check_accepted().items():
                 for check_id in matched:
                     again.setdefault(check_id, []).append(task_id)
             notes = result.batch_check_notes()
-            # Fix round 28: a code task whose own check reported only what a
+            # A code task whose own check reported only what a
             # check task reported is named under that check too.
             repeated: Dict[str, List[str]] = {}
             repeated_found: Dict[Tuple[str, str], List[str]] = {}
@@ -433,7 +433,7 @@ class WriteReports:
                         f"failure.{_check_records._note_sentence(notes.get(rerun))}", "",
                     ]
                 for rerun in repeated.get(task_id, []):
-                    # Fix round 29 (review of round 28, checks #5): the record
+                    # The record
                     # is what the task's run saw. A check that ran again and
                     # no longer lists what it repeated has the repeat quoted,
                     # never set under findings the task never reported.
@@ -500,7 +500,7 @@ class WriteReports:
                 )
         blocked = result.blocked_by_check
         if blocked:
-            # Fix round 11: the tasks a check with findings kept from
+            # The tasks a check with findings kept from
             # running, apart from a stop's own not-run list.
             lines += [
                 "", "## Not Run: Upstream Check Reported Problems", "",
@@ -518,7 +518,7 @@ class WriteReports:
             for task_id, check_id in sorted(blocked.items()):
                 lines.append(f"| {task_id} | {check_id} |")
         if (result.stop or {}).get("kind") == "manual-gate":
-            # Fix round 28 (live run 12, Codex racing 06): nothing ran, and
+            # Nothing ran, and
             # the summary says why rather than reading as a finished run.
             lines += [
                 "", "## Not Finished: Waiting On A Manual Task", "",
@@ -640,7 +640,7 @@ class WriteReports:
             # a write phase whose last `report_progress` came from the judging
             # dispatch printed `dispatching human-decision judging` for the whole
             # 288 s of batch application AND in the terminal payload, beside
-            # `run.state: done` (measured 2026-09-16). The mirror already writes
+            # `run.state: done`. The mirror already writes
             # `progress` on every advance, so it is the one place that can move
             # the step with the work; it is written key-by-key, so every sibling
             # counter survives.
@@ -656,14 +656,14 @@ class WriteReports:
             # ids for the three apply kinds, the task id itself for implement),
             # so both counts are already on hand with no new bookkeeping.
             #
-            # F9 (2026-09-16): both denominators also used to include the human
+            # F9: both denominators also used to include the human
             # task(s) `human_task_strategy` skips — they never dispatch, so a
             # clean 14-task run with one deferred manual task mirrored
             # `13/14 batches ok`, a run that did everything it could reading as
             # one short. `result.human_plan.skipped` is resolved before this is
             # ever called (`_run`'s step 1), so it is on hand the same way.
             #
-            # Fix round 19 (review of round 18, #1): and over the same tasks
+            # And over the same tasks
             # the `[ETA]` line counts (`EtaLines.task_ids`): not a manual task,
             # nor one a check with findings holds back — the line names that
             # one as not run, with the check. Counted over the materialized
@@ -679,7 +679,7 @@ class WriteReports:
                 if str(task.get("task_id", "")) in counted
             }
             total = len(counted_ids)
-            # Fix round 20: the `ok` of `<ok>/<total> batches ok`, over the
+            # The `ok` of `<ok>/<total> batches ok`, over the
             # same tasks, so a task an implement run kept from an earlier one
             # (never dispatched, never in `total`) is not counted as one of
             # its batches; the progress line names it as kept instead.
@@ -687,7 +687,7 @@ class WriteReports:
             items_total = sum(len(ids) for ids in expected_ids_by_task.values())
             items_applied = sum(
                 len([
-                    # Fix round 18: an item its batch declined, or one
+                    # An item its batch declined, or one
                     # skipped at the user's request, was not applied.
                     item for item in expected_ids_by_task.get(o.task_id, [])
                     if item not in o.declined and item not in o.skipped_items
@@ -717,7 +717,7 @@ class WriteReports:
             _status_file.update_status(self._ctx.phase_dir, {
                 # The read phases record a phase-level `state` beside the run
                 # record; without one here `status` printed `phase state: (none)`
-                # for every finished write phase (measured 2026-09-16).
+                # for every finished write phase.
                 "state": phase_state,
                 "phase": self._ctx.phase,
                 "progress": {
@@ -739,13 +739,13 @@ class WriteReports:
                         ],
                         "items_total": items_total,
                         "items_applied": items_applied,
-                        # Fix round 26 (live run 11, OpenCode 05): the one
+                        # The one
                         # file a single-target phase edits, repo-relative,
                         # so `status` says where the items were applied
-                        # ("applied to plans/x.md" was the host's guess).
+                        # ("applied to" was the host's guess).
                         **({"applied_to": self.applied_to_label()}
                            if self.applied_to_label() else {}),
-                        # Fix round 18: what finished batches did not apply
+                        # What finished batches did not apply
                         # on purpose, and why — `status` names each one.
                         **({"declined_items": declined_rows}
                            if declined_rows else {}),
@@ -769,14 +769,14 @@ class WriteReports:
                            if result.verification else {}),
                         "human_task_strategy": result.human_plan.strategy,
                         "skipped_task_ids": sorted(result.human_plan.skipped),
-                        # Fix round 14: which of those the user skipped
+                        # Which of those the user skipped
                         # (`--human-task <id>=skip`, a pause-and-ask "Skip")
                         # and which went with them, so `status` no longer
                         # lists them as "deferred manual" — work owed by hand
                         # — beside a summary that says "skipped at your
                         # request" (Codex stop-path accept 02).
                         **_human_task_plan._declined_split(result.human_plan),
-                        # Fix round 17: which of the rest wait on a deferred
+                        # Which of the rest wait on a deferred
                         # manual task, named apart from it on `status`.
                         **_human_task_plan._deferred_split(result.human_plan),
                         # One row per finished task. The id lists its rows
@@ -797,21 +797,21 @@ class WriteReports:
                                 # the row of a check that found something.
                                 **({"check_findings": list(o.check_findings)}
                                    if o.ok and o.check_findings else {}),
-                                # Fix round 14: a code batch whose own check
+                                # A code batch whose own check
                                 # failed after its edits.
                                 **({"batch_check_findings": list(o.batch_check)}
                                    if o.ok and o.batch_check else {}),
                                 "files_touched": list(o.files_touched),
-                                # Fix round 15: moved, with no rollback point.
+                                # Moved, with no rollback point.
                                 **({"unrestorable": list(o.unrestorable)}
                                    if o.unrestorable else {}),
-                                # Plan step 3: the rung, only when there was one.
+                                # The rung, only when there was one.
                                 **({"sandbox_rung": self._dispatch_rungs[o.task_id]}
                                    if self._dispatch_rungs.get(o.task_id) else {}),
                             }
                             for o in outcomes
                         ],
-                        # Fix round 23 (review of round 22, #4): which of
+                        # Which of
                         # the failed tasks a runner ran in this run — not one
                         # refused before dispatch, nor a failed check not run
                         # again — so `status` says "nothing crashed" only of
@@ -822,13 +822,13 @@ class WriteReports:
                             if not o.ok and not o.skipped and not o.not_rerun
                             and o.task_id not in result.refusals.before_dispatch
                         ],
-                        # Fix round 18 (run 7 #3): the tasks this run kept
+                        # The tasks this run kept
                         # from an earlier one instead of dispatching them, so
                         # `status` does not read them as this run's batches.
-                        # Fix round 22 (live run 9 #5): every task the
+                        # Every task the
                         # resume kept, as its `resume: kept` line names
                         # them, not only the ones it materialized again.
-                        # Fix round 23: the line's whole set — the tasks an
+                        # The line's whole set — the tasks an
                         # earlier run finished and this one did not
                         # dispatch, then the ones kept on the user's
                         # `--human-task <id>=done` (an accepted check or
@@ -840,34 +840,34 @@ class WriteReports:
                             set(result.human_plan.completed) & set(kept_ids)
                         )} if set(result.human_plan.completed) & set(kept_ids)
                            else {}),
-                        # Fix round 23: a task whose own check repeated only
+                        # A task whose own check repeated only
                         # the findings the user accepted, by the checks.
                         **({"batch_check_accepted": {
                             o.task_id: sorted(o.batch_check_accepted)
                             for o in outcomes if o.ok and o.batch_check_accepted
                         }} if any(o.ok and o.batch_check_accepted for o in outcomes)
                            else {}),
-                        # Fix round 28: one whose own check repeated only a
+                        # One whose own check repeated only a
                         # check task's finding, by the checks.
                         **({"batch_check_repeats": {
                             o.task_id: sorted(o.batch_check_repeats)
                             for o in outcomes if o.ok and o.batch_check_repeats
                         }} if any(o.ok and o.batch_check_repeats for o in outcomes)
                            else {}),
-                        # Fix round 14: nothing ran the repository's tests.
+                        # Nothing ran the repository's tests.
                         **({"unverified": result.unverified}
                            if result.unverified else {}),
-                        # Racing re-run 3 (2026-10-05): the tasks a stop left
+                        # Racing re-run 3: the tasks a stop left
                         # undispatched, and the failed tasks the user accepted,
                         # so `status` and a terminal poll account for every
                         # task rather than only the dispatched ones.
                         "not_run_task_ids": sorted(result.not_run),
-                        # Fix round 11: which of them wait for a check that
+                        # Which of them wait for a check that
                         # reported problems, and for which one.
                         **({"blocked_by_check": dict(sorted(result.blocked_by_check.items()))}
                            if result.blocked_by_check else {}),
                         "accepted_task_ids": sorted(result.human_plan.accepted),
-                        # Fix round 16: which of them are checks accepted with
+                        # Which of them are checks accepted with
                         # their findings, so `status` does not read them
                         # "accepted after failing" (Codex accept 02).
                         **({"accepted_with_findings_task_ids": sorted(
@@ -895,7 +895,7 @@ class WriteReports:
     def record_refusal(self, exc: ExecutorError, batch_index: int) -> None:
         """I11: name the refusal in ``.status.json``, with nothing in flight.
 
-        Plan codex-sandbox-unavailable-findings-and-fixes §5 I11 (2026-09-30):
+        Fixes I11:
         after a batch-0 refusal the status file still listed ``apply-batch-0``
         as "in flight (since 0m 9s)". The in-flight entry is closed by
         ``_dispatch_one``'s ``finally`` before the mirror above is written;

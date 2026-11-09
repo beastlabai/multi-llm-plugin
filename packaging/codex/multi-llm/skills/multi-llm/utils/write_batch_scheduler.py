@@ -552,7 +552,7 @@ def _same_batch_row(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
     (``apply-batch-N``): a ``--resume`` after the selection changed (a stopped
     batch's items skipped in the report) renumbers its batches, and an id
     match alone replaced the earlier run's ``apply-batch-1`` row, whose edits
-    are still on disk, with a row for different items (#28). ``implement``'s
+    are still on disk, with a row for different items. ``implement``'s
     ``expected_ids`` is ``[task_id]``, so it is unaffected. A row without
     them (refused before any verdict, or a report older than F9) falls back
     to the id.
@@ -565,8 +565,7 @@ def _same_batch_row(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# The write grant on the plugin-landlock rung (plan
-# codex-sandbox-unavailable-findings-and-fixes, step 3 option (b), 2026-09-30)
+# The write grant on the plugin-landlock rung (step 3 option (b), 2026-09-30)
 # ---------------------------------------------------------------------------
 
 def write_scope_for_kind(kind: str) -> Optional[str]:
@@ -625,15 +624,15 @@ class SchedulerResult:
     report_path: Optional[str] = None
     dry_run_path: Optional[str] = None
     messages: List[str] = field(default_factory=list)
-    #: Plan step 3 (2026-09-30): ``task_id -> {sandbox_rung, jail_denials}``
-    #: for a write batch that ran on a fallback rung. §7 step 2 subtask item 3:
+    #: ``task_id -> {sandbox_rung, jail_denials}``
+    #: for a write batch that ran on a fallback rung. step 2 subtask item 3:
     #: from step 3 "a write batch's recorded outcome also names the rung:
     #: applied, failed, partial or timed out" — and ``TaskOutcome`` is the
     #: executor's row, so the scheduler's own report carries it beside that
     #: row rather than in it. Absent for a batch on codex's own sandbox or on
     #: another runner, so those reports are byte-identical to before.
     sandbox_records: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    #: #28 (2026-10-02): a ``--resume`` re-materializes only the unfinished tasks,
+    #: #28: a ``--resume`` re-materializes only the unfinished tasks,
     #: so its reports described the resumed stretch alone and the first run's
     #: T001-T008 rows were overwritten and gone. These are the previous
     #: ``write_batch_report.json``'s task rows, read before this run replaces it
@@ -651,7 +650,7 @@ class SchedulerResult:
     stop: Optional[Dict[str, Any]] = None
     #: ``task_id -> check task id`` for every task this run did not dispatch
     #: because it depends (transitively) on a check task that reported
-    #: problems (fix round 11: the dependents ran on code the check had just
+    #: problems (the dependents ran on code the check had just
     #: rejected). Each is in ``not_run`` too, with
     #: :func:`blocked_by_check_reason` as its reason.
     blocked_by_check: Dict[str, str] = field(default_factory=dict)
@@ -663,7 +662,7 @@ class SchedulerResult:
     #: (``write_context.Refusals``): read by the stop, the ``[ETA]`` lines,
     #: the summary and the mirror. Never in the report (``to_dict``).
     refusals: _write_context.Refusals = field(default_factory=_write_context.Refusals)
-    #: Fix round 14: the line saying nothing ran the repository's tests,
+    #: The line saying nothing ran the repository's tests,
     #: when a code phase finished with no ``driver.verify_command`` set
     #: (:func:`unverified_line`); ``None`` when one ran, or none was owed.
     unverified: Optional[str] = None
@@ -690,7 +689,7 @@ class SchedulerResult:
 
     def batch_check_findings(self) -> Dict[str, List[str]]:
         """``{task_id: findings}`` for every code batch that finished ``ok``
-        while a check it ran on its own edits failed (fix round 14), this
+        while a check it ran on its own edits failed, this
         run's and the earlier runs' rows alike, in row order."""
         found: Dict[str, List[str]] = {}
         for row in self.report_rows():
@@ -702,7 +701,7 @@ class SchedulerResult:
     def batch_check_accepted(self) -> Dict[str, Dict[str, List[str]]]:
         """``{task_id: {check id: findings}}`` for every code task that
         finished ``ok`` while its own check reported again findings the user
-        accepted for a check (fix round 22), in row order."""
+        accepted for a check, in row order."""
         found: Dict[str, Dict[str, List[str]]] = {}
         for row in self.report_rows():
             matched = row_batch_check_accepted(row)
@@ -713,7 +712,7 @@ class SchedulerResult:
     def batch_check_repeats(self) -> Dict[str, Dict[str, List[str]]]:
         """``{task_id: {check id: findings}}`` for every code task that
         finished ``ok`` while its own check reported only what a check task
-        of the run reported (fix round 28), in row order."""
+        of the run reported, in row order."""
         found: Dict[str, Dict[str, List[str]]] = {}
         for row in self.report_rows():
             matched = row_batch_check_repeats(row)
@@ -723,7 +722,7 @@ class SchedulerResult:
 
     def batch_check_notes(self) -> Dict[str, str]:
         """``{task_id: note}`` for every code task that finished ``ok`` with
-        an own-check note (its ``check.note``, fix round 28), in row order."""
+        an own-check note (its ``check.note``), in row order."""
         found: Dict[str, str] = {}
         for row in self.report_rows():
             note = row_batch_check_note(row)
@@ -873,8 +872,7 @@ class SchedulerOptions:
     log: Optional[Callable[[str], None]] = None
     #: The phase's one write target — ``write_phase_artifact()``,
     #: the plan for apply-suggestions and the tasks file for
-    #: apply-task-suggestions (plan step 3, F1 "How a dispatch receives its
-    #: grant", 2026-09-30). ``realpath``-resolved and checked at
+    #: apply-task-suggestions. ``realpath``-resolved and checked at
     #: construction: it must exist, be a regular file, not be a symlink and
     #: lie under the repo root, or nothing runs. For the ``plan-file`` and
     #: ``tasks`` scopes it is the grant's target, and every task's declared
@@ -982,18 +980,19 @@ class WriteBatchScheduler:
         #: `skip` with `{task_id}` left for the failed task. Absent (a direct
         #: invocation), the stop message names the flags instead.
         self.user_commands: Dict[str, str] = dict(options.user_commands or {})
-        #: Fix round 18: the apply batches answered ``--human-task <id>=skip``
+        #: The apply batches answered ``--human-task <id>=skip``
         #: on this resume — each stopped as a partial application whose report
         #: left items out, kept as it stands, those items recorded as skipped
         #: at the user's request (:meth:`ResumeEvidence.check_partial_skips`).
         self.partial_skips: List[str] = [str(t) for t in (options.partial_skips or [])]
-        #: The scope policy an apply dispatch enforces (plans/
-        #: scope-policy-and-report-tags.md §5): the orchestrator's effective
-        #: one, else the round's record in ``state.json`` at dispatch.
+        #: The scope policy an apply dispatch enforces
+        #: (docs/development/write-scheduler.md#scope-policy-at-the-write-seam):
+        #: the orchestrator's effective one, else the round's record in
+        #: ``state.json`` at dispatch.
         self.scope_policy = options.scope_policy
         self.scope_baseline_id = options.scope_baseline_id
 
-        # Plan step 3 (2026-09-30): the grant a write dispatch on the
+        # The grant a write dispatch on the
         # plugin-landlock rung carries. ONE request for the whole phase — the
         # scope from the kind map, the target from the phase's own artifact —
         # never a per-task path, so nothing a task file says can widen it.
@@ -1027,8 +1026,8 @@ class WriteBatchScheduler:
         #: status is silently dropped, leaving resume and the report disagreeing
         #: with what actually ran.
         self._effects_lock = threading.Lock()
-        #: The commit write policy's leg (`write_commit_leg.CommitGuardLeg`,
-        #: plans/review-commits.md §2.7): the guard's deny layer, the
+        #: The commit write policy's leg (`write_commit_leg.CommitGuardLeg`): the
+        #: guard's deny layer, the
         #: pre-dispatch re-check and the batches it stopped, each dispatch's
         #: watched paths. It mutates and saves the guard under `_effects_lock`.
         self._commit = _write_commit_leg.CommitGuardLeg(
@@ -1047,7 +1046,7 @@ class WriteBatchScheduler:
         #: The prompt each dispatch is sent and the copy kept of it
         #: (`batch_prompt_builder.BatchPromptBuilder`). The phase dir the
         #: copies go in is pinned now, before any batch of this run can
-        #: replace it (fix round 17).
+        #: replace it.
         self._prompts = _batch_prompt_builder.BatchPromptBuilder(
             self._ctx,
             plan_file=self.plan_file,
@@ -1132,7 +1131,7 @@ class WriteBatchScheduler:
         #: ``_preflight_batch_runners``; the write path preflights inline, per
         #: dispatch, and this is where its return value was being discarded.
         self._runner_versions: Dict[str, str] = {}
-        #: Plan step 3 (2026-09-30), all keyed by task id. The rung each
+        #: Plan step 3, all keyed by task id. The rung each
         #: executor dispatch ran on (``None``: codex's own sandbox or another
         #: runner) — what names the rung on the batch's line, its verdict and
         #: the report whatever the outcome, a timeout included.
@@ -1459,7 +1458,7 @@ class WriteBatchScheduler:
 
     def _unverified_text(self, *, stop: bool = False) -> str:
         """The tests line this code phase owes with no ``driver.verify_command``
-        (:func:`unverified_line`), led by what ran (fix round 24): implement's
+        (:func:`unverified_line`), led by what ran: implement's
         tasks' checks (:func:`implement_checks_ran`), apply-code-fixes' known
         checks (:meth:`_known_checks_report`; at a stop only when a batch
         ran one, cut to :data:`STOP_TALLY_MAX_CHARS`, so the stop's remedy
@@ -1512,7 +1511,7 @@ class WriteBatchScheduler:
             # A batch can replace the phase path after dispatch. Trusted
             # discovery refuses it; report a human-needed stop without reading
             # or writing through that replacement to produce more artifacts.
-            # Fix round 21: an ending too, so the `[ETA]` lines say it.
+            # An ending too, so the `[ETA]` lines say it.
             self._eta.close(self._eta.run_result)
             return SchedulerResult(
                 kind=self.kind, phase=self.phase, exit_code=EXIT_NEEDS_HUMAN,
@@ -1520,7 +1519,7 @@ class WriteBatchScheduler:
             )
         except KeyboardInterrupt:
             # A foreground run's Ctrl-C (a detached worker's signal goes
-            # through `metrics.aborted_eta_line` instead, fix round 21).
+            # through `metrics.aborted_eta_line` instead).
             self._eta.close(self._eta.run_result, verb="interrupted")
             raise
         except Exception:
@@ -1546,8 +1545,7 @@ class WriteBatchScheduler:
 
     def _repeat_jail_lines(self, before: int) -> None:
         """Repeat this phase's ``[JAIL_DENIED]`` / ``[CODEX_HOME_CHECK]`` lines
-        at its close (plan codex-sandbox-unavailable §6 F1 item 6, Limits,
-        2026-09-30): write batches dispatch through ``dispatch_task`` directly,
+        at its close: write batches dispatch through ``dispatch_task`` directly,
         so ``run_tasks``' own closing summary never runs for them, and a change
         to ``$CODEX_HOME`` outlives the run."""
         try:
@@ -1616,18 +1614,17 @@ class WriteBatchScheduler:
             # human" condition, and dispatching around it would run code tasks
             # against unmet preconditions.
             result.exit_code = EXIT_NEEDS_HUMAN
-            # Fix round 16: a stop says nothing ran the tests too. No
+            # A stop says nothing ran the tests too. No
             # `[ETA]` baseline exists yet, so there is nothing to close.
             return self._end_run(
                 result, lambda: self._pending_human_message(result.human_plan),
                 close_eta=False, check_lines=False,
             )
 
-        # What this run will dispatch, counted as the loop below decides it
-        # (fix round 18, run 7 #3): the orchestrator's line counted every
-        # task a resume took up, so "4 task(s) to dispatch" preceded
+        # What this run will dispatch, counted as the loop below decides it: the
+        # orchestrator's line counted every task a resume took up, so "4 task(s) to dispatch" preceded
         # "dispatched 0".
-        # Fix round 20 (live run 8 #1): the `[ETA]` total starts from the
+        # The `[ETA]` total starts from the
         # same walk, so the two never disagree.
         if self.kind == "implement":
             self.log(self._dispatch_preview(ordered, result))
@@ -1644,14 +1641,14 @@ class WriteBatchScheduler:
             # run's `write_batch_report.json` / `subagent_batch_report.json`.
             return result
 
-        # Fix round 18: a `--human-task <batch>=skip` answer is checked
+        # A `--human-task <batch>=skip` answer is checked
         # against the batch's stopped verdict and the bytes on disk before
         # anything is dispatched; one that cannot apply stops the run here.
         refusals = self._evidence.check_partial_skips()
         if refusals:
             result.exit_code = EXIT_NEEDS_HUMAN
             result.messages.extend(refusals)
-            # Fix round 19: on the record the tool routes read, so the
+            # On the record the tool routes read, so the
             # result line names the refusal and the refused answer is not
             # offered again from the stop it answered.
             self._stop.record_answer_refusal(result, self._evidence.refused_skips)
@@ -1705,12 +1702,12 @@ class WriteBatchScheduler:
             result.outcomes.extend(outcomes)
             result.batches_dispatched.append(batch_index)
             # A check that reported problems keeps every task that depends on
-            # it from running (fix round 11); the tasks that do not depend on
+            # it from running; the tasks that do not depend on
             # it go on.
             self._checks.block_dependents_of_checks(outcomes, result)
             self._verify.record_batch_tracking(result)
             self._reports.mirror_status(result)
-            # plans/review-commits.md §2.7: a batch the commit re-check
+            # A batch the commit re-check
             # stopped was never dispatched and the loop goes on past it.
             stale = self._commit.stale
             stopping = [o for o in outcomes if o.task_id not in stale]
@@ -1746,7 +1743,7 @@ class WriteBatchScheduler:
                 summary=PARTIAL_SUMMARY_LINE,
             )
 
-        # 4b. Fix round 28 (live run 12, Codex racing 06): a run that
+        # 4b. A run that
         # dispatched nothing because every code task left waits on a manual
         # task not recorded done is not a finished implement. It stops for
         # the user, naming the manual task and the resume that records it.
@@ -1815,7 +1812,7 @@ class WriteBatchScheduler:
     ) -> str:
         """The ``Organized into …`` line for what this run will dispatch
         (:meth:`_dispatch_walk`), which also sets the ``[ETA]`` line's task
-        set (``EtaLines.scope``, fix round 20): the tasks the line counts. A walk
+        set (``EtaLines.scope``): the tasks the line counts. A walk
         that fails counts every task, and the ``[ETA]`` total with it."""
         walk = self._dispatch_walk(ordered, result)
         if walk is None:
@@ -1836,7 +1833,7 @@ class WriteBatchScheduler:
         """``(batches, task ids, waiting ids)`` this run will dispatch, or
         ``None`` when the walk fails.
 
-        Fix round 18 (live run 7, Codex and OpenCode stop resumes): the line
+        The line
         the orchestrator printed counted every task a resume took up, so
         01b and 01c read "4 task(s) to dispatch" before "dispatched 0" and
         fix 02 read 4 for the 2 it ran. This walks the batches in the loop's
@@ -1853,7 +1850,7 @@ class WriteBatchScheduler:
           batches, are not reached. A group is what ``_run_batch`` dispatches
           together (``admit_disjoint_groups`` under :meth:`write_ceiling`;
           one task each at the default ceiling of 1), so the tasks dispatched
-          beside the refused one count (fix round 19).
+          beside the refused one count.
 
         A check this run dispatches is decided by its verdict, which is not
         known yet: the tasks after it count, and are named as waiting on it.
@@ -1872,7 +1869,7 @@ class WriteBatchScheduler:
         waiting: Dict[str, List[str]] = {}
         picked_batches = 0
         picked_ids: List[str] = []
-        # Fix round 22: what the walk foresees this run leaves (refused, held
+        # What the walk foresees this run leaves (refused, held
         # by a check on record, not reached) and keeps, for `EtaLines.left_out`.
         left: Dict[str, str] = {}
         kept_ids: set = set()
@@ -1897,8 +1894,7 @@ class WriteBatchScheduler:
                     continue
                 in_batch = 0
                 # The loop's runnable list, as far as a preview can tell, in
-                # the groups `_run_batch` admits together (fix round 19,
-                # review of round 18, #4): with a write ceiling above 1 a
+                # the groups `_run_batch` admits together: with a write ceiling above 1 a
                 # group's tasks are dispatched at once and a stop takes
                 # effect only once the whole group settled, so a refused
                 # task's siblings in its group run.
@@ -2017,7 +2013,7 @@ class WriteBatchScheduler:
                 # before `_record_batch_effects`, so the `[ETA]` numerator is
                 # advanced here instead, or a resumed run's last line stops short
                 # of its own total by exactly the batches it skipped (F3). An
-                # implement run counts only what it dispatches (fix round 20),
+                # implement run counts only what it dispatches,
                 # so there the skip leaves both halves.
                 with self._effects_lock:
                     self._eta.mark(outcome.task_id, ran=False)
@@ -2058,7 +2054,7 @@ class WriteBatchScheduler:
         profile = profile_for_kind(self.kind)
 
         if task_id in self._evidence.kept_at_request:
-            # Fix round 18: answered `--human-task <id>=skip` — kept as it
+            # Answered `--human-task <id>=skip` — kept as it
             # stood, never dispatched again.
             return self._keep_at_request(task, batch_index, result)
 
@@ -2120,7 +2116,7 @@ class WriteBatchScheduler:
                 self._write_record(task, replace(self._batch_facts(
                     task, outcome, "completed", resumed_reason,
                     dispatched=False, kept=False), resumed=True))
-                # §2.7: its completion's identities, should the earlier
+                # Its completion's identities, should the earlier
                 # run have stopped before it saved them.
                 self._commit.repin(task, outcome)
                 self.state.save()
@@ -2139,7 +2135,7 @@ class WriteBatchScheduler:
                 self._record_batch_effects(task, refused, batch_index, result)
                 return refused
 
-        # The scope policy's stale-task check (plan §5): a task materialized
+        # The scope policy's stale-task check: a task materialized
         # under another policy, baseline or binding is never sent with the
         # wrong policy's prompt. Never blocks an `expand` task without scope
         # metadata.
@@ -2153,7 +2149,7 @@ class WriteBatchScheduler:
                 task, exc.message, batch_index, result, status=exc.status)
         self._evidence.retire_foreign_result(task)
 
-        # plans/review-commits.md §2.7, "Every batch is re-checked immediately
+        # "Every batch is re-checked immediately
         # before it is dispatched": beside the D3l check below and before the
         # snapshot, every fix file the batch declares is held to the content
         # the apply guard saved for it. A batch that fails is never
@@ -2175,7 +2171,7 @@ class WriteBatchScheduler:
             for path in declared_file_set(task)
         ]
         try:
-            # As declared (fix round 21): a file outside the repository is
+            # As declared: a file outside the repository is
             # named as the task wrote it, never by its resolved absolute path.
             self.policy.check(declared_file_set(task), when="pre-dispatch")
         except PolicyViolation as exc:
@@ -2185,7 +2181,7 @@ class WriteBatchScheduler:
                 task, exc.message, batch_index, result,
                 write_outcome=WRITE_POLICY_VIOLATION,
             )
-        # Plan step 3 (2026-09-30), beside the D3l check and before the
+        # Plan step 3, beside the D3l check and before the
         # snapshot for the same reason: under `plan-file`/`tasks` the declared
         # set must be exactly the phase's write target, on every rung, or the
         # batch is refused with nothing snapshotted and nothing spawned.
@@ -2200,11 +2196,11 @@ class WriteBatchScheduler:
             return self._refused(task, exc.message, batch_index, result)
         # The replaced-target check's "before": taken at THIS dispatch's
         # pre-batch snapshot (reused or fresh), so the identity compared after
-        # the child is always the one this spawn saw (§8.3 item 14).
+        # the child is always the one this spawn saw.
         self._grant.target_identity_before[task_id] = self._grant.identity_of(
             self._grant.identity_path()
         )
-        # §2.7: the protected set's (and context plan's) "before" for this
+        # The protected set's (and context plan's) "before" for this
         # dispatch's own post-run check, independent of the sweep below.
         self._commit.watch_begin(task_id)
 
@@ -2241,8 +2237,7 @@ class WriteBatchScheduler:
             # `_classify` / `_audit_terminal` got there first; this drops them in
             # the one case neither did (a dispatch that raised out).
             #
-            # I11 (plan codex-sandbox-unavailable-findings-and-fixes §5,
-            # 2026-09-30): that case is also a batch refused before any child
+            # I11: that case is also a batch refused before any child
             # started (`preflight_runner` raising `RunnerRejected` at batch 0),
             # and `_begin_sweep` had already published it in flight. Left
             # registered, the refusal's own `WriteReports.mirror_status` re-published it,
@@ -2257,7 +2252,7 @@ class WriteBatchScheduler:
     def _keep_at_request(
         self, task: Dict[str, Any], batch_index: int, result: SchedulerResult,
     ) -> TaskOutcome:
-        """Keep a stopped batch as it stands, at the user's request (fix round 18).
+        """Keep a stopped batch as it stands, at the user's request.
 
         Answered ``--human-task <id>=skip`` and checked by
         :meth:`ResumeEvidence.partial_skip_evidence`. Nothing is dispatched:
@@ -2307,7 +2302,7 @@ class WriteBatchScheduler:
     ) -> TaskOutcome:
         """Record a task refused before any runner started, and return it.
 
-        Fix round 13 (the check-gate fixture): a task ``driver.write_paths``
+        A task ``driver.write_paths``
         refused before dispatch was never recorded — it stayed ``pending``
         with no reason while the task after it read "T005 failed" — so
         ``--human-task <id>=skip`` was refused as "a code task that did not
@@ -2379,7 +2374,7 @@ class WriteBatchScheduler:
             return
         undeclared = self._undeclared_writes(outcome.task_id, snapshot)
         observed = self._sweep.observed_with_undeclared(snapshot, undeclared)
-        # §2.7: a protected path this window changed is put back here too,
+        # A protected path this window changed is put back here too,
         # before the byte comparison below reads the snapshot.
         self._commit.protected_unclassified(outcome, snapshot)
         if not outcome.files_touched:
@@ -2454,7 +2449,7 @@ class WriteBatchScheduler:
     ) -> TaskOutcome:
         """Real subprocess dispatch, with the D3g/D3l hooks bound to this task.
 
-        Plan step 3 (2026-09-30): the phase's :class:`JailRequest` goes to the
+        The phase's :class:`JailRequest` goes to the
         preflight (its scope joins the sandbox decision's key) and to
         ``dispatch_task``, and a batch that will run on the plugin-landlock rung
         is announced first with the stray-writes-only line.
@@ -2513,25 +2508,24 @@ class WriteBatchScheduler:
                            resend_note=context.get("resend_note"))
 
         def nothing_changed(context: Dict[str, Any]) -> Optional[str]:
-            # Rule 9 (fix round 14): asked before `after_result`, read-only,
+            # Rule 9: asked before `after_result`, read-only,
             # so a re-send leaves the census for the classification that
             # follows it.
             return self._applied_without_changes(task, snapshot, context)
 
         def incomplete_report(context: Dict[str, Any]) -> Optional[str]:
-            # Fix round 18: asked before `after_result`, read-only, like rule
+            # Asked before `after_result`, read-only, like rule
             # 9's question; a reason sends the one report re-ask.
             return self._incomplete_report(task, snapshot, context)
 
         def restate_findings(
             context: Dict[str, Any],
         ) -> Optional[Tuple[str, List[str]]]:
-            # Fix round 28: asked the same way; never a classification.
+            # Asked the same way; never a classification.
             return self._restate_findings(task, context)
 
         def changed_files(context: Dict[str, Any]) -> List[str]:
-            # T4.8 (plan opencode-validator-false-rate-limit-and-denied-turn
-            # §4.4 step 4): a turn a denial ended has no result, so `_classify`
+            # T4.8: a turn a denial ended has no result, so `_classify`
             # never runs and `dispatch_task` would retry on top of whatever it
             # half-applied. Asked before that retry decision, against the same
             # pre-batch snapshot and pre-run census `_classify` reads.
@@ -2661,7 +2655,7 @@ class WriteBatchScheduler:
         changed = snapshot.changed()
         undeclared = self._undeclared_writes(task_id, snapshot)
         observed = self._sweep.observed_with_undeclared(snapshot, undeclared)
-        # plans/review-commits.md §2.7: under an apply guard, the protected
+        # Under an apply guard, the protected
         # set's (and the context plan's) own post-run check, which never
         # depends on the sweep above. Empty without a guard.
         watched, commit_apply, watched_guard = self._commit.watch_after(task_id)
@@ -2769,7 +2763,7 @@ class WriteBatchScheduler:
             assert violation is not None
             report = snapshot.restore(violation.paths)
             # A protected path the snapshot holds no bytes for is put back
-            # from what the guard kept (§2.7); no-op without a guard.
+            # from what the guard kept; no-op without a guard.
             report = self._commit.restore_watched(
                 task_id, report, commit_apply, watched_guard,
             )
@@ -2819,9 +2813,9 @@ class WriteBatchScheduler:
         self, task: Dict[str, Any], outcome: TaskOutcome, result: Any,
     ) -> None:
         """The checks a code batch's reply says it ran on its own edits, on
-        the outcome: its findings (fix round 14), its own words about them,
-        never a finding (fix round 28), and, for apply-code-fixes, what it
-        says each known check it was told to run did (fix round 20)."""
+        the outcome: its findings, its own words about them (never
+        a finding) and, for apply-code-fixes, what it says each known
+        check it was told to run did."""
         if self.kind in _batch_prompt.CODE_WRITE_KINDS and not outcome.verification_only:
             outcome.batch_check = batch_check_findings(result)
             outcome.batch_check_note = batch_check_note(result)
@@ -2829,7 +2823,7 @@ class WriteBatchScheduler:
                 # What only repeats findings the user accepted for a check is
                 # that check's, never this task's own failure: only the checks
                 # this task was told were accepted, and none whose failure is
-                # its own job (fix rounds 22, 23).
+                # its own job.
                 own, matched = _check_records.split_accepted_findings(
                     outcome.batch_check,
                     _check_records.accepted_findings_for(self.tasks, task, self.state),
@@ -2890,7 +2884,7 @@ class WriteBatchScheduler:
 
     def _declined_words(self, declined: Dict[str, str]) -> str:
         """``fix 1 (`<id>`) — <reason>; …``: an apply batch's declined items,
-        numbered as its result contract numbers them (fix round 18)."""
+        numbered as its result contract numbers them."""
         return _check_records.declined_words(self.kind, self._task_ids_in_order(), declined)
 
     def _unapplied_words(self, items: Sequence[str]) -> str:
@@ -2928,7 +2922,7 @@ class WriteBatchScheduler:
         moved not one byte, or ``None`` when that is not what happened.
 
         Read-only — the census stays registered for the classification —
-        and asked before ``_classify`` (fix round 14). ``None`` whenever the
+        and asked before ``_classify``. ``None`` whenever the
         classification decides on something else, or a re-send could land on
         moved bytes: a claim other than ``applied``, a check task (it changes
         nothing by design, and its verdict is VERIFIED or check-findings), a
@@ -2944,7 +2938,7 @@ class WriteBatchScheduler:
         expected = [str(i) for i in (task.get("expected_ids") or [])]
         declined = declined_items(result, expected).items
         if expected and all(item in declined for item in expected):
-            # Fix round 18: it declined every item, so nothing was meant to
+            # It declined every item, so nothing was meant to
             # land; sending it again would ask for what it refused.
             return None
         if context.get("exit_code") not in (0, None):
@@ -2967,7 +2961,7 @@ class WriteBatchScheduler:
         moved = self._sweep.moved_since_dispatch(task_id, snapshot)
         outside: List[str] = []
         if moved and self.kind in SHARED_ARTIFACT_WRITE_KINDS:
-            # Fix round 15: for a plan or task-list batch the declared file
+            # For a plan or task-list batch the declared file
             # is the whole contract, so a stray write beside an unchanged
             # plan does not make it applied, and the plan's own bytes cannot
             # be applied twice by a re-send. Told which files moved instead.
@@ -3002,7 +2996,7 @@ class WriteBatchScheduler:
     ) -> Optional[str]:
         """Why an apply batch's readable report, after edits that moved
         bytes, leaves some of its items out of both ``ids`` and ``declined``
-        — the one problem its report re-ask names — or ``None`` (fix round 18).
+        — the one problem its report re-ask names — or ``None``.
 
         Read-only, asked before ``_classify``. ``None`` whenever the
         classification would not read the reply as a partial application for
@@ -3060,7 +3054,7 @@ class WriteBatchScheduler:
         accepted, word for word, with words added
         (:func:`accepted_findings_with_words_added`) — the one problem its
         report re-ask names and what such a finding may be cut down to — or
-        ``None`` (fix round 28, live run 12 stop accept 02).
+        ``None``.
 
         Read-only, asked before ``_classify``, and never a classification:
         the re-ask's restated report is classified like any. ``None`` for a
@@ -3107,7 +3101,7 @@ class WriteBatchScheduler:
         duration: float,
     ) -> None:
         self._audited.add(outcome.task_id)
-        # Plan step 3: a jail-denial count that left the verdict alone still
+        # A jail-denial count that left the verdict alone still
         # goes on the outcome (and, through it, the report and the stamp).
         note = self._grant.jail_notes.get(outcome.task_id)
         if note and note not in (outcome.reason or ""):
@@ -3143,8 +3137,7 @@ class WriteBatchScheduler:
         """Move out of a finished code task's own failing check what is the
         same finding a check task of the run already reported
         (:func:`repeated_findings_for`, the strict comparison), into
-        ``batch_check_repeats``, and re-stamp its verdict (fix round 28, the
-        code task recording second). Caller holds the effects lock."""
+        ``batch_check_repeats``, and re-stamp its verdict. Caller holds the effects lock."""
         if not outcome.ok or outcome.verification_only or not outcome.batch_check:
             return
         repeats = _check_records.repeated_findings_for(self.tasks, task, self.state)
@@ -3163,7 +3156,7 @@ class WriteBatchScheduler:
         moved: Mapping[str, Tuple[List[str], Dict[str, List[str]]]],
         result: SchedulerResult,
     ) -> None:
-        """The check task recording second (fix round 28): what
+        """The check task recording second: what
         :func:`move_check_repeats_in_state` *moved* in ``state.json`` (the
         record ``write_record`` wrote) is moved on the code task's outcome,
         its earlier run's row in *result* and its verdict stamp too, with one
@@ -3200,7 +3193,7 @@ class WriteBatchScheduler:
     ) -> None:
         """Re-write a result file's verdict ``batch_check`` and
         ``batch_check_repeats`` keys after :meth:`_split_check_repeats` or
-        :meth:`_move_repeats_of` moved findings (fix round 28), so a resume
+        :meth:`_move_repeats_of` moved findings, so a resume
         skip reads what the records say; every other key is left alone."""
         if not output_path:
             return
@@ -3256,8 +3249,7 @@ class WriteBatchScheduler:
             # a dispatch that persisted nothing (a prose reply, a timeout, a
             # partial application) has no file to stamp, and the audit's
             # `completed` line and `state.json` carry its verdict instead. A
-            # warning here named a file that was never meant to exist (fix
-            # round 8).
+            # warning here named a file that was never meant to exist.
             return
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -3344,7 +3336,7 @@ class WriteBatchScheduler:
         started (:meth:`_refuse_before_dispatch`): no metric, and its batch
         line says it was refused. *kept* (with ``dispatched=False``) is an
         apply batch kept as it stood at the user's request
-        (:meth:`_keep_at_request`, fix round 18): its summary is appended, its
+        (:meth:`_keep_at_request`): its summary is appended, its
         status is ``completed`` with that reason, and its line says so.
 
         The ordering is not cosmetic: the append must land before batch N+1's
@@ -3389,9 +3381,9 @@ class WriteBatchScheduler:
             summary = None
         if not outcome.ok or task_id in self._grant.jail_failed or outcome.not_rerun:
             # A batch that is not done gets the line the native leg appends
-            # for it (fix round 15: the executor wrote none, so later prompts
-            # differed between the legs for the same history). Safe since fix
-            # round 14 made `append` supersede a changed summary per `(id,
+            # for it (the executor wrote none, so later prompts
+            # differed between the legs for the same history). Safe made `append`
+            # supersede a changed summary per `(id,
             # phase)`: the --resume that dispatches it again replaces the line
             # with its real entry, and a task answered `--human-task <id>=skip`
             # keeps it on both legs, which tells the tasks after it that the
@@ -3400,7 +3392,7 @@ class WriteBatchScheduler:
                 self._failed_entry(outcome, result.refusals) if dispatched else None
             )
 
-        # Plan step 3 (2026-09-30): the rung the batch ran on, named on its
+        # The rung the batch ran on, named on its
         # line and in the report whatever the outcome (a timeout included).
         rung = self._dispatch_rungs.get(task_id)
         if rung:
@@ -3425,7 +3417,7 @@ class WriteBatchScheduler:
             # was not run again: no child ran, and a zero would average in.
             ran = bool(not outcome.not_rerun and dispatched)
             self._eta.mark(task_id, ran=ran, ok=outcome.ok)
-            # Fix round 21 (review of round 20, #1): a check that reported
+            # A check that reported
             # findings holds its dependents only once its batch returns
             # (`CheckHolds.block_dependents_of_checks`), so its own line and the lines
             # of the tasks beside it in the batch still counted them, and a
@@ -3443,7 +3435,7 @@ class WriteBatchScheduler:
             if self.kind == "implement" and isinstance(
                 getattr(self.state, "state", None), dict
             ):
-                # Fix round 28: under this lock, so whichever of a code
+                # Under this lock, so whichever of a code
                 # task and a check task records second sees the other.
                 self._split_check_repeats(task, outcome)
             status = "completed" if outcome.ok else "failed"
@@ -3458,7 +3450,7 @@ class WriteBatchScheduler:
                 task, outcome, status, reason, dispatched=dispatched, kept=kept))
             if record.repeats_moved:
                 self._move_repeats_of(task_id, record.repeats_moved, result)
-            # plans/review-commits.md §2.7: a completed batch re-pins its
+            # A completed batch re-pins its
             # fix files to the bytes it left (no-op without a guard).
             self._commit.repin(task, outcome)
             # Persists the metric recorded just above too: it is a mutation
@@ -3494,30 +3486,30 @@ class WriteBatchScheduler:
                     f"({_check_records.quoted_findings(outcome.batch_check, 300)})"
                 )
             if outcome.ok and outcome.batch_check_accepted:
-                # Fix round 22: reported again, never its own failure.
+                # Reported again, never its own failure.
                 verdict = (
                     f"{verdict}; its own check reported again only what you "
                     f"accepted for {', '.join(outcome.batch_check_accepted)}"
                 )
             if outcome.ok and outcome.batch_check_repeats:
-                # Fix round 28: a check task's finding, never its own.
+                # A check task's finding, never its own.
                 verdict = (
                     f"{verdict}; its own check reported only what check task "
                     f"{', '.join(outcome.batch_check_repeats)} reported"
                 )
             if outcome.ok and outcome.declined:
-                # Fix round 18: what it left out on purpose, and why.
+                # What it left out on purpose, and why.
                 verdict = (
                     f"{verdict}; declined {len(outcome.declined)}, not applied: "
                     f"{clip(self._declined_words(outcome.declined), 300)}"
                 )
             elif outcome.write_outcome and not outcome.ok:
-                # Plan step 3: a failed batch whose write outcome reads
+                # A failed batch whose write outcome reads
                 # "clean-failure" says which failure it was.
                 verdict = f"{verdict} ({outcome.status})"
             stale_line = self._commit.stale.get(task_id)
             if stale_line is not None and not dispatched:
-                # plans/review-commits.md §2.7: the pre-dispatch re-check's
+                # The pre-dispatch re-check's
                 # `[COMMIT_FIXES_STALE]` line is this batch's line.
                 self.log(stale_line)
             elif dispatched and not outcome.not_rerun:
@@ -3529,8 +3521,7 @@ class WriteBatchScheduler:
                     f"{rung_text}"
                 )
             else:
-                # Fix round 28 (live run 12, stop fixture on OpenCode and
-                # Codex): a task no runner started was named as "batch 3"
+                # A task no runner started was named as "batch 3"
                 # beside "Organized into 3 execution batches", which counts
                 # the batches the run dispatches (0 to 2), so the log read as
                 # four. It names no batch: none was dispatched for it.
@@ -3662,14 +3653,14 @@ class WriteBatchScheduler:
         byte comparison against a snapshot — it says the runner edited what it
         declared, never that the result still builds — so a phase that applied
         seven code fixes and marked itself completed without once asking the repo
-        was reporting on a property it had not checked (measured 2026-09-16).
+        was reporting on a property it had not checked.
         """
         if not self._verify.run(result):
             # The stop path's shape, for the same reason: the summary is this
             # run's own account and `--resume` has no other record of what was
             # applied. Nothing is rolled back and nothing is completed — the
             # plan reference, the tracking census and the phase marker all wait
-            # for a run whose check passes. Fix round 21: and its `[ETA]` lines
+            # for a run whose check passes. And its `[ETA]` lines
             # close on the failed command, not on "ALL BATCHES COMPLETE".
             verification = result.verification or {}
             self._eta.close(
@@ -3691,16 +3682,15 @@ class WriteBatchScheduler:
         # `implement --resume --human-task T007=done` closing a deferred
         # manual task — changed no code, so its completion keeps its date:
         # re-stamping it made review-code and apply-code-fixes read stale,
-        # and the closing answer cost a review cycle (fix round 14). Fix
-        # round 15: "dispatched nothing" is read off the outcomes, not
+        # and the closing answer cost a review cycle. "dispatched nothing" is read off
+        # the outcomes, not
         # `batches_dispatched`, which a batch of resume skips joins too —
         # a check whose findings stand, materialized again on every
         # resume and kept without a dispatch, re-stamped the date.
         # 2026-10-09: but never a date older than the review this apply
         # phase applies. A `--force` round whose review re-reports every
         # batch byte for byte keeps them all and dispatches nothing; the
-        # findings are applied, so the apply is stamped after the review
-        # (plan improve-plan-and-improve-code §2.5). Kept, the old date
+        # findings are applied, so the apply is stamped after the review. Kept, the old date
         # read as "review not applied yet" to `ImproveWorkflow`, and no
         # later re-run of the composite reached `[ALREADY_COMPLETE]`.
         ran = any(not outcome.skipped for outcome in result.outcomes)
@@ -3727,16 +3717,13 @@ class WriteBatchScheduler:
         if self.kind in _batch_prompt.CODE_WRITE_KINDS:
             # Only a code phase records `tracked_files`: the planning
             # phases edit the plan and the task list, which are never
-            # code under review (2026-10-05, Codex racing run 3:
-            # apply-task-suggestions' census put both in review-code's
-            # scope).
+            # code under review.
             self._verify.finalize_tracking(result)
             # `finalize_tracking` is a file-level writer: it read the state
             # we just saved, computed `tracked_files` and wrote it back.
             # Adopt its file before touching the dict again, or the `save()`
             # below dumps the pre-finalize dict over it and the phase's
-            # only deliverable is not tracked at all (F3, measured
-            # 2026-09-16).
+            # only deliverable is not tracked at all.
             self._reload_state()
         if self.summary_file:
             result.summary_file = self._reports.write_summary(result)
@@ -3746,7 +3733,7 @@ class WriteBatchScheduler:
             # insertion) — re-stamp once more so it is not left stale too.
             self.state.refresh_plan_hash()
             self.state.save()
-        # Fix round 15: a check whose findings stand and hold nothing back
+        # A check whose findings stand and hold nothing back
         # lets the run finish; the run's own later edits (the tasks after it,
         # the plan's back-reference just above) are not a change the user
         # made, so its tree is stamped as the run leaves it, as on a stop —
@@ -3767,7 +3754,7 @@ class WriteBatchScheduler:
     def _mark_implement_started(self) -> None:
         """Record implement started, once per run, as the native emit does.
 
-        Fix round 17 (review of fix round 16): the executor leg never wrote
+        The executor leg never wrote
         ``phases_started.implement``, so once an implement had finished, a
         later run that stopped left that completion standing — ``status``
         read implement done, and the next plain ``--implement`` started over

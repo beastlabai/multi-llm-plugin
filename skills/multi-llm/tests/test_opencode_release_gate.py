@@ -1697,7 +1697,7 @@ class TestTheGateRecipe:
     def test_the_steps_are_sequential_recipe_lines_in_order(self):
         makefile = MAKEFILE.read_text(encoding="utf-8")
         header = re.search(r"^opencode-package-check:(.*)$", makefile, re.M)
-        assert header and not header.group(1).strip(), (
+        assert header and not header.group(1).split("##")[0].strip(), (
             "the steps are recipe lines, never prerequisites: `make -j` would reorder them")
         lines = _raw_recipes()["opencode-package-check"]
         assert lines[0].startswith("@$(OPENCODE_GATE) begin"), lines[0]

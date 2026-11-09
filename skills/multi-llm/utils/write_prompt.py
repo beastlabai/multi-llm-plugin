@@ -22,7 +22,7 @@ and wraps it in the write-batch result contract (fixed blocks first, the
 batch's ids last: docs/development/write-scheduler.md "Prompt order").
 Both invokers therefore produce byte-identical text for the same
 prior-changes log (each leg appends a
-summary per finished batch and a failure line per failed one, fix round 15;
+summary per finished batch and a failure line per failed one;
 a native host words a failure's reason itself): it calls the scheduler's own
 :func:`utils.batch_prompt.bind_prior_changes` and
 :func:`utils.batch_prompt.with_result_contract`, and
@@ -44,7 +44,7 @@ phases it also takes the batch's pre-batch snapshot (kept when the same batch
 is bound again) and prints ``[WRITE_SNAPSHOT] <path>`` and
 ``[WRITE_ARTIFACT] <path>`` after the three markers (on stderr under
 ``--stdout``): :func:`prepare_batch_snapshot`. After a commit review
-(plans/review-commits.md §2.7) an apply-code-fixes batch whose fix files
+ an apply-code-fixes batch whose fix files
 changed since the apply guard decided gets no prompt at all: one
 ``[COMMIT_FIXES_STALE]`` line replaces the markers (in both modes), the batch
 is already recorded, and the exit is 0 (:func:`commit_stale_check`); a batch
@@ -328,8 +328,7 @@ def render_write_prompt(
     # The log lives in the plan dir — the phase dir's parent, where the
     # executor leg's `WriteBatchScheduler` (output_dir=<plan dir>) appends.
     output_dir = str(phase_dir.parent)
-    # The scope policy's stale-task check (plans/scope-policy-and-report-
-    # tags.md §5), the executor dispatch's twin: a task materialized under
+    # The scope policy's stale-task check, the executor dispatch's twin: a task materialized under
     # another policy, baseline or binding than the round's effective one is
     # refused before any prompt exists. A task without scope metadata never
     # blocks an `expand` round.
@@ -350,7 +349,7 @@ def render_write_prompt(
     )
     scoped = _prior_changes.canonical_phase(phase)
     if scoped in OWN_RUN_CONTEXT_PHASES:
-        # Fix round 22: the entries the render bound, this run's own.
+        # The entries the render bound, this run's own.
         entries = _prior_changes.run_entries(
             output_dir, phase,
             last_phase_end(
@@ -390,7 +389,7 @@ def _accepted_checks(
     """The checks upstream of an implement task whose findings the user
     accepted (``check_records.accepted_upstream_checks``), from the
     plan dir's ``state.json`` as it is now — what the executor leg reads at
-    dispatch (fix round 14). ``[]`` for any other kind, or a state that
+    dispatch. ``[]`` for any other kind, or a state that
     cannot be read: the note is advisory and never a refusal."""
     if str(document.get("kind") or "") != "implement":
         return []
@@ -411,8 +410,8 @@ def _known_checks_section(
     """An apply-code-fixes batch's list of the repository's known check
     commands and the earlier batches whose own check failed
     (:func:`known_checks.known_checks_section`), from the plan dir's
-    ``state.json`` as it is now — what the executor leg binds at dispatch
-    (fix round 20). ``""`` for every other kind; advisory, never a refusal."""
+    ``state.json`` as it is now — what the executor leg binds at dispatch. ``""`` for
+    every other kind; advisory, never a refusal."""
     if str(document.get("kind") or "") != "apply_code_fixes":
         return ""
     try:
@@ -442,7 +441,7 @@ MARKER_REFUSED = "[WRITE_PROMPT_REFUSED]"
 def policy_refusal(phase_dir: Path, task_id: str) -> Optional[str]:
     """The executor's pre-dispatch write-policy check, for the native leg.
 
-    Fix round 13 (the check-gate fixture): ``driver.write_paths`` refuses a
+    ``driver.write_paths`` refuses a
     task whose declared files it does not allow before the executor starts
     a runner, and the native leg handed the same task to the host to run.
     The same check, on the same declared set (``declared_file_set``) against
@@ -462,14 +461,14 @@ def policy_refusal(phase_dir: Path, task_id: str) -> Optional[str]:
 
 
 def policy_refused_paths(phase_dir: Path, task_id: str) -> List[str]:
-    """The declared files the policy refuses for *task_id* (fix round 20: the
+    """The declared files the policy refuses for *task_id* (the
     way forward names them), or ``[]``."""
     return [str(getattr(hit, "path", hit)) for hit in policy_refused_hits(phase_dir, task_id)]
 
 
 def policy_refused_hits(phase_dir: Path, task_id: str) -> List[Any]:
     """Each declared file the policy refuses for *task_id*, with its rule
-    (``write_safety.PolicyHit``; fix round 21: the way forward is worded
+    (``write_safety.PolicyHit``;: the way forward is worded
     from it), or ``[]``."""
     phase_dir = Path(os.path.abspath(str(phase_dir)))
     try:
@@ -487,7 +486,7 @@ def policy_violation_for(
     task: Dict[str, Any], *, plan_file: Optional[str], anchor_dir: Path,
 ) -> Optional[PolicyViolation]:
     """The policy check :func:`policy_refusal_for` makes, its exception kept
-    (its ``hits`` word the way forward, fix round 21)."""
+    (its ``hits`` word the way forward)."""
     try:
         declared = declared_file_set(task)
         if not declared:
@@ -499,7 +498,7 @@ def policy_violation_for(
         if root is None or problem:
             return None
         policy = WritePolicy.load(root, anchor=plan_file)
-        # As declared (fix round 21): a file outside the repository is named
+        # As declared: a file outside the repository is named
         # as the task wrote it, not by its resolved absolute path.
         policy.check(declared, when="pre-dispatch")
     except PolicyViolation as exc:
@@ -515,7 +514,7 @@ def policy_refusal_for(
     """:func:`policy_refusal` for a materialized write task in hand.
 
     What the native implement emit asks of every task before it hands the
-    task out (fix round 14: a task the policy refuses is recorded failed and
+    task out (a task the policy refuses is recorded failed and
     left out of the batches, as the executor refuses it before dispatch).
     *anchor_dir* is any directory inside the repository (the phase dir, or
     the plan's output folder before the phase dir exists).
@@ -529,7 +528,7 @@ _policy_violation_for = policy_violation_for
 
 
 # ---------------------------------------------------------------------------
-# The commit re-check (plans/review-commits.md §2.7)
+# The commit re-check
 # ---------------------------------------------------------------------------
 #
 # "Every batch is re-checked immediately before it is dispatched": a batch
@@ -647,8 +646,7 @@ def commit_stale_check(phase_dir: Path, task_id: str) -> Optional[List[str]]:
 
 
 def commit_bind(phase_dir: Path, task_id: str) -> bool:
-    """Record the watched set's disk ids as *task_id*'s prompt is bound
-    (plans/review-commits.md §2.7, "Every observed write, after each batch"),
+    """Record the watched set's disk ids as *task_id*'s prompt is bound,
     so its ``util batch-done`` counts only a change made while the batch ran:
     ``commit_apply.bind_watched``, saved in the guard under
     ``state_file_lock``. The executor reads the same ids just before it
@@ -688,7 +686,7 @@ def commit_bind(phase_dir: Path, task_id: str) -> bool:
 def held_by_check(phase_dir: Path, task_id: str) -> Optional[Tuple[str, List[str]]]:
     """``(check id, its findings)`` when a check with findings holds *task_id*.
 
-    Fix round 11: on the native leg the host dispatches each task itself, so
+    On the native leg the host dispatches each task itself, so
     the plugin's hold on the tasks that depend on a check that reported
     problems (the executor leg's ``CheckHolds.block_dependents_of_checks``)
     is enforced here, where the host gets each task's prompt. The held
@@ -696,7 +694,7 @@ def held_by_check(phase_dir: Path, task_id: str) -> Optional[Tuple[str, List[str
     findings on record, recorded completed, not accepted with
     ``--human-task <id>=done``); the graph is ``write_tasks.json``'s
     ``depends_on`` plus ``state.json``'s recorded decomposition
-    (``check_records.decomposition_graph``, fix round 12: a
+    (``check_records.decomposition_graph``: a
     ``--resume`` leaves a finished task out of the file, and a chain through
     it used to end there). ``None`` for an implement task nothing holds, any other
     kind, or a state or task file that cannot be read (the prompt step is
@@ -725,7 +723,7 @@ def held_by_check(phase_dir: Path, task_id: str) -> Optional[Tuple[str, List[str
 def ordering_warnings(phase_dir: Path, task_id: str) -> List[str]:
     """What this prompt is missing because an earlier batch is not logged yet.
 
-    Fix round 7 (racing re-run 3, Claude Code apply-code-fixes): the host
+    The host
     recorded batch 0 with ``util batch-done``, bound batch 1's prompt, and
     only then appended batch 0's summary — so batch 1's prompt went out
     without it, and the host had to notice, re-bind batch 1 and re-bind
@@ -752,7 +750,7 @@ def ordering_warnings(phase_dir: Path, task_id: str) -> List[str]:
     statuses = state.get("task_status") or {}
     phase = _phase_word(document)
     scoped = _prior_changes.canonical_phase(phase)
-    # Fix round 22: a phase whose prompts carry only this run's batches
+    # A phase whose prompts carry only this run's batches
     # counts only this run's entries as logged, as the render binds them.
     logged = {
         str(entry.get("id") or "")
@@ -810,7 +808,7 @@ def default_output_path(phase_dir: Path, task_id: str) -> Path:
 def phase_dir_pin(phase_dir: Path, *, identity: bool = True) -> "_prompt_files.PhasePin":
     """Where this command writes under the phase dir, without following a link.
 
-    Fix round 17: the host's subagents can write the phase dir, and this
+    The host's subagents can write the phase dir, and this
     command wrote ``prompts/<id>.prompt.txt`` by path — through a ``prompts``
     link, a link planted at the file's own name (which overwrote the file it
     named), or a phase dir replaced by one. The walk starts at the repository
@@ -832,7 +830,7 @@ def phase_dir_pin(phase_dir: Path, *, identity: bool = True) -> "_prompt_files.P
 
 
 # ---------------------------------------------------------------------------
-# The check guard (fix round 13)
+# The check guard
 # ---------------------------------------------------------------------------
 #
 # A check task declares no files: it promised to change nothing. On the
@@ -895,7 +893,7 @@ def check_tree_fingerprint(phase_dir: Path) -> Optional[str]:
     files changed". The native leg stamps it on a check with findings
     (``util batch-done``, re-stamped by ``util finalize-tracking`` with the
     tree the run left) and compares it on ``--resume`` before handing the
-    check out again (fix round 14). ``None`` when the repository cannot be
+    check out again. ``None`` when the repository cannot be
     pinned or read: a caller then runs the check again rather than guess.
     """
     anchor = Path(os.path.abspath(str(phase_dir)))
@@ -1717,7 +1715,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = parser.parse_args(argv)
     # The phase dir as it is now, before anything is read from it: the
     # prompt, the check's tree record and the pre-batch snapshot are written
-    # for this directory or not at all (fix round 17), so a phase dir that is
+    # for this directory or not at all, so a phase dir that is
     # a link or not a directory is refused here, before any side effect.
     try:
         pin = phase_dir_pin(Path(args.phase_dir))
@@ -1736,7 +1734,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             file=sys.stderr,
         )
         return 1
-    # plans/review-commits.md §2.7: re-checked before the prompt is bound; a
+    # Re-checked before the prompt is bound; a
     # batch whose fix files changed since the apply guard decided gets none.
     stale = commit_stale_check(Path(args.phase_dir), args.task_id)
     if stale is not None:
@@ -1775,7 +1773,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         task_id = args.task_id
         hits = policy_refused_hits(Path(args.phase_dir), task_id)
         implement = info.get("kind") == "implement"
-        # Fix round 21: worded per rule (a deny hit names the deny rule to
+        # Worded per rule (a deny hit names the deny rule to
         # narrow), and, for a file outside the repository, the skip alone.
         clause = policy_allow_clause(hits)
         skip = (
@@ -1865,7 +1863,7 @@ def _hand_out(
         # What `util batch-done` holds this check to: it changes no file.
         record_check_tree(Path(args.phase_dir), args.task_id, pin)
 
-    # plans/review-commits.md §2.7: the watched set as this batch is handed
+    # The watched set as this batch is handed
     # out, what its `util batch-done` compares with. No-op without a guard.
     commit_bind(Path(args.phase_dir), args.task_id)
 

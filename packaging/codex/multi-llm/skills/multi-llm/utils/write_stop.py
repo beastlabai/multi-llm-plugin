@@ -1,4 +1,4 @@
-"""How a write phase that stops says so (fix rounds 13 to 29).
+"""How a write phase that stops says so.
 
 :class:`StopAccount` words and records every ending of the executor leg that
 is short of a finished phase: a failed batch (:meth:`StopAccount.record_stop`,
@@ -127,7 +127,7 @@ class StopAccount:
                     f'"{self._ctx.phase_dir}" --task-id {outcome.task_id}'
                 )
             if outcome.unrestorable:
-                # Fix round 15: moved, and outside every rollback point.
+                # Moved, and outside every rollback point.
                 lines.append(
                     f"      no rollback point: {', '.join(outcome.unrestorable[:5])}"
                     f"{', …' if len(outcome.unrestorable) > 5 else ''} changed "
@@ -160,9 +160,9 @@ class StopAccount:
                 "the tasks before it keep what they changed."
             )
         elif failed and not any(o.bytes_moved for o in failed):
-            # Fix round 14 (stop fixture, accept 02): a clean failure, a
+            # A clean failure, a
             # timeout or a prose reply that moved no byte left nothing
-            # half-applied either. Fix round 15: "moved" is what the sweep
+            # half-applied either. "moved" is what the sweep
             # observed, a file with no rollback point included.
             lines.append(
                 "Nothing was half-applied: the stopped task changed no file, "
@@ -229,7 +229,7 @@ class StopAccount:
     @staticmethod
     def ran_out_of_time(outcome: TaskOutcome) -> bool:
         """Whether the batch was killed at its time limit after its edits
-        landed (``TaskOutcome.ran_out_of_time``, fix round 16)."""
+        landed (``TaskOutcome.ran_out_of_time``)."""
         return bool(getattr(outcome, "ran_out_of_time", False))
 
     def account_lines(self, result: Optional[Any]) -> List[str]:
@@ -329,10 +329,10 @@ class StopAccount:
         refused = [o for o in failed if o.task_id in refusals.before_dispatch]
         if refused and not acceptable:
             policy = any(o.write_outcome == WRITE_POLICY_VIOLATION for o in refused)
-            # Fix round 18 (live run 7): that nothing is half-applied is the
-            # block's closing line, said once; the bullet is the remedy. Fix
-            # round 20: the policy's, worded as the user's own call. Fix
-            # round 21: per rule (a deny hit names the deny rule), and none
+            # That nothing is half-applied is the
+            # block's closing line, said once; the bullet is the remedy. The policy's,
+            # worded as the user's own call. Per rule (a deny hit names the deny rule),
+            # and none
             # for a file outside the repository, which no rule can allow.
             def hits_of(outcome: TaskOutcome) -> List[Any]:
                 return list(
@@ -431,7 +431,7 @@ class StopAccount:
             )
             lines.append(f"        {resume}")
         elif any(o.bytes_moved for o in failed):
-            # Fix round 15: it moved only files with no rollback point, so
+            # It moved only files with no rollback point, so
             # there is no restore command to name.
             lines.append(
                 "  - inspect the files it changed that cannot be restored "
@@ -441,9 +441,9 @@ class StopAccount:
             )
             lines.append(f"        {resume}")
         else:
-            # Fix round 14: no byte moved (a timeout, a prose reply, a
+            # No byte moved (a timeout, a prose reply, a
             # refused runner), so there is nothing half-applied to inspect —
-            # which the block's closing line says (fix round 18: once).
+            # which the block's closing line says (once).
             lines.append(
                 "  - fix the cause the details name, then resume this phase; "
                 "the failed batch is dispatched again and the ones never "
@@ -451,9 +451,9 @@ class StopAccount:
             )
             lines.append(f"        {resume}")
         if self._ctx.kind != "implement":
-            # `--human-task` is implement's flag (fix round 15), save the one
+            # `--human-task` is implement's flag, save the one
             # answer an apply phase's partial application takes when its
-            # report left items out (fix round 18): keep it and go on.
+            # report left items out: keep it and go on.
             for outcome in failed:
                 if self._ctx.kind in APPLY_WRITE_KINDS and outcome.unapplied_ids:
                     skip = cmds.get("skip", "").replace(
@@ -485,7 +485,7 @@ class StopAccount:
                 f"stay undone)." if dependents else " stays undone)."
             )
             if outcome.applied_without_changes:
-                # Fix round 15: going on without it first, as the recorded
+                # Going on without it first, as the recorded
                 # answers order them (`stop_answers`).
                 lines.append(
                     f"  - or go on without it: {skip} ({task_id}"
@@ -516,7 +516,7 @@ class StopAccount:
         self, result: Optional[Any], failed: Sequence[TaskOutcome],
     ) -> List[str]:
         """The answers of each check with findings that holds tasks back, for
-        any stop's way forward (fix round 13).
+        any stop's way forward.
 
         A stop is not where those tasks wait: a ``--resume`` that changes no
         file leaves the check's findings standing and the tasks held, so a
@@ -580,14 +580,13 @@ class StopAccount:
         earlier runs' ``ok`` rows; ``failed`` this run's failed outcomes;
         ``not_run`` the tasks the stop left undispatched; ``accepted`` the
         failed tasks answered ``done``; ``completed_manual`` the human tasks
-        answered ``done`` (fix round 8: they counted in ``total`` and sat in
+        answered ``done`` (they counted in ``total`` and sat in
         no bucket, so a five-task line summed to four); ``deferred`` the human
         tasks the strategy skipped and ``skipped_dependents`` the tasks
         skipped with a skipped one. The buckets add up to ``total``, which is
         the test ``summary.md``'s accounting line is written to. ``accepted``
         and ``completed_manual`` include the answers an earlier run recorded
-        for tasks this resume did not materialize (``answered_done_on_record``,
-        fix round 9).
+        for tasks this resume did not materialize (``answered_done_on_record``).
         """
         rows = result.report_rows()
         plan = result.human_plan
@@ -669,7 +668,7 @@ class StopAccount:
                   f"the loop stopped at batch {batch_index}")
         )
         # A task a check with findings already kept from running keeps that
-        # reason: the stop is not why it did not run (fix round 11).
+        # reason: the stop is not why it did not run.
         for task_id, check_id in result.blocked_by_check.items():
             result.not_run[task_id] = _check_records.blocked_by_check_reason(check_id)
         for task in self._ctx.tasks:
@@ -709,13 +708,12 @@ class StopAccount:
             "not_rerun": bool(first is not None and first.not_rerun),
         }
         if first is not None and first.task_id in result.refusals.before_dispatch:
-            # Fix round 13: nothing was dispatched, so there is nothing
+            # Nothing was dispatched, so there is nothing
             # half-applied, and the task can be skipped or accepted.
             result.stop["refused_before_dispatch"] = True
             result.stop["policy"] = first.write_outcome == WRITE_POLICY_VIOLATION
             if result.stop["policy"]:
-                # Fix round 20: the files its way forward names. Fix round
-                # 21: and the rule that refused each, which words it.
+                # The files its way forward names. And the rule that refused each, which words it.
                 result.stop["policy_paths"] = list(
                     result.refusals.policy_paths.get(first.task_id) or [])
                 result.stop["policy_rules"] = [
@@ -723,22 +721,22 @@ class StopAccount:
                     for hit in result.refusals.policy_hits.get(first.task_id) or []
                 ]
         if first is not None and first.applied_without_changes:
-            # Fix round 14: it said `applied` and changed nothing, twice.
+            # It said `applied` and changed nothing, twice.
             result.stop["applied_without_changes"] = True
-        # Whether the stop left bytes a human has to look at (fix round 14:
-        # "the half-applied state is left in place" followed a refusal before
-        # dispatch and a clean failure, where nothing was half-applied). Fix
-        # round 15: what the sweep observed, not what the rollback store holds,
+        # Whether the stop left bytes a human has to look at ("the half-applied state is
+        # left in place" followed a refusal before
+        # dispatch and a clean failure, where nothing was half-applied). What the sweep
+        # observed, not what the rollback store holds,
         # so a file with no rollback point counts — and is named.
         result.stop["bytes_moved"] = any(o.bytes_moved for o in failed)
         if (
             self._ctx.kind in APPLY_WRITE_KINDS and first is not None
             and first.unapplied_ids
         ):
-            # Fix round 18: the items its readable report left out of both
+            # The items its readable report left out of both
             # `ids` and `declined` — what `--human-task <id>=skip` answers.
             result.stop["unapplied_ids"] = list(first.unapplied_ids)
-        # Fix round 16 (OpenCode racing 06, T006): a batch killed at its time
+        # A batch killed at its time
         # limit after its edits landed. The edits stay; the plain way forward
         # is the resume, which dispatches it again on top of them.
         if first is not None and first.write_outcome == WRITE_PARTIAL and (
@@ -750,7 +748,7 @@ class StopAccount:
             result.stop["unrestorable"] = unrestorable
         if result.blocked_by_check:
             # The tasks a check with findings holds, which this stop's own
-            # remedy does not release (fix round 13).
+            # remedy does not release.
             result.stop["blocked"] = dict(sorted(result.blocked_by_check.items()))
             result.stop["check_task_ids"] = self.blocking_checks(result)
         answers = self.stop_answers(result, failed)
@@ -764,7 +762,7 @@ class StopAccount:
     def stop_answers(
         self, result: Any, failed: Sequence[TaskOutcome] = (),
     ) -> List[Dict[str, Any]]:
-        """The ``--human-task`` answers this stop offers, as data (fix round 14).
+        """The ``--human-task`` answers this stop offers, as data.
 
         ``[{"flags": [...], "why": ...}]``, each a resume command's flags
         (``--resume`` first) and one plain clause saying what it does, in the
@@ -783,7 +781,7 @@ class StopAccount:
         each one as a command the user types and an ``options`` entry: on
         live run 5 the answers lived only in the result's ``error`` and the
         hosts relayed them in two of four first stops. On an apply phase
-        (fix round 18) the one answer is ``--human-task <batch>=skip`` for a
+         the one answer is ``--human-task <batch>=skip`` for a
         partial application whose report left items out (``unapplied_ids``):
         keep what it applied and go on without them — Codex racing run 7's
         08b resumed into the same stop with nothing else to offer.
@@ -876,7 +874,7 @@ class StopAccount:
         that very tree (``verdict.tree_fingerprint``), the comparison
         :meth:`CheckHolds.unchanged_since_failure` and :meth:`CheckHolds.check_findings_rerun`
         make. No file, no stamp, another tree or a tree git cannot measure:
-        the resume dispatches it again (fix round 23)."""
+        the resume dispatches it again."""
         if tree is None:
             return False
         task = self._task_by_id(task_id)
@@ -932,7 +930,7 @@ class StopAccount:
     def record_check_block(self, result: Any) -> None:
         """Account for the tasks a check with findings kept from running.
 
-        The end-of-loop counterpart of :meth:`record_stop` (fix round 11):
+        The end-of-loop counterpart of :meth:`record_stop`:
         every task that could run has run, and the ones in
         ``result.blocked_by_check`` were left out. Each is ``not run`` with
         :func:`blocked_by_check_reason` on its ``pending`` status, and the
@@ -975,10 +973,10 @@ class StopAccount:
 
     def manual_gate(self, result: Any) -> Optional[Dict[str, Any]]:
         """The manual-task gates (:func:`plan_manual_gates`) when this run
-        must stop on them, else ``None`` (fix round 28): an implement run
+        must stop on them, else ``None``: an implement run
         that started no runner, on an implement not on record completed (a
-        resume of a completed one that runs nothing keeps it completed, fix
-        round 14), whose every code task left waits on a manual task not
+        resume of a completed one that runs nothing keeps it completed), whose every
+        code task left waits on a manual task not
         recorded done, one the user can do now among them."""
         if (self._ctx.kind != "implement" or self._ctx.dry_run
                 or not _write_context.has_state(self._ctx.state)):
@@ -1037,12 +1035,12 @@ class StopAccount:
         why = self.manual_gate_why(gating, waiting)
         if why:
             result.stop["resume_why"] = why
-        # Fix round 29 (review of round 28 #1): the user's decline beside
+        # The user's decline beside
         # that resume, as an answer the section lists.
         answers = self.manual_gate_answers(gating, waiting)
         if answers:
             result.stop["answers"] = answers
-        # The merge of fix round 28: and beside it the line without the way
+        # The: and beside it the line without the way
         # on the section carries (its resume records the gate done), which
         # the tool routes relay in the `error`'s place.
         self.set_stop_headline(result.stop)
@@ -1077,7 +1075,7 @@ class StopAccount:
         self, gating: Sequence[str], waiting: Mapping[str, Sequence[str]],
     ) -> List[Dict[str, Any]]:
         """The gate's other ways on, ``next_phase.manual_gate_decline_answers``
-        (fix round 29): the user's ``--human-task <id>=skip`` for each
+        The user's ``--human-task <id>=skip`` for each
         gating manual task, recorded on the stop as its ``answers``."""
         from .next_phase import manual_gate_decline_answers
 
@@ -1129,7 +1127,7 @@ class StopAccount:
             f"recording {it} done; the code tasks that wait on {it} then run:"
         )
         lines.append(f"        {command or 'add ' + answers + ' to the resume command'}")
-        # Fix round 29 (review of round 28 #1): or the user's decline.
+        # Or the user's decline.
         for entry in stop.get("answers") or []:
             skips = " ".join(list(entry.get("flags") or [])[1:])
             spelled = (
@@ -1210,7 +1208,7 @@ class StopAccount:
         without the ways forward its resume section carries
         (``headline_beside_section``, :data:`HEADLINE_BESIDE_SECTION_KEY`).
 
-        Fix round 28 (live run 12 #5): at a stop the Codex host relayed the
+        At a stop the Codex host relayed the
         whole ``error`` line, whose "To go on (your call): … add --human-task
         T005=skip … --human-task T002=done …" restated every answer the
         ready section then gave as commands. ``util next-command --blocked``
@@ -1239,7 +1237,7 @@ class StopAccount:
         as "the last line it left", ending with *tail* (the line saying nothing
         ran the repository's tests) when one is owed.
 
-        Fix round 19 (review of round 18, decline #5 and implement #2): the
+        The
         line is bounded (``cli_common.ERROR_MAX_CHARS``), and the bound used
         to cut its end — the ``--human-task <batch>=skip`` sentence of an
         apply stop, the remedy and the ``--human-task T002=done`` answer of a
@@ -1269,7 +1267,7 @@ class StopAccount:
         names the task, *reported* is the model's own words, *not_run* the
         tasks the stop left, *body* the remedy and the answers, in order.
         A task title in *head* is cut to *label_cap* characters (``0``: left
-        out). *beside_section* (fix round 28): *body* without the ways
+        out). *beside_section*: *body* without the ways
         forward a resume section carries — every ``--human-task`` answer
         and a bare "resume this phase" — keeping each fix only the user can
         make before the resume (:meth:`set_stop_headline`)."""
@@ -1288,7 +1286,7 @@ class StopAccount:
         task_id = stop.get("task_id")
         reported = stop.get("reported") or None
         if stop.get("kind") == "answer-refused":
-            # Fix round 19: a `--human-task <batch>=skip` this run refused.
+            # A `--human-task <batch>=skip` this run refused.
             return (
                 f"{self._ctx.phase} {stop.get('what')}", None, [],
                 ["Nothing was dispatched and no file was changed.",
@@ -1296,7 +1294,6 @@ class StopAccount:
                 ".",
             )
         if stop.get("kind") == "manual-gate":
-            # Fix round 28 (live run 12, Codex racing 06).
             gating = list(stop.get("manual_task_ids") or [task_id])
             waiting = {
                 mid: list((stop.get("waiting") or {}).get(mid) or [])
@@ -1353,7 +1350,7 @@ class StopAccount:
                 f"command (the tasks after it then run)."
             )
         elif stop.get("applied_without_changes") and stop.get("bytes_moved"):
-            # Fix round 15: the files it declares did not change, others did
+            # The files it declares did not change, others did
             # (a plan or task-list batch is judged on its declared file).
             body.append(
                 "Files outside the ones it declares changed: inspect them "
@@ -1369,7 +1366,7 @@ class StopAccount:
                 "Nothing changed, so there is nothing to restore. To go on: "
                 "resume this phase and it is dispatched again"
                 + (
-                    # Fix round 15: going on without it first, and `done`
+                    # Going on without it first, and `done`
                     # only for a change made by hand; implement's flag only.
                     f"; or leave it and the tasks after it undone with "
                     f"--human-task {task_id}=skip, or make its change "
@@ -1388,10 +1385,9 @@ class StopAccount:
                 )
             )
         elif stop.get("refused_before_dispatch") and stop.get("policy"):
-            # Fix round 20 (live run 8 #4, a user decision: permissive):
-            # allowing the file stays a way forward, worded as the user's own
+            # Allowing the file stays a way forward, worded as the user's own
             # call and naming the file, beside the skip answer.
-            # Fix round 21: worded per rule from `policy_rules` (a deny hit
+            # Worded per rule from `policy_rules` (a deny hit
             # names the deny rule; the paths alone, from a record that kept
             # no rule, get the wording right for either), and no policy
             # change at all for a file outside the repository.
@@ -1440,7 +1436,7 @@ class StopAccount:
                 "fix the cause, then resume this phase."
             )
             if stop.get("unrestorable"):
-                # Fix round 15: a moved file with no rollback point.
+                # A moved file with no rollback point.
                 names = stop["unrestorable"]
                 body.append(
                     f"{', '.join(names[:5])}{', …' if len(names) > 5 else ''} "
@@ -1453,7 +1449,7 @@ class StopAccount:
                 "fix the cause, then resume this phase."
             )
         if stop.get("unapplied_ids") and not beside_section:
-            # Fix round 18: the way out of a stop a resume only repeats.
+            # The way out of a stop a resume only repeats.
             body.append(
                 f"Or keep what it applied and go on without "
                 f"{self._unapplied_words(stop['unapplied_ids'])}: add "
@@ -1527,9 +1523,9 @@ class StopAccount:
         self, result: Any, refused_skips: Mapping[str, str],
     ) -> None:
         """Keep a refused ``--human-task <batch>=skip`` where the tool routes
-        read a stop (fix round 19).
+        read a stop.
 
-        Review of fix round 18: the refusal was printed and nothing else, so
+        Review: the refusal was printed and nothing else, so
         the result line named no ``error`` (the tool's needs-human message
         said "Its result line names no error", run 7's #4 shape) and the
         mirror still held the stop the answer was refused for, whose

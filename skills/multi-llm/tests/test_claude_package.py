@@ -2095,7 +2095,8 @@ class TestMake:
         for target in self.TARGETS:
             assert target in recipes, target
             assert re.search(rf"(?<![\w-]){re.escape(target)}(?![\w-])", phony), target
-            assert f"make {target}" in makefile, f"{target} has no help line"
+            assert re.search(rf"^{re.escape(target)}:[^\n]*## \S", makefile, re.M), (
+                f"{target} has no `## ` help description")
 
     def test_the_clean_build_ignores_every_dirty_opt_in(self):
         """(src) ``claude-package`` is what CI trusts, so a developer's exported variable

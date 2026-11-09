@@ -322,7 +322,7 @@ def provider_dispatch_context(
     adapter's own context (docs/development/providers.md#private-config-roots).
     """
     with private_home.dispatch_homes():
-        # Plan codex-sandbox-unavailable I12 (2026-09-30): an adapter may also ask
+        # Unavailable I12: an adapter may also ask
         # to be told a dispatch is about to start (codex records its trust state
         # so the run can remove the entries its children add). A separate,
         # side-effect-only hook — never a context, never a refusal, never argv or
@@ -458,8 +458,7 @@ MAX_LOGGED_PROMPT_LENGTH = 5000
 #: ``[]`` from such a run is refused (``task_result._salvage_gave_up``),
 #: because a reviewer killed mid-review never said "I found nothing", while a
 #: ``[]`` from a run that finished and then exited non-zero is still a genuine
-#: empty review (plan: review-run-scope-salvage-and-failure-visibility D4.5,
-#: decision 11.10). Here because every lane that writes or reads a request
+#: empty review. Here because every lane that writes or reads a request
 #: already imports this module, and ``ERROR_TIMEOUT`` is what decides it.
 SALVAGE_FAILURE_KEY = "failure"
 SALVAGE_FAILURE_TIMEOUT = "timeout"
@@ -523,7 +522,7 @@ def _save_log(
             told not to print JSON on stdout at all, so a failed stdout
             parse beside a file-channel success is expected, not a fault
             (F9.2).
-        readonly_audit: The attempt's compact read-only verdict (plan §4.2),
+        readonly_audit: The attempt's compact read-only verdict,
             rendered as one ``Readonly audit:`` header line — the verdict,
             never the stream it was computed on (which the ``STDOUT`` section
             below carries bounded, like any other).
@@ -531,8 +530,8 @@ def _save_log(
     Returns:
         True if log was saved successfully, False otherwise
 
-    Every rendered field is passed through §4.5's ``redact_text`` **first** and
-    bounded by §4.4's caps **second**. This is the sink where all nine planted
+    Every rendered field is passed through the ``redact_text`` **first** and
+    bounded by the caps **second**. This is the sink where all nine planted
     secret shapes landed on a *successful* run, and the sink that wrote a
     6,254,326 B log for one ``review-plan``.
     """
@@ -540,7 +539,7 @@ def _save_log(
         log_path = Path(log_file)
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # §4.5 before §4.4: redact the fully rendered text, then cap it. Reversing
+        # Redact the fully rendered text, then cap it. Reversing
         # these two would slice a secret across a cut and leave a remnant nothing
         # downstream can match.
         prompt = _redact(prompt or "")
@@ -640,8 +639,7 @@ def _save_log(
 
 
 # ---------------------------------------------------------------------------
-# The Lane A spawn: `subprocess.run`'s contract, plus the tree sweep (plan:
-# review-run-scope-salvage-and-failure-visibility D3.3)
+# The Lane A spawn: `subprocess.run`'s contract, plus the tree sweep
 # ---------------------------------------------------------------------------
 
 #: SIGTERM → SIGKILL grace for a stopped Lane A CLI and for each process group
@@ -677,8 +675,8 @@ _STOP_SIGNALS = frozenset(
 #: shell leads a group of its own and survives it.
 _STOP_EXIT_CODES = frozenset(128 + sig for sig in _STOP_SIGNALS)
 
-#: ``STATUS_CONTROL_C_EXIT``: the Windows spelling of "died of Ctrl-C"
-#: (2026-10-25). Windows has no signal to die of, so a return code there is
+#: ``STATUS_CONTROL_C_EXIT``: the Windows spelling of "died of Ctrl-C". Windows has no
+#: signal to die of, so a return code there is
 #: never negative and the ``-N`` half of :func:`_stopped_from_outside` never
 #: fires. A console process whose Ctrl-C or Ctrl-Break reached the default
 #: handler exits with this status instead, and a Python CLI whose
@@ -717,7 +715,7 @@ def _stop_cli_tree(
     its parent links still lead to its children) with the registry's last
     refreshed one (which still holds them when *proc* itself died first). On
     Windows, where there is no snapshot to take, *job* is the CLI's Job Object
-    and is terminated right after the CLI (2026-10-25). Never raises: teardown
+    and is terminated right after the CLI. Never raises: teardown
     must not mask the timeout or the interrupt that asked for it, so a failed
     sweep falls back to a plain kill of the CLI, and then of its job.
     """
@@ -821,7 +819,7 @@ def _run_provider_cli(
 
     Same arguments, same ``CompletedProcess``, and the same ``TimeoutExpired``
     carrying the output so far — the ``TimeoutExpired`` handler in
-    :func:`invoke_with_provider` and §4's salvage read that partial stdout. What
+    :func:`invoke_with_provider` and the salvage read that partial stdout. What
     changes is what a stop does. ``subprocess.run`` SIGKILLs the direct child
     only, which skips pi's own cleanup and leaves every child in a session of its
     own running (pi's detached shells, and a ``timeout`` inside one, which leads
@@ -927,8 +925,7 @@ def _describe_tree_sweep(expired: BaseException) -> str:
 
 
 # ---------------------------------------------------------------------------
-# A fan-out slot on the plugin's Landlock jail (plan
-# codex-sandbox-unavailable-findings-and-fixes §6 F1, 2026-09-30)
+# A fan-out slot on the plugin's Landlock jail
 # ---------------------------------------------------------------------------
 #
 # `invoke_with_provider` is the fan-out's spawn site, so it owns the attempt's
@@ -1365,7 +1362,7 @@ class PreparedDispatch:
 def _phase_schema(
     provider: Any, schema_phase: str, stack: contextlib.ExitStack
 ) -> Tuple[Any, str]:
-    """§4.2.2's pre-dispatch read of ``schema_phase``'s schema, as ``(schema,
+    """The pre-dispatch read of ``schema_phase``'s schema, as ``(schema,
     marker)``; raises ``structured_output.SchemaConfigError``.
 
     Lane A only, and no production caller passes ``schema_phase`` (W1, deferred
@@ -1422,7 +1419,7 @@ def prepare_dispatch(
             }
         }
 
-    # M10 (§5.1) — a **bool** consumer, and it stays one. The gate is still
+    # M10 — a **bool** consumer, and it stays one. The gate is still
     # `is_available()` verbatim, so this refusal is byte-for-byte the decision it
     # always was; the typed report is read only *inside* the branch, to put the
     # state and its sentence on the error details a caller renders.
@@ -1458,7 +1455,7 @@ def prepare_dispatch(
             "error_code": ERROR_SUBPROCESS_FAILED,
             "details": {"provider": provider_name, "model": model},
         }
-    # §4.2.2's pre-dispatch read, and M7's one call site. `schema_phase=None`
+    # The pre-dispatch read, and M7's one call site. `schema_phase=None`
     # skips all of it, so every existing caller renders the same argv it always
     # did. `schema_for_dispatch` is what consults `structured_output_support`:
     # an adapter that declares `False` — or a schema this CLI provably cannot
@@ -1466,12 +1463,12 @@ def prepare_dispatch(
     # path, marked `recovered`/`unvalidated` and never `native`.
     schema = None
     structured_marker = structured_output.MARKER_UNVALIDATED
-    # M4/§2.3 — the adapter's run-scoped dispatch context is entered BEFORE argv
+    # The adapter's run-scoped dispatch context is entered BEFORE argv
     # is built, because argv and env are rendered from the same context state
     # (opencode's `--pure` pairs with its `XDG_CONFIG_HOME` redirect and neither
     # is emitted without the other). It rides the same `ExitStack` as the schema
     # sidecar, so it is left on success, on timeout, on kill-path teardown and on
-    # exception alike — the `finally` half of §2.3's lifecycle, with the
+    # exception alike — the `finally` half of the lifecycle, with the
     # adapter's own `atexit` sweep as the backstop.
     # Every post-entry setup step — the schema read, the argv build, the
     # executable resolution and the env composition — runs INSIDE this `with`,
@@ -1513,7 +1510,7 @@ def prepare_dispatch(
                     },
                 }
 
-        # Plan codex-sandbox-unavailable §6 F1 (2026-09-30): a slot on a
+        # Unavailable F1: a slot on a
         # wrapping rung (the plugin's own Landlock jail) gets its grant here,
         # at the spawn site, once per attempt — order steps 1-2 of "How a
         # dispatch receives its grant". The read-only request comes from this
@@ -1554,7 +1551,7 @@ def prepare_dispatch(
                 rung=jail_rung, request=request, tmpdir=tmpdir, cwd=repo_root,
             )
 
-        # `timeout_s=effective_timeout` is L5's one call site (§9.6.b): the number is
+        # `timeout_s=effective_timeout` is L5's one call site: the number is
         # already resolved here, so an adapter with an internal cutoff of its own
         # (agy's `--print-timeout`) can hold it under the deadline this same call
         # passes to `_run_provider_cli`, instead of hardcoding a value that has to
@@ -1582,10 +1579,10 @@ def prepare_dispatch(
                 ),
             )
         except (StructuredOutputUnavailable, ReadOnlyInvocationRefused) as exc:
-            # §4.2.1's sixth case: fails BEFORE spawn, so no partial argv reaches
+            # The sixth case: fails BEFORE spawn, so no partial argv reaches
             # the CLI. A configuration error, never retried. The same for an
             # adapter refusing an invocation the user's own config makes unsafe
-            # (plans/ask-answer-recovery-and-false-success.md D4.2: aider with
+            # (aider with
             # yes-always on in an `.aider.conf.yml` or `.env`): re-running
             # reads the same file, and the error names it.
             return {
@@ -1626,8 +1623,8 @@ def prepare_dispatch(
         start_time = time.time()
 
         # Build subprocess environment: add provider vars, remove blacklisted ones.
-        # `resolve_env`, not `get_env`: the Lane A fan-out IS the `generate` profile
-        # (§2.2), so it gets the global non-interactive git block plus the scoped
+        # `resolve_env`, not `get_env`: the Lane A fan-out IS the `generate` profile, so
+        # it gets the global non-interactive git block plus the scoped
         # `credential.helper=""` wipe. Naming the profile rather than leaning on the
         # default keeps the scoping greppable — `agent-write` must never appear here.
         # `cwd` rides along because an adapter's delta may carry a
@@ -1844,18 +1841,18 @@ def invoke_with_provider(
             (prefix-less) spec resolves its ``default_provider`` — and its
             timeout — against the plan-derived project config rather than CWD's.
             This is the spawn site: unanchored, a run started from a foreign CWD
-            launches a different binary than the project configured (§9.3.c).
-        schema_phase: §4.2's phase name (``review-plan``, ``code-review``, …),
+            launches a different binary than the project configured.
+        schema_phase: the phase name (``review-plan``, ``code-review``, …),
             or ``None``. **``None`` is the default and changes nothing**: no
             schema is resolved, no flag is emitted and the returned dict is
             byte-for-byte what it has always been.
 
-            When set, this is §4.2.2's "the caller reads the flag before
+            When set, this is the "the caller reads the flag before
             dispatch" leg: the phase's schema file is resolved through
             ``utils.structured_output``, the adapter's
             ``structured_output_support`` decides whether it is passed at all,
             codex's sidecar is written and removed in a ``finally``, and
-            §4.2.1's failure policy is applied to the envelope afterwards. The
+            The failure policy is applied to the envelope afterwards. The
             verdict lands on ``details['structured_output']`` as ``native`` /
             ``recovered`` / ``unvalidated``; a refusal replaces the result with
             a failure carrying ``details['failure_reason']``.
@@ -1875,7 +1872,8 @@ def invoke_with_provider(
             **Re-check trigger:** claude-code accepts an array-rooted
             ``--json-schema``. **Re-read date:** 2027-02-20. Until one of those
             fires, wiring a production caller here is a regression, not
-            progress. See ``plans/harness-residual-work.md`` §3, W1.
+            progress. Where the verdict sits:
+            docs/development/providers.md#reading-a-capture (the schema verdict).
         _defer_parse_failure_log: Internal (§Fix1/F13). When the child
             exited 0, writing the log here (if ``log_file`` is set) — before
             :func:`invoke_with_file_output` has chosen between the file
@@ -1895,7 +1893,7 @@ def invoke_with_provider(
             failure (binary not found, timeout, non-zero exit) still logs
             immediately, unaffected by this flag — there is no channel choice
             to wait for.
-        sandbox_fallback: The fan-out's D6 override (2026-09-17): the rung id
+        sandbox_fallback: The fan-out's D6 override: the rung id
             ``review_orchestrator_base.sandbox_refusal`` selected for this slot
             — the runner's own sandbox probe said ``unavailable``, the
             fallback walk found a rung ``providers.<name>.sandbox_fallback``
@@ -1909,8 +1907,7 @@ def invoke_with_provider(
             ``served_model`` does. The default renders every argv
             byte-for-byte as before and adds no key.
 
-            **The plugin's own jail** (``plugin-landlock``, plan
-            codex-sandbox-unavailable-findings-and-fixes §6 F1, 2026-09-30):
+            **The plugin's own jail** (``plugin-landlock`` F1, 2026-09-30):
             this function is the fan-out's spawn site, so it builds the
             read-only ``JailRequest`` from ``cwd``, owns the attempt's scratch
             ``TMPDIR`` (``slot_tmpdir`` on ``setup_cleanup``, released by the
@@ -1932,7 +1929,7 @@ def invoke_with_provider(
             spawned; a scratch directory it cannot make is
             ``failure_reason: "jail-setup-failed"``, also non-retryable.
         want_answer_text: The ask lane's request for the model's **whole**
-            answer text (plans/ask-answer-recovery-and-false-success.md D2.2).
+            answer text.
             When True, every exit that ran the child — success, exit-0 parse
             failure, non-zero exit, timeout — sets ``details["answer_text"]``
             from the full stdout (:func:`_attach_answer_text`: the adapter's
@@ -1991,7 +1988,7 @@ def invoke_with_provider(
                 duration=time.time() - prepared.start_time,
             ))
     finally:
-        # §4.2.1: codex's per-invocation schema directory is removed in a
+        # Codex's per-invocation schema directory is removed in a
         # `finally` so it is cleaned up on success, on timeout, on kill-path
         # teardown and on exception alike, and so are the adapter's dispatch
         # context and a jailed attempt's scratch directory. A no-op for what
@@ -2252,8 +2249,7 @@ def misnamed_result_baseline(
     every attempt as ``misnamed_baseline``: a misnamed file is this slot's only
     when it appeared (or changed) after the slot started. Taken per attempt, an
     attempt killed after writing it under the wrong name left it in the next
-    attempt's baseline, and the slot was recorded failed beside its own answer
-    (review of fix round 24).
+    attempt's baseline, and the slot was recorded failed beside its own answer.
     """
     from .json_extractor import generate_output_path
 
@@ -2404,8 +2400,7 @@ def _adopt_misnamed_result(
     The candidate is read through one descriptor that never follows a link
     (:func:`utils.result_files.read_regular_text`), and what the rename left
     at the requested name must be that same regular file: a link swapped in
-    after the directory scan, or before the rename, is never adopted (review
-    of fix round 24).
+    after the directory scan, or before the rename, is never adopted.
     """
     from .json_extractor import parse_file_content
 
@@ -2485,7 +2480,7 @@ def invoke_with_file_output(
         log_file: Optional path to save full output log
         prefer_arrays: If True, prefer array candidates when extracting JSON
         anchor: Optional discovery anchor (the run's plan-file path), forwarded
-            verbatim to :func:`invoke_with_provider` (§9.3.c)
+            verbatim to :func:`invoke_with_provider`
         sandbox_fallback: The D6 override, forwarded verbatim to
             :func:`invoke_with_provider`; the prompt's ``{output_location}``
             block is unchanged by it (a bypassed codex still answers on
@@ -2520,7 +2515,7 @@ def invoke_with_file_output(
         - 'file_error': File-specific error (if file read failed, or the file
           was left unread as older than the slot, or as not shown newer)
         - 'details': Provider execution details, forwarded verbatim on every
-          return path — including §3.6's ``served_model`` /
+          return path — including the ``served_model`` /
           ``served_model_is_fallback``, so the JSON's origin travels with it
           whichever channel (file, extracted file, stdout) supplied it
     """

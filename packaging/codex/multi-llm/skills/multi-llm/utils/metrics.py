@@ -185,7 +185,7 @@ def start_phase_in_state(state: dict, phase: str, total_batches: int) -> None:
 
 #: ``metrics_progress.{phase}.withdrawn``: ``{task id: the task whose record
 #: took it out}`` — the tasks this run's started total counted that it will
-#: not dispatch after all (fix round 18).
+#: not dispatch after all.
 WITHDRAWN_KEY = "withdrawn"
 
 
@@ -194,7 +194,7 @@ def withdraw_from_progress_in_state(
 ) -> List[str]:
     """Take *task_ids* out of this run's started total; the ones taken out.
 
-    Fix round 18 (live run 7, Claude Code stop 01): the native implement emit
+    The native implement emit
     hands out a task that waits on a check's verdict (T007 behind check
     T002), so ``tasks_to_dispatch`` — what the host passes as
     ``--total-batches`` — counts it. When T002 reported problems, T007 was
@@ -246,7 +246,7 @@ def restore_to_progress_in_state(state: dict, phase: str, cause: str) -> List[st
 
 
 #: ``metrics_progress.{phase}.failed``: the tasks this run recorded
-#: ``failed`` after a runner ran them (fix round 22). A task refused before
+#: ``failed`` after a runner ran them. A task refused before
 #: dispatch is withdrawn instead. Their run stops short, so the line of the
 #: last task does not say "complete" and ``util metrics finish`` closes on
 #: "run stopped" rather than "phase complete", as the executor does.
@@ -272,9 +272,7 @@ def mark_failed_in_progress(
         progress.pop(FAILED_KEY, None)
 
 
-#: A metric entry whose task failed carries ``"failed": true`` (fix round
-#: 24, live run 10 #5: OpenCode's T002 timed out at its 1200 s slot budget
-#: and its line read "task 2/11 done in 20m 5s · ~109m 30s remaining"). Its
+#: A metric entry whose task failed carries ``"failed": true``. Its
 #: ``[ETA]`` line says it failed, and no remaining-time estimate averages its
 #: duration in or counts it as progress (:func:`_compute_eta`).
 FAILED_ENTRY_KEY = "failed"
@@ -296,7 +294,7 @@ def label_task_id(label: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
-#: Fix round 25 (review of round 24, stops #2): a native record that names
+#: A native record that names
 #: no task (no ``--task-id``, a label not starting with ``<id>: ``) while
 #: two or more failed tasks of this run have no record yet is marked
 #: ``"no_task_id": true``: which task it measured is never guessed, so it is
@@ -311,7 +309,7 @@ def unrecorded_failures(
 ) -> List[str]:
     """The tasks this run's ``util batch-done`` recorded ``failed``
     (:data:`FAILED_KEY`) that no metric entry of this run measures yet, by
-    its ``task_id`` or the id its label starts with (fix round 25)."""
+    its ``task_id`` or the id its label starts with."""
     progress = (state.get("metrics_progress") or {}).get(phase)
     if not isinstance(progress, dict):
         return []
@@ -343,7 +341,7 @@ def native_failure(
     batch-done`` recorded ``failed`` (:data:`FAILED_KEY`), read off the reason
     it recorded (the host's ``--reason``, cut at a word; ``--partial``
     prefixes :data:`HALF_APPLIED_PREFIX`); ``None`` for any other task, a
-    task refused before dispatch included (fix round 24)."""
+    task refused before dispatch included."""
     if not task_id:
         return None
     progress = (state.get("metrics_progress") or {}).get(phase)
@@ -362,9 +360,8 @@ def native_failure(
 
 
 #: ``metrics_progress.{phase}.named_out``: the tasks taken out of this run's
-#: total (:data:`WITHDRAWN_KEY`) that a line already named (fix round 24,
-#: live run 10 #7: the stop fixture's lines went "task 1/5", "task 2/4" and
-#: nothing said why). The next line after a record that took one out names
+#: total (:data:`WITHDRAWN_KEY`) that a line already named. The next line after a record
+#: that took one out names
 #: it beside the new total.
 NAMED_OUT_KEY = "named_out"
 
@@ -389,7 +386,7 @@ def _newly_withdrawn_tail(state: dict, phase: str, progress: dict) -> str:
 #: ``state.json``'s ``metrics_left_out.{phase}``: ``{task id: how it was
 #: left}`` for the tasks the native implement emit kept out of the batches it
 #: handed the host — refused by the write policy, after a refused task, held
-#: by a check whose findings stand (fix round 22, live run 9 #1). The host's
+#: by a check whose findings stand. The host's
 #: ``util metrics finish`` names them on its closing line, as the executor's
 #: closing line names the same tasks, also when nothing was dispatched and
 #: the host ran no ``util metrics start``. Each emit replaces it; ``finish``
@@ -400,8 +397,8 @@ LEFT_OUT_KEY = "metrics_left_out"
 LEFT_REFUSED = "refused"
 LEFT_CHECK_PREFIX = "check:"
 LEFT_NOT_RUN = ""
-#: A task the run counted that it kept from an earlier run instead (fix
-#: round 24: only a line's dropped total names one).
+#: A task the run counted that it kept from an earlier run instead (only a line's
+#: dropped total names one).
 LEFT_KEPT = "kept"
 #: How many ids one clause of :func:`left_out_tail` names, and how many
 #: clauses it shows.
@@ -467,12 +464,12 @@ def _withdrawn_left_out(state: dict, entry: dict) -> Dict[str, str]:
 
 
 def left_out_tail(left_out: Mapping[str, str], *, unit: str = "task") -> str:
-    """What a run left, for its closing ``[ETA]`` line (fix round 22):
+    """What a run left, for its closing ``[ETA]`` line:
     ``T005 refused before dispatch; T006 not run; T007 not run: check T002
     reported problems``. One clause per way a task was left, in task order;
     at most :data:`LEFT_OUT_IDS_SHOWN` ids a clause and
     :data:`LEFT_OUT_CLAUSES_SHOWN` clauses, the rest counted in *unit*s
-    (:func:`eta_unit`: an apply phase's are batches, fix round 23). Both
+    (:func:`eta_unit`: an apply phase's are batches). Both
     legs render it, so the same story closes on the same words."""
     groups: Dict[str, List[str]] = {}
     for task_id, how in left_out.items():
@@ -508,9 +505,7 @@ def left_out_tail(left_out: Mapping[str, str], *, unit: str = "task") -> str:
 #: ``state.json``'s ``metrics_set_aside.{phase}``: ``{task id: how}`` for the
 #: tasks the human-task plan set aside, which no runner runs: a manual task
 #: left for the user, a task skipped with one, a task skipped at the user's
-#: request and one skipped with it (fix round 24, Claude Code racing #6:
-#: "task 10/10 done … ALL TASKS COMPLETE" while the manual T011 and T012
-#: were left). The native emit writes it, each emit replaces it and
+#: request and one skipped with it. The native emit writes it, each emit replaces it and
 #: ``finish`` removes it; the line that reaches N/N names them
 #: (:func:`set_aside_tail`), on the executor from its own plan.
 SET_ASIDE_KEY = "metrics_set_aside"
@@ -579,7 +574,7 @@ def set_aside_tail(aside: Mapping[str, str]) -> str:
 
 
 def eta_unit(phase: str) -> str:
-    """What the ``[ETA]`` lines of *phase* count (fix round 22, live run 9):
+    """What the ``[ETA]`` lines of *phase* count:
     implement counts one record per task it dispatches, so its lines say
     "task 1/5" beside "Organized into 3 execution batches: 5 task(s)"; the
     other phases count batches."""
@@ -596,7 +591,7 @@ def closing_line(
     elapsed_ms: Optional[int] = None, tail: str = "", why: str = "",
 ) -> str:
     """The closing ``[ETA]`` line of a run that ends short of completing
-    its phase, on both legs (fix round 22): ``run stopped after task 4/4 ·
+    its phase, on both legs: ``run stopped after task 4/4 ·
     <what it left>``, ``run stopped with nothing dispatched · …`` when it
     dispatched nothing, then *why* (a failed verify command)."""
     if done <= 0 and total <= 0:
@@ -614,7 +609,7 @@ def closing_line(
 def native_ends_short(state: dict, phase: str) -> bool:
     """Whether the native run on record will end short of completing its
     phase: a record took tasks out of its total or failed, or the emit left
-    tasks out (fix round 22). Its last ``[ETA]`` line then claims no
+    tasks out. Its last ``[ETA]`` line then claims no
     completion."""
     progress = (state.get("metrics_progress") or {}).get(phase)
     if isinstance(progress, dict) and (
@@ -659,7 +654,7 @@ def finish_phase_in_state(
     if entry is None:
         if not left:
             return None
-        # Fix round 22 (live run 9 #1, 01b/01c): a native resume that
+        # A native resume that
         # handed out nothing ran no `util metrics start`, and its `finish`
         # printed nothing; every ending closes its run's lines, this one too.
         set_left_out_in_state(state, phase, {})
@@ -686,12 +681,12 @@ def finish_phase_in_state(
 
     left.update(_withdrawn_left_out(state, entry))
     if left or entry.get(FAILED_KEY):
-        # Fix round 21 (review of round 20, #1): a native run whose records
+        # A native run whose records
         # kept tasks from running (`util batch-done`: held by a check's
         # findings, after a failed task, refused at `util write-prompt`)
         # did not complete its phase, and its closing line said "phase
-        # complete" after a check held the last tasks back. Fix round 22
-        # (live run 9 #1): the tasks its emit left out are named too, in the
+        # complete" after a check held the last tasks back. The tasks its emit left out
+        # are named too, in the
         # executor's closing line's words, and a run whose last task failed
         # closes on "run stopped" as well.
         run_id = entry.get("run_id")
@@ -713,8 +708,8 @@ def finish_phase_in_state(
     return elapsed_ms, f"[ETA] {phase}: {complete_segment}"
 
 
-#: The write run whose ``[ETA]`` lines no ending has closed yet (fix round
-#: 21): a callable taking the signal's name and returning that run's closing
+#: The write run whose ``[ETA]`` lines no ending has closed yet: a callable taking the
+#: signal's name and returning that run's closing
 #: line. The write scheduler opens it once its baseline is stamped and closes
 #: it on every ending; a detached worker's abort handler asks for the line
 #: (:func:`aborted_eta_line`), because it ends the process with ``os._exit``
@@ -794,7 +789,7 @@ def _compute_eta(
     per-item duration, however the first one used to be labelled: printing
     both used to read as three quantities (a per-item time, a wall-clock
     time, and a remaining time barely different from either), when a batch
-    ≠ item phase made "per-item" actively misleading (F13, 2026-09-16). The
+    ≠ item phase made "per-item" actively misleading. The
     rendered line now reports only the number a reader acts on — ``eta_ms``,
     the min of the two — and keeps the intermediates in the returned dict
     for callers/tests that want them.
@@ -810,7 +805,7 @@ def _compute_eta(
             `done in X` display).
         failure: ``None`` for a task that did not fail; else what failed
             (``""`` when nothing says), and the line reads ``task 2/11
-            failed (timeout) after 20m 5s`` with no estimate (fix round 24).
+            failed (timeout) after 20m 5s`` with no estimate.
         half_applied: the failed task changed files before it failed.
         dropped: why the total dropped since the run's last line
             (``T007 not run: check T002 reported problems``), or ``""``.
@@ -826,12 +821,12 @@ def _compute_eta(
     remaining = max(total - done, 0) if total > 0 else 0
 
     def failed(entry: Any) -> bool:
-        # Fix round 25: a record that named no task among several failed
+        # A record that named no task among several failed
         # ones (:data:`NO_TASK_ID_ENTRY_KEY`) is no progress either.
         return isinstance(entry, dict) and bool(
             entry.get(FAILED_ENTRY_KEY) or entry.get(NO_TASK_ID_ENTRY_KEY))
 
-    # Fix round 24 (live run 10 #5): a failed task is no progress. Its
+    # A failed task is no progress. Its
     # duration (a 20-minute timeout) is not how long a task takes, so it is
     # averaged in nowhere, and the wall-clock rate is the time the run spent
     # on the tasks that did not fail, over those tasks.
@@ -872,10 +867,10 @@ def _compute_eta(
         eta_ms = None
 
     unit = eta_unit(phase)
-    # Fix round 24 (live run 10 #7): the line whose total dropped says why.
+    # The line whose total dropped says why.
     why_total = [f"total now {total} ({dropped})"] if dropped else []
     if failure is not None:
-        # Fix round 24 (live run 10 #5): what happened, never "done", and
+        # What happened, never "done", and
         # no estimate (the run stops short, or goes on without it).
         parts = [
             f"[ETA] {phase}: {unit} {done}/{total} failed"
@@ -892,7 +887,7 @@ def _compute_eta(
             f"{format_duration(this_duration_ms)}"
         ] + why_total
         if remaining == 0:
-            # Fix round 22 (live run 9 #1): a run about to stop short of
+            # A run about to stop short of
             # completing its phase (*ends_short*) said "ALL BATCHES COMPLETE"
             # on this line and "run stopped" on the next. "N/N done" is all
             # that is true of it; its closing line says what it left.
@@ -900,7 +895,7 @@ def _compute_eta(
                 if unit != "task":
                     parts.append(_colorize("ALL BATCHES COMPLETE", "1;32", colorize))
                 elif set_aside:
-                    # Fix round 24 (Claude Code racing #6): manual tasks
+                    # Manual tasks
                     # left for the user are not complete.
                     parts.append(_colorize(ALL_DISPATCHED_COMPLETE, "1;32", colorize))
                     parts.append(set_aside)
@@ -1183,10 +1178,10 @@ def record_metric_in_state(
     stderr for the CLI, the phase log for the scheduler — and nothing is
     printed for a caller that wants none. See ``start_phase_in_state`` for why
     the in-memory form exists. *ends_short*: the run will stop short of
-    completing its phase, so the line that reaches N/N claims no completion
-    (fix round 22); ``None`` reads it off the state (:func:`native_ends_short`).
+    completing its phase, so the line that reaches N/N claims no completion; ``None``
+    reads it off the state (:func:`native_ends_short`).
 
-    Fix round 24 (live run 10): *failed* says the task failed (*failure*:
+    *failed* says the task failed (*failure*:
     what failed, *half_applied*: it changed files first), so its line says
     so and its entry is marked :data:`FAILED_ENTRY_KEY`; ``None`` reads it
     off the state, where ``util batch-done`` recorded it, for *task_id* or
@@ -1279,7 +1274,7 @@ def record_metric_in_state(
             # ``Retry: …`` starts with a word, not a task of this state.
             named = None
         if not named:
-            # Fix round 25 (review of round 24, stops #2): a record naming
+            # A record naming
             # no task is the one failed task of this run still unrecorded;
             # among two or more it is never guessed.
             candidates = unrecorded_failures(state, phase, entries)
@@ -1351,7 +1346,7 @@ def record_metric_in_state(
         isinstance(progress, dict) and progress.get(WITHDRAWN_KEY)
         and _is_index(progress.get("total_batches"))
     ):
-        # Fix round 18: this run's total lost the tasks a record took out
+        # This run's total lost the tasks a record took out
         # (`withdraw_from_progress_in_state`); the host still passes the
         # count it was handed at the emit.
         total_batches = int(progress["total_batches"])
@@ -1371,7 +1366,7 @@ def record_metric_in_state(
         this_duration_ms=duration_ms,
         colorize=_should_colorize_stderr(),
         # The executor knows (*ends_short*); on the native leg the state says
-        # it (fix round 22).
+        # it.
         ends_short=(
             native_ends_short(state, phase) if ends_short is None else ends_short
         ),
@@ -1422,7 +1417,7 @@ def record_metric(
         print_eta: When False, suppresses ETA stderr output.
         task_id: Optional id of the task or batch the entry measures (an
             apply batch's label carries none): the line of one ``util
-            batch-done`` recorded failed says so (fix round 24).
+            batch-done`` recorded failed says so.
     """
     with _state_file.update(state_path, temp_prefix=METRICS_TEMP_PREFIX) as state:
         eta_line = record_metric_in_state(

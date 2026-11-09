@@ -244,6 +244,35 @@ rules. Each has a contents list; load the sections relevant to the change.
   [Host result delivery](../../docs/development/host-reporting.md).
 - **Bracket markers (`[BATCH_DONE]` and the rest): who emits, who reads, never rename:**
   [Marker registry](../../docs/development/markers.md), generated.
+- **Makefile targets, container lanes and spend guards, package and release gates:**
+  [Makefile lanes and release gates](../../docs/development/release-gates.md).
+
+## Comments and docstrings
+
+**A comment states the rule or the reason, in the present tense, and points to the doc
+section that holds the rest.** It says what must stay true and why a reader may not remove or
+reorder the code; it does not say what the code used to do.
+
+- Keep every "why" that guards a write-safety, sandbox, secret-scrubbing or containment
+  decision, in the comment itself. Move only the story: the incident, the run that found it,
+  the date, the round that fixed it.
+- Write the invariant in a few lines and end with a pointer, `docs/development/<topic>.md#<anchor>`,
+  where the history is. If the history is not there yet, add it there first, briefly.
+- Do not cite unpublished plans. `§7.2`, `fix round 14` and `plans/<name>.md` mean nothing to a
+  reader of a clone: root `plans/` is local-only. Cite the owning doc anchor, a test, or the code.
+  An example path in a usage string (`plans/my-plan.md`) is not a citation.
+- Do not narrate dates, live runs or racing runs, and do not state counts that a registry owns
+  (the adapter roster is discovered from `utils/providers/`).
+- A docstring documents the contract: what the caller passes, what comes back, what is refused.
+  Rule names that are the real vocabulary (`rule 9`, `rung 7`) stay.
+
+`tests/test_comment_citations.py` is the ratchet. It counts plan citations (`§N`, `fix round N`,
+`plans/*.md`) per file across `skills/multi-llm/**/*.py` (tests excluded), `Makefile` and
+`instructions/**`, and compares them with `tests/comment_citation_baseline.json`. A count may only
+go down: an increase fails naming the file. After removing citations, lower the baseline with
+`uv run --project skills/multi-llm -- python skills/multi-llm/tests/test_comment_citations.py --write`.
+Check that a comment-only change left the code alone by comparing each changed module's syntax tree
+with docstrings stripped (`ast.dump`) before and after.
 
 ## Maintaining this guide
 

@@ -28,8 +28,7 @@ from .write_verdict import findings_clause
 
 
 #: The stop record's key for its headline without the ways forward a resume
-#: section carries (fix round 28, live run 12 #5;
-#: :meth:`WriteBatchScheduler._set_stop_headline`), which ``util next-command
+#: section carries, which ``util next-command
 #: --blocked`` hands the tool routes beside that section.
 HEADLINE_BESIDE_SECTION_KEY = "headline_beside_section"
 
@@ -41,11 +40,10 @@ _HEADLINE_ANSWER = re.compile(r"--human-task (<check id>|[A-Za-z0-9][\w.-]*)=(do
 def answers_cover(full: str, beside: str, stop: Mapping[str, Any]) -> bool:
     """Whether every ``--human-task`` answer *full* names and *beside* leaves
     out is one of *stop*'s own ``answers`` — the ones its resume section
-    lists as commands (fix round 28) — or of its ``resume_flags``, the
-    resume the section leads with when that resume carries answers itself
-    (a manual-task gate's ``--resume --human-task T010=done``; the merge of
-    fix round 28). The generic ``<check id>=done`` stands for ``=done`` on
-    each of the stop's ``check_task_ids``."""
+    lists as commands — or of its ``resume_flags``, the resume the section leads
+    with when that resume carries answers itself (a manual-task gate's
+    ``--resume --human-task T010=done``). The generic ``<check id>=done`` stands
+    for ``=done`` on each of the stop's ``check_task_ids``."""
     wanted = set()
     left_out = set(_HEADLINE_ANSWER.findall(full)) - set(_HEADLINE_ANSWER.findall(beside))
     for task_id, word in left_out:
@@ -91,7 +89,7 @@ def fit_stop_headline(
     last_resort: bool = True,
 ) -> Optional[str]:
     """A stop headline within *budget* (default ``cli_common.ERROR_MAX_CHARS``),
-    as one :func:`~utils.cli_common.plain_line` (fix round 19).
+    as one :func:`~utils.cli_common.plain_line`.
 
     ``head [reported]<terminator> Not run: … <body…> <tail>``. What gives way,
     in order: *reported* (the model's own words: cut with ``…``, or left out
@@ -149,7 +147,7 @@ def fit_stop_headline(
 
 
 #: How the resume's why ends when a failed batch moved bytes
-#: (:func:`compose_resume_why`; ``status``'s own words before fix round 23).
+#: (:func:`compose_resume_why`; ``status``'s own words).
 HALF_APPLIED_LEFT_CLAUSE = (
     "the half-applied state is left in place — inspect it, or "
     "`util restore-batch` the failed batch, before resuming"
@@ -180,7 +178,7 @@ def implement_tasks_done(state: Any) -> int:
 class FailedAnswerable:
     """A failed implement task a stop's ``--human-task`` answers can answer
     (:func:`compose_stop_answers`): ``unlanded`` when its reply said applied
-    and nothing it declares changed (fix round 15), ``not_rerun`` when a
+    and nothing it declares changed, ``not_rerun`` when a
     resume kept a failed check from running again on unchanged files."""
 
     task_id: str
@@ -188,9 +186,9 @@ class FailedAnswerable:
     not_rerun: bool = False
     #: A check task (it declares no file) whose failure a resume does not run
     #: again while the files are unchanged (the executor's
-    #: ``CheckHolds.unchanged_since_failure``; fix round 22, :func:`compose_resume_why`):
+    #: ``CheckHolds.unchanged_since_failure``, :func:`compose_resume_why`):
     #: only one whose verdict carries the tree it failed on, or one the run
-    #: already kept (fix round 23).
+    #: already kept.
     check: bool = False
 
 
@@ -210,7 +208,7 @@ def compose_resume_why(
 ) -> Optional[str]:
     """What the plain ``--resume`` of a stopped write phase does on an
     unchanged tree, from the stop's own facts, or ``None`` when nothing
-    waits (fix round 22).
+    waits.
 
     Live run 9 (the stop-path fixture): every surface gave each
     ``--human-task`` answer its why and the plain resume none, and the hosts
@@ -219,7 +217,7 @@ def compose_resume_why(
     resume does not simply run: each check of *checks* whose findings hold
     tasks back (*blocked*) is not run again while the files are unchanged,
     unless *rerun_checks* names it (no record of the tree it ran on, so a
-    resume runs it again; fix round 23); a *failed* check task the resume
+    resume runs it again); a *failed* check task the resume
     keeps (``FailedAnswerable.check``) neither, and any other failed task is
     dispatched again; a task *refused* before dispatch stays refused until
     ``driver.write_paths`` changes when *policy* names it — or for good when
@@ -229,14 +227,13 @@ def compose_resume_why(
     task that does not run. Both legs compose it from the facts they answer
     the stop from (the executor's ``StopAccount.stop_resume_why``,
     :func:`native_resume_why`), and it is cut at a word to
-    ``next_phase.MAX_RECORDED_WHY_CHARS`` (fix round 23).
+    ``next_phase.MAX_RECORDED_WHY_CHARS``.
 
     It ends with what the resume keeps — *kept* tasks or batches already
     done, and, with *half_applied*, that a failed batch's edits are left in
     place — so every surface that relays the why says it in the same words:
     ``status`` used to append those clauses itself, and the tool routes'
-    ``resume_why`` and ``util next-command --blocked`` did not (fix round 23,
-    review of round 22 relay #6). The cut takes the facts before them,
+    ``resume_why`` and ``util next-command --blocked`` did not. The cut takes the facts before them,
     never them.
     """
 
@@ -272,14 +269,14 @@ def compose_resume_why(
             parts.append(f"{task_id} is checked again before it is dispatched")
     if not parts:
         return None
-    # Fix round 24 (live run 10, Claude Code accept 01): "done", not
+    # "done", not
     # "applied" — a kept check task applied nothing, and the host told the
     # user "3 of 7 applied" from "keeps the 4 already applied".
     noun = {"tasks": "task", "batches": "batch"}.get(unit, unit) if kept == 1 else unit
     tail = f"; keeps the {kept} {noun} already done" if kept else ""
     if half_applied:
         tail += f"; {HALF_APPLIED_LEFT_CLAUSE}"
-    # Fix round 23 (review of round 22, relay #4): within the length a route
+    # Within the length a route
     # reads back from the run's folder (`next_phase.recorded_why`), cut at a
     # word, so the tool routes and status carry the why the native block
     # prints instead of falling back on a large stop.
@@ -310,7 +307,7 @@ def compose_stop_answers(
     and *undone_with* names the tasks a ``skip`` leaves undone with a task.
 
     The executor's stop (:meth:`WriteBatchScheduler._stop_answers`) and the
-    native leg's (:func:`native_stop_answers`, fix round 20) both answer
+    native leg's (:func:`native_stop_answers`) both answer
     through this, so each answer and its why read the same on every host:
     on live run 8 the native block offered only the combined command while
     the tool routes listed six, and the Claude Code host described a
@@ -341,7 +338,7 @@ def compose_stop_answers(
     for item in failed:
         task_id = item.task_id
         if item.unlanded:
-            # Fix round 15 (review R1): its change did not land, so there is
+            # Its change did not land, so there is
             # no failure to accept — going on without it comes first, and
             # `done` is for a change the user made by hand, as the stop
             # message says.
@@ -364,7 +361,7 @@ def compose_stop_answers(
     for check_id in checks:
         waiting = sorted(t for t, c in blocked.items() if c == check_id)
         reported = list(findings.get(check_id) or [])
-        # Fix round 28 (live run 12 #7, Claude Code status): the findings
+        # The findings
         # closed the why in brackets, "… review-code (… requires 3.)", which
         # status's own brackets made "3.))"; they follow a semicolon now,
         # without their closing stop, as no why ends in one.
@@ -396,7 +393,7 @@ def compose_stop_answers(
     for task_id in [*refused, *(item.task_id for item in failed)]:
         combined_flags += answer(task_id, "skip")
         clauses.append(skipped_clause(task_id))
-    # Fix round 23: each why within the length the tool routes read back
+    # Each why within the length the tool routes read back
     # from the run's folder (`next_phase.stop_answers_on_record`), cut at a
     # word, so a large stop's answers are not dropped on the way.
     from .next_phase import MAX_RECORDED_WHY_CHARS
@@ -420,7 +417,7 @@ def compose_stop_answers(
 NATIVE_REFUSED_PREFIX = "refused before dispatch: "
 
 #: How ``util batch-done --status failed --partial`` opens the reason of a
-#: native task that failed after its subagent changed files (fix round 21):
+#: native task that failed after its subagent changed files:
 #: the executor's partial application, which no ``--human-task`` answer is
 #: offered for until the half-applied state is inspected.
 HALF_APPLIED_PREFIX = "half-applied: "
@@ -428,7 +425,7 @@ HALF_APPLIED_PREFIX = "half-applied: "
 #: The reason the native instructions prescribe for a reply that said
 #: ``applied`` and changed no file, twice: the executor's
 #: ``applied_without_changes``, answered ``skip`` first, then ``done`` for a
-#: change made by hand (fix round 21).
+#: change made by hand.
 UNLANDED_REASON = "said applied, no file changed"
 
 
@@ -505,7 +502,7 @@ def native_stop_answers(state: Any) -> List[Dict[str, Any]]:
     depend on its task and have not run (not a manual one). ``[]`` when none
     waits, or when the record cannot be read.
 
-    Fix round 21: a failed task whose edits are half-applied
+    A failed task whose edits are half-applied
     (:data:`HALF_APPLIED_PREFIX`, ``util batch-done --partial``) gets no
     answer, as the executor offers none for a partial application: it is
     inspected first. One whose reply said ``applied`` and changed nothing
@@ -577,7 +574,7 @@ def check_kept_on_resume(
     (``implement_orchestrator._native_check_reruns``): a ``task_check_trees``
     stamp on record, else, with *phase_dir*, the executor's verdict stamp
     (:func:`executor_check_stamp`). With neither, the check runs again, and
-    the resume's why says so (fix round 23)."""
+    the resume's why says so."""
     from .state_manager import TASK_CHECK_TREES_KEY
     try:
         stamps = state.get(TASK_CHECK_TREES_KEY)
@@ -600,12 +597,12 @@ def native_resume_why(
     state: Any, *, phase_dir: Optional[Union[str, Path]] = None,
 ) -> Optional[str]:
     """:func:`compose_resume_why` for a stopped native implement, from the
-    facts :func:`native_stop_answers` answers it from (fix round 22): every
+    facts :func:`native_stop_answers` answers it from: every
     refusal the native emit records is the write policy's, and a failed task
     — a half-applied one too — is handed out again on a resume. A check
     whose findings hold tasks back is said to stay unrun only when the
     resume keeps it (:func:`check_kept_on_resume`, with the implement
-    *phase_dir* for the executor's stamp; fix round 23)."""
+    *phase_dir* for the executor's stamp)."""
     facts = _native_stop_facts(state)
     if facts is None:
         return None
@@ -630,7 +627,7 @@ def native_resume_why(
         },
         blocked=facts["blocked"],
         undone_with=facts["undone_with"],
-        # Fix round 23: what it keeps, as the executor's why says it.
+        # What it keeps, as the executor's why says it.
         kept=implement_tasks_done(state),
     )
 
@@ -657,8 +654,8 @@ def _accounting_line(account: Dict[str, Any]) -> str:
         parts.append(f"{len(account['not_run'])} not run ({'; '.join(named)})")
     with_findings = account.get("accepted_with_findings") or []
     after_failing = [tid for tid in account["accepted"] if tid not in with_findings]
-    # The bucket names are the labels every other surface uses (fix round
-    # 21, review of round 20, #3: this line still read "accepted with their
+    # The bucket names are the labels every other surface uses (this line still read
+    # "accepted with their
     # check findings" beside the table's "accepted with its check findings").
     if after_failing:
         parts.append(

@@ -55,7 +55,7 @@ def state_implement_view(
 ) -> Optional[Dict[str, Any]]:
     """Implement's tasks as ``state.json`` records them, when nothing else does.
 
-    Fix round 14 (live run 5, the stop path on Claude Code): the native leg
+    The native leg
     hands its batches to the host, which writes no ``write_batch_report.json``
     and no write mirror, so ``status --view run`` listed no implement task at
     all while ``state.json`` held every status, reason, check finding and
@@ -65,7 +65,7 @@ def state_implement_view(
     ``{tasks, titles, buckets, reasons, findings, answers}``. Read-only;
     ``None`` when it does not apply.
 
-    Fix round 16 (live run 6, Claude Code racing 06): a native implement the
+    A native implement the
     host completed is read back too (``completed: true``): `status --view
     run` printed "no run recorded for phase implement" after it, since the
     native leg leaves nothing else that view reads.
@@ -74,7 +74,7 @@ def state_implement_view(
 
     implement_dir = phase_dir_path(plan_path, _IMPLEMENT_PHASE)
     if (implement_dir / _WRITE_REPORT).exists() and native_leg_stamp(implement_dir) is None:
-        # Fix round 26: an executor report beside a native emit's newer
+        # An executor report beside a native emit's newer
         # `write_tasks.json` is an earlier run's (`superseded_by_native`).
         return None
     for view in views:
@@ -101,14 +101,14 @@ def state_implement_view(
     titles = record.get("task_titles") or {}
     buckets, waits_on = _implement_buckets(state, merge=_VIEW_MERGE)
     answers = record.get("human_task_decisions")
-    # The workflow trailer's rule for both kinds of findings (fix round 11):
+    # The workflow trailer's rule for both kinds of findings:
     # once implement completed, shown until a review-code that judged them
     # completed or was skipped.
     settled = completed and (
         state.is_phase_completed("code-review") or state.is_phase_skipped("code-review")
     )
     tally_buckets, _waits = _implement_buckets(state)
-    # Fix round 20 (live run 8, Claude Code stop): the workflow view's own
+    # The workflow view's own
     # test for an implement a `--resume` continues (`get_workflow_status`:
     # started on the host, or a task of its decomposition recorded done).
     resumable = not completed and (
@@ -126,44 +126,44 @@ def state_implement_view(
         from .stop_answers import native_resume_why, native_stop_answers
 
         stop_answers = native_stop_answers(record)
-        # Fix round 22: what the plain resume does, as `util next-command`
+        # What the plain resume does, as `util next-command`
         # says it above the resume.
         stop_resume_why = native_resume_why(
             record, phase_dir=str(phase_dir_path(plan_path, _IMPLEMENT_PHASE)))
-        # Fix round 28 (live run 12, Codex racing 06): every code task left
+        # Every code task left
         # waits on a manual task the user can do now, so the resume records
         # it done; the run stopped for the user.
         gate_flags, gate_why, gate_answers = _native_manual_gate(state)
         if gate_flags:
             stop_resume_why = gate_why or stop_resume_why
             stopped = not in_progress_since
-            # Fix round 29 (review of round 28 #1): and the user's decline.
+            # And the user's decline.
             stop_answers = list(stop_answers) + gate_answers
     return {
         "completed": completed,
-        # Fix round 20: whether `--implement <plan> --resume` continues it,
+        # Whether `--implement <plan> --resume` continues it,
         # and the `--human-task` answers its stop waits for, as the native
         # `util next-command` gives them (`{flags, why}`, `--resume` first).
         "resumable": resumable,
         "stop_answers": stop_answers,
         "stop_resume_why": stop_resume_why,
-        # Fix round 28: the flags the resume carries after the plan.
+        # The flags the resume carries after the plan.
         "resume_flags": gate_flags,
-        # Fix round 24 (live run 10, Claude Code stop 01/01b): whether the
+        # Whether the
         # run ended short and waits for the user, as the executor routes'
         # "stopped and needs you" head says (:func:`native_run_stopped`).
         "stopped": stopped,
-        # Fix round 25 (stops #3): the tasks a stopped run's host could
+        # The tasks a stopped run's host could
         # still run, which the resume runs (:func:`native_still_runnable`).
         "still_runnable": native_still_runnable(record, statuses) if stopped else [],
-        # Fix round 18 (Claude Code racing 06, mid-run): when the host's loop
+        # When the host's loop
         # is between `util metrics start` and `finish`.
         "in_progress_since": in_progress_since,
-        # Fix round 19: when state.json last changed, so a loop that ended
+        # When state.json last changed, so a loop that ended
         # without `util metrics finish` can be told from a live one.
         "state_changed_at": _state_changed_at(state.state_file),
         # The executor routes' `all tasks:` tally, every task in one bucket
-        # (fix round 18: the native leg printed a coarser `tasks:` line).
+        # (the native leg printed a coarser `tasks:` line).
         "tally": {
             "total": len(decomposition),
             "done": sum(len(tally_buckets[key]) for key in _TALLY_DONE),
@@ -173,7 +173,7 @@ def state_implement_view(
         "tasks": [str(t) for t in decomposition],
         "titles": {str(k): str(v) for k, v in titles.items()},
         "buckets": buckets,
-        # Fix round 17: what each `deferred_dependents` task waits on.
+        # What each `deferred_dependents` task waits on.
         "waits_on": waits_on,
         "reasons": {
             task_id: str(reasons[task_id])
@@ -181,7 +181,7 @@ def state_implement_view(
             if reasons.get(task_id)
         },
         "findings": [] if settled else state.implementation_check_findings(),
-        # A code task whose own check failed after its edits (fix round 15).
+        # A code task whose own check failed after its edits.
         "batch_checks": [] if settled else state.implementation_batch_check_findings(),
         # And one whose own check repeated the accepted findings (round 23).
         "batch_check_accepted": [] if settled else state.implementation_batch_check_accepted(),
@@ -195,7 +195,7 @@ def native_still_runnable(
     record: Mapping[str, Any], statuses: Mapping[str, Any],
 ) -> List[str]:
     """The tasks of a native implement that waits for an answer which the
-    host could still run without it, in task order (fix round 25): every
+    host could still run without it, in task order: every
     task of the decomposition not recorded completed, skipped or failed that
     is not manual, not held by a check's findings and not after a failed
     task. ``[]`` when nothing waits for an answer, or the record cannot be
@@ -225,9 +225,9 @@ def _native_manual_gate(
     state: Any,
 ) -> Tuple[List[str], Optional[str], List[Dict[str, Any]]]:
     """``(resume flags, why, answers)`` of a native implement whose every
-    code task left waits on a manual task the user can do now (fix round
-    28), the words ``util next-command`` gives them — the answers being the
-    user's decline of each such task (fix round 29) — else
+    code task left waits on a manual task the user can do now, the words ``util
+    next-command`` gives them — the answers being the
+    user's decline of each such task — else
     ``([], None, [])``."""
     from . import next_phase
 
@@ -258,7 +258,7 @@ def native_run_stopped(
     """Whether a native implement the host ran ended short and waits for the
     user: the run the executor routes head "stopped and needs you".
 
-    Fix round 24 (live run 10, Claude Code stop 01/01b): the native head read
+    The native head read
     "not finished on the host" for a stop, since that leg leaves no run
     record and "not finished" also covers a host still working. The caller
     has already ruled out a completed phase and an open loop (``util metrics
@@ -278,8 +278,7 @@ def native_run_stopped(
       the last emit opened: its ``util metrics finish`` removed the emit's
       left-out record (``metrics_left_out``), or the emit left nothing out.
 
-    Fix round 25 (review of round 24, stops #3; the coordinator's decision,
-    permissive): a host that ended its turn right after a failed task,
+    A host that ended its turn right after a failed task,
     leaving an independent task pending, read "not finished on the host"
     while ``util next-command`` gave the resume and the answers. Its loop is
     closed and something waits, so it is stopped; the block names the tasks
@@ -336,7 +335,7 @@ def _state_changed_at(state_file: Path) -> Optional[str]:
 
 
 #: A native implement that stopped and waits for the user's answer
-#: (:func:`native_run_stopped`, fix round 24): the executor routes' words
+#: (:func:`native_run_stopped`): the executor routes' words
 #: (:data:`STOPPED_FOR_THE_USER_VERDICT`), with no exit code to name, since
 #: the native leg's phase exits 0 and the host closed it.
 NATIVE_STOPPED_VERDICT = "stopped and needs you (not marked completed)"
@@ -348,10 +347,10 @@ def _native_head(
 ) -> str:
     """A native write phase's head line: what state.json says it is doing.
 
-    Fix round 18 (Claude Code racing 06): a running native implement read
+    A running native implement read
     "no run record — the host ran these tasks itself" exactly as a stopped
-    one did, so the view could not say whether anything was going on. Fix
-    round 24: one that stopped needing the user (*stopped*) reads
+    one did, so the view could not say whether anything was going on. One that stopped
+    needing the user (*stopped*) reads
     :data:`NATIVE_STOPPED_VERDICT`.
     """
     if completed:
@@ -374,7 +373,7 @@ def _native_head(
 
 
 def _native_resume_line(resume: Optional[str]) -> List[str]:
-    """What an in-progress head may also mean, and the way on (fix round 19).
+    """What an in-progress head may also mean, and the way on.
 
     ``util metrics start`` with no ``finish`` is all that says a host's loop
     is running, so a loop that crashed or whose session ended reads the same
@@ -395,11 +394,11 @@ def native_resume_command(
     """``--<mode> <plan> --resume`` in the host's spelling (:func:`user_speller`),
     else the dispatcher's: the way on for a native phase whose loop ended
     without its finish, or that stopped. *flags* replace the bare verb with a
-    whole answer (``--resume --human-task T005=skip``, fix round 20).
+    whole answer (``--resume --human-task T005=skip``).
 
     On a commit review (a brief whose ``state.json`` holds ``commit_range``)
     the command reads as the commit mode with the pinned range, in either
-    spelling (plans/review-commits.md §2.8): ``status``'s ``resume with:``
+    spelling: ``status``'s ``resume with:``
     line for a native apply that stopped."""
     tokens = [str(flag) for flag in flags] or [_RESUME_VERB_BY_MODE.get(mode, "--resume")]
     if spell is not None:
@@ -430,7 +429,7 @@ def _native_stop_lines(
     resume: Optional[str], answers: Sequence[Tuple[str, str]] = (),
     why: Optional[str] = None,
 ) -> List[str]:
-    """The way on from a native phase that stopped (fix round 20).
+    """The way on from a native phase that stopped.
 
     Live run 8 (Claude Code stop path): a native implement the host closed
     without ``--mark-completed`` read "not finished on the host" with no
@@ -444,7 +443,7 @@ def _native_stop_lines(
         return []
     lines = [f"      resume with: {resume}"]
     if why:
-        # Fix round 22: what the plain resume does, like each answer below.
+        # What the plain resume does, like each answer below.
         lines.append(why_line(why))
     for command, answer_why in answers:
         lines.append(f"      or answer the stop with: {command}")
@@ -457,7 +456,7 @@ STILL_RUNNABLE_IDS_SHOWN = 8
 
 
 def _still_runnable_clause(ids: Sequence[str]) -> str:
-    """``T003 can still run: the resume runs it`` (fix round 25)."""
+    """``T003 can still run: the resume runs it``."""
     shown = list(ids[:STILL_RUNNABLE_IDS_SHOWN])
     rest = len(ids) - len(shown)
     if rest:
@@ -475,12 +474,12 @@ def render_state_implement_lines(
 ) -> List[str]:
     """:func:`state_implement_view` as the run view's text: one block.
 
-    Fix round 18 (Claude Code racing 06 and stop path): its tally line reads
+    Its tally line reads
     ``all tasks:``, in the executor routes' words (:func:`implement_tally_text`),
-    and its head says whether the host's run is in progress. Fix round 19:
-    an in-progress head says when state.json last changed and, with
-    *resume* (:func:`native_resume_command`), what it may also mean. Fix
-    round 20: a "not finished" one that a ``--resume`` continues
+    and its head says whether the host's run is in progress. An in-progress head says
+    when state.json last changed and, with
+    *resume* (:func:`native_resume_command`), what it may also mean. A "not finished"
+    one that a ``--resume`` continues
     (``resumable``) ends with *resume* and each of *answers*
     (:func:`native_stop_answer_commands`), :func:`_native_stop_lines`.
     """
@@ -496,7 +495,7 @@ def render_state_implement_lines(
     )
     runnable = [str(t) for t in (view.get("still_runnable") or [])]
     if runnable:
-        # Fix round 25 (stops #3): stopped with tasks the host could run.
+        # Stopped with tasks the host could run.
         lines.append(f"      {_still_runnable_clause(runnable)}")
     if since:
         lines += _native_resume_line(resume)
@@ -533,7 +532,7 @@ def render_state_implement_lines(
 
 def native_leg_stamp(directory: Path) -> Optional[Dict[str, str]]:
     """``{leg, host}`` when *directory*'s ``write_tasks.json`` was written by
-    the native emit, else ``None`` (fix round 26).
+    the native emit, else ``None``.
 
     Every run of a write phase rewrites that file, on either leg, and only
     the native emit stamps it (``write_phase_bridge.NATIVE_LEG``), so the
@@ -652,7 +651,7 @@ def set_aside_superseded_runs(
     and each one's :func:`earlier_run_record` for that native block to name.
 
     Set aside only when the native view of that phase is there to show in its
-    place; otherwise the record stays as it is (fix round 26)."""
+    place; otherwise the record stays as it is."""
     kept: List[Dict[str, Any]] = []
     candidates: Dict[str, Tuple[Dict[str, Any], Dict[str, str]]] = {}
     for view in views:
@@ -755,8 +754,8 @@ def state_apply_views(
 ) -> List[Dict[str, Any]]:
     """The apply phases a native host ran, read back from ``state.json``.
 
-    Fix round 18 (Claude Code racing run 7): the run view listed the native
-    implement (fix round 14) but none of the apply phases the same host had
+    The run view listed the native
+    implement but none of the apply phases the same host had
     run, while on the tool routes, whose apply runs leave a run record, it
     listed every one. A phase is listed when its folder holds the batch list
     the native emit wrote (``write_tasks.json``) and neither a run view nor a
@@ -766,9 +765,9 @@ def state_apply_views(
     host's loop is going. ``{phase, phase_dir, completed,
     in_progress_since, batches_recorded, batches_total}`` (plus
     ``declined_items`` / ``skipped_items`` when a batch's record names one,
-    fix round 22, ``items_applied`` / ``items_total`` / ``applied_to``
-    once a record names one of its items, fix round 28, counted over the
-    run, and ``failed_batches``, fix round 29) in workflow order;
+    ``items_applied`` / ``items_total`` / ``applied_to`` once a record names
+    one of its items, counted over the run, and ``failed_batches``) in
+    workflow order;
     *only* limits it to one phase (``--phase``). Read-only.
     """
     from .metrics import _current_run_id
@@ -815,7 +814,7 @@ def state_apply_views(
             "in_progress_since": None if completed else since,
             "batches_recorded": None,
             "batches_total": None,
-            # Fix round 19, as on the native implement view.
+            # As on the native implement view.
             "state_changed_at": changed,
         }
         if entry["in_progress_since"]:
@@ -834,23 +833,23 @@ def state_apply_views(
             if isinstance(total, int) and not isinstance(total, bool) and total > 0:
                 entry["batches_total"] = total
         if phase == "apply-code-fixes":
-            # Fix round 20: the batches whose own check failed after their
+            # The batches whose own check failed after their
             # edits, as `util batch-done` recorded them, named as the native
             # implement view names its tasks'.
             checks = _native_apply_batch_checks(record, directory)
             if checks:
                 entry["batch_checks"] = checks
-        # Fix round 22: the items a batch declined or the user skipped;
-        # fix round 28: and the items count they are left out of.
+        # The items a batch declined or the user skipped;
+        # And the items count they are left out of.
         entry.update(_native_apply_not_applied(record, directory, phase))
         out.append(entry)
     return out
 
 
 #: The not-applied items a write mirror (and a native apply view) names, in
-#: the order and words the progress line prints them (fix round 18): the
+#: the order and words the progress line prints them: the
 #: key, the words for one item and for several, and the words a recorded
-#: reason may open with that the clause has already said (fix round 26).
+#: reason may open with that the clause has already said.
 _NOT_APPLIED_ITEM_WORDS: Tuple[Tuple[str, str, str, str], ...] = (
     ("declined_items", "declined by its batch (not applied)",
      "declined by their batch (not applied)", ""),
@@ -864,10 +863,10 @@ def not_applied_item_clauses(source: Mapping[str, Any]) -> List[str]:
     and its skipped twin, one clause per kind *source* carries
     (``declined_items`` / ``skipped_items``: ``[{task_id, id, reason}]``, a
     write mirror's keys). The executor's progress line puts them after its
-    ``items applied`` count; the native apply view prints each on its own
-    (fix round 22), so the two legs name a declined item in the same words.
+    ``items applied`` count; the native apply view prints each on its own, so the two
+    legs name a declined item in the same words.
 
-    Fix round 26 (live run 11 #7): the clause read "not applied, declined by
+    The clause read "not applied, declined by
     its batch: …" after "2/3 items applied, ", two clauses run together by
     commas; it now counts the items and says "not applied" once, in
     parentheses."""
@@ -899,7 +898,7 @@ def _reason_after(reason: str, said: str) -> str:
 
 def accepted_rerun_clauses(by_task: Mapping[str, Sequence[str]]) -> List[str]:
     """``completed, its check repeated T002's accepted findings: T007`` per
-    set of checks, from ``{task_id: [check ids]}`` (fix round 23): the code
+    set of checks, from ``{task_id: [check ids]}``: the code
     tasks whose own check reported again only what the user accepted for a
     check (``--human-task <check>=done``), named on every ``status`` surface
     of both legs where a failing own check is named, never as a failure."""
@@ -918,7 +917,7 @@ def accepted_rerun_clauses(by_task: Mapping[str, Sequence[str]]) -> List[str]:
 
 def repeated_check_clauses(by_task: Mapping[str, Sequence[str]]) -> List[str]:
     """``completed, its check repeated T002's findings: T001`` per set of
-    checks, from ``{task_id: [check ids]}`` (fix round 28): the code tasks
+    checks, from ``{task_id: [check ids]}``: the code tasks
     whose own check reported only what a check task of the run reported
     (``task_batch_check_repeats``), named on the ``status`` surfaces
     :func:`accepted_rerun_clauses` names its tasks on, never as a failure
@@ -957,14 +956,13 @@ def _native_apply_not_applied(
 ) -> Dict[str, Any]:
     """``{declined_items, skipped_items, failed_batches, items_applied,
     items_total, applied_to}`` for a native apply phase, in the write
-    mirror's shape (fix round 22, live run 9: the decline the host recorded
-    with ``util batch-done --declined`` was on no ``status`` surface). Read
+    mirror's shape. Read
     from ``processed_<phase dir>``: a record of the review the phase's
     ``write_tasks.json`` applies (its ``grouped_sha256``), or, for a record
     or a task without that stamp, one whose item the run handed out. ``{}``
     when nothing applies or either cannot be read.
 
-    Fix round 28 (live run 12 #4, Claude Code decline): the block printed
+    The block printed
     "1 declined by its batch (not applied): …" with no "2/3 items applied;"
     before it, which the executor's line has. ``items_applied`` counts the
     items a record of this run says ``applied`` (as the executor counts an
@@ -973,7 +971,7 @@ def _native_apply_not_applied(
     ``applied_to`` is the one file a single-target phase's batches all
     declare, from the repository root, as the executor names it.
 
-    Fix round 29 (review of round 28): the run is the file's ``native_run``
+    The run is the file's ``native_run``
     (``write_phase_bridge.native_run_record``), not the file's batches,
     which a native ``--resume`` cuts down to the ones still to run: right
     after a resume's emit the count was gone, and once its batch was
@@ -1084,8 +1082,7 @@ def _failed_batch_reason(
     return ""
 
 
-#: The words of the clause naming a native apply phase's failed batches
-#: (fix round 29), for one and for several.
+#: The words of the clause naming a native apply phase's failed batches, for one and for several.
 _FAILED_BATCH_WORDS = ("1 batch failed", "{n} batches failed")
 
 
@@ -1094,7 +1091,7 @@ def failed_batch_clause(view: Mapping[str, Any]) -> List[str]:
     …``) for a native apply view's ``failed_batches``, else ``[]``: the
     executor's line names its failed batches (``failed apply-batch-0``), and
     the native view's count read "0/4 items applied" beside one and named
-    nothing (fix round 29)."""
+    nothing."""
     raw = view.get("failed_batches")
     entries = [
         entry for entry in raw
@@ -1159,9 +1156,9 @@ def _native_apply_batch_checks(record: Dict[str, Any], directory: Path) -> List[
 
 
 def native_items_count(view: Mapping[str, Any]) -> str:
-    """``2/3 items applied`` (``… applied to plans/p.md`` for a single-target
+    """``2/3 items applied`` (``… applied to`` for a single-target
     phase) for a native apply view that counted its items, else ``""``:
-    the executor's progress-line words (fix round 28)."""
+    the executor's progress-line words."""
     applied, total = view.get("items_applied"), view.get("items_total")
     if not (isinstance(applied, int) and isinstance(total, int)
             and not isinstance(applied, bool) and total > 0):
@@ -1193,10 +1190,9 @@ def render_state_apply_lines(
         lines.append(
             f"      own check fails {entry['id']}: {clip('; '.join(findings), 300)}"
         )
-    # Fix round 22: in the executor's progress-line words. Fix round 28
-    # (live run 12 #4): after the items count they are left out of, as the
-    # executor's line puts them, "2/3 items applied; 1 declined by …".
-    # Fix round 29: and the batches recorded failed, by name.
+    # The items left out of the count follow it in the executor's progress-line
+    # words, "2/3 items applied; 1 declined by …", then the batches recorded
+    # failed, by name.
     not_applied = not_applied_item_clauses(view) + failed_batch_clause(view)
     count = native_items_count(view)
     if count:
@@ -1206,7 +1202,7 @@ def render_state_apply_lines(
     if since:
         lines += _native_resume_line(resume)
     elif not view.get("completed"):
-        # Fix round 20: listed unfinished only while the workflow shows it
+        # Listed unfinished only while the workflow shows it
         # `in_progress` (`state_apply_views`), which a `--resume` continues.
         lines += _native_stop_lines(resume)
     return lines
@@ -1215,7 +1211,7 @@ def render_state_apply_lines(
 def implement_task_tally(plan_path: Path) -> Optional[Dict[str, Any]]:
     """Every task of implement's decomposition as ``state.json`` records it.
 
-    Fix round 16 (run 6, Codex and OpenCode stop paths): after a resume,
+    After a resume,
     ``status``'s implement run block counted only that run's batches ("2/2
     batches ok, 1/2 items applied", then "1/1" on the accept path) and never
     added up to the fixture's seven tasks, while summary.md and the stop's

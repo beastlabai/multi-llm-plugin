@@ -1162,7 +1162,7 @@ class TestPlacement:
         joined = self.MAKEFILE.replace("\\\n", " ")
         phony = " ".join(re.findall(r"^\.PHONY:(.*)$", joined, re.M))
         assert re.search(r"(?<![\w-])claude-check-bump(?![\w-])", phony)
-        assert "make claude-check-bump" in self.MAKEFILE
+        assert "claude-check-bump: ## " in self.MAKEFILE
 
     @EVERY_ENTRY
     def test_every_entry_point_s_help_names_every_family(self, entry):
@@ -1182,14 +1182,14 @@ class TestPlacement:
 
     def test_the_makefile_help_names_every_family(self):
         line = next(text for text in self.MAKEFILE.splitlines()
-                    if "make opencode-check-bump " in text and "@echo" in text)
+                    if text.startswith("opencode-check-bump:") and "## " in text)
         assert "claude-v*/codex-v*/opencode-v*" in line
 
     def test_it_is_phony_documented_and_follows_the_registry_target(self):
         joined = self.MAKEFILE.replace("\\\n", " ")
         phony = " ".join(re.findall(r"^\.PHONY:(.*)$", joined, re.M))
         assert re.search(r"(?<![\w-])opencode-check-bump(?![\w-])", phony)
-        assert "make opencode-check-bump" in self.MAKEFILE
+        assert "opencode-check-bump: ## " in self.MAKEFILE
         assert (self.MAKEFILE.index("\nopencode-print-registry:")
                 < self.MAKEFILE.index("\nopencode-check-bump:"))
 

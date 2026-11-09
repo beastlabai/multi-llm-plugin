@@ -112,7 +112,7 @@ REASONING_EFFORTS = EFFORT_LADDER.accepted
 STRUCTURAL_MODEL_VERSION = "1.18.18"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# M4 / donor §2.3 — hermetic runs.
+# M4 / donor — hermetic runs.
 #
 # The user's own opencode config can silently change the effective model, agent
 # or permission set per machine and per repository. The containment is an empty,
@@ -191,8 +191,7 @@ HERMETIC_DIR_PREFIX = "multi-llm-opencode-"
 #: the managed file and this variable). It lands in the top-level
 #: ``permission``, which the agent-layer rows the hermetic content carries
 #: already beat (T4.6 rig ``envperm_plan``), but it is a config carrier the
-#: redirect does not reach, so a hermetic slot strips it like the three above
-#: (plans/opencode-validator-false-rate-limit-and-denied-turn.md §4.2 step 1).
+#: redirect does not reach, so a hermetic slot strips it like the three above.
 #: A non-hermetic slot leaves it alone: there it is the user's own override.
 CONFIG_ENV_NAMES = (
     "OPENCODE_CONFIG",
@@ -209,8 +208,7 @@ PROJECT_CONFIG_ENV = "OPENCODE_DISABLE_PROJECT_CONFIG"
 HOME_DIR_ENV = "OPENCODE_TEST_HOME"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# The denied turn (plans/opencode-validator-false-rate-limit-and-denied-turn.md
-# §4.2, T4.1/T4.2).
+# The denied turn.
 #
 # `opencode run` answers every permission `ask` with an auto-reject, and on
 # 1.18.32 a rejected permission ENDS the agent loop: the process exits 0 with no
@@ -253,7 +251,7 @@ HOME_DIR_ENV = "OPENCODE_TEST_HOME"
 # A shadowing layer of either kind is a silent allow, which the structural
 # denied-turn check (`classify_structural`) cannot catch.
 #
-# **The non-hermetic delivery (T4.7, §4.4).** `agent-write` (always) and
+# **The non-hermetic delivery.** `agent-write` (always) and
 # `agent-readonly` under `hermetic: off` keep the user's own config, so they get
 # no rebuild, no `--pure`, no `XDG_CONFIG_HOME` redirect and no stripping. Their
 # rows are merged **over** the inherited `OPENCODE_CONFIG_CONTENT` instead
@@ -359,7 +357,7 @@ def builtin_external_allows(
 def permission_block(
     agent: Optional[str] = None, env: Optional[Mapping[str, str]] = None
 ) -> Dict[str, Any]:
-    """A fresh copy of the §4.2 step 1 rows, as ordered dicts.
+    """A fresh copy of the step 1 rows, as ordered dicts.
 
     With ``agent``, the built-in allows the deny shadows
     (:func:`builtin_external_allows`) are re-listed right after ``"*": "deny"``,
@@ -715,7 +713,7 @@ def _defines_an_implementation(block: Dict[str, Any]) -> bool:
     qualify, and they are the two that cannot be reconstructed once the user's
     config is out of reach: an ``npm`` SDK package, or an ``options.baseURL``
     pointing the provider at a server multi-llm has never heard of — the shape
-    §2.3 measured on a real machine (a custom base URL with its own ``models``
+ measured on a real machine (a custom base URL with its own ``models``
     map and a live ``apiKey``).
 
     Everything else is an *override* of a provider opencode already has, and an
@@ -750,7 +748,7 @@ def _user_config_paths() -> List[str]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# §8 (plans/opencode-validator-false-rate-limit-and-denied-turn.md) — the
+# The
 # resolved config, read through `opencode debug config`.
 #
 # `auth list` is structurally blind to a provider declared only in config (a
@@ -1026,9 +1024,7 @@ def _read_declared_providers(
 # `""`; `{file:PATH}` → the trimmed file, PATH relative to the layer's own
 # directory (`cwd` for `OPENCODE_CONFIG_CONTENT`), `~/` → `$HOME`.
 #
-# The layer order is MEASURED on 1.18.34 (2026-10-02: the real binary from a
-# scratch HOME, every layer setting its own `provider.openrouter.options.timeout`,
-# the printed winner removed until none was left), lowest precedence first:
+# The layer order is MEASURED on 1.18.34, lowest precedence first:
 #
 #   1. the global directory, `$XDG_CONFIG_HOME/opencode/` (else
 #      `~/.config/opencode/`): `config.json`, `opencode.json`, `opencode.jsonc`;
@@ -1310,7 +1306,7 @@ def read_user_declared_config(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# T4.7 — the rows over the user's own config (plan §4.4 steps 2-3).
+# T4.7 — the rows over the user's own config.
 # ─────────────────────────────────────────────────────────────────────────────
 
 #: `external_directory` patterns that match every path. Never re-listed after
@@ -1329,7 +1325,7 @@ _LAYERS_BY_AGENT: Dict[str, Tuple[str, str]] = {
 def relisted_external_rules(
     declared: Optional[DeclaredConfig], agent: str
 ) -> List[Tuple[str, str]]:
-    """The user's ``external_directory`` rules to re-list after our deny (§4.4 step 3).
+    """The user's ``external_directory`` rules to re-list after our deny.
 
     ``declared`` is :func:`read_user_declared_config`'s result (the user's own
     resolved config, no hermetic delta). The effective ordered list is the
@@ -1403,7 +1399,7 @@ def _external_directory_map(
 ) -> Dict[str, str]:
     """``{"*": "deny"}``, the built-in allows it shadows, then the user's rules.
 
-    Built-in first, then the user's (§4.2 step 1): a user pattern equal to a
+    Built-in first, then the user's: a user pattern equal to a
     built-in one is moved to its own position with its own action.
     """
     rules = dict(permission_block(agent, env)["external_directory"])
@@ -1418,7 +1414,7 @@ def _external_directory_map(
 #:
 #: Re-ordering the map we emit does not re-order the merged one: opencode
 #: deep-merges ``OPENCODE_CONFIG_CONTENT`` over the user's config *files*, and a
-#: key a file already holds keeps the file's position (§4.1). So with a file's
+#: key a file already holds keeps the file's position. So with a file's
 #: own ``agent.<name>.permission`` in force, the real ``external_directory`` key
 #: can lose twice: its user patterns (``"/shared/*": "allow"``) stay ahead of
 #: our appended ``"*": "deny"`` and are shadowed by it (rig
@@ -1631,7 +1627,7 @@ def _user_defines_provider(prefix: str) -> bool:
     When the config files alone answer it (:func:`_user_config_files_conclusive`:
     only a plain global ``opencode.json``, no ``OPENCODE_CONFIG*``, no project
     config), the answer is the file read and **nothing is spawned** — this is
-    reached by §8's structural leg, Lane A ``generate`` slots and the
+    reached by the structural leg, Lane A ``generate`` slots and the
     ``--dry-run-subagents`` renderer, none of which should pay for a spawn.
 
     Otherwise it is read through ``opencode debug config``
@@ -1739,7 +1735,7 @@ class OpenCodeProvider(LLMProvider):
     # whether its key is in auth.json under the custom id, in an `{env:}`
     # reference, or absent (keyless); a built-in override passes only when its
     # config key resolves in the dispatch's env. A built-in with no key
-    # anywhere, or one that does not resolve, is still refused (plan §8).
+    # anywhere, or one that does not resolve, is still refused.
     auth_check = ("opencode", "auth", "list")
     login_cmd = "opencode auth login"
     #: D3 step 2 — the model tokens opencode serves with NO credential present,
@@ -1760,7 +1756,7 @@ class OpenCodeProvider(LLMProvider):
     # The flag gate reads the `run` subcommand's own help: `--pure` is one of
     # `opencode run`'s options, never the top-level command's.
     help_argv = ("run", "--help")
-    # SUPPORT POLICY (2026-10-02): the newest opencode release is the only one
+    # SUPPORT POLICY: the newest opencode release is the only one
     # supported, so the floor and the release the parser fixtures were captured
     # from are one version, always. Below it the executor refuses (exit 3,
     # naming `upgrade_hint`); above it — a release newer than this commit —
@@ -1790,7 +1786,7 @@ class OpenCodeProvider(LLMProvider):
     #: unmeasured build omits it with one WARN until the next bump.
     CONTINUE_LOOP_ON_DENY_RANGE = (min_version, verified_version)
 
-    # §7.2 — per-adapter pattern overrides, EXTENDING the base sets (never
+    # Per-adapter pattern overrides, EXTENDING the base sets (never
     # replacing them: the base entries are audited-clean and shared).
     #
     # `ProviderAuthError` is the `error.name` of a live opencode auth failure,
@@ -1814,7 +1810,7 @@ class OpenCodeProvider(LLMProvider):
     # stderr reach the tables now.
     rate_limit_patterns = LLMProvider.rate_limit_patterns
 
-    #: `opencode auth list` exits 0 whether or not anything is stored (§5.3), so
+    #: `opencode auth list` exits 0 whether or not anything is stored, so
     #: the count line is the only verdict. Measured 2026-08-16 against a scratch
     #: HOME/XDG pair: a logged-out run prints exactly "└  0 credentials" and no
     #: Environment section at all, while an env-key-only run prints the same
@@ -1854,7 +1850,7 @@ class OpenCodeProvider(LLMProvider):
     ) -> Optional[str]:
         """Why opencode's *addressing scheme* cannot express this model, or None.
 
-        With ``profile`` (the executor's preflight passes it, plan §8 T8.3), a
+        With ``profile`` (the executor's preflight passes it T8.3), a
         slot that runs hermetically is also asked the hermetic
         reconstructibility question here, **before** the auth leg: a provider
         defined only in the user's own opencode config is refused with the
@@ -2000,7 +1996,7 @@ class OpenCodeProvider(LLMProvider):
             )
         return ModelVerdict(known=False, detail=detail, suggestions=nearest)
 
-    # ── §8 — config-declared providers (T8.3, T8.6) ────────────────────────
+    # ── — config-declared providers (T8.3, T8.6) ────────────────────────
 
     def config_credential_source(
         self,
@@ -2020,7 +2016,7 @@ class OpenCodeProvider(LLMProvider):
         (the executor's shared ``resolve_env`` + ``build_child_env`` helper, so
         the ``env_allowlist`` and host guards apply exactly as at dispatch), and
         runs ``debug config`` with the dispatch's ``cwd`` and with ``--pure``
-        exactly when the dispatch argv carries it. The verdict (§8.2):
+        exactly when the dispatch argv carries it. The verdict:
 
         * the prefix is declared **custom** (``npm``/``baseURL``) → ``declared``,
           with or without a key: ``auth list`` is blind to it and a keyless
@@ -2149,7 +2145,7 @@ class OpenCodeProvider(LLMProvider):
         runner_version: Optional[str] = None,
         continue_gate: bool = True,
     ) -> Iterator[Optional[str]]:
-        """Scope one dispatch to the run's empty config home (donor §2.3).
+        """Scope one dispatch to the run's empty config home (donor).
 
         Yields ``None`` normally, or a refusal string when the slot's model names
         a provider that the redirect would make unreconstructible — a silent
@@ -2228,7 +2224,7 @@ class OpenCodeProvider(LLMProvider):
     def _merge_agent(profile: str) -> Optional[str]:
         """The agent a **non-hermetic** slot merges its rows under, or ``None``.
 
-        ``agent-write`` always (it is never hermetic, §4.4) and ``agent-readonly``
+        ``agent-write`` always (it is never hermetic) and ``agent-readonly``
         when ``hermetic: off`` put its dispatch here. ``generate`` does not: it
         passes no ``--agent``, and under ``hermetic: off`` a user's
         ``default_agent`` decides which agent it runs.
@@ -2335,7 +2331,7 @@ class OpenCodeProvider(LLMProvider):
           provider needs no block. A provider defined **only** in the user's own
           opencode config raises :class:`_UnreconstructibleProvider`, because
           after the redirect there is nothing left for it to resolve against.
-        * **permission** (T4.1) — the §4.2 step 1 deny rows under
+        * **permission** (T4.1) — the step 1 deny rows under
           ``agent.<name>.permission`` for every profile in
           :data:`PERMISSION_AGENT_BY_PROFILE`, whatever the provider, plus
           ``experimental.continue_loop_on_deny`` when the version gate allows it
@@ -2343,8 +2339,7 @@ class OpenCodeProvider(LLMProvider):
 
         **The refusal fires first.** The provider half is resolved, and may
         raise, before any permission row is merged, so a refused slot produces
-        no content at all and claims no config home (§9 item 4; §8's structural
-        leg relies on this raise).
+        no content at all and claims no config home.
         """
         provider_block: Optional[Dict[str, Any]] = None
         base_model, _effort = split_reasoning_effort(model or "", REASONING_EFFORTS)
@@ -2616,8 +2611,7 @@ class OpenCodeProvider(LLMProvider):
     @classmethod
     def _scan_text_parts(cls, stdout: str) -> "_OpenCodeText":
         """One walk over the stream for the answer text, shared by
-        :meth:`parse_output` and :meth:`salvage_text` (plan:
-        review-run-scope-salvage-and-failure-visibility §4, D4.4).
+        :meth:`parse_output` and :meth:`salvage_text`.
 
         A text part is a ``text`` event whose ``part.type`` is ``text`` —
         ``parse_output``'s rule, unchanged. Each step is one assistant message,
@@ -2663,7 +2657,7 @@ class OpenCodeProvider(LLMProvider):
     def classify_auth_probe(
         self, stdout: str, stderr: str, exit_code: int = 0
     ) -> Optional[bool]:
-        """Read ``opencode auth list`` (§5.3/§7.2: exit 0 carries no verdict).
+        """Read ``opencode auth list`` (exit 0 carries no verdict).
 
         The base implementation reports ``True`` on a clean exit with no login
         notice — and ``auth list`` *always* exits 0 and never prints one, so a
@@ -2707,7 +2701,7 @@ class OpenCodeProvider(LLMProvider):
 
         opencode does not echo our prompt, but it echoes the **repository**:
         ``--format json`` stdout carries every tool call's output. Run b38de8bb
-        (2026-09-24) was a validator that grepped a plan discussing rate
+         was a validator that grepped a plan discussing rate
         limiting, died on an auto-rejected permission with exit 0, and was
         recorded ``rate_limited`` off ``bypasses the record rate limiter`` in a
         ``tool_use`` event — then halved opencode's concurrency for the rest of
@@ -2973,7 +2967,7 @@ class OpenCodeProvider(LLMProvider):
         read the exact plan rows …"), which the ask lane would otherwise count
         as the answer. The adapter already calls that ending a failure, so the
         parse result says the answer did not finish, ``"incomplete": True``
-        (plans/ask-answer-recovery-and-false-success.md D3.1: any adapter that
+        (any adapter that
         fails an exit-0 run on how its stream ended sets it). It is not an
         ``error_code``, so the findings-file channel is unchanged.
 

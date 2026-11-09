@@ -96,19 +96,18 @@ def manual_close_note(
     """How to record the deferred manual tasks done, in *host_id*'s spelling.
 
     ``next_phase.manual_close_note`` over the workflow payload's
-    ``phases.implement.manual_tasks`` (fix round 14: Codex racing 06/08
-    listed T007 and never said how to close it). ``None`` when nothing is
+    ``phases.implement.manual_tasks``. ``None`` when nothing is
     owed or the host has no command template for this route.
     *recorded_route* is the route the plan's run was started on
-    (:func:`_recorded_route`), for a reader that names none (fix round 24).
+    (:func:`_recorded_route`), for a reader that names none.
     """
     import io
 
     from . import next_phase
 
     # The manual tasks themselves, never a code task skipped with one
-    # (`next_phase.manual_close_ids`, fix round 16); while a manual-task gate
-    # holds, the gate's alone (`manual_note_ids`, fix round 29).
+    # (`next_phase.manual_close_ids`); while a manual-task gate
+    # holds, the gate's alone (`manual_note_ids`).
     implement = payload.get("phases", {}).get("implement") or {}
     ids = next_phase.manual_note_ids(implement)
     if not ids:
@@ -126,7 +125,7 @@ def manual_close_note(
         return None
     return next_phase.manual_close_note(
         next_phase.close_command(template, plan_spelling, ids), len(ids),
-        # Fix round 28: never "No later phase waits" beside code tasks that do.
+        # Never "No later phase waits" beside code tasks that do.
         waiting=next_phase.manual_waiting_count(implement, ids),
         named=next_phase.manual_note_named(implement, ids),
     )
@@ -149,9 +148,7 @@ def _workflow_trailer_lines(
     *carried* is the ``user_next_step`` answer (``next_phase.NextPhase``) the
     same result carries: a line its ``markdown`` already says is left out —
     a notice that is one of its optional entries' ``why`` and, when it lists
-    manual tasks, the manual-tasks line (fix round 26, live run 11: Codex
-    04/06/08 and OpenCode 03-08 relayed the notice above the copied section,
-    so the user read the same sentence twice).
+    manual tasks, the manual-tasks line.
     """
     said_whys = {
         plain_line(getattr(step, "why", "") or "")
@@ -164,7 +161,7 @@ def _workflow_trailer_lines(
         # (`check_workflow_prerequisites.get_workflow_status`'s own
         # `OPTIONAL_PHASES` walk), so the bare word reads as "nothing else is
         # outstanding" — a weak model given only this line, and the tool's own
-        # `next: null` beside it, asserted exactly that (F8, 2026-09-16). Name
+        # `next: null` beside it, asserted exactly that. Name
         # the optional phases it stepped over: the ones still `pending` that
         # sit *before* it in phase order (`payload["phases"]` preserves that
         # order), not every pending optional phase regardless of position — an
@@ -184,7 +181,7 @@ def _workflow_trailer_lines(
 
         gate = gate_resume_suggested(payload)
         if gate:
-            # Fix round 29 (review of round 28 #4): implement finished with
+            # Implement finished with
             # code tasks waiting on a manual task the user can do now, and
             # every other surface leads with its resume, as this does.
             answers = " ".join(gate[1:])
@@ -204,19 +201,19 @@ def _workflow_trailer_lines(
     # The implement tasks the run deferred (`phases.implement.manual_tasks`,
     # read from state.json). A workflow with nothing left to suggest printed
     # no trailer at all, so a finished plan with two manual playthroughs still
-    # owed read as done (2026-10-04, OpenCode racing re-run).
+    # owed read as done.
     manual = (payload.get("phases", {}).get("implement") or {}).get("manual_tasks")
     manual_line: Optional[str] = None
     if isinstance(manual, list) and manual:
         from .next_phase import ManualTask
 
         # One rendering with the `[MANUAL_TASK]` line: a task skipped with a
-        # manual one says what it waits on (fix round 17).
+        # manual one says what it waits on.
         named = "; ".join(
             ManualTask(
                 str(entry["id"]), entry.get("title") or None,
                 str(entry["waits_on"]) if entry.get("waits_on") else None,
-                # Fix round 28: a later manual task names the code it comes after.
+                # A later manual task names the code it comes after.
                 tuple(str(t) for t in entry.get("after") or ()
                       if isinstance(entry.get("after"), list)),
             ).line()
@@ -226,7 +223,7 @@ def _workflow_trailer_lines(
         if named:
             # Appended last, below: its note ends with the command that
             # records the tasks done, and a joined `notice` must not run on
-            # past it (live run 8, Codex racing 08 fenced the text after it).
+            # past it.
             manual_line = (
                 f"{prefix}manual tasks left for you: {named}"
                 + (f". {close_note}" if close_note else "")
@@ -236,7 +233,7 @@ def _workflow_trailer_lines(
     # 2026-10-05). Shown while implement is unfinished — its findings are
     # newer than any review on record — and, once it has completed, until a
     # review-code that judged it has completed or the review was skipped.
-    # Fix round 11 (review finding 5): keyed on review-code alone, an
+    # Keyed on review-code alone, an
     # `implement --resume` that recorded new findings beside an older
     # completed review hid them until implement finished, and a skipped
     # review kept them on screen for good.
@@ -260,11 +257,11 @@ def _workflow_trailer_lines(
                 f"implement/summary.md): {named}"
             )
     # The implement tasks whose own check failed after their edits
-    # (`phases.implement.batch_check_findings`, fix round 15), shown by the
+    # (`phases.implement.batch_check_findings`), shown by the
     # same rule as the check findings above.
     failing = (phases.get("implement") or {}).get("batch_check_findings")
     if isinstance(failing, list) and failing and not (implement_done and review_settled):
-        # Fix round 16: the task's own report, quoted (Codex racing 06r).
+        # The task's own report, quoted.
         named = "; ".join(
             f"{entry['id']} (\"{clip((entry.get('findings') or [''])[0], 120)}\""
             f"{', …' if len(entry.get('findings') or []) > 1 else ''})"
@@ -277,8 +274,8 @@ def _workflow_trailer_lines(
                 f"implement/summary.md): {named}"
             )
     # And those whose own check reported again only the findings the user
-    # accepted for a check (`phases.implement.batch_check_accepted`, fix
-    # round 23), by the same rule: not a failure, but on record.
+    # accepted for a check (`phases.implement.batch_check_accepted`), by the same rule:
+    # not a failure, but on record.
     accepted_reruns = _accepted_reruns_by_task(
         (phases.get("implement") or {}).get("batch_check_accepted"))
     if accepted_reruns and not (implement_done and review_settled):
@@ -286,7 +283,7 @@ def _workflow_trailer_lines(
             f"{prefix}{clause} — not counted as a failure (see implement/summary.md)"
             for clause in accepted_rerun_clauses(accepted_reruns)
         ]
-    # Fix round 28: and those whose own check reported only what a check
+    # And those whose own check reported only what a check
     # task of the run reported (`phases.implement.batch_check_repeats`).
     repeats = _accepted_reruns_by_task(
         (phases.get("implement") or {}).get("batch_check_repeats"))
@@ -333,7 +330,7 @@ def render_run_text(
     spell: Optional[Speller] = None,
 ) -> List[str]:
     # *spell* (`user_speller`): the user's commands below in the host's
-    # spelling (fix round 18); `None` keeps the dispatcher command.
+    # spelling; `None` keeps the dispatcher command.
     # The workflow payload the resume block may consult without rendering the
     # workflow lines above it (`--view run`'s terminal read); see `_resume_lines`.
     resume_workflow = workflow if workflow is not None else resume_workflow
@@ -341,14 +338,14 @@ def render_run_text(
     if not views:
         if not state_block:
             # A native implement read back from state.json follows instead
-            # (`render_state_implement_lines`, fix round 16).
+            # (`render_state_implement_lines`).
             lines.append(
                 f"  no run recorded for {scope or 'this ' + _document_word(plan_path)}")
         return lines
     outer_spell = spell
     for view in views:
         run = view["run"]
-        # Fix round 24: each run's commands in the route that started it.
+        # Each run's commands in the route that started it.
         spell = _view_speller(outer_spell, view)
         name = os.path.basename(view["phase_dir"])
         head = f"  {name}"
@@ -442,7 +439,7 @@ def render_run_text(
                 f"{_progress_text(view['progress'], phase=_view_dir_name(view))}"
             )
             if implement_tally is not None and _is_executor_implement_view(view):
-                # Fix round 16: the line above counts this run's batches; this
+                # The line above counts this run's batches; this
                 # one every task of the phase, every run (state.json).
                 lines.append(
                     f"      all tasks:      "
@@ -535,7 +532,7 @@ def render_run_text(
 
 
 def _run_state_text(view: Dict[str, Any]) -> str:
-    """``run.state``, annotated when the run's result was ``partial`` (plan §5).
+    """``run.state``, annotated when the run's result was ``partial``.
 
     ``run.state`` keeps its process meaning (``done``); the note says what the
     exit code could not: ``done (partial — failed: codex:gpt-6-astra:xhigh)``.
@@ -544,9 +541,8 @@ def _run_state_text(view: Dict[str, Any]) -> str:
     result = _result_state(view)
     if result is None:
         if _stopped_for_the_user(view):
-            # Fix round 22: what the record means is said. Fix round 23
-            # (review of round 22, #4): "nothing crashed" only when nothing
-            # it ran failed. Fix round 26 (live run 11 #6): the text no
+            # What the record means is said. "nothing crashed" only when nothing
+            # it ran failed. The text no
             # longer says "failed" under the "stopped and needs you" head.
             # Only the text: the stored word stays `failed`, because
             # `TERMINAL_RUN_STATES`, `classify_run`'s verdict, `exit_code_for`,
@@ -562,16 +558,14 @@ def _run_state_text(view: Dict[str, Any]) -> str:
 
 
 #: How ``status`` reads a run that ended needing the user (exit 3), whose run
-#: record says ``failed`` (fix round 22, live run 9 #5: Codex 01b's poll read
-#: "run … failed" for a resume that stopped where the first run had, needing
-#: the user's answer, as the stop's own text said).
+#: record says ``failed``.
 STOPPED_FOR_THE_USER_VERDICT = "stopped and needs you (exit 3)"
-#: The ``run.state:`` line of such a run (fix round 26, live run 11 #6:
+#: The ``run.state:`` line of such a run (live run 11 #6:
 #: "failed (exit 3: …)" under the head above). The record keeps ``failed``.
 STOPPED_RUN_STATE_WORD = "stopped"
 STOPPED_FOR_THE_USER_GLOSS = "exit 3: the run needs you"
 #: Added to the gloss only when no runner and no model of the run failed
-#: (:func:`_a_dispatch_failed`, fix round 23): a stop on a refusal, a check's
+#: (:func:`_a_dispatch_failed`): a stop on a refusal, a check's
 #: findings or an unanswered manual task.
 NOTHING_CRASHED = "nothing crashed"
 
@@ -626,7 +620,7 @@ def _verdict_text(view: Dict[str, Any]) -> str:
         # `subagents_failed` or whatever the phase wrote.
         progress = view.get("progress") or {}
         if progress.get("step") == STOPPED_STEP:
-            # Fix round 23 (review of round 22, #2): the write mirror's stop,
+            # The write mirror's stop,
             # which read "finished in foreground" while the same ending
             # detached heads "stopped and needs you (exit 3)".
             return STOPPED_IN_FOREGROUND
@@ -665,7 +659,7 @@ def _consolidation_text(recommendation: Any) -> Optional[str]:
 
 
 def _validation_context_text(obj: Any) -> Optional[str]:
-    """The phase's ``validation_context`` line (plan §2.4), or ``None``.
+    """The phase's ``validation_context`` line, or ``None``.
 
     Rendered from the published object only — never recomputed — so the poll
     text, ``MULTI_LLM_RESULT`` and ``report.md`` say the same thing. A
@@ -688,7 +682,7 @@ def _validation_context_notice(views: Sequence[Dict[str, Any]]) -> Optional[str]
 def _write_result_notice(views: Sequence[Dict[str, Any]]) -> Optional[str]:
     """The write mirror's own notice parts over every view, or ``None``.
 
-    Fix round 14: a code batch whose own check failed after its edits
+    A code batch whose own check failed after its edits
     (``write_subagents.tasks[].batch_check_findings``) and the line saying
     nothing ran the repository's tests (``write_subagents.unverified``) —
     what the worker recorded on its own result line, which a detached caller
@@ -698,7 +692,7 @@ def _write_result_notice(views: Sequence[Dict[str, Any]]) -> Optional[str]:
 
 
 def _write_result_notice_parts(views: Sequence[Dict[str, Any]]) -> List[str]:
-    """:func:`_write_result_notice`'s parts, unjoined (fix round 26: a stop's
+    """:func:`_write_result_notice`'s parts, unjoined (a stop's
     poll leaves out a part its `error` already says)."""
     try:
         from .check_records import batch_check_summary
@@ -794,7 +788,7 @@ def _progress_text(progress: Dict[str, Any], *, phase: Optional[str] = None) -> 
     if generated is not None:
         # What that run produced, labelled as such: a `tasks 10/10` pair read
         # as a live count of tasks.md and went stale the moment
-        # apply-task-suggestions split a task (2026-10-04).
+        # apply-task-suggestions split a task.
         parts.append(f"generated {generated} task{'' if generated == 1 else 's'}")
     elif progress.get("tasks_total"):
         parts.append(f"tasks {progress.get('tasks_done', 0)}/{progress['tasks_total']}")
@@ -812,14 +806,14 @@ def _progress_text(progress: Dict[str, Any], *, phase: Optional[str] = None) -> 
     # beside a mirror that said `ok: 1`. Measured 2026-09-14.
     for key in ("subagents", "write_subagents"):
         parts.extend(_mirror_text(key, progress.get(key)))
-    # D6 override (2026-09-17): a detached fan-out records the slots it ran
+    # D6 override: a detached fan-out records the slots it ran
     # without the runner's own sandbox under `progress.sandbox_bypassed`, and
     # a host polling `status` is told so here — the `[SANDBOX_BYPASSED]` line
     # is in a log a detached caller never reads.
     bypassed = progress.get("sandbox_bypassed")
     if isinstance(bypassed, list) and bypassed:
         parts.append(f"unsandboxed {', '.join(map(str, bypassed))}")
-    # Landlock rung (2026-09-22): a slot on a *contained* fallback rung is
+    # Landlock rung: a slot on a *contained* fallback rung is
     # recorded under `progress.sandbox_fallback` as `{spec: rung}` and rendered
     # by rung name — never as "unsandboxed", which is the one thing it was not.
     contained = progress.get("sandbox_fallback")
@@ -834,9 +828,8 @@ def _progress_text(progress: Dict[str, Any], *, phase: Optional[str] = None) -> 
     return ", ".join(parts) or NO_PROGRESS_RECORDED
 
 
-#: The rung ids of an **incidental** grade (plan codex-sandbox-unavailable-
-#: findings-and-fixes §7, "Step 2 subtask: messaging and markers", item 3;
-#: 2026-09-30). A closed set spelled here — `status` reads recorded data and
+#: The rung ids of an **incidental** grade. A closed set spelled here — `status` reads
+#: recorded data and
 #: imports no provider code — whose slots render as `stray-writes-only <rung>`:
 #: the plugin's Landlock jail stops stray writes, not the model, so the one
 #: word a real OS boundary earns (`sandbox-fallback`) is never its word. The
@@ -850,8 +843,7 @@ def _fallback_clause_head(rung: str) -> str:
     return "stray-writes-only" if rung in INCIDENTAL_RUNG_IDS else "sandbox-fallback"
 
 
-#: A jailed slot's recorded failure reason and the key carrying its denied path
-#: (plan §6 F1 "Where it sits" item 6, "When the jail denies a turn"). The
+#: A jailed slot's recorded failure reason and the key carrying its denied path. The
 #: fan-out records both on the slot's row, so this view says what failed after
 #: the log that printed the `[JAIL_DENIED]` line is gone.
 JAIL_DENIED_REASON = "jail-denied"
@@ -898,7 +890,7 @@ def _one_line(text: str) -> str:
 
     One helper for both sites on purpose — folding it into only the newer
     renderer would leave the two spellings of one field disagreeing, which is the
-    drift this file keeps testing against (2026-09-20).
+    drift this file keeps testing against.
     """
     return " ".join(str(text).split())
 
@@ -929,7 +921,7 @@ def _model_timing_text(entry: Dict[str, Any]) -> str:
     launch turn renders its run time) renders
     ``waiting 7m45s`` and no budget: it has spent none, and ``7m30s/20m`` —
     what it rendered until the wait and the run were separated — read as budget
-    spent (plan: review-run-scope-salvage-and-failure-visibility §6). A
+    spent. A
     terminal row that waited at least a second before dispatching adds
     ``, queued 7m45s``, so the wait a slot paid is still on its row once the
     run is over; below a second there is nothing a ``0m00s`` would tell anyone
@@ -1018,7 +1010,7 @@ def _model_detail_text(entry: Dict[str, Any]) -> str:
     # dispatch its `LAUNCH_STAGGER_S` apart, and the launch-time poll — taken at
     # second zero on purpose, for the roster — met every row but the first
     # reading `staggering`, which a reader took for the fan-out running its
-    # models one at a time (2026-09-21). The state word is the lifecycle's and
+    # models one at a time. The state word is the lifecycle's and
     # stays; the clause says how long, in the shape `retry in 20s` already
     # has. Rounded *up*, so a slot 0.4 s from dispatch reads `1s`, never `0s`
     # — and `entry_stagger_remaining_s` is `None` once the stamp is past, so
@@ -1027,7 +1019,7 @@ def _model_detail_text(entry: Dict[str, Any]) -> str:
     remaining = entry_stagger_remaining_s(entry)
     if remaining is not None:
         details.append(f"starts in {math.ceil(remaining)}s")
-    # A jailed slot's `jail-denied` row names the denied path (2026-09-30).
+    # A jailed slot's `jail-denied` row names the denied path.
     error = _entry_error_text(entry)
     if error:
         details.append(_one_line(error))
@@ -1051,8 +1043,8 @@ def _model_row_specs(view: Dict[str, Any], models: Dict[str, Any]) -> List[str]:
     ``FanoutProgress._entry`` seeding a spec some lane transitioned without
     requesting — a wiring mistake, and hiding it in the one table that could show
     it would be the wrong trade. The two lists agreeing is the normal state: the
-    three launch writes drop the predecessor's ``progress`` outright (F1,
-    2026-09-20), so a map surviving next to a *different* run's
+    three launch writes drop the predecessor's ``progress`` outright, so a map surviving
+    next to a *different* run's
     ``models_requested`` is no longer a shape this can meet.
 
     The checkpoint's top-level ``models_requested`` is the only record of the
@@ -1101,7 +1093,7 @@ def _model_table_lines(view: Dict[str, Any]) -> List[str]:
     separator that survives as ``?`` is worse than one that was ASCII to begin
     with.
 
-    **An absent map is not an absent roster** (2026-09-20). The child writes
+    **An absent map is not an absent roster**. The child writes
     ``models_requested`` and calls ``report_progress(step="fanout",
     models_total=N)`` *before* it constructs the tracker that seeds the map, so
     for the first seconds of every fan-out the view knows the whole roster and
@@ -1193,7 +1185,7 @@ def _just_finished_text(view: Dict[str, Any]) -> str:
       dispatch, so a slot that never dispatched reads ``0m00s``; the wait in
       front of the run stays on the ``models:`` row (``, queued 7m45s``) rather
       than being added here (plan: review-run-scope-salvage-and-failure-
-      visibility §6.2).
+      visibility).
 
     One line and ASCII, through the **same** scrub the roster takes
     (:func:`progress_tracker.one_line_ascii`), applied to the whole composed
@@ -1328,9 +1320,9 @@ def _progress_lines(view: Dict[str, Any]) -> List[str]:
     just_finished = _just_finished_text(view)
     if just_finished:
         lines.append(f"{JUST_FINISHED_LABEL} {just_finished}")
-    # Fix round 14: a finished run's notes follow its counts, so a host that
+    # A finished run's notes follow its counts, so a host that
     # relays these lines verbatim relays "1 not applied" beside "10/10 items
-    # applied" (Codex racing re-run 5 reported "Applied 10 of 10").
+    # applied".
     lines.extend(f"note: {note}" for note in _run_notes(view))
     return lines
 
@@ -1433,7 +1425,7 @@ def _terminal_fingerprints(view: Dict[str, Any]) -> Optional[Dict[str, tuple]]:
     every row that turns terminal afterwards really did turn terminal during this
     wait. Read as ``None`` the whole first wait was skipped instead, so a
     ``--wait`` that spanned the launch printed no ``just finished:`` line however
-    many specs ended inside it (F1, 2026-09-21). ``None`` now means only what the
+    many specs ended inside it. ``None`` now means only what the
     paragraph above describes: a ``models`` that is *present and not a dict*.
     """
     progress = view.get("progress") or {}
@@ -1481,7 +1473,7 @@ def _attach_finished_during_wait(
     finished on no evidence at all. A dir that appeared mid-wait gets its roster
     from the table like any other first sighting. A dir whose baseline is
     ``None`` is skipped for the same reason: its map was unreadable when the wait
-    began, so nothing was observed about it either (F4, 2026-09-20).
+    began, so nothing was observed about it either.
 
     A spec is announced when its terminal *fingerprint* differs from the one the
     baseline holds — a different ending, not merely a second sighting of the same
@@ -1544,7 +1536,7 @@ def _attach_finished_during_wait(
                 elapsed = entry_elapsed_s(entry)
             except Exception as exc:
                 # The `started_at: "...Z"` shape that used to take the whole
-                # command down (F5, 2026-09-20). A clause with no clock is worth
+                # command down. A clause with no clock is worth
                 # more than a traceback.
                 note_swallowed("status: finished-during-wait elapsed time", exc)
                 elapsed = None
@@ -1562,8 +1554,8 @@ def _attach_finished_during_wait(
 
 
 def _run_notes(view: Dict[str, Any]) -> List[str]:
-    """``progress.notes``: a finished apply phase's lines for the host (fix
-    round 14) — a consistency warning, the items left unapplied and why."""
+    """``progress.notes``: a finished apply phase's lines for the host — a consistency warning,
+the items left unapplied and why."""
     progress = view.get("progress") if isinstance(view.get("progress"), dict) else {}
     notes = progress.get("notes")
     return [str(note).strip() for note in notes if str(note).strip()] if isinstance(
@@ -1577,10 +1569,10 @@ def _id_list(value: Any) -> List[str]:
 
 def _kept_labels(mirror: Mapping[str, Any], kept: Sequence[str]) -> Dict[str, str]:
     """What each task a write mirror kept is, in the ``resume: kept`` line's
-    words (fix round 20): a check whose findings stand (its row carries
+    words: a check whose findings stand (its row carries
     them), an accepted task (``accepted_task_ids``, a check apart from a
     failed task) and a manual task completed by hand
-    (``completed_by_hand_task_ids``, fix round 23). Plain kept tasks carry
+    (``completed_by_hand_task_ids``). Plain kept tasks carry
     no label."""
     from .task_ledger import (
         ACCEPTED_AFTER_FAILING_LABEL,
@@ -1602,7 +1594,7 @@ def _kept_labels(mirror: Mapping[str, Any], kept: Sequence[str]) -> Dict[str, st
             ACCEPTED_WITH_FINDINGS_LABEL if task_id in with_findings
             else ACCEPTED_AFTER_FAILING_LABEL
         )
-    # Fix round 23: a manual task kept on the user's `=done` answer.
+    # A manual task kept on the user's `=done` answer.
     for task_id in _id_list(mirror.get("completed_by_hand_task_ids")):
         labels[task_id] = COMPLETED_BY_HAND_LABEL
     return labels
@@ -1626,13 +1618,13 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
     if not counts and tasks:
         # The write mirror records one row per task and no `counts`/`ok`
         # summary; read only the summary keys and a finished nine-task run
-        # printed `implement 0/9 ok` (measured 2026-09-16).
+        # printed `implement 0/9 ok`.
         counts = _write_mirror_as_counts(mirror)["counts"]
     ok = mirror.get("ok")
     if not isinstance(ok, int):
         ok = counts.get("ok", 0) if isinstance(counts.get("ok"), int) else 0
     accepted = mirror.get("accepted_task_ids") if isinstance(mirror.get("accepted_task_ids"), list) else []
-    # Fix round 20 (run 8 #6): an implement run's accepted tasks were kept
+    # An implement run's accepted tasks were kept
     # from an earlier run, not dispatched, so they are named in the kept note
     # ("T002 (accepted with its check findings)"), not in a clause of their
     # own; OpenCode accept 02 read "accepted with their check findings T002".
@@ -1653,9 +1645,9 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
         ] if isinstance(mirror.get("kept_task_ids"), list) else []
         kept_labels = _kept_labels(mirror, kept) if kept or folded else {}
         kept += [task_id for task_id in folded if task_id not in kept]
-        # Fix round 18 (run 7 #3): a resume that dispatched nothing read
+        # A resume that dispatched nothing read
         # "1/4 batches ok", the one being a check an earlier run finished.
-        # Fix round 20 (run 8 #6): each kept task is named with what it is,
+        # Each kept task is named with what it is,
         # in the `resume: kept` line's words, an accepted one included.
         kept_note = (
             f" ({len(kept)} kept from an earlier run: "
@@ -1663,20 +1655,19 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
             if kept else ""
         )
         if total == 0:
-            # Fix round 22 (live run 9 #5, Codex 01b): a resume that
+            # A resume that
             # dispatched nothing read "implement 0/0 batches ok (1 kept …),
             # 0/0 items applied" under "failed".
             parts = [f"{kind}: nothing dispatched{kept_note}"]
         elif kind == "implement":
-            # Implement counts tasks, as its `[ETA]` lines say (fix round
-            # 22). An implement task is its own one item, so "3/4 items
+            # Implement counts tasks, as its `[ETA]` lines say. An implement task is its
+            # own one item, so "3/4 items
             # applied" beside "4/4 tasks ok" counted the same tasks a second
-            # way (fix round 24, live run 10 #7); the outcome clauses below
+            # way; the outcome clauses below
             # say which applied an edit.
             parts = [f"{kind} {ok}/{total} tasks ok{kept_note}"]
         else:
-            # Fix round 26 (live run 11, OpenCode 05 said the task
-            # suggestions went "to plans/racing-game.md"): a single-target
+            # A single-target
             # phase's line names the file its items were applied to.
             applied_to = mirror.get("applied_to")
             target = (
@@ -1687,7 +1678,7 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
                 f"{kind} {ok}/{total} batches ok{kept_note}, "
                 f"{items_applied}/{items_total} items applied{target}"
             ]
-            # Fix round 26 (live run 11 #7): the items not applied follow
+            # The items not applied follow
             # the count they are left out of, after a semicolon.
             counted_items = True
     else:
@@ -1700,8 +1691,8 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
     for row in in_flight:
         if not isinstance(row, dict) or not row.get("task_id"):
             continue
-        # Same defensive read as `_model_timing_text`, same reason (F5,
-        # 2026-09-20): `dispatched_at` goes through the same `ValueError`-only
+        # Same defensive read as `_model_timing_text`, same reason: `dispatched_at` goes
+        # through the same `ValueError`-only
         # parser, so one tz-aware stamp written by a future mirror would take
         # the whole poll down instead of costing this row its `(since …)`.
         try:
@@ -1722,7 +1713,7 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
     outcomes: Dict[str, int] = {}
     for row in tasks:
         # `outcome_label` first: a verification-only task's `no-op` reads
-        # `verified` here as on every other surface (2026-10-04).
+        # `verified` here as on every other surface.
         row = row if isinstance(row, dict) else {}
         outcome = str(row.get("outcome_label") or row.get("write_outcome") or "")
         if outcome:
@@ -1743,16 +1734,16 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
     failed = _mirror_ids(mirror, "failed_task_ids") or []
     if failed:
         parts.append(f"failed {', '.join(map(str, failed))}")
-    # Racing re-run 4 (2026-10-05): a check task that ran and reported
+    # Racing re-run 4: a check task that ran and reported
     # problems is named, never only counted under its label.
     flagged = _mirror_ids(mirror, "check_findings_task_ids")
     if isinstance(flagged, list) and flagged:
         parts.append(f"check findings {', '.join(map(str, flagged))}")
-    # Fix round 14: a code batch applied its edits, then a check it ran
+    # A code batch applied its edits, then a check it ran
     # failed — never only an `ok` count.
     failing = _mirror_ids(mirror, "batch_check_task_ids")
     if isinstance(failing, list) and failing:
-        # Fix round 15: a check that could not run is named so (the prefix is
+        # A check that could not run is named so (the prefix is
         # `batch_reply.BATCH_CHECK_COULD_NOT_RUN`, spelled here so this
         # sub-second path imports nothing heavy).
         could_not = {
@@ -1769,7 +1760,7 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
         unrun = [str(t) for t in failing if str(t) in could_not]
         if unrun:
             parts.append(f"own check could not run {', '.join(unrun)}")
-    # Fix round 23: a task whose own check repeated only the findings the
+    # A task whose own check repeated only the findings the
     # user accepted for a check is named, never only counted `ok`.
     repeated = mirror.get("batch_check_accepted")
     if isinstance(repeated, dict) and repeated:
@@ -1777,24 +1768,24 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
             str(task_id): checks for task_id, checks in repeated.items()
             if isinstance(checks, list)
         })
-    # Fix round 28: and one whose own check repeated a check task's finding.
+    # And one whose own check repeated a check task's finding.
     echoed = mirror.get("batch_check_repeats")
     if isinstance(echoed, dict) and echoed:
         parts += repeated_check_clauses({
             str(task_id): checks for task_id, checks in echoed.items()
             if isinstance(checks, list)
         })
-    # Fix round 18: an item a finished batch declined (or one skipped at the
+    # An item a finished batch declined (or one skipped at the
     # user's request) is named, never only left out of `items applied`.
     not_applied = not_applied_item_clauses(mirror)
     if not_applied and counted_items:
         parts[0] = "; ".join([parts[0], *not_applied])
     else:
         parts += not_applied
-    # Racing re-run 3 (2026-10-05): the tasks a stop left undispatched were
+    # Racing re-run 3: the tasks a stop left undispatched were
     # on no surface at all; a failed task the user accepted is named too.
     not_run = mirror.get("not_run_task_ids") if isinstance(mirror.get("not_run_task_ids"), list) else []
-    # Fix round 11: a task a check with findings kept from running says so,
+    # A task a check with findings kept from running says so,
     # naming the check (from the run's first such check on, not only at its end).
     blocked = mirror.get("blocked_by_check") if isinstance(mirror.get("blocked_by_check"), dict) else {}
     stopped = [task_id for task_id in not_run if str(task_id) not in blocked]
@@ -1805,10 +1796,10 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
         parts.append(
             f"not run (upstream check {check_id} reported problems) {', '.join(waiting)}"
         )
-    # Fix round 16 (Codex stop-path accept 02): a check accepted with its
+    # A check accepted with its
     # findings read "accepted after failing T002"; the mirror names those
     # apart (a mirror without the key reads as before). An implement mirror
-    # names them in the kept note instead (fix round 20).
+    # names them in the kept note instead.
     with_findings = set(_id_list(mirror.get("accepted_with_findings_task_ids")))
     shown = set(folded) if isinstance(items_total, int) and isinstance(items_applied, int) else set()
     accepted_checks = [
@@ -1827,14 +1818,14 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
     # but rendered nowhere, so the one task `--yes`'s default strategy defers
     # to a human was invisible in the finished run's own progress line.
     skipped_ids = mirror.get("skipped_task_ids") if isinstance(mirror.get("skipped_task_ids"), list) else []
-    # Fix round 14: a task the user skipped (`--human-task <id>=skip`), and
+    # A task the user skipped (`--human-task <id>=skip`), and
     # the tasks skipped with it, are not manual work left for the user, so
     # they are named apart from the deferral (Codex stop-path accept 02 read
     # "deferred manual: T005, T006" beside a summary saying "Skipped at your
     # request"). A mirror without the keys reads as before.
     declined = _id_list(mirror.get("declined_task_ids"))
     with_them = _id_list(mirror.get("declined_dependent_task_ids"))
-    # Fix round 17: a task skipped with a deferred manual task is named
+    # A task skipped with a deferred manual task is named
     # apart, as the phase tally names it (`deferred_waits_on`; a mirror
     # without the key reads as before).
     raw_waits = mirror.get("deferred_waits_on")

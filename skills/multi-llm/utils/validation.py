@@ -86,17 +86,18 @@ except ImportError:
 #:
 #: 60 000 rather than the original 30 000, because 30 000 was under the size of
 #: a real plan and the prompt asks the validator to judge against it. Measured
-#: on a review-code run over a 44 374-char plan: the excerpt ended mid-§4.6, so
-#: §4.7–§11 — the acceptance criteria and the single source of truth for every
-#: tunable — reached no validator, and four of the nine verdicts cited exactly
-#: those sections (they were right only because that runner could open the file
-#: itself, which ``context_mode: inline`` does not promise).
+#: on a review-code run over a 44 374-char plan: the excerpt ended in the middle
+#: of one section, so every later section — the acceptance criteria and the
+#: single source of truth for every tunable — reached no validator, and four of
+#: the nine verdicts cited exactly those sections (they were right only because
+#: that runner could open the file itself, which ``context_mode: inline`` does
+#: not promise).
 #:
 #: Above the limit a plan or tasks document is no longer silently cut: the
 #: excerpt stays (so prompts are deterministic and the common case needs no
 #: read) and the round's hash-bound snapshot is named by path, the task
-#: materializing ``context_mode: workspace-read`` (§2.3 of
-#: ``plans/validation-context-by-path-and-codex-0156-fallout.md``). Only a
+#: materializing ``context_mode: workspace-read``
+#: (docs/development/delegation.md#code-review-validation-context). Only a
 #: document with no readable file keeps the bare cut, and that is surfaced.
 #:
 #: What the raise costs, checked both ways. The **runner**: a prompt never
@@ -118,13 +119,11 @@ VALIDATION_CONTEXT_LIMIT = 60000
 #: lever that shrinks it is a *larger* ``max_per_batch`` — fewer batches means
 #: fewer copies of the excerpt — bounded above by the D2d per-task budget.
 #: Crossing this ceiling is **reported, not resolved**. Validation now emits
-#: ``context_mode: workspace-read`` for an over-limit document (§2.3 of
-#: ``plans/validation-context-by-path-and-codex-0156-fallout.md``), but that is
+#: ``context_mode: workspace-read`` for an over-limit document, but that is
 #: decided per document by :data:`VALIDATION_CONTEXT_LIMIT`, never by this
 #: file total: the excerpt stays in every batch either way, so a path cannot
 #: shrink the file, and failing a phase outright would throw away a completed
-#: fan-out over a scratch file being large (the D2f deviation note in
-#: ``plans/host-harness-portability.md`` says the same).
+#: fan-out over a scratch file being large.
 VALIDATION_TASKS_TOTAL_CHARS_CEILING = 2_000_000
 
 #: Sidecar beside ``validation_batch_{N}.json``, holding exactly the bytes of
@@ -252,7 +251,7 @@ def describe_context_cut(context: str, limit: int) -> str:
     A raw "N chars over" says how much was lost and nothing about *what*: the
     run this was measured on cut a 336 026-char plan at 60 000 and printed
     ``276143 chars over``, while every verdict that came back cited a section —
-    §2, §4, §6, the implementation notes at the tail — that no validator had
+    among them the implementation notes at the tail — that no validator had
     been shown. Named sections make the same line answer "did the part this
     review is about survive?" without opening the task file.
 
@@ -310,7 +309,7 @@ def excerpt_context_reported(
 
 
 # ---------------------------------------------------------------------------
-# Validation context by path (plans/validation-context-by-path-and-codex-0156-fallout.md §2)
+# Validation context by path
 # ---------------------------------------------------------------------------
 
 #: The context contract a validation round is materialized under (task 2.10).
@@ -340,7 +339,7 @@ REVALIDATION_SNAPSHOT_NAME = "revalidation-snapshot.md"
 LEGACY_TRUNCATION_MARKER = "[... truncated ...]"
 
 #: A verdict whose reason starts with this is a validator saying it could not
-#: read the document it was pointed at (§2.3 step 3a); the aggregate counts them
+#: read the document it was pointed at; the aggregate counts them
 #: into ``validation_context.insufficient``.
 INSUFFICIENT_CONTEXT_PREFIX = "insufficient-context:"
 
@@ -385,7 +384,7 @@ def decode_document(data: bytes, path: str) -> str:
 
 
 class BoundDocument:
-    """One context document bound for a validation round (§2.3 steps 5 and 7).
+    """One context document bound for a validation round.
 
     ``text`` is what the excerpt is cut from, ``sha256``/``size`` are over the
     bytes the round read once, and ``path`` is the one absolute path a prompt
@@ -448,7 +447,7 @@ def bind_document_file(
 ) -> BoundDocument:
     """Read a document once, as bytes, and bind a snapshot of exactly those bytes.
 
-    One read, one snapshot, one hash domain (§2.3 step 5): the snapshot is
+    One read, one snapshot, one hash domain: the snapshot is
     written from the bytes read here, never copied from the live path, so its
     sha256 is the recorded one by construction. ``reuse_names`` are existing
     phase-dir files that may stand in for the snapshot when their raw sha256
@@ -567,7 +566,7 @@ def build_context_source(
     limit: int = VALIDATION_CONTEXT_LIMIT,
     read_refusal: Optional[str] = None,
 ) -> Tuple[str, Dict[str, Any]]:
-    """``(excerpt, context source record)`` for one context block (§2.3 step 7).
+    """``(excerpt, context source record)`` for one context block.
 
     ``block_text`` is what the prompt embeds (not always ``document.text``: a
     caller may frame the document). The mode:
@@ -877,7 +876,7 @@ def legacy_context_document_reason(
 
 
 def count_insufficient(results: List[Dict[str, Any]]) -> int:
-    """Verdicts whose reason starts ``insufficient-context:`` (§2.3 step 3a)."""
+    """Verdicts whose reason starts ``insufficient-context:``."""
     return sum(
         1
         for result in results or []
@@ -895,7 +894,7 @@ def publish_validation_context(
     *,
     phase: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """The one writer of ``.status.json``'s ``validation_context`` (§2.4).
+    """The one writer of ``.status.json``'s ``validation_context``.
 
     Aggregates the round's context source records (one entry per document
     label, worst mode wins), writes the object wholesale with
@@ -936,7 +935,7 @@ def publish_validation_context(
         # Remove an earlier round's key, but never create a checkpoint just to
         # say "nothing": a phase with no .status.json keeps having none.
         # ``update_status`` merges and cannot delete: ``{"k": None}`` would
-        # leave a ``"validation_context": null`` member behind (§7.2a).
+        # leave a ``"validation_context": null`` member behind.
         if "validation_context" in read_status(phase_dir):
             remove_status_keys(phase_dir, ["validation_context"])
         recorder = getattr(_cli, "record_validation_context", None)
@@ -1013,9 +1012,7 @@ def write_prompt_sidecars(
     caller before :func:`make_task`, so the schema saw them). *stale_glob*
     names the kind's own sidecars in *phase_dir*, removed first: validation's
     by default; consolidation (``consolidation_batch_*.prompt.txt``) and task
-    generation (``task_generation.prompt.txt``) pass theirs (live run 8:
-    the Claude Code host wrote both kinds' prompts to temp files by hand, or
-    pasted a 21 KB prompt into its subagent call). A phase where some
+    generation (``task_generation.prompt.txt``) pass theirs. A phase where some
     tasks carry the key and others do not invites non-identical prompt bytes
     across batches, so on any ``OSError`` every written file is removed, both
     keys are popped from every task, one ``[PROMPT_SIDECAR_SKIPPED]`` line goes
@@ -1403,7 +1400,7 @@ def apply_validation_to_groups(
     reason and confidence to it, so such a group is left at the default
     "No validation result" and the count of those groups is printed.
 
-    Scope authority follows the same rule, only stricter (plan §3): a group's
+    Scope authority follows the same rule, only stricter: a group's
     ``scope_verdict`` is attached (``scope_policy.attach_verdict``) only from a
     record its stable hash joined, and only when the host stamped that record
     at merge time. The ``group_index`` fallback carries validity alone and
@@ -1449,7 +1446,7 @@ def apply_validation_to_groups(
         if validation is None:
             validation = default_validation
             unmatched += 1
-        # Scope authority by stable hash only — never by index (plan §3).
+        # Scope authority by stable hash only — never by index.
         _sp.attach_verdict(group_dict, by_hash, hash_matched=by_hash is not None)
 
         group_dict["validation_status"] = validation.get("status", "needs-human-decision")
@@ -1537,18 +1534,18 @@ def validation_source_decision(
     grouped_text: Optional[str] = None,
     task_document: Any = UNREAD,
 ) -> Tuple[Optional[str], str]:
-    """``(stale_reason, use_note)`` for a ``validation.json`` (D7, §7.1).
+    """``(stale_reason, use_note)`` for a ``validation.json``.
 
     ``stale_reason`` is ``None`` when the file may be used, else the one-line
     reason it must be retired and the batch files re-merged. ``use_note`` is the
     parenthetical the caller prints when it *does* use the file, naming what was
-    checked (§7.1b).
+    checked.
 
     The checks, in order:
 
     1. **Grouping (D7).** ``metadata.grouped_sha256`` must match the
        ``grouped.json`` beside it now.
-    2. **Batch bytes (§7.1a).** A file written by ``merge_validation_batches``
+    2. **Batch bytes.** A file written by ``merge_validation_batches``
        records ``metadata.batch_sha256 = {batch_index: sha256}`` over the bytes
        of every batch it merged, plus ``metadata.batch_manifest = {kind,
        round}`` of the task file those batches answered. It is retired when a
@@ -1561,7 +1558,8 @@ def validation_source_decision(
        ``git checkout`` sets every mtime to now, and neither says anything
        about which verdicts the file holds.
     3. **Legacy fallback only.** A file with no ``batch_sha256`` (written before
-       §7.1, or by a writer that merges no batches of this round) keeps the old
+       the binding existed, or by a writer that merges no batches of this round)
+       keeps the old
        mtime test: it is honoured only if no ``validation_batch_*.json`` beside
        it is newer. No merge writes a file without the binding any more.
 
@@ -1770,7 +1768,7 @@ def _derive_model_from_results(validation_results: List[Dict[str, Any]]) -> Opti
 
 def join_model_names(names: Any) -> Optional[str]:
     """One ``metadata.model`` value from several: the single name, or the sorted,
-    comma-joined list — never ``"mixed"`` (§7.3b).
+    comma-joined list — never ``"mixed"``.
 
     Shared by :func:`_derive_model_from_results` and the per-batch attribution
     in ``merge_validation_batches``, so both de-duplicate the same way. Returns
@@ -1844,15 +1842,15 @@ def save_validation_results(
             tool) path has no executor record to attribute. Does not change
             how ``model`` is derived; a caller that wants the authoritative
             spec to also win ``metadata.model`` passes it as both.
-        runners: ``{batch_index: model}`` — who answered each batch (§7.3b),
+        runners: ``{batch_index: model}`` — who answered each batch,
             stored as ``metadata.runners`` so the per-batch answer survives a
             joined ``model``.
         batch_sha256: ``{batch_index: sha256}`` over the bytes of every batch
-            merged into this file (§7.1a). An empty dict is still a binding
+            merged into this file. An empty dict is still a binding
             (a writer that merged no batches); ``None`` omits the key and leaves
             the file on the legacy mtime test in ``validation_source_decision``.
         batch_manifest: ``{kind, round}`` of the task file those batches
-            answered (§7.1a), so a hash recorded under one round is never
+            answered, so a hash recorded under one round is never
             matched against another round's file of the same name.
         scope: The round's task-file scope block (``scope_round.scope_block``):
             recorded as ``metadata.scope_policy`` / ``scope_baseline_id`` /
@@ -2281,7 +2279,7 @@ def resolved_reaggregate_command(
     Returns ``None`` when the document carries neither the durable pair nor a
     legacy resolved command (an empty phase, which owes no follow-up).
 
-    *typed_plan* (the native hand-off's printed command, fix round 14) names
+    *typed_plan* (the native hand-off's printed command) names
     the plan as this invocation's user typed it when that spelling names the
     same file (``cli_common.typed_plan_for``).
     """
@@ -2320,7 +2318,7 @@ class ContextBlock:
     *text* is excerpted on its own per-context budget, so a long first block
     cannot squeeze a second one out of the prompt. *label* is the block's
     heading (``"Plan content"``, …). *document* is the bound document the text
-    was read from (§2.3 step 5): its hash becomes ``inputs.plan_sha256``
+    was read from: its hash becomes ``inputs.plan_sha256``
     (label ``plan``) or ``inputs.tasks_sha256`` (label ``tasks``) instead of a
     re-read of the live file, and over the limit its snapshot is what the
     prompt names. ``None`` keeps the legacy behaviour: no path, and an
@@ -2344,11 +2342,11 @@ class RoundProvenance:
     * ``phase``: the phase the published ``validation_context`` names
       (default: the phase dir's basename).
     * ``base_ref`` / ``head_ref``: ``inputs.diff_base``; ``<base>..<head>``
-      for a review pinned to two commits (plans/review-commits.md §2.5).
+      for a review pinned to two commits.
     * ``tasks_file``: review-tasks' task list, recorded and hashed into
       ``inputs.tasks_sha256``.
     * ``context_plan_sha256`` / ``context_plan_file``: a commit review's
-      frozen context plan (§2.4), recorded as ``inputs.context_plan_sha256``
+      frozen context plan, recorded as ``inputs.context_plan_sha256``
       and, relative to the phase dir, ``context_plan_file``, so a resume
       whose snapshot no longer hashes to it is refused.
     * ``round_id``: the review round the phase's ``.status.json`` records
@@ -2394,8 +2392,8 @@ class ValidationRound:
       rendered into every prompt (``scope_policy.validator_guidance``) and
       recorded under ``scope``, which the merge stamps each hash-joined
       verdict with. ``None`` is a default ``expand`` round with no baseline.
-    * ``runner_read_refusal``: who will read a ``mode: path`` source (§2.3
-      step 4a): ``None`` (a capable reader), a string (the reason no source
+    * ``runner_read_refusal``: who will read a ``mode: path`` source: ``None`` (a
+      capable reader), a string (the reason no source
       may be named by path) or a callable taking the absolute path and
       returning ``None`` or such a reason. A ``prompt_budget`` whose
       ``supports_workspace_reads`` is false counts as a refusal.
@@ -2592,7 +2590,7 @@ def materialize_validation_round(round_: ValidationRound) -> Dict[str, Any]:
         secondary_document is not None and secondary_document.label == "tasks"
     ) else None
     inputs = build_inputs(
-        # One read, one hash domain (§2.3 step 5): a bound document's hash is
+        # One read, one hash domain: a bound document's hash is
         # taken over the bytes the round read, never over a second read of the
         # live file, so the excerpt, the snapshot and `inputs` cannot come from
         # two versions. The value keeps the 16-char text-hash domain the
@@ -2614,7 +2612,7 @@ def materialize_validation_round(round_: ValidationRound) -> Dict[str, Any]:
 
     # The round's scope block, rendered per call: the template text is never
     # cached with a policy in it, so an `expand` rendering cannot be served to
-    # a `preserve` round (plan §3.1).
+    # a `preserve` round.
     scope_meta = dict(scope) if scope else _scope_round.scope_block(
         None, _sp.review_phase_of(phase or os.path.basename(os.path.normpath(output_dir))),
     )
@@ -2659,7 +2657,7 @@ def materialize_validation_round(round_: ValidationRound) -> Dict[str, Any]:
     # truncate the artifact under review down to nothing, which is the failure
     # two contexts exist to fix.
     #
-    # Each block becomes one context source record (§2.3 step 7): inline when
+    # Each block becomes one context source record: inline when
     # it fits, `path` when it is over the limit and a readable hash-bound
     # snapshot names the whole document, `truncated` otherwise — decided here,
     # at materialization, and reported one stderr line per non-inline source.
@@ -2801,7 +2799,7 @@ def materialize_validation_round(round_: ValidationRound) -> Dict[str, Any]:
             # `resolution` raises for a runner with no workspace-read capability,
             # but *returns* "workspace-read" for one that has it. That return is
             # still not a further downgrade: each source's context mode is set
-            # by VALIDATION_CONTEXT_LIMIT (§2.3), not by the transport budget,
+            # by VALIDATION_CONTEXT_LIMIT, not by the transport budget,
             # and an unsplittable batch that is still over is over because of
             # its INLINE part — the excerpt and its suggestion records — which
             # naming a path cannot shrink.
@@ -2950,7 +2948,7 @@ def merge_batched_validation_results(
     """
     Merge results from multiple validation batch files.
 
-    Scope (plan §3): every verdict that joined its group **by hash** is stamped
+    Scope: every verdict that joined its group **by hash** is stamped
     (``scope_round.stamp``) against the host's own copy of that group from
     ``groups`` — the proposal digest and the baseline id recorded in the task
     file's ``scope`` block, never a model's echo of either — and under
@@ -3208,7 +3206,7 @@ def merge_batched_validation_results(
         print(f"[merge] {hash_join_mismatched} of {hash_join_total} verdicts "
               f"echoed a different group_index; all joined by hash")
 
-    # Scope authority by hash only (plan §3). A record left in a slot by an
+    # Scope authority by hash only. A record left in a slot by an
     # index strategy may be the very object a hash join also placed elsewhere,
     # so stamping replaces the slot's record rather than editing it in place.
     scope_meta = _scope_round.task_scope(batch_metadata)
@@ -3277,7 +3275,7 @@ def pinned_validation_guidance(plan_file: Optional[str]) -> str:
 
 
 #: The second context block of a revalidation whose current document is not
-#: the review round's scope baseline (plan §2: both labelled contexts).
+#: the review round's scope baseline (both labelled contexts).
 REVALIDATION_BASELINE_LABEL = (
     "Original scope baseline \u2014 the plan as this review round read it; "
     "judge scope against this, correctness against the context above"
@@ -3432,7 +3430,7 @@ def prepare_batched_revalidation_tasks(
             a ``diff`` round (a code review's findings) whose plan state pins
             the review to a commit gets :func:`pinned_validation_guidance`, so
             its revalidators read the reviewed code at ``head`` as the review's
-            own validators did (plans/review-commits.md §2.5); anything else
+            own validators did; anything else
             gets none, as before. apply-code-fixes passes it explicitly
             (``get_revalidation_instructions``), because its batches carry
             the plan fallback as their context, not a ``diff``.
@@ -3442,7 +3440,7 @@ def prepare_batched_revalidation_tasks(
             (``state.json``'s ``scope_policy`` record of the review phase this
             revalidation writes into). Correctness is judged against the
             current document; scope against the round's **original** baseline
-            (plan §2): when the current document is not that baseline's
+            When the current document is not that baseline's
             primary document, the round's own ``validation-snapshot.md`` (hash
             verified) is embedded as a second, labelled context and the
             validators are told so. Without it the verdicts are bound to the

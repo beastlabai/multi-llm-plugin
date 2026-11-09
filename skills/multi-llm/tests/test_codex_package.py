@@ -1696,7 +1696,8 @@ class TestMake:
         for target in self.TARGETS:
             assert target in recipes, target
             assert re.search(rf"(?<![\w-]){re.escape(target)}(?![\w-])", phony), target
-            assert f"make {target}" in makefile, f"{target} has no help line"
+            assert re.search(rf"^{re.escape(target)}:[^\n]*## \S", makefile, re.M), (
+                f"{target} has no `## ` help description")
         assert "codex-stage" not in recipes, "the tree is committed; nothing stages it"
 
     def test_codex_package_pytest_names_this_route_s_suite(self):
@@ -1728,7 +1729,7 @@ class TestMake:
         and the stamp is the last step, after all three tiers and the bump."""
         makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
         header = re.search(r"^codex-package-check:(.*)$", makefile, re.M)
-        assert header and not header.group(1).strip(), (
+        assert header and not header.group(1).split("##")[0].strip(), (
             "the tiers are recipe lines, never prerequisites: `make -j` would "
             "reorder the reset after a tier")
         lines = _makefile_recipes()["codex-package-check"]
@@ -1779,7 +1780,8 @@ class TestMake:
                                  "codex-gate-ceiling", "codex-gate-derived")}
         for target in ("codex-gate-pinned", "codex-gate-minimum", "codex-gate-ceiling"):
             header = re.search(rf"^{target}:(.*)$", makefile, re.M).group(1)
-            assert not header.strip(), f"{target}: the image is a bounded step, not a prerequisite"
+            assert not header.split("##")[0].strip(), (
+                f"{target}: the image is a bounded step, not a prerequisite")
             first = recipes[target][0]
             assert first.startswith("$(CODEX_GATE_STEP) ") and "--timeout" in first, target
             assert first.endswith("-- $(MAKE) --no-print-directory e2e-image"), target

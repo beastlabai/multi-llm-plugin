@@ -63,7 +63,7 @@ from utils.cli_common import (
 )
 from utils.report_parser import issue_numbering_footer
 from utils import report_markdown
-# plans/review-commits.md §2.6/§2.10: a commit brief's run (its state records
+# A commit brief's run (its state records
 # `commit_range`) gets the commit template, attribution and report header.
 from utils import commit_report
 from utils import commit_spelling
@@ -133,7 +133,7 @@ from utils.review_orchestrator_base import (
     record_sandbox_bypassed,
     recorded_served_models,
     recorded_usage,
-    # Plan §5: what a reaggregate says about the models that produced nothing.
+    # What a reaggregate says about the models that produced nothing.
     announce_remaining_failures,
     exit_when_every_reviewer_failed,
     remaining_failed_models,
@@ -563,7 +563,7 @@ Examples:
         help='Path to the implementation plan markdown file'
     )
 
-    # A commit front door's `--detach` stage (plans/review-commits.md §2.1):
+    # A commit front door's `--detach` stage:
     # the detached worker applies it right after its lock
     # (`utils/detach.RunHandle`). Hidden: only a front door writes it, and
     # replay drops it.
@@ -590,7 +590,7 @@ Examples:
         help='Git ref to compare against (default: from state file)'
     )
 
-    # plans/review-commits.md §2.5: a two-commit review. A real flag, because
+    # A two-commit review. A real flag, because
     # the commit front doors synthesise it and every replay (a resume line, a
     # detached child) carries it, as the full SHA the run resolved.
     parser.add_argument(
@@ -708,7 +708,7 @@ Examples:
              '[HIGH_PRIORITY_ISSUES] <n> marker is printed either way.'
     )
 
-    # plans/scope-policy-and-report-tags.md §4: declared once, in cli_common.
+    # Declared once, in cli_common.
     from utils.cli_common import add_scope_policy_argument
 
     add_scope_policy_argument(parser, role="review")
@@ -723,7 +723,7 @@ def load_code_review_prompt() -> str:
 
 #: Where a review's scope came from (:attr:`ReviewScope.source`), in the order
 #: :func:`resolve_review_scope` tries them. ``commit_range`` is a review pinned
-#: to two commits (``--head-ref``, plans/review-commits.md §2.5): ``git diff
+#: to two commits (``--head-ref``): ``git diff
 #: --name-only <base> <head>``, which ``--files`` narrows and never widens.
 SCOPE_SOURCE_COMMIT_RANGE = "commit_range"
 SCOPE_SOURCE_FILES_FLAG = "files_flag"
@@ -797,9 +797,8 @@ def review_git_root(project_root: Optional[str]) -> Optional[str]:
 
 # ---------------------------------------------------------------------------
 # Two-commit reviews: `--head-ref` and the pinned records
-# (plans/review-commits.md §2.4, §2.5)
-# ---------------------------------------------------------------------------
 #
+# ---------------------------------------------------------------------------
 # A review pinned to two commits diffs `<base> <head>`, never the working tree.
 # Three things can pin one: a commit brief's `commit_range` (written by a front
 # door before this phase runs), the `head_ref` a direct `--head-ref` round
@@ -939,7 +938,7 @@ def resolve_pinned_range(
     the working tree. Raises :class:`RangeError` (exit 3) — print its
     ``message`` and exit with its ``exit_code`` before writing anything.
 
-    In order (§2.5 "One reader"):
+    In order:
 
     1. ``commit_range`` (a commit brief): both SHAs re-resolved strictly
        (``[RANGE_UNRESOLVED]`` naming ``--review-commits``); a typed
@@ -1036,7 +1035,7 @@ def resolve_pinned_range(
     else:
         # Never `head_at_start`: `StateManager` stamps it from the current
         # `HEAD`, so on a plan whose state was created at the reviewed tip the
-        # pair would silently be `head..head` or inverted (§2.2, §2.5). Only
+        # pair would silently be `head..head` or inverted. Only
         # implement's own `head_before_implement` names where a change starts.
         fallback = doc.get("head_before_implement")
         if not fallback:
@@ -1056,7 +1055,7 @@ def pin_recorded_refs(pinned: PinnedRange) -> bool:
 
     The record (``cli_common.invocation()``) is what a detached child, a
     resume line and a next command replay, so after this a moved branch
-    cannot change which commits they review (§2.5 "Record and replay"). Every
+    cannot change which commits they review. Every
     spelling argparse binds to either flag (``--head-ref=x``, ``--head x``) is
     replaced in place; a missing one is appended. Only a ``review-code``
     record is touched. True when the record changed.
@@ -1098,7 +1097,7 @@ def pin_recorded_refs(pinned: PinnedRange) -> bool:
 def landed_stage(args: Any) -> bool:
     """Whether a commit front door's stage may have landed during this run's
     detach boundary: a worker whose argv names one (the hidden
-    ``--commit-stage``, plans/review-commits.md §2.1). The worker applies it
+    ``--commit-stage``). The worker applies it
     right after ``_acquire_lock``, inside ``maybe_detach`` — after this phase's
     pre-flight loaded ``state``, read the brief and resolved the pair."""
     return bool(getattr(args, "commit_stage", None))
@@ -1163,8 +1162,7 @@ def round_starts(
 def record_round_start(state: Any, pinned: Optional[PinnedRange]) -> bool:
     """The pinned records a new round writes, on *state* in memory.
 
-    Through the ``StateManager`` the phase already holds and saves (§2.1 "The
-    phase writes through the instance it saves with"):
+    Through the ``StateManager`` the phase already holds and saves:
 
     - a commit brief (``commit_range`` present): ``reviewed_header_sha256``
       takes ``header_sha256`` and ``guard`` is deleted, so the next apply
@@ -1216,8 +1214,8 @@ def drift_check(
     which lands in the worker's detach boundary, after this pre-flight. The
     front door printed the line already, and the landed record brings the list
     (:func:`refresh_pinned_after_stage`). A direct run checks its own scope
-    with the one change test (``git_utils.paths_changed_since``, §2.5
-    "Drift"), in the pre-flight, so the line reaches the caller's terminal
+    with the one change test (``git_utils.paths_changed_since``), in the pre-flight, so
+    the line reaches the caller's terminal
     before any detach.
     """
     if pinned.fronted or staged:
@@ -1261,8 +1259,8 @@ def resolve_review_scope(
 ) -> ReviewScope:
     """The files under review, labelled with the branch that picked them.
 
-    With ``head_ref`` (a review pinned to two commits, plans/review-commits.md
-    §2.5) the range decides, ahead of everything below: ``git diff
+    With ``head_ref`` (a review pinned to two commits) the range decides, ahead of
+    everything below: ``git diff
     --name-only <base_ref> <head_ref>`` minus the workflow's own paths is the
     universe, and a ``--files`` list (typed, or recorded as
     ``review_scope_files``) is intersected with it, never widening it; a
@@ -1285,8 +1283,8 @@ def resolve_review_scope(
     One resolution for both entry points. The fan-out always had the fallback;
     the reaggregate path read ``tracked_files`` alone, so a review that had
     printed ``Files to review: 144`` from the diff reported ``**Files
-    Changed:** 0`` in every ``report.md`` its reaggregate wrote (measured
-    2026-09-17). The fallback is the same live computation either way, so it is
+    Changed:** 0`` in every ``report.md`` its reaggregate wrote. The fallback is the
+    same live computation either way, so it is
     re-derived — and its lines re-printed, since they explain where the count
     came from — rather than persisted.
 
@@ -1318,8 +1316,7 @@ def resolve_review_scope(
     # The plan, its task list and the output folder are never code under
     # review, whichever branch below names them: an older `tracked_files`
     # holds the plan and `tasks.md` an apply phase recorded, and the git-diff
-    # fallback sees the plan the planning phases edited (2026-10-05, Codex
-    # racing run 3: `tasks.md` reviewed as code, two duplicate findings).
+    # fallback sees the plan the planning phases edited.
     workflow = review_workflow_entries(state, anchor, repo_root)
 
     tracked_files = state.get("tracked_files", [])
@@ -1473,8 +1470,8 @@ def _drop_workflow_paths(
     """*paths* without the workflow's own files, saying once what went.
 
     Besides this run's *workflow* entries, every commit review's brief and
-    report folder goes as a class (``commit_paths.commit_review_artifact``,
-    plans/review-commits.md §2.4), on every mode and whatever plan the run
+    report folder goes as a class (``commit_paths.commit_review_artifact``), on every
+    mode and whatever plan the run
     has: a range holding a commit of another review's files, or a diff across
     one, would otherwise review them. The folder is read for *repo_root*
     (the cwd's repository when None); when the accessor refuses it, nothing
@@ -1514,7 +1511,7 @@ def _announce_fallback_scope(
 
     The fallback used to print one plain line, so a 1 040-file guess — 880 of
     the paths opencode fixtures, 26 the generated codex mirror, ~30 hand-written
-    source — read exactly like a scoped review (review-scope plan §2.1, D2.5).
+    source — read exactly like a scoped review (review-scope, D2.5).
     This says what was guessed and how big the guess is, and names what it left
     out: ``git diff`` never shows an untracked file, so an implementer that did
     not stage its new files has them dropped here (decision 11.2: they stay out
@@ -1544,8 +1541,7 @@ def _announce_fallback_scope(
     untracked = list_worktree_untracked_files()
     if untracked and workflow:
         # The plugin's own output folder is not a file the diff "left out":
-        # naming its 200 phase artifacts buried the one new source file
-        # (2026-10-05, Codex racing run 3: `index.html` among them).
+        # naming its 200 phase artifacts buried the one new source file.
         untracked = subtract_baseline(untracked, list(workflow))
     if untracked is None:
         print(
@@ -1972,8 +1968,8 @@ def build_reviewed_code_excerpt(
     the dropped list — :func:`build_validation_secondary_context` names it on
     stderr — can read the files once and fit them twice.
 
-    ``pinned`` reads every window at the review's head commit instead of disk
-    (plans/review-commits.md §2.5), so the excerpt — and the
+    ``pinned`` reads every window at the review's head commit instead of disk, so the
+    excerpt — and the
     ``reviewed_code_sha256`` hashed from it — is the same on every reaggregate
     whatever the working tree holds by then.
     """
@@ -2055,7 +2051,7 @@ def pinned_git_name(path: str) -> Optional[str]:
     ``path`` is model output. An absolute path is refused, as on the disk
     branch (the prompt asks for a relative one), and so is any path that
     climbs out of the repository; the rest go through ``git_path``
-    (plans/review-commits.md §2.5, "Paths in git's form") and are normalised.
+     and are normalised.
     Lexical only: the working tree is never consulted, so the answer is the
     same however it has moved since ``head``.
     """
@@ -2075,7 +2071,7 @@ def absent_at_head(
 
     One ``paths_in_commit`` at the base (a root range has none) and, when any
     name is there, one ``rename_map`` over the whole range, used for the label
-    only (§2.5 "Deleted or renamed: the label"). ``kind`` is
+    only. ``kind`` is
     :data:`ABSENT_RENAMED` (with its new path), :data:`ABSENT_DELETED`,
     :data:`ABSENT_UNLABELLED` (present at base, the rename lookup failed) or
     :data:`ABSENT_BOTH`.
@@ -2157,8 +2153,7 @@ def _pinned_code_sections(
 
     Every read is immutable — ``head``, or for a path the range removed,
     ``base`` — so the excerpt is byte-identical on every reaggregate however
-    the working tree moves (plans/review-commits.md §2.5, "Validation
-    excerpts"). One ``paths_in_commit`` and one ``git cat-file --batch`` over
+    the working tree moves. One ``paths_in_commit`` and one ``git cat-file --batch`` over
     the cited paths at ``head``; a path absent there keeps its slot:
 
     - deleted or renamed away (present at ``base``): the cited windows of the
@@ -2346,7 +2341,7 @@ def build_implementation_record(plan_path: Path) -> str:
                 "their work normally): " + "; ".join(unfinished_gaps)
             )
         # A task recorded `completed` because the user ACCEPTED its failure
-        # (`--human-task <id>=done` after a failed check, fix round 8): the
+        # (`--human-task <id>=done` after a failed check): the
         # check still failed, so the reviewers are told what it found rather
         # than reading `completed` as a check that passed.
         accepted = [
@@ -2376,7 +2371,7 @@ def build_implementation_record(plan_path: Path) -> str:
                 + "; ".join(entry["findings"])
             )
         # A task whose own check (a test it ran on its edits) failed: the
-        # edits were kept, recorded `completed` (fix round 15).
+        # edits were kept, recorded `completed`.
         for entry in state.implementation_batch_check_findings():
             lines.append(
                 f"- Task {entry['id']}'s own check failed after its edits (the "
@@ -2444,7 +2439,7 @@ def build_validation_secondary_context(
     ``cut_report``, when given, is filled with what was left out —
     ``record_cut`` (the record went over ``IMPLEMENTATION_RECORD_CHARS``),
     ``record_chars`` (the record's uncut length), ``dropped_files`` and ``files_total`` — so the caller can record the block
-    as a ``reviewed-code`` context source with ``mode: truncated`` (§2.6).
+    as a ``reviewed-code`` context source with ``mode: truncated``.
     Neither half is ever named by path: the record has no file and the windows
     are live working-tree bytes no snapshot binds.
 
@@ -2689,7 +2684,7 @@ def validation_extra_instructions(
     """``extra_instructions`` for a code-review validation batch.
 
     On a review pinned to two commits (*pinned*) the guidance states the
-    pinned-head read rule, with the §2.6 trust sentence, for every file
+    pinned-head read rule, with the trust sentence, for every file
     (``subagent_prompts.code_review_validation_guidance``), and the dropped
     files are named for a read at the head commit; a commit brief's frozen
     context plan (*plan_snapshot*) is named by its snapshot, never the user's
@@ -2738,7 +2733,7 @@ def validation_extra_instructions(
 
 
 def reviewed_code_document(secondary: str, cut_report: Dict[str, Any]) -> BoundDocument:
-    """The ``reviewed-code`` context source for review-code's second block (§2.6).
+    """The ``reviewed-code`` context source for review-code's second block.
 
     Always inline, never a path. A record cut or any dropped window makes it
     ``mode: truncated``, and its notice names the dropped files and the record
@@ -2864,7 +2859,6 @@ def prepare_fixes_for_subagents(
 
 # ---------------------------------------------------------------------------
 # Which scope each result reviewed, and what the prompt says about the diff set
-# (plan: review-run-scope-salvage-and-failure-visibility §2, D2.2/D2.3)
 # ---------------------------------------------------------------------------
 
 #: ``{<result stem>: <scope id>}`` — the scope manifest each model's latest
@@ -3313,8 +3307,7 @@ SALVAGE_ISSUE_FIELDS = ("title", "desc", "importance", "file", "line_range", "ty
 
 def salvage_issue_fields(commit_record: Optional[Mapping[str, Any]]) -> List[str]:
     """The salvage request's ``expected_schema.fields``. A commit review's
-    reviewers also answer ``introduced_by`` (plans/review-commits.md §2.6,
-    ``schemas/code_review_issues.schema.json``): a repaired answer without it
+    reviewers also answer ``introduced_by``: a repaired answer without it
     would drop every claim that slot made, and attribution falls back to the
     claim. Any other run keeps the fields it always had."""
     fields = list(SALVAGE_ISSUE_FIELDS)
@@ -3331,7 +3324,7 @@ def code_review_scope_baseline(
     base_ref: Optional[str],
     head_ref: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """The scope baseline of a code (or commit) review round (plan §2).
+    """The scope baseline of a code (or commit) review round.
 
     Intent is the accepted plan — for a commit review, the pinned brief and
     its frozen context plan; the task list and the reviewed range are
@@ -3427,7 +3420,7 @@ async def run_single_review(
         diff_coverage: That set's coverage, ``complete`` or ``partial``; a
             lane that cannot open the phase dir gets the change inline only
             when it is complete (D2.3).
-        served_models: Optional collector for §3.6's attribution.  When a
+        served_models: Optional collector for the attribution.  When a
             configured ``--fallback-model`` list produced a served model, this
             slot's ``{model_spec: {"served_model", "fallback"}}`` entry is
             written into it, so the report can name the model that really
@@ -3547,8 +3540,7 @@ class CodeSlot:
         # Detect project root so CLI providers (e.g. Claude Code) run in the
         # correct working directory and can access project files.
         self.project_root = get_project_root(str(plan_path))
-        # Parse model spec to get provider info for display. Anchored on the plan
-        # (§9.3.a): the value already exists here, it just used to be dropped.
+        # Parse the model spec to get provider info for display, anchored on the plan.
         self.provider_name, model_name = parse_model_spec(model_spec, anchor=str(plan_path))
         self.display_name = f"{self.provider_name}:{model_name}"
 
@@ -3610,45 +3602,15 @@ class CodeSlot:
         log_file = phase_dir / f"log_{sanitized_model}.txt"
         self.sanitized_model, self.phase_dir, self.log_file = sanitized_model, phase_dir, log_file
 
-        # This model's attempt starts *here*, so any salvage pair an earlier attempt
-        # left in the phase dir stops being outstanding work *here* — before the
-        # provider is invoked, and whatever this attempt goes on to do.
-        #
-        # `get_phase_dir` is stable per plan (`utils/output_handler.py`), so every
-        # run for this plan writes into the same directory, and `--force` clears
-        # only the state file's phase-completion marker (see main()) — it deletes
-        # nothing from disk. Without this call the exact P2 rerun still reproduces
-        # P2: kilocode dies on `User not found.`, `has_salvageable_json` correctly
-        # writes nothing, and the *previous* run's `salvage_task_<stem>.json` is
-        # still dispatched by `dispatch_salvage_tasks`'s glob and still advertised
-        # by main()'s end-of-run `salvage_*.json` scan. A salvage task's
-        # `output_name` IS this model's result file, so what that repairs is a run
-        # that no longer exists, over a slot this run recorded as failed — the
-        # phantom participant the gate exists to prevent, arriving by the one route
-        # the gate cannot see. Confirmed on disk: a real `code-review` phase dir
-        # holds request/task pairs from three separate runs that are long over.
-        #
-        # **Retire-by-rename rather than run-stamping**, deliberately, and the
-        # resumed run is what decides it. Retiring belongs to *the attempt that
-        # would replace the artifact*, and this is only ever reached by a
-        # model that is actually re-running: `run_all_reviews` answers a resume
-        # (`skip_existing`, i.e. no `--rerun-all`) from the existing
-        # `<model>.json` and returns before calling here, so a skipped model keeps
-        # its pair and a re-run model loses one that can only describe an answer it
-        # is about to replace. That is the whole of the shared-phase-dir case a run
-        # stamp was wanted for, without a run id to thread through two writers, two
-        # globs and two reporting blocks — and without the question a stamp cannot
-        # answer, which is what to do with the unstamped pairs already on disk.
-        # What this shape does *not* cover is a model dropped from the selection
-        # between runs: it begins no attempt, so nothing retires its pair. That is
-        # the same residual as its stale `<model>.json`, which the fan-out also
-        # leaves for reaggregation to pick up (see the `--rerun-all` note at the
-        # salvage dispatch in main()), and it belongs to whatever eventually scopes
-        # the phase dir by run rather than to the gate.
-        #
-        # Quiet: the fan-out already prints a line per model per phase, and one
-        # `[SALVAGE_RETIRED]` per re-run model would bury them. The audit trail is
-        # the renamed file, which is not deleted.
+        # This model's attempt starts here, so a salvage pair an earlier attempt left
+        # in the phase dir stops being outstanding work before the provider is
+        # invoked. The phase dir is stable per plan and `--force` deletes nothing, so
+        # without this the previous run's `salvage_task_<stem>.json` would still be
+        # dispatched over this model's fresh result path. Retire by rename, at the
+        # attempt that replaces the artifact: a resumed model that is skipped keeps
+        # its pair, and a model dropped from the selection keeps its stale pair as it
+        # keeps its stale `<model>.json`. Quiet; the renamed file is the audit trail
+        # (docs/development/delegation.md#in-process-continuations).
         retire_salvage_artifacts(
             str(phase_dir), sanitized_model, reason=RETIRE_SUPERSEDED, quiet=True
         )
@@ -3673,8 +3635,8 @@ class CodeSlot:
         # they never saw.
         #
         # A commit brief's run (its state records `commit_range`) with a context
-        # plan hands the frozen snapshot over too (§2.4 "Everyone reads the
-        # snapshot"): an inline lane cannot open it, so its text is one more block
+        # plan hands the frozen snapshot over too: an inline lane cannot open it, so its
+        # text is one more block
         # of the bounded payload, and a lane it does not fit is not dispatched.
         commit_record = commit_report.run_commit_range(plan_path)
         self.commit_record = commit_record
@@ -3737,8 +3699,7 @@ class CodeSlot:
 
         # Load prompt template. A commit brief's run (its state records
         # `commit_range`, read above) gets `commit_review.txt`; every other run, a
-        # direct `--head-ref` one included, keeps `code_review.txt` (§2.6
-        # "Loading").
+        # direct `--head-ref` one included, keeps `code_review.txt`.
         prompt_template = (
             load_code_review_prompt() if commit_record is None
             else load_prompt(commit_report.review_prompt_name(commit_record))
@@ -3768,16 +3729,16 @@ class CodeSlot:
             "scope_file": scope_file_text,
             "diff_dir": diff_dir_text,
             "diff_access": diff_access_text,
-            # The round's scope block, rendered per slot from the resolved policy
-            # (plans/scope-policy-and-report-tags.md §3.1): a commit review judges
-            # scope against its brief, a code review against the accepted plan.
+            # The round's scope block, rendered per slot from the resolved policy:
+            # a commit review judges scope against its brief, a code review against
+            # the accepted plan.
             "scope_policy_guidance": _sp.reviewer_guidance(
                 self.scope_policy,
                 _scope_round.guidance_phase("code-review", commit_review=commit_record is not None),
             ),
         }
         if commit_record is not None:
-            # The commit template's own slots (§2.6). The block's pointer names
+            # The commit template's own slots. The block's pointer names
             # the brief by the path this lane can open, or the `git log` command
             # when it cannot open the brief at all.
             inline_lane = diff_access is not None and diff_access.mode == "inline"
@@ -3846,10 +3807,10 @@ class CodeSlot:
         return self._failed(reason, source="not-dispatched")
 
     def after_ladder(self, run: Any) -> None:
-        # §3.6: record which model served this slot before any of the endings
+        # Record which model served this slot before any of the endings
         # return, so a fallback that fired is attributed even on the paths
         # that end in salvage. Only ever populated when a fallback is configured.
-        # The D6 override's provenance (2026-09-17) lands in the same collector,
+        # The D6 override's provenance lands in the same collector,
         # with or without a served model beside it.
         details = run.details
         if self.served_models is not None:
@@ -3942,72 +3903,16 @@ class CodeSlot:
             print(f"[{display_name}] Agent failed ({duration:.1f}s): {error_msg}")
 
             # Write a salvage request only when the failure output still holds an
-            # answer to repair. "stderr is non-empty" is not that test: a hard
-            # provider failure — kilocode answering `Error: User not found.` on a
-            # dead account, in ANSI colour — passes it with no JSON anywhere in the
-            # stream, and the salvage prompt's own "if nothing recoverable is
-            # present, print an empty array" then writes `[]` over this model's
-            # result path, so a model that never ran is aggregated as one that
-            # reviewed the diff and found nothing. It also spends the operator's
-            # next move on a JSON repair when the fix is `kilocode` auth. With
-            # nothing to salvage the model simply stays failed, which is the D6
-            # row-3 partial-results path already taken by every other dead slot.
-            # `has_salvageable_json` subsumes the old condition: a `stdout_error`
-            # with empty stderr only ever produced a salvage request whose
-            # `raw_output` was the empty string.
-            #
-            # WHICH CHANNEL THE ANSWER IS ON, and this branch used to look at only
-            # one of them. `if not result["success"]` is not merely "the provider
-            # never spoke": it also covers the provider that wrote a truncated or
-            # fenced array and *then* exited non-zero — a kill at the deadline, a
-            # crash on teardown — and that array is on **stdout**, never on stderr.
-            # Gating on stderr alone therefore printed "Provider failed before
-            # producing any JSON — nothing to salvage" about a run that had produced
-            # JSON, and threw a recoverable review away without a word. The
-            # JSON-erroring providers press the same point from the other side:
-            # `opencode run --format json` puts its failure shape on stdout with
-            # stderr empty, and a relayed `{"error": {"code": 401, ...}}` body is
-            # indistinguishable from any HTTP-backed CLI — those reached the
-            # predicate as `""`, so even the verdicts it reached correctly were
-            # reached for the wrong reason. The pre-gate code was equally blind (its
-            # `raw_output` was the empty string), so this closes a latent hole rather
-            # than a regression; it is closed here because site A is the one place
-            # the gate above could make a real loss *visible*.
-            #
-            # **Precedence, not concatenation.** The first non-empty channel wins and
-            # the other is not appended, because `raw_output` is handed to a subagent
-            # as *the* damaged answer to repair (`build_salvage_prompt` in
-            # `utils/subagent_prompts.py`), and gluing a launch banner or an auth
-            # notice onto a truncated array gives that subagent two documents and no
-            # way to tell which one it was asked about — with the same empty-array
-            # fallback waiting when it guesses wrong. stdout is the one that can hold
-            # an answer, so stdout is the one that is asked first.
-            #
-            # `utils/llm_client.py`'s `_attach_stdout_excerpt` attaches
-            # `stdout_excerpt` on all three losing paths — non-zero exit, timeout
-            # kill, and the zero exit whose output would not parse — already
-            # `_redact`ed and `_bound_stream`ed in that order (§4.5/§4.4), and it
-            # **omits the key entirely** when nothing survived rather than setting
-            # `""`. So when no reducer applies, absent and empty mean the same thing,
-            # and stderr still answers for the provider that died before printing a
-            # byte.
-            #
-            # Whatever this picks is also what gets persisted: the gate below judges
-            # `raw_content` and the salvage request stores `raw_content`, so the text
-            # a subagent is asked to repair is the text the decision was made on.
-            # Gating on one string and writing another would let a request be written
-            # for evidence nobody ever saw.
-            #
-            # **And a stream adapter's answer is not its stream.** `salvage_source`
-            # (the rule `failure_output_from_result` applies to the other lane)
-            # reads `details["salvage_text"]` first — the adapter's own reduction of
-            # its full stdout to the assistant's answer text — and, when that key is
-            # present, reads nothing else, even when it is `""`. On pi and omp the
-            # stdout excerpt is JSONL whose `content` arrays pass the gate as
-            # findings: a reviewer killed while a tool ran was sent to salvage over
-            # its own `thinking`/`toolCall` parts (plan:
-            # review-run-scope-salvage-and-failure-visibility §4). Only when no
-            # reducer applies does the stdout-then-stderr order above still hold.
+            # answer to repair, never on "stderr is non-empty": a hard provider
+            # failure (an auth error with no JSON in the stream) would otherwise get
+            # an empty array written over this model's result path and aggregate as a
+            # reviewer that found nothing. With nothing to salvage the model stays
+            # failed. The source is the adapter's `salvage_text` when it has one (a
+            # stream adapter's answer is not its stream), else the first non-empty of
+            # `stdout_excerpt`, then stderr: precedence, never concatenation, because
+            # `raw_output` goes to a subagent as the one damaged answer to repair. The
+            # gate judges `raw_content` and the request stores the same text
+            # (docs/development/delegation.md#in-process-continuations).
             details = result.get("details", {}) or {}
             raw_content = salvage_source(details)
             timed_out = salvage_failure_kind(result) is not None
@@ -4101,7 +4006,7 @@ class CodeSlot:
             # Same rule as the hard-failure path above, for the same reason: a reply
             # with no JSON in it is not a parse failure, and salvage against it can
             # only print the empty array its prompt falls back to. This branch is
-            # where §40's two write-refusal shapes land — cursor-agent's "I can't
+            # where the two write-refusal shapes land — cursor-agent's "I can't
             # write the requested file while Ask mode is active" and gemini's
             # "JSON written to …" confirmation for a write that never happened —
             # and a `[]` recorded for either would be an invented clean review.
@@ -4209,7 +4114,7 @@ async def run_all_reviews(
         pinned: The two commits of a pinned review, forwarded to each
             :func:`run_single_review` (only when set, so a stand-in written for
             an unpinned run need not accept it).
-        served_models: Optional §3.6 attribution collector, forwarded to each
+        served_models: Optional attribution collector, forwarded to each
             :func:`run_single_review` (see its docstring)
         usage: Optional per-slot usage collector, forwarded the same way
         prior_usage: What an earlier attempt of this phase recorded, read off
@@ -4365,7 +4270,7 @@ def generate_review_report(
     """Generate a markdown review report.
 
     ``scope_state`` is the ``state.json`` dict holding the review round's
-    ``scope_policy`` record (plans/scope-policy-and-report-tags.md §6);
+    ``scope_policy`` record;
     ``None`` reads the saved one beside *phase_dir*. Each issue shows its own
     provisional scope tag and its group's validated one, and the header the
     effective policy and the tag counts over distinct groups.
@@ -4381,7 +4286,7 @@ def generate_review_report(
     added to ``report_data.json`` as ``reviewScope`` and ``diffCoverage``.
     ``None`` (a direct call) adds neither.
 
-    ``served_models`` is §3.6's attribution
+    ``served_models`` is the attribution
     (``{model_spec: {"served_model", "fallback"}}``): every row that names a
     model — the ``**Models:**`` summary, each issue's ``**Model:**`` field and
     the HTML report's badges — names the model that actually served the turn
@@ -4395,8 +4300,8 @@ def generate_review_report(
     a fan-out of duration-only adapters, which leaves the report as it was.
 
     ``commit_review`` is a commit review's report payload
-    (:func:`utils.commit_report.report_context`, plans/review-commits.md
-    §2.10): the header labels the brief "Commit brief" and carries the commit
+    (:func:`utils.commit_report.report_context`): the header labels the brief "Commit
+    brief" and carries the commit
     block with the focus and context plan under it, each finding whose group
     was attributed gets an "Introduced by" line, and the HTML report gets the
     commit filter, the drift badges and the apply command its export help
@@ -4421,7 +4326,7 @@ def generate_review_report(
     size of the requested set — main()'s ``len(model_specs)``, the
     reaggregate's recorded requested set — never succeeded plus failed.
     """
-    # "Commit brief", never "Plan", for a commit review (§2.8), through the
+    # "Commit brief", never "Plan", for a commit review, through the
     # one owner of the word.
     document = (
         commit_review.get("documentLabel") if commit_review
@@ -4472,7 +4377,7 @@ def generate_review_report(
         "**Models:** "
         + ", ".join(model_label(m, served_models, usage) for m in successful_models)
     )
-    # Plan §5 T5.2: the models that produced nothing, directly under the ones
+    #  T5.2: the models that produced nothing, directly under the ones
     # that did (the bottom `## Failed Reviews` section alone left a lost
     # reviewer below the fold). The salvage answer is computed once and handed
     # to the HTML report too, so the notice there is this line minus its bold.
@@ -4480,7 +4385,7 @@ def generate_review_report(
         str(phase_dir) if phase_dir is not None else None, list(failed_models)
     )
     # A jail-denied slot's `models_served` entry makes the line say "denied by
-    # the plugin's jail: <path>" (plan codex-sandbox-unavailable F1 item 6).
+    # the plugin's jail: <path>".
     failure_line = failed_models_line(
         failed_models, requested_models, salvage_requested,
         served_models=served_models,
@@ -4506,7 +4411,7 @@ def generate_review_report(
             "in the JSON files counts from 0)"
         )
 
-    # Add validation summary if available. §6 T6.1: the four counts come from
+    # Add validation summary if available. T6.1: the four counts come from
     # the base's `validation_counts`, the same helper that records them on the
     # result line below, so a `validation_failed` group shows here too and the
     # header and payload agree.
@@ -4522,7 +4427,7 @@ def generate_review_report(
         )
     if phase_dir is not None:
         record_validation_counts(str(phase_dir), validated_groups)
-    # Plan §2.4: the published `validation_context`, read from `.status.json`
+    # The published `validation_context`, read from `.status.json`
     # and never recomputed; absent adds nothing, so the report is unchanged.
     if phase_dir is not None:
         lines.extend(
@@ -4533,7 +4438,7 @@ def generate_review_report(
     # Review-scope plan D2.2: the manifest and per-file diffs the reviewers
     # were pointed at, their coverage, and any result that reviewed another set.
     lines.extend(review_scope_report_lines(review_scope))
-    # Scope tags (plans/scope-policy-and-report-tags.md §6): the round's
+    # Scope tags: the round's
     # effective policy and the tag counts over distinct groups, never over the
     # issue rows below (a consensus finding is one row per model).
     from utils import scope_report as _scope_report
@@ -4629,7 +4534,7 @@ def generate_review_report(
                 issue_siblings[id(issue)] = [n for n in sorted(numbers) if n != mine]
                 issue_group_models[id(issue)] = model_count
 
-    # §2.10: each finding names the commit its group was attributed to
+    # Each finding names the commit its group was attributed to
     # (`introduced_by`, decided by `utils/commit_attribution.py`), with the
     # subject from `commit_range.commits`; an unattributed one shows nothing.
     issue_introduced: Dict[int, str] = {}
@@ -4781,7 +4686,7 @@ def generate_review_report(
             html_content = generate_html_report(
                 groups=validated_groups or [],
                 plan_path=plan_path,
-                # §2.10: the commit header, filter, badges and export help.
+                # The commit header, filter, badges and export help.
                 commit_review=commit_review,
                 phase_dir=phase_dir,
                 phase_type="code-review",
@@ -4859,7 +4764,7 @@ def _format_issue(
         issue: The issue dict with title, desc, type, file, model, etc.
         validation_status: The validation status (valid, invalid, needs-human-decision, etc.)
         validation_reason: The reason for the validation decision (shown for invalid/needs-human-decision)
-        served_models: Optional §3.6 attribution.  The ``**Model:**`` field is
+        served_models: Optional attribution.  The ``**Model:**`` field is
             the one place this report credits a finding to a model, so a slot
             served by a configured fallback is named here too — otherwise the
             row reads as if the primary produced it.
@@ -4871,7 +4776,7 @@ def _format_issue(
         group_model_count: Distinct models behind this issue's group, for the
             agreement phrase.
         introduced_by: A commit review's "Introduced by `<sha7>` — <subject>"
-            line for this issue's group (plans/review-commits.md §2.10). It
+            line for this issue's group. It
             sits above the metadata line, so the description the parser reads
             after that line is unchanged, and its subject is escaped so it
             cannot pass for a checkbox.
@@ -4880,7 +4785,7 @@ def _format_issue(
             ``preserve``, its policy outcome. The issue's own provisional tag
             is always shown. Both sit above the metadata line, so
             ``report_parser.parse_issue_descriptions`` reads the same
-            description as before (plan §6).
+            description as before.
     """
     file_ref = issue.get("file", "unknown")
     line_range = issue.get("line_range")
@@ -4997,7 +4902,7 @@ def code_review_validation_round(
     ``--reaggregate``: one builder, so a reaggregate re-validates against the
     prompt the fan-out wrote.
 
-    The plan block is the bound snapshot (§2.3 step 5), with no ``Plan file:``
+    The plan block is the bound snapshot, with no ``Plan file:``
     line: a second path, the live plan, would point a validator at bytes the
     snapshot hash does not cover. The second block is the reviewed code, each
     batch embedding the windows its own issues cite, from one read.
@@ -5032,7 +4937,7 @@ def code_review_validation_round(
     batch_view = reviewed_code_batch_view(per_batch, **guidance)
     read_refusal = materialization_read_refusal(args, str(plan_path))
     recorded = getattr(state, "state", {}) or {}
-    # The reviewers' policy and baseline (plan §3.1), in the one task file
+    # The reviewers' policy and baseline, in the one task file
     # both invokers run.
     scope = validation_scope_block(
         "code-review", scope_round_policy, state,
@@ -5213,7 +5118,7 @@ async def reaggregate_from_existing_files(
         base_ref = validate_git_ref(base_ref)
     pinned_kw: Dict[str, Any] = {"pinned": pinned} if pinned is not None else {}
     plan_snapshot, plan_sha256 = _context_plan(getattr(state, "state", None))
-    # A reaggregate belongs to the round on record (plan §4): its policy and
+    # A reaggregate belongs to the round on record: its policy and
     # baseline stay; a differing explicit policy was refused before the
     # boundary and is refused here too for a direct caller.
     scope_round_policy = resolve_scope_round(
@@ -5240,7 +5145,7 @@ async def reaggregate_from_existing_files(
         pinned_kw = {"pinned": pinned}
 
     # Two commits need no intent-to-add marking: the working tree is not in
-    # their diff (plans/review-commits.md §2.5).
+    # their diff.
     with (
         contextlib.nullcontext() if pinned is not None
         else intent_to_add_untracked(changed_files, cwd=git_root)
@@ -5269,7 +5174,7 @@ async def reaggregate_from_existing_files(
         # the task file below, so a rewrite would refuse its own round), or
         # the issues regrouped: one rule for every review lane. A
         # `--reaggregate` completing a run interrupted before grouping finds no
-        # grouped.json and groups as the fan-out would. §2.6: attributed again
+        # grouped.json and groups as the fan-out would. Attributed again
         # in memory on a reused grouping, into the file on a regroup.
         bound = _review_lane.bind_grouping(
             claim, steps, phase_dir=str(phase_dir), grouped_path=str(grouped_path),
@@ -5342,13 +5247,13 @@ async def reaggregate_from_existing_files(
         )
 
         # Generate report. `served_models` is what the fan-out recorded in the
-        # checkpoint (§3.6's attribution and the D6 override's `sandbox:
+        # checkpoint (the attribution and the D6 override's `sandbox:
         # bypassed`, 2026-09-17): the per-model files carry neither, so without
         # this read a reaggregated report named a bypassed slot as if it had
         # run sandboxed.
         report = generate_review_report(
             plan_path, results, changed_files, validated_groups_for_report,
-            # §2.10: the commit header from the record, never from git.
+            # The commit header from the record, never from git.
             commit_review=commit_report.report_context(
                 state, commit_attribution_pass, changed_files,
                 repo_root=git_root or project_root,
@@ -5359,7 +5264,7 @@ async def reaggregate_from_existing_files(
             # is a bare issue list here too, so a reaggregated report that did
             # not read this lost every number the original run recorded.
             usage=recorded_usage(str(phase_dir)),
-            # Plan §5 T5.1: the failures read back above, and the recorded
+            #  T5.1: the failures read back above, and the recorded
             # requested set as the "of M requested" denominator.
             failed_models=failed_models_map,
             requested_models=(
@@ -5554,8 +5459,7 @@ def heal_unrecorded_completion(
 def _plan_file_label(plan_path: Path, args: Any = None) -> str:
     """``Plan file`` as today, or ``Commit brief`` when the plan's
     ``state.json`` records a ``commit_range``: the phase's own lines never call
-    a commit brief a plan (plans/review-commits.md §2.8, "'Commit brief',
-    never 'plan'"), through the one owner of the word,
+    a commit brief a plan, through the one owner of the word,
     ``commit_paths.document_label``. *args* carrying a front door's stage
     (:func:`landed_stage`) is a commit brief too: a detached launch of a new
     brief has its ``commit_range`` only in that stage until the worker's
@@ -5638,7 +5542,7 @@ async def _main(argv: Optional[List[str]], run: PhaseRun) -> int:
     )
 
     # Two commits need no intent-to-add marking: the working tree is not in
-    # their diff (plans/review-commits.md §2.5).
+    # their diff.
     with (
         contextlib.nullcontext() if scope.pinned is not None
         else intent_to_add_untracked(scope.changed_files, cwd=scope.git_root)
@@ -5763,7 +5667,7 @@ def _locate_plan(args: argparse.Namespace) -> Tuple[Path, str, Path]:
         print(f"       Resolved path: {plan_path}")
         sys.exit(1)
 
-    # §9.3.a/b: the anchor capture point — absolute, before anything can chdir
+    # The anchor capture point — absolute, before anything can chdir
     # and before any provider read that decides routing.
     set_run_anchor(str(plan_path))
 
@@ -5824,7 +5728,7 @@ async def _reaggregate_entry(
     )
     if detach_outcome is not None:
         sys.exit(detach_outcome)
-    # A front door's stage lands inside that boundary (§2.1): the pair and
+    # A front door's stage lands inside that boundary: the pair and
     # its drift list come from the state it left, not the one the pre-flight
     # read.
     if landed_stage(args):
@@ -5921,8 +5825,7 @@ def _reaggregate_preflight(
     # strictly here, before the detach boundary and before anything is
     # written, so a pruned SHA is `[RANGE_UNRESOLVED]` exit 3 on the
     # caller's terminal and never a `HEAD~1` stand-in, and a typed ref
-    # that resolves elsewhere is refused (plans/review-commits.md §2.4,
-    # §2.5).
+    # that resolves elsewhere is refused.
     reaggregate_pinned = _resolve_pinned_or_exit(
         get_or_create_state(plan_path), args, plan_path, reaggregate=True,
     )
@@ -5931,8 +5834,7 @@ def _reaggregate_preflight(
 
     # The stale guard the fan-out path applies (`_guard_phase_state`),
     # applied here too. A review completed before the latest implement
-    # judged an earlier state of the code (2026-10-02: the empty
-    # repository); the fan-out takes
+    # judged an earlier state of the code; the fan-out takes
     # `--force` on it, but this path ran no model and ended in
     # `mark_phase_completed`, which re-stamped the stale review newer than
     # implement, so apply-code-fixes then applied the empty-repo findings
@@ -5951,7 +5853,7 @@ def _reaggregate_preflight(
         sys.exit(EXIT_NEEDS_HUMAN)
 
     # The round on record keeps its scope policy: a differing explicit
-    # `--scope-policy` is refused here, before the boundary (plan §4).
+    # `--scope-policy` is refused here, before the boundary.
     resolve_scope_round(
         get_or_create_state(plan_path), "code-review", args, same_round=True,
         phase_dir=str(get_phase_dir(plan_path, 'code-review')),
@@ -5985,8 +5887,8 @@ def _guard_phase_state(args: argparse.Namespace, plan_path: Path) -> Optional[Pi
     # `commit_range`): both ends resolved strictly, never through
     # `validate_git_ref`'s `HEAD~1` fallback, and a recorded SHA that no longer
     # names a commit is `[RANGE_UNRESOLVED]` exit 3 — all before this phase
-    # writes anything, `state.json` included (plans/review-commits.md §2.4,
-    # §2.5). The recorded invocation then carries the pair as full SHAs, so a
+    # writes anything, `state.json` included. The recorded invocation then carries the
+    # pair as full SHAs, so a
     # detached child, a resume line and a next command replay the same pair
     # after a branch moves.
     pinned = _resolve_pinned_or_exit(state_guard, args, plan_path)
@@ -6006,17 +5908,16 @@ def _guard_phase_state(args: argparse.Namespace, plan_path: Path) -> Optional[Pi
         state_guard.save()
     if not args.force and state_guard.phase_completion_is_stale("code-review"):
         # Implement completed after this review did, so the review judged an
-        # earlier state of the code (2026-10-02: the empty repository, before
-        # implement existed). `is_phase_completed` already reads it as pending;
+        # earlier state of the code. `is_phase_completed` already reads it as pending;
         # the artifacts it left in the phase dir must not auto-heal it back to
         # complete below, so a plain run takes the `--force` path.
         print("NOTE: code-review was completed before the latest implement; "
               "re-running it (as --force)")
         args.force = True
     if state_guard.is_phase_completed("code-review") and not args.force:
-        # Fix round 28 (live run 12 #11): said as done, never as an error. A
+        # Said as done, never as an error. A
         # commit review says it as the mode the user typed, of its commit
-        # brief (plans/review-commits.md §2.8).
+        # brief.
         from utils.commit_paths import document_label
         from utils.commit_spelling import commit_view, spell_mode
 
@@ -6263,7 +6164,7 @@ def _resolve_base_and_scope(
     # This ordered list is what every reviewer's prompt lists, what
     # `intent_to_add_untracked` marks and what the report counts; before this,
     # main resolved it and then handed the reviewers the raw — and, on the
-    # fallback, empty — `tracked_files` instead (review-scope plan §2.1).
+    # fallback, empty — `tracked_files` instead (review-scope).
     review_scope = resolve_review_scope(
         state, base_ref, anchor=str(plan_path), repo_root=git_root,
         **({"head_ref": pinned.head} if pinned is not None else {}),
@@ -6284,7 +6185,7 @@ def _resolve_base_and_scope(
         # `[SCOPE_DRIFT]` must reach the caller's terminal, so a direct run
         # checks here, before its detach boundary; a fronted run's list is
         # the front door's (`commit_range.drifted`), neither recomputed nor
-        # printed (plans/review-commits.md §2.5 "Drift"), a staged launch's
+        # printed, a staged launch's
         # included: its record arrives with the stage, past the boundary.
         pinned = drift_check(pinned, changed_files, repo_root=git_root,
                              staged=landed_stage(args))
@@ -6356,7 +6257,7 @@ def _resolve_round_policy_and_plan_bytes(
     ``--skip-validation``); it is bound to the phase's snapshot past the
     boundary, by :func:`_open_fanout_round`.
     """
-    # The round's scope policy, resolved before the boundary (plan §4): it
+    # The round's scope policy, resolved before the boundary: it
     # decides the reviewer and validator prompts alike, and a same-round
     # resume keeps the recorded one. A change that would mix reviewer outputs
     # in one round is refused here, on the caller's terminal (exit 3).
@@ -6436,7 +6337,7 @@ def _cross_detach_boundary(
 
     # A detached worker takes its lock inside `maybe_detach`, and a commit
     # front door's stage (the new header, `commit_range`, a context-plan
-    # snapshot; plans/review-commits.md §2.1) is applied there — after the
+    # snapshot) is applied there — after the
     # pre-flight loaded `state`, read the brief and resolved the pair.
     # Saved as loaded, `state` would put the old `commit_range` back (or, on a
     # new brief, drop it) and the validation snapshot would bind the old
@@ -6500,7 +6401,7 @@ def _open_fanout_round(
             str(plan_path), str(detach_phase_dir), data=plan_bytes
         )
 
-    # The round's scope baseline (plan §2): the accepted plan (a commit
+    # The round's scope baseline: the accepted plan (a commit
     # review's brief) from the same bytes the validation snapshot holds, the
     # task list and the pinned range as evidence, a frozen context plan by its
     # recorded hash. Recorded through `state`, the instance this phase saves.
@@ -6580,7 +6481,7 @@ def _write_diff_set(
 
     # A new round (not a resume of the missing models) records which
     # review is on record, through this phase's own `state`, the instance
-    # it saves at the end (plans/review-commits.md §2.1): a commit brief's
+    # it saves at the end: a commit brief's
     # `reviewed_header_sha256` (and its apply guard cleared), a direct
     # round's `head_ref`, or — a round with neither — no `head_ref`.
     if round_starts(
@@ -6620,7 +6521,7 @@ async def _run_reviews_and_save(
     saves each, names the losses, salvages in-process under
     ``--exec-subagents`` and exits 3 when no model answered.
     """
-    # §3.6: filled per slot by run_single_review when a configured fallback
+    # Filled per slot by run_single_review when a configured fallback
     # served the turn; empty under the shipped config, which is what keeps the
     # report identical.
     served_models: Dict[str, Dict[str, Any]] = {}
@@ -6639,7 +6540,7 @@ async def _run_reviews_and_save(
 
     # A model whose spec changed since the last run (`codex:x` becoming
     # `codex:x:high`) has no slot in this run to retire its old files, and a
-    # later `--reaggregate` would read them back into this run's report (#30).
+    # later `--reaggregate` would read them back into this run's report.
     retire_unselected_results(str(detach_phase_dir), model_specs)
 
     # Run reviews - agents receive the resolved, ordered scope (labelled
@@ -6766,7 +6667,7 @@ async def _group_validate_and_report(
     # *after* `progress.step` is written.
     #
     # It is no longer the ONLY turn the loop gets, but most of this stretch
-    # still does not yield (F6, 2026-09-20). `dispatch_subagent_tasks` is
+    # still does not yield. `dispatch_subagent_tasks` is
     # the long one — it blocks in `_run_sync`'s
     # `pool.submit(asyncio.run, …).result()` for the whole validation
     # window, which used to pin this loop and leave the executor lane with
@@ -6803,7 +6704,7 @@ async def _group_validate_and_report(
         )
     finally:
         await phase_ticker.stop_ticker()
-        # Plan codex-sandbox-unavailable F1 (2026-09-30): every
+        # Every
         # `[CODEX_HOME_CHECK]` and `[JAIL_DENIED]` line of this run's
         # slots, repeated — on every ending this `finally` covers.
         print_closing_summary(str(phase_dir))
@@ -6885,8 +6786,8 @@ async def _group_and_validate(
     # verdicts retired in the same step, or, for zero issues, a
     # finished review with zero groups whose whole previous round
     # retires (otherwise --force could report zero issues while
-    # apply-code-fixes still applied the previous run's groups). §2.6:
-    # a commit review names the commit behind each group, as sibling
+    # apply-code-fixes still applied the previous run's groups). A commit review names
+    # the commit behind each group, as sibling
     # fields written before grouped.json (off the hash).
     grouping = _review_lane.group_findings(
         claim, steps, phase_dir=str(phase_dir), grouped_path=str(grouped_path),
@@ -6914,7 +6815,7 @@ async def _group_and_validate(
             slots.lane, claim, args, steps,
             grouped=grouped_list, validation_path=str(validation_path),
             # The plan bound at load, before the fan-out, to this phase
-            # dir's own `validation-snapshot.md` (§2.3 step 5), never a
+            # dir's own `validation-snapshot.md`, never a
             # re-read of a plan edited while the models ran.
             plan_document=lambda: plan_document_at_load or bind_plan_for_validation(
                 str(plan_path), str(phase_dir)
@@ -6955,7 +6856,7 @@ def _publish_report(
     # passed in rather than left for the function to re-derive.
     report = generate_review_report(
         plan_path, slots.results, scope.changed_files, validated.groups,
-        # §2.10: the commit header, "Introduced by" lines and filter.
+        # The commit header, "Introduced by" lines and filter.
         commit_review=commit_report.report_context(
             state, validated.commit_attribution, scope.changed_files,
             repo_root=scope.git_root or scope.project_root,
@@ -6964,7 +6865,7 @@ def _publish_report(
         served_models=slots.served_models or None,
         usage=slots.usage or None,
         failed_models=slots.failed_models,
-        # Plan §5 T5.2: "N of M requested" counts this run's own specs.
+        #  T5.2: "N of M requested" counts this run's own specs.
         requested_models=len(model_specs),
         # D2.2: the diff set this fan-out wrote before dispatch.
         review_scope=review_scope_record(

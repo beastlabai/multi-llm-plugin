@@ -65,8 +65,8 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 | `[AUTO_RESOLVED]` | `utils/unattended.py` `RESOLVED_MARKER` | `instructions/full-workflow.md`<br>`instructions/implement.md`<br>`instructions/improve-code.md`<br>`instructions/improve-commits.md`<br>`instructions/improve-plan.md`<br>`instructions/review-code.md`<br>+4 more | Prefix of the one stdout line every auto-resolution prints |
 | `[BATCH_CHECK_ACCEPTED]` | `utils/check_records.py` `BATCH_CHECK_ACCEPTED_MARKER` | `instructions/implement.md` | The line a code task prints when its own check reported only findings the user accepted for a check (`--human-task <check>=done`): both… |
 | `[BATCH_CHECK_FAILED]` | `utils/check_records.py` `BATCH_CHECK_MARKER` | `instructions/apply-code-fixes.md`<br>`instructions/implement.md` | The line a code phase prints per batch whose own check failed after its edits (`CheckHolds.batch_check_lines`, `util batch-done --own-check… |
-| `[BATCH_CHECK_REPEATED]` | `utils/check_records.py` `BATCH_CHECK_REPEATED_MARKER` | `instructions/implement.md` | The line a code task prints when its own check reported only the same findings a check task of the run reported (fix round 28): both legs… |
-| `[BATCH_DECLINED]` | `utils/batch_done.py` `BATCH_DECLINED_MARKER` | `instructions/apply-code-fixes.md`<br>`instructions/apply-suggestions.md`<br>`instructions/apply-task-suggestions.md` | Fix round 18: one line per item an apply batch declined with a reason (`--declined`), and per item the user chose to skip when the batch… |
+| `[BATCH_CHECK_REPEATED]` | `utils/check_records.py` `BATCH_CHECK_REPEATED_MARKER` | `instructions/implement.md` | The line a code task prints when its own check reported only the same findings a check task of the run reported: both legs, in place of… |
+| `[BATCH_DECLINED]` | `utils/batch_done.py` `BATCH_DECLINED_MARKER` | `instructions/apply-code-fixes.md`<br>`instructions/apply-suggestions.md`<br>`instructions/apply-task-suggestions.md` | One line per item an apply batch declined with a reason (`--declined`), and per item the user chose to skip when the batch was kept as it… |
 | `[BATCH_DONE]` | `utils/batch_done.py` `MARKER` | `instructions/apply-code-fixes.md`<br>`instructions/apply-suggestions.md`<br>`instructions/apply-task-suggestions.md`<br>`instructions/implement.md` | The one stdout line a successful record prints |
 | `[BATCH_SKIPPED]` | `utils/batch_done.py` `BATCH_SKIPPED_MARKER` | `instructions/apply-code-fixes.md`<br>`instructions/apply-suggestions.md`<br>`instructions/apply-task-suggestions.md` | — |
 | `[CHECKPOINT_RECOVERED]` | `utils/review_lane.py` `CHECKPOINT_RECOVERED_MARKER` | not for the host: run-notice | The warning line of a fresh run that recovered its phase's damaged checkpoint (`recover_damaged_checkpoint`); the round records the same… |
@@ -111,7 +111,7 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 | `[DRY_RUN]` | `utils/host_install.py` | not for the host: operator-cli | — |
 | `[DRY_RUN_COMPLETE]` | `review_plan_orchestrator.py` | not for the host: phase-progress | — |
 | `[ETA]` | `utils/metrics.py` | `instructions/apply-code-fixes.md`<br>`instructions/apply-suggestions.md`<br>`instructions/apply-task-suggestions.md`<br>`instructions/implement.md`<br>`instructions/review-code.md`<br>`instructions/review-tasks.md`<br>+2 more | — |
-| `[FINDING_RESTATE]` | `utils/batch_done.py` `FINDING_RESTATE_MARKER` | `instructions/implement.md`<br>`references/own-check.md` | The line `util batch-done` prints for a finding that holds a finding the user accepted, word for word, with words added (fix round 28) |
+| `[FINDING_RESTATE]` | `utils/batch_done.py` `FINDING_RESTATE_MARKER` | `instructions/implement.md`<br>`references/own-check.md` | The line `util batch-done` prints for a finding that holds a finding the user accepted, word for word, with words added |
 | `[GIT_CONFIG_CHANGED]` | `utils/git_utils.py` `GIT_CONFIG_CHANGED_MARKER` | not for the host: run-notice | The name a changed-metadata line carries |
 | `[HEAD_REF_MISMATCH]` | `code_review_orchestrator.py` `HEAD_REF_MISMATCH` | not for the host: run-notice | The refusal for a typed pair that is not the pair on record |
 | `[HIGH_PRIORITY_ISSUES]` | `code_review_orchestrator.py` | not for the host: phase-progress | — |
@@ -129,26 +129,26 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 | `[LEGACY_INSTRUCTIONS]` | `multi_llm.py` | not for the host: operator-cli | — |
 | `[MANUAL_GATE]` | `implement_orchestrator.py` | `instructions/implement.md` | — |
 | `[MANUAL_TASK]` | `utils/next_phase.py` `MANUAL_TASK_MARKER` | `instructions/implement.md`<br>`references/summary-format.md` | One line per deferred implement task under `[WORKFLOW_COMPLETE]`: the id, then the title when `state.json` recorded one |
-| `[MANUAL_TASK_COMMAND]` | `utils/next_phase.py` `MANUAL_TASK_COMMAND_MARKER` | `instructions/implement.md`<br>`references/summary-format.md` | The line after `[MANUAL_TASK_NOTE]`: the command that records the manual tasks done, alone (fix round 22, live run 9: the note carried it… |
-| `[MANUAL_TASK_NOTE]` | `implement_orchestrator.py`<br>`utils/next_phase.py` `MANUAL_TASK_NOTE_MARKER` | `instructions/full-workflow.md`<br>`instructions/implement.md`<br>`references/summary-format.md` | One line after the `[MANUAL_TASK]` lines: how to record them done (`manual_close_note`, fix round 14) |
+| `[MANUAL_TASK_COMMAND]` | `utils/next_phase.py` `MANUAL_TASK_COMMAND_MARKER` | `instructions/implement.md`<br>`references/summary-format.md` | The line after `[MANUAL_TASK_NOTE]`: the command that records the manual tasks done, alone |
+| `[MANUAL_TASK_NOTE]` | `implement_orchestrator.py`<br>`utils/next_phase.py` `MANUAL_TASK_NOTE_MARKER` | `instructions/full-workflow.md`<br>`instructions/implement.md`<br>`references/summary-format.md` | One line after the `[MANUAL_TASK]` lines: how to record them done (`manual_close_note`) |
 | `[METRICS_CONFLICT]` | `utils/metrics.py` | not for the host: metrics-note | — |
 | `[METRICS_DUPLICATE]` | `utils/metrics.py` | not for the host: metrics-note | — |
 | `[METRICS_INDEX_MISMATCH]` | `utils/metrics.py` | not for the host: metrics-note | — |
 | `[METRICS_NO_TASK_ID]` | `utils/metrics.py` `NO_TASK_ID_MARKER` | not for the host: metrics-note | — |
 | `[MODEL_FAILED]` | `utils/review_orchestrator_base.py` `MODEL_FAILED_MARKER` | `instructions/review-code.md`<br>`instructions/review-plan.md`<br>`instructions/review-tasks.md`<br>`references/summary-format.md` | The stdout line a reaggregate prints per model that is still failed, right after `record_models_present`: the model and its stored reason… |
 | `[MODE_CHECK]` | `utils/providers/sandbox_rungs.py` `MODE_CHECK_MARKER` | not for the host: runner-diagnostic | The after-the-fact checks of a slot on the incidental rung (F1 "What it fixes", Limits): a flipped executable bit on a tracked file… |
-| `[NEXT_COMMAND]` | `utils/next_phase.py` `NEXT_COMMAND_MARKER` | `SKILL.md`<br>`instructions/improve-code.md`<br>`instructions/improve-commits.md`<br>`instructions/improve-plan.md`<br>`instructions/review-code.md`<br>`instructions/review-plan.md`<br>+2 more | The four line kinds of the block (§2.2(2)) |
+| `[NEXT_COMMAND]` | `utils/next_phase.py` `NEXT_COMMAND_MARKER` | `SKILL.md`<br>`instructions/improve-code.md`<br>`instructions/improve-commits.md`<br>`instructions/improve-plan.md`<br>`instructions/review-code.md`<br>`instructions/review-plan.md`<br>+2 more | The four line kinds of the block |
 | `[NEXT_COMMAND_ANSWERS]` | `utils/next_phase.py` `NEXT_COMMAND_ANSWERS_MARKER` | `references/summary-format.md` | — |
-| `[NEXT_COMMAND_ANSWERS_WHY]` | `utils/next_phase.py` `NEXT_COMMAND_ANSWERS_WHY_MARKER` | `references/summary-format.md` | The answers line pair `util next-command` prints under a resume of a stopped native implement (fix round 14): the why on its own line, then… |
+| `[NEXT_COMMAND_ANSWERS_WHY]` | `utils/next_phase.py` `NEXT_COMMAND_ANSWERS_WHY_MARKER` | `references/summary-format.md` | The answers line pair `util next-command` prints under a resume of a stopped native implement: the why on its own line, then one resume… |
 | `[NEXT_COMMAND_OPTIONAL]` | `utils/next_phase.py` `NEXT_COMMAND_OPTIONAL_MARKER` | not for the host: unnamed-handler | — |
 | `[NEXT_COMMAND_OPTIONAL_WHY]` | `utils/next_phase.py` `NEXT_COMMAND_OPTIONAL_WHY_MARKER` | not for the host: unnamed-handler | — |
-| `[NEXT_COMMAND_WHY]` | `utils/next_phase.py` `NEXT_COMMAND_WHY_MARKER` | `references/summary-format.md` | The line `util next-command` prints directly above the `--resume` of a stopped native implement (fix round 22): what that plain resume does… |
-| `[NEXT_STEP_MARKDOWN]` | `utils/next_phase.py` `NEXT_STEP_MARKDOWN_MARKER` | `SKILL.md`<br>`instructions/implement.md`<br>`references/summary-format.md` | The lines `util next-command` prints around its answer's `markdown` (fix round 24, live run 10: Claude Code racing 06 put the manual tasks… |
+| `[NEXT_COMMAND_WHY]` | `utils/next_phase.py` `NEXT_COMMAND_WHY_MARKER` | `references/summary-format.md` | The line `util next-command` prints directly above the `--resume` of a stopped native implement: what that plain resume does on an… |
+| `[NEXT_STEP_MARKDOWN]` | `utils/next_phase.py` `NEXT_STEP_MARKDOWN_MARKER` | `SKILL.md`<br>`instructions/implement.md`<br>`references/summary-format.md` | The lines `util next-command` prints around its answer's `markdown`: the report's closing section already written, below the marker lines… |
 | `[NEXT_STEP_MARKDOWN_END]` | `utils/next_phase.py` `NEXT_STEP_MARKDOWN_END_MARKER` | `SKILL.md`<br>`instructions/implement.md`<br>`references/summary-format.md` | — |
 | `[NOTHING_TO_REVIEW]` | `utils/commit_range.py` `NOTHING_TO_REVIEW` | `instructions/apply-commit-fixes.md`<br>`instructions/improve-commits.md`<br>`instructions/review-commits.md` | Markers |
 | `[NOT_YET_LOADED]` | `utils/host_install.py` | not for the host: operator-cli | — |
 | `[OUTPUT_FILE]` | `utils/apply_orchestrator_base.py`<br>`utils/apply_output_helpers.py` | `references/summary-format.md` | — |
-| `[OWN_CHECK_NOT_RECORDED]` | `utils/batch_done.py` `OWN_CHECK_NOT_RECORDED_MARKER` | `instructions/apply-code-fixes.md`<br>`instructions/implement.md` | Fix round 24 (live run 10, Claude Code racing 06: all ten implement records lacked `--own-check passed` while every reply said its check… |
+| `[OWN_CHECK_NOT_RECORDED]` | `utils/batch_done.py` `OWN_CHECK_NOT_RECORDED_MARKER` | `instructions/apply-code-fixes.md`<br>`instructions/implement.md` | A `completed` record of a task that edits files given no `--own-check`, and of a check task given no `--check`, draws one line naming the… |
 | `[PIPE_HELD]` | `utils/process_capture.py` | not for the host: runner-diagnostic | — |
 | `[PORCELAIN_CHECK]` | `utils/review_orchestrator_base.py` | not for the host: runner-diagnostic | — |
 | `[PREREQUISITE_CHECK]` | `implement_orchestrator.py` | `instructions/implement.md`<br>`references/implement-prerequisites.md` | — |
@@ -216,7 +216,7 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 | `[SHIM_WOULD_REMOVE]` | `utils/host_install.py` | not for the host: operator-cli | — |
 | `[SKIPPED]` | `full_workflow_orchestrator.py` | not for the host: phase-progress | — |
 | `[SKIP]` | `ask_orchestrator.py`<br>`code_review_orchestrator.py`<br>`utils/review_orchestrator_base.py` | `SKILL.md`<br>`instructions/review-code.md`<br>`instructions/review-plan.md`<br>`instructions/review-tasks.md`<br>`references/host-capabilities.md`<br>`references/interrupted-run-recovery.md`<br>+1 more | — |
-| `[STATE_REPLACED]` | `utils/commit_front_door.py` `STATE_REPLACED` | not for the host: run-notice | Step 6 replaced a `state.json` that did not parse (§2.1 allows it; the apply door refuses the same file loudly, so this one says it too) |
+| `[STATE_REPLACED]` | `utils/commit_front_door.py` `STATE_REPLACED` | not for the host: run-notice | Step 6 replaced a `state.json` that did not parse |
 | `[STREAM_CAP]` | `utils/process_capture.py` | not for the host: runner-diagnostic | — |
 | `[TASKS_GRAPH_OK]` | `utils/tasks_graph_check.py` | `instructions/apply-task-suggestions.md` | — |
 | `[TASKS_GRAPH_WARNING]` | `utils/tasks_graph_check.py` `WARNING_PREFIX` | `instructions/apply-task-suggestions.md` | — |

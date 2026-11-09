@@ -387,7 +387,7 @@ class PathEscape(WriteSafetyError):
 
 class PolicyViolation(WriteSafetyError):
     """A path is outside ``driver.write_paths`` (D3l). Carries the offenders:
-    ``paths`` as named, and ``hits`` (fix round 21), each one's
+    ``paths`` as named, and ``hits``, each one's
     :class:`PolicyHit`, which every way forward is worded from."""
 
     def __init__(
@@ -983,7 +983,7 @@ def describe_paths(paths: Sequence[str], limit: int = 3) -> str:
 class PolicyHit:
     """One file ``driver.write_paths`` refuses, and which of its rules do.
 
-    Fix round 21 (review of round 20, the run-8 case): the way forward said
+    The way forward said
     "allow it in driver.write_paths" for every refusal, while the deny list
     wins over ``allow`` — so for a deny hit, adding the file to ``allow``
     resumed into the same refusal with the same advice. The way forward is
@@ -995,8 +995,7 @@ class PolicyHit:
     declared it (never resolved to an absolute path).
 
     *protected* is the rule text of :attr:`WritePolicy.exact_deny` when that
-    layer refuses the path (plans/review-commits.md §2.7, "The commit write
-    policy": ``changed since reviewed commit <head7>``), ``""`` otherwise. No
+    layer refuses the path, ``""`` otherwise. No
     ``driver.write_paths`` change lets such a write through, so the way
     forward never offers one (:func:`policy_allow_clause`).
     """
@@ -1066,14 +1065,13 @@ def policy_allow_clause(refused: Sequence[Any]) -> Optional[str]:
     way forward is the skip alone (:func:`policy_outside_note`).
 
     *refused* holds :class:`PolicyHit` entries (or their recorded dicts).
-    Plain path strings, a record from before fix round 21 that kept no rule,
-    get the wording that is right for either rule.
+    Plain path strings, and a recorded dict that kept no rule, get the wording
+    that is right for either rule.
 
-    Fix round 20 (live run 8 #4, a user decision: permissive): the plugin
-    keeps offering it, since it is the user's to decide and it lets the run
-    complete, but plainly as their choice, naming the file. Fix round 21: a
-    deny hit names the deny rule to narrow (the deny list wins over
-    ``allow``, so "allow it" resumed into the same refusal). Every stop,
+    The plugin keeps offering the policy change, since it is the user's to
+    decide and it lets the run complete, but plainly as their choice, naming
+    the file. A deny hit names the deny rule to narrow (the deny list wins
+    over ``allow``, so "allow it" would resume into the same refusal). Every stop,
     refusal and status line that offers it says it in these words, and the
     hosts relay it as given and never change the policy themselves
     (``modes.STOP_POLICY_RULE``).
@@ -1083,7 +1081,7 @@ def policy_allow_clause(refused: Sequence[Any]) -> Optional[str]:
     hits = policy_hits(e for e in entries if not isinstance(e, str))
     if any(hit.outside or hit.protected for hit in hits):
         # Neither a path outside the repository nor one the commit review
-        # protects (§2.7) is a driver.write_paths matter: no rule change
+        # protects is a driver.write_paths matter: no rule change
         # lets the write through (:func:`policy_outside_note` says why).
         return None
     where = f"driver.write_paths ({POLICY_FILE})"
@@ -1149,12 +1147,12 @@ def policy_allow_clause(refused: Sequence[Any]) -> Optional[str]:
 
 
 def policy_outside_note(refused: Sequence[Any]) -> str:
-    """Why no policy change can let a task run (fix round 21): ``../x is
+    """Why no policy change can let a task run: ``../x is
     outside the repository, so no driver.write_paths rule can allow it``,
     naming each such file as the task declared it.
 
-    A file the commit review protects (:attr:`PolicyHit.protected`,
-    plans/review-commits.md §2.7) gets :func:`protected_note`'s clause
+    A file the commit review protects (:attr:`PolicyHit.protected`) gets
+    :func:`protected_note`'s clause
     instead, after the outside one when there are both; with neither the
     note reads exactly as before."""
     hits = policy_hits(e for e in (refused or ()) if not isinstance(e, str))
@@ -1174,14 +1172,12 @@ def policy_outside_note(refused: Sequence[Any]) -> str:
 
 
 #: The exact-path deny layer's rule text for the commit review's context
-#: plan (plans/review-commits.md §2.7, "The user's context plan is
-#: protected"): read-only whether or not it differs from the reviewed head.
+#: plan: read-only whether or not it differs from the reviewed head.
 CONTEXT_PLAN_RULE = "the context plan, read-only in this review"
 
 
 def protected_note(hits: Sequence[Any]) -> str:
-    """The clause naming the files the commit review protects (§2.7, "The
-    commit write policy"): ``the commit review protects src/b.py, which
+    """The clause naming the files the commit review protects: ``the commit review protects src/b.py, which
     changed since reviewed commit abc1234: this apply never writes it, so
     make that change by hand, or review a range that ends at HEAD``. One
     clause per distinct rule text (one reviewed head in practice). The
@@ -1217,7 +1213,7 @@ def policy_skip_clause(task_id: str, *, alone: bool = False) -> str:
     """The way past an implement task the policy refused that leaves it
     undone, beside :func:`policy_allow_clause`: ``if not, skip T005: …``.
     *alone* drops the ``if not,`` for a refusal no policy change answers
-    (fix round 21: a file outside the repository)."""
+    (a file outside the repository)."""
     return (
         ("" if alone else "if not, ")
         + f"skip {task_id}: add --human-task {task_id}=skip to the "
@@ -1251,7 +1247,7 @@ class WritePolicy:
 
     *exact_deny* is a second deny layer of exact repo-relative paths, each
     with the rule text a refusal names. It is the commit review's protected
-    set (plans/review-commits.md §2.7, "The commit write policy": every path
+    set (every path
     that differed from the reviewed ``head`` when the apply guard ran, plus
     the fix files a pre-dispatch re-check found changed since), so a fix
     batch that writes one fails exactly as a ``driver.write_paths`` deny hit
@@ -1482,7 +1478,7 @@ class WritePolicy:
     def hit(self, path: str) -> Optional[PolicyHit]:
         """``path``'s :class:`PolicyHit`, or ``None`` when the policy permits
         it: every deny pattern that covers it and whether ``allow`` matches
-        it, so the way forward names each rule to change (fix round 21).
+        it, so the way forward names each rule to change.
 
         A hit the :attr:`exact_deny` layer refuses is named by the entry it
         matched (:meth:`exact_match`), never by the resolved path: the
@@ -1508,7 +1504,7 @@ class WritePolicy:
         """Raise :class:`PolicyViolation` naming every offender and its rule.
 
         Each offender is named repo-relative, or, outside the repository, as
-        given (fix round 21: a task's ``../x`` was named by its resolved
+        given (a task's ``../x`` was named by its resolved
         absolute path, in the way forward and every record of it).
         """
         offenders: List[Tuple[str, str]] = []
@@ -3659,13 +3655,13 @@ class AuditLog:
     ) -> None:
         """The post-classification line. The evidence behind D3g's verdict.
 
-        ``usage`` (F6, 2026-09-16): optional and omitted when ``None``, so
+        ``usage``: optional and omitted when ``None``, so
         every existing write-path call — none of which passes it — appends a
         byte-identical record to before. The read path's judging dispatch is
         the first caller to pass it, since that record is its only durable
         home for what the dispatch cost.
 
-        ``expected_ids`` (2026-10-02): the items the batch was materialized
+        ``expected_ids``: the items the batch was materialized
         for, omitted when ``None`` (the judging dispatch has none). An apply
         batch's id is positional, so after a selection change the record a
         set-aside snapshot has to be verified against sits under an id another
@@ -3847,7 +3843,7 @@ class AuditLog:
 
 
 # ---------------------------------------------------------------------------
-# Redaction over rendered text (§4.5)
+# Redaction over rendered text
 # ---------------------------------------------------------------------------
 #
 # One boundary, four sinks: the success log (``llm_client._save_log``), the
@@ -3927,8 +3923,8 @@ _KEY_CHAR = r"[A-Za-z0-9_.\-]"
 #: nobody noticed; a base64url blob, a dotted module-path list or a run of
 #: hyphenated slugs on **one line** has none of them. 32 KB of dotted
 #: identifiers already costs 15 s, and :func:`redact_text` runs on the FULL
-#: provider stream **before** ``_bound_stream`` caps it (§14.4, and that
-#: ordering is right), so a megabyte of it is hours inside every log sink.
+#: provider stream **before** ``_bound_stream`` caps it, so a megabyte of it is hours
+#: inside every log sink.
 #:
 #: **The rule now.** One run, walked once::
 #:
@@ -4115,7 +4111,7 @@ _REDACTIONS: List[Tuple[str, Any, int, Optional[Any]]] = [
     # P12 — multi-line, so it runs first: nothing else may chew its body.
     # `_PEM_BLOCK`'s matches, scanned linearly (see `_PemPrivateKeyBlocks`).
     ("pem-private-key", _PemPrivateKeyBlocks(), 0, None),
-    # P13 — identity/PII (§5.2), in the **two shapes the probe boundary really
+    # P13 — identity/PII, in the **two shapes the probe boundary really
     # emits**, both of them key-named. A bare unkeyed email pattern is still
     # deliberately not shipped: it would redact commit-message prose in
     # container_turns/.
@@ -4227,8 +4223,8 @@ _REDACTIONS: List[Tuple[str, Any, int, Optional[Any]]] = [
     # inconsistency, not a control, and the group replaced is the password
     # either way.
     #
-    # **The scheme run is BOUNDED, and that bound is load-bearing** (measured
-    # 2026-09-22). This is the one row whose pattern opens with a character
+    # **The scheme run is BOUNDED, and that bound is load-bearing**. This is the one row
+    # whose pattern opens with a character
     # class rather than a literal, so CPython cannot skip start positions with
     # its literal-prefix scan — every other row here begins `sk-`, `xox`, `gh`,
     # `AIza`, `AKIA`, `glpat-`, `hf_` or `eyJ` and is scanned in C. Dropping
@@ -4237,8 +4233,8 @@ _REDACTIONS: List[Tuple[str, Any, int, Optional[Any]]] = [
     # buffer and backtracked looking for `://`: **quadratic**. Measured on a
     # run of one character, 0.16 s at 20 KB, 2.5 s at 80 KB, 40 s at 320 KB,
     # which is ~1600 s on the 2 MB a provider really can emit — and `redact_text`
-    # runs on the FULL stream **before** `_bound_stream` caps it (§14.4, and
-    # that ordering is right), so an unbounded quantifier here is a hang in
+    # runs on the FULL stream **before** `_bound_stream` caps it, so an unbounded
+    # quantifier here is a hang in
     # every log sink rather than a slow test. `{0,31}` makes the work per start
     # position constant, so the row is linear again: 0.038 s at 1.28 MB, the
     # same class as the rest of the table.
@@ -4317,7 +4313,7 @@ def redact_argv(argv: Sequence[str], prompt: str) -> List[str]:
     The prompt becomes ``<prompt sha256:… bytes:…>`` so the audit record proves
     *which* prompt ran without carrying its bytes.
 
-    Two passes, and the flag-hint one is **kept, not replaced** (§4.5.5): knowing
+    Two passes, and the flag-hint one is **kept, not replaced**: knowing
     a value's *position* from ``--api-key`` is strictly stronger than any pattern
     and catches the bare high-entropy blob no regex can. Every argument that
     survives that pass then goes through :func:`redact_text`, which closes the

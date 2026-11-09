@@ -233,8 +233,7 @@ def apply_phase_in_progress(state: StateManager, phase: str) -> bool:
 def scope_blocker_reason(state: StateManager, phase: str) -> Optional[str]:
     """Why a completed apply phase does not satisfy its dependents, else None.
 
-    The scope policy's one concrete blocker (plans/scope-policy-and-report-
-    tags.md §5, ``utils/scope_apply``): a ``preserve`` batch declined an item
+    The scope policy's one concrete blocker: a ``preserve`` batch declined an item
     because its agreed requirement cannot be met within the agreed scope.
     The phase finished its batches, but the accepted goal is not complete,
     so a phase that builds on it must not run. Deferred optional extensions
@@ -289,7 +288,7 @@ def check_apply_suggestions_prerequisite(state: StateManager, plan_dir: Path) ->
 
     # Check if apply-suggestions completed or skipped. A completion that
     # deferred optional scope extensions is complete ("eligible work
-    # completed"); one that recorded a scope blocker is not (plan §5).
+    # completed"); one that recorded a scope blocker is not.
     if state.is_phase_completed("apply-suggestions"):
         blocked = scope_blocker_reason(state, "apply-suggestions")
         if blocked:
@@ -329,8 +328,8 @@ def check_apply_suggestions_prerequisite(state: StateManager, plan_dir: Path) ->
 
     if valid_count == 0:
         # `open_count` is what `get_workflow_status` keys the
-        # `skipped (no valid findings)` mark on (plans/next-phase-command.md
-        # §2.1): the groups whose verdict is anything but `invalid`. This return
+        # `skipped (no valid findings)` mark on: the groups whose verdict is anything
+        # but `invalid`. This return
         # is too wide to mean "nothing to apply" on its own — a review whose
         # only groups are `needs-human-decision` lands here too, and
         # apply-suggestions presents those, so skipping it would hide decisions
@@ -382,7 +381,7 @@ def check_apply_task_suggestions_prerequisite(state: StateManager, plan_dir: Pat
 
     # Check if apply-task-suggestions already completed or skipped. As for
     # apply-suggestions, a completion that recorded a scope blocker is not
-    # one its dependents may build on (plan §5).
+    # one its dependents may build on.
     if state.is_phase_completed("apply-task-suggestions"):
         blocked = scope_blocker_reason(state, "apply-task-suggestions")
         if blocked:
@@ -469,8 +468,8 @@ def check_apply_task_suggestions_prerequisite(state: StateManager, plan_dir: Pat
         "met": False,
         "reason": f"review-tasks produced {actionable_count} unapplied task suggestion groups",
         "actionable_count": actionable_count,
-        # Whether that count is of groups validation judged valid (fix round
-        # 18: the next-step notice says so when it is).
+        # Whether that count is of groups validation judged valid (the next-step notice
+        # says so when it is).
         "counted_valid": counted_valid,
         "importance_breakdown": importance_breakdown
     }
@@ -595,7 +594,7 @@ def collect_missing(state: StateManager, plan_dir: Path, mode: str) -> List[dict
         # apply-task-suggestions is no hard prerequisite of implement (its
         # unapplied output is row 7's advisory), but a completion of it that
         # recorded a scope blocker is: the task list's accepted goal is not
-        # complete, and implement builds on it (plan §5). Nothing is added
+        # complete, and implement builds on it. Nothing is added
         # without a blocker, so a default run's gate is as it was.
         task_check = check_apply_task_suggestions_prerequisite(state, plan_dir)
         if task_check.get("scope_blocked"):
@@ -645,7 +644,7 @@ def build_unmet_message(
     for entry in missing:
         phase = entry.get("phase", "")
         if entry.get("scope_blocked"):
-            # The scope policy's blocker (plan §5): no unapplied suggestions
+            # The scope policy's blocker: no unapplied suggestions
             # to count and nothing --skip-prerequisites should paper over;
             # the scope decision is the user's. The entry is always an apply
             # phase (`scope_blocker_reason`), so both ways out name it: its
@@ -823,7 +822,7 @@ def ensure_prerequisites(
             if m.get("phase") not in SKIPPABLE_PREREQUISITES
             and not m.get("scope_blocked")
         ]
-        # A scope blocker (plan §5) is not unapplied advice either: the
+        # A scope blocker is not unapplied advice either: the
         # phase ran, and its accepted goal cannot be met within the agreed
         # scope. Settling that is the user's scope decision, which a skip
         # recorded over the completed phase would paper over.
@@ -938,7 +937,7 @@ def ensure_prerequisites(
 
 #: The write phases codex's own sandbox cannot serve once it fails to start on
 #: this machine: their scope is ``repo-wide``, which the plugin's Landlock jail
-#: takes since plan step 3b (2026-10-02) — so they are refused at dispatch
+#: takes since plan step 3b — so they are refused at dispatch
 #: (``sandbox_unavailable``) only where that rung is unusable too, which is
 #: what :func:`repo_wide_sandbox_warning` asks the dispatch's own decision.
 REPO_WIDE_WRITE_PHASES = ("implement", "apply-code-fixes")
@@ -960,9 +959,8 @@ def repo_wide_sandbox_warning(
 
     On a machine where codex's own sandbox cannot start, a repo-wide write
     dispatch refuses at batch 0 (``sandbox_unavailable``) unless the plugin's
-    Landlock jail takes it (plan step 3b, 2026-10-02) — and the user used to
-    learn that at phase 6, about 20 minutes in (Codex racing run, 2026-10-02).
-    This says so at ``init``, in ``status`` before any phase has run, and on
+    Landlock jail takes it, which the user would otherwise learn at phase 6,
+    about 20 minutes in. This says so at ``init``, in ``status`` before any phase has run, and on
     the next-step block, from the SAME decision the dispatch takes
     (:func:`utils.sandbox_walk.repo_wide_write_refusal`: the adapter's
     model-free probes through the shared probe cache — cheap, no model), never
@@ -1032,12 +1030,11 @@ def unapplied_task_groups_notice(
     It is also the ``why`` of the optional ``--apply-task-suggestions`` step
     the next-step command offers before ``--implement`` (``next_phase``), so
     it names how many groups are waiting and what going straight to
-    implement does with them (fix round 18, live run 7 #11: 11, 9 and 7
-    valid groups sat unapplied while the next step read ``--implement``).
+    implement does with them.
 
     *in_progress*: a run of the phase started and did not finish, so its
     command is a ``--resume`` that applies only what that run has not; the
-    count is then review-tasks' and the notice says so (fix round 19: it
+    count is then review-tasks' and the notice says so (it
     said all N were unapplied beside that ``--resume``).
     """
     kind = "valid task suggestion" if valid else "task suggestion"
@@ -1082,7 +1079,7 @@ def get_workflow_status(
        about apply work left or deferred;
     6. ``suggested_next`` (:func:`utils.phase_walk.next_step`), picked once,
        after every mark above, so it can never name a phase this payload
-       shows as skipped (plans/next-phase-command.md §2.1). A skip ``full``
+       shows as skipped. A skip ``full``
        recorded itself is read by pass 1 and keeps ``full``'s own reason;
     7. :func:`_sandbox_warning`, last because it reads the final statuses.
 
@@ -1221,7 +1218,7 @@ def _implement_progress(state: StateManager, implement: dict) -> None:
     # recorded so far: the native leg records a task only once it ran, so
     # a mid-run `status` on a 10-task plan read `6/6 tasks` where the
     # executor leg, which seeds every task `pending`, read `8/13`
-    # (racing re-run 3, fix round 7). A state with no such record keeps
+    # (racing re-run 3). A state with no such record keeps
     # the old count, and one with no task recorded and no started record
     # (an `implement --dry-run`) still shows none: a count is what the
     # next-step walk reads as "implement was started".
@@ -1243,7 +1240,7 @@ def _implement_progress(state: StateManager, implement: dict) -> None:
         # is a run whose finalize failed (`driver.verify_command` non-zero,
         # or killed before `mark_phase_completed`); `--resume` dispatches
         # nothing and re-runs the check it owes. Until the adversarial
-        # review (2026-10-02) that state read `pending` and the earlier-
+        # review that state read `pending` and the earlier-
         # phase rule routed a later phase's answer to the bare command.
         if tasks_done > 0:
             implement["status"] = "in_progress"
@@ -1262,20 +1259,19 @@ def _implement_manual_tasks(state: StateManager, implement: dict) -> None:
     ``skip-dependents`` skipped with it): read from ``task_status``, never by
     re-parsing tasks.md. A workflow that completes with these still owed is
     complete for the plugin and not for the user, so the next-step builder
-    names them on its ``complete`` answer and ``status`` on its trailer line
-    (2026-10-04: ``[WORKFLOW_COMPLETE]`` said nothing about T011/T012)."""
+    names them on its ``complete`` answer and ``status`` on its trailer line."""
     deferred = state.deferred_implementation_tasks()
     if not deferred:
         return
     implement["manual_tasks"] = deferred
-    # The ones `--human-task <id>=done` answers (fix round 16): not a code
-    # task skipped with a manual one, which the resume then runs. Fix
-    # round 28: and only the ones the user can do now.
+    # The ones `--human-task <id>=done` answers: not a code task skipped
+    # with a manual one, which the resume then runs, and only the ones the
+    # user can do now.
     implement["manual_close_ids"] = state.manual_tasks_to_close(deferred)
     gates = state.manual_task_gates(deferred)
     if gates is None:
         return
-    # Fix round 28 (live run 12, Codex racing 06): the code tasks each of
+    # The code tasks each of
     # those waits on, so no note says that nothing waits; a later manual
     # task names the code it comes after; and, while implement is not
     # finished, whether a resume can run nothing until one is recorded done
@@ -1300,12 +1296,11 @@ def _implement_manual_tasks(state: StateManager, implement: dict) -> None:
 #:   structured ``check``; racing re-run 4 recorded T007 VERIFIED with two
 #:   html-validate problems that nothing surfaced);
 #: - ``batch_check_findings``: code tasks whose own check failed after their
-#:   edits (``task_batch_check``, fix round 15): kept edits, nothing held back;
+#:   edits (``task_batch_check``): kept edits, nothing held back;
 #: - ``batch_check_accepted``: code tasks whose own check reported again only
-#:   what the user accepted for a check (``task_batch_check_accepted``, fix
-#:   round 23);
+#:   what the user accepted for a check (``task_batch_check_accepted``);
 #: - ``batch_check_repeats``: those whose own check reported only what a check
-#:   task of the run reported (``task_batch_check_repeats``, fix round 28).
+#:   task of the run reported (``task_batch_check_repeats``).
 _IMPLEMENT_FINDINGS: Tuple[Tuple[str, str], ...] = (
     ("check_findings", "implementation_check_findings"),
     ("batch_check_findings", "implementation_batch_check_findings"),
@@ -1357,7 +1352,7 @@ def _task_groups_notice(
     unapplied, from pass 2's check (*task_check* is set whenever review-tasks
     is completed, so nothing is read again). It runs after pass 4, so a run of
     the phase that started and did not finish is worded as the resume its
-    command is (fix round 19: the count of every valid group sat beside a
+    command is (the count of every valid group sat beside a
     ``--resume`` that applies only what is left)."""
     if not (phases["apply-task-suggestions"]["status"] in ("pending", "in_progress")
             and phases["review-tasks"]["status"] == "completed"
@@ -1383,8 +1378,7 @@ def _task_groups_notice(
 def _scope_notices(
     state: StateManager, phases: Dict[str, dict], notices: List[str],
 ) -> None:
-    """Pass 5b: the scope policy's record of each finished apply phase
-    (plans/scope-policy-and-report-tags.md §5). Deferred optional extensions
+    """Pass 5b: the scope policy's record of each finished apply phase. Deferred optional extensions
     are done for the workflow ("eligible work completed") and named, never
     counted as unapplied work; a recorded blocker is named too, and the
     phases that build on it refuse (:func:`scope_blocker_reason`). Nothing is

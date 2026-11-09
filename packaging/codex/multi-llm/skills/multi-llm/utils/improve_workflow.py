@@ -12,7 +12,7 @@ Which composites exist, which of them takes a review scope and which step
 method runs each word are read off the mode table (each composite row's
 ``sequence``), never listed here, so a composite is added by adding its row.
 ``improve-commits`` is ``improve-code``'s sequence behind a commit front door
-(plans/review-commits.md §2.8): its front door resolves the range, writes the
+Its front door resolves the range, writes the
 commit brief that stands in for the plan, and hands :func:`entry_point`
 ``--plan-file <brief> --base-ref <base> --head-ref <head>``. Everything that
 differs for it keys on the row's range positional (:func:`pins_commit_range`)
@@ -21,8 +21,8 @@ or on the brief's ``commit_range`` record, never on its name.
 Every rule both legs follow lives here, once, as a function of the mode word,
 the parsed flags and :class:`Records`, the state read once before step 1:
 
-* :func:`skip_reason` decides whether a step runs (§2.3 of the plan);
-* :func:`step_flags` decides the flags it gets (§2.2), the one
+* :func:`skip_reason` decides whether a step runs;
+* :func:`step_flags` decides the flags it gets, the one
   ``--scope-policy`` :func:`scope_policy_choice` resolved included;
 * :func:`continuation_flags` is the command a stop names (row 14);
 * :func:`plan_steps` is the per-step plan with its reasons, for the planner.
@@ -182,8 +182,8 @@ def pins_commit_range(mode: str) -> bool:
     Read off the row: its positional is a range (``modes.POS_REVS``), not a
     plan, so its front door resolves the range, records ``commit_range`` in the
     brief's ``state.json`` and synthesises ``--plan-file``, ``--base-ref`` and
-    ``--head-ref`` on every call, a resume included (plans/review-commits.md
-    §2.1). Those three are therefore never the user's: no continuation
+    ``--head-ref`` on every call, a resume included. Those three are therefore never the
+    user's: no continuation
     carries them, and the user reads the steps as the commit modes
     (``commit_spelling.step_word`` keys on the same positional).
     """
@@ -194,7 +194,7 @@ def _step_word(mode: str, word: str) -> str:
     """A sequence word as a line the user reads spells it: the commit mode on a
     composite whose range a front door pins (``review-code`` →
     ``review-commits``), else the word itself (``commit_spelling.step_word``,
-    the row-keyed mapping of plans/review-commits.md §2.8)."""
+    the row-keyed mapping)."""
     from .commit_spelling import step_word
 
     return step_word(_row(mode).name, word)
@@ -369,7 +369,7 @@ class Records:
             (:func:`pins_commit_range`) only: the brief's
             ``commit_range.header_sha256`` differs from the
             ``reviewed_header_sha256`` the review on record answered (a changed
-            ``--focus`` or context plan, plans/review-commits.md §2.4), so the
+            ``--focus`` or context plan), so the
             review starts a new round, as under ``--force``. ``False`` when no
             round has started yet (no ``reviewed_header_sha256``), and on every
             other composite.
@@ -507,7 +507,7 @@ def _recorded_base_ref(mode: str, plan: Path) -> Optional[str]:
 def _leftover_results(mode: str, review_dir: Path) -> bool:
     """:attr:`Records.leftover_results`: per-model files, no ``grouped.json``.
 
-    Fable review, finding 1 (2026-10-27): a fan-out stopped before grouping (on
+    Fable review, finding 1: a fan-out stopped before grouping (on
     Claude Code, at the background launch's time limit) leaves only per-model
     files. ``--resume`` handed the review step ``--yes`` alone, review-code's
     partial-completion guard refused it (exit 3, "Run: --reaggregate"), and the
@@ -727,7 +727,7 @@ def scope_policy_choice(
 def releases_deferrals(args: argparse.Namespace, records: Records) -> bool:
     """The user's ``expand`` over a completed apply with remaining scope work.
 
-    Plan §4: a completed bounded apply that still holds scope deferrals, or
+    A completed bounded apply that still holds scope deferrals, or
     stopped on a scope blocker, is offered them again, never "already
     complete". The choice is :func:`scope_policy_choice`'s — the typed flag
     or this composite's live recorded one — so the override survives a later
@@ -776,8 +776,8 @@ def step_flags(
     when step 1 is passed over, the one the code review on record used. The
     improve-commits front door passes its pinned base (the empty-tree id on a
     root range) on every call, and ``util improve-steps`` sets the same from
-    ``commit_range``, so on that composite the first branch always answers
-    (plans/review-commits.md §2.8); the rule itself names no mode.
+    ``commit_range``, so on that composite the first branch always answers; the rule
+    itself names no mode.
     """
     row = _row(mode)
     review, apply = row.sequence
@@ -880,7 +880,7 @@ def continuation_flags(mode: str, args: argparse.Namespace) -> List[str]:
     one would fail), and are left out; the range itself is the command's
     positional, which :func:`continuation_args` spells as the pinned range.
     ``--focus`` and ``--context-plan`` never reach this parser: the brief
-    inherits them (plans/review-commits.md §2.8, "The continuation").
+    inherits them.
     """
     flags: List[str] = []
     if getattr(args, "models", None):
@@ -1260,7 +1260,7 @@ def state_read_error_line(mode: str, exc: StateReadError) -> str:
 
 
 # ---------------------------------------------------------------------------
-# A live run is refused, never joined (§2.5)
+# A live run is refused, never joined
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -1303,8 +1303,7 @@ def _age_of(run: Dict[str, Any]) -> Optional[float]:
 #: Phase-dir locks this process already holds for the composite it runs, by
 #: lock path (:func:`_held_key`). Set only inside :func:`holding`: the
 #: improve-commits front door's code-review lock, which it holds through
-#: :func:`entry_point` (plans/review-commits.md §2.1, "It holds the lock
-#: through the fronted phase's main").
+#: :func:`entry_point`.
 _HELD_LOCKS: Dict[str, process_control.PhaseLock] = {}
 
 
@@ -1504,8 +1503,7 @@ def build_parser(mode: str, *, raising: bool = False) -> argparse.ArgumentParser
     A composite whose range a front door pins (:func:`pins_commit_range`,
     improve-commits) also takes ``--head-ref`` and the hidden
     ``--commit-stage``: only its front door passes them, with ``--plan-file``
-    and ``--base-ref`` (plans/review-commits.md §2.5, "Which parsers take
-    ``--head-ref``"). On improve-code ``--head-ref`` stays argparse's usage
+    and ``--base-ref``. On improve-code ``--head-ref`` stays argparse's usage
     error. ``--focus`` and ``--context-plan`` are the front door's and never
     reach this parser. Its help names the steps as the commit modes.
     """
@@ -1651,7 +1649,7 @@ def build_parser(mode: str, *, raising: bool = False) -> argparse.ArgumentParser
         help="Accepted and implied: nothing is confirmed in an unattended run.",
     )
     if pinned:
-        # The front door's `--detach` stage (plans/review-commits.md §2.1),
+        # The front door's `--detach` stage,
         # applied by the composite's worker right after its run-dir lock.
         parser.add_argument("--commit-stage", dest="commit_stage", default=None,
                             help=argparse.SUPPRESS)
@@ -1825,8 +1823,8 @@ class ImproveWorkflow(fwo.FullWorkflow):
         an improve-commits stop names ``apply-commit-fixes``; the command is
         built by ``FullWorkflow._phase_failed`` from :meth:`resume_flags`,
         which carries none of the front door's flags, and the commit spelling
-        of its plan argument is that method's hook (plans/review-commits.md
-        §2.8); :meth:`resume_command` is the command it must come to.
+        of its plan argument is that method's hook; :meth:`resume_command` is the
+        command it must come to.
         """
         exit_code = super()._phase_failed(step, detail, code)
         if step.phase == self.row.sequence_phases[0]:
@@ -2009,7 +2007,7 @@ class ImproveWorkflow(fwo.FullWorkflow):
         ``self.state``: its load writes the judge-name upgrade back (and
         takes ``.state.lock``) when an old run left a ``claude_*`` spelling,
         and this report is also what a finished run's exit 2 prints, which
-        writes nothing (§2.3, §2.4; Fable review 2026-10-09).
+        writes nothing.
         """
         from .batch_ledger import BatchLedger, touched_files
         from .git_utils import get_project_root
@@ -2089,7 +2087,7 @@ def entry_point(mode: str, argv: Optional[Sequence[str]] = None) -> int:
         # Only a re-attach is `launch`'s to answer for the composite's own live
         # run. While every `--detach` skipped it, `--detach --force` reached
         # `launch`'s take-over of a worker still writing a step dir; `--force`
-        # and `--resume` change nothing here (§2.5, Fable review 2026-10-09).
+        # and `--resume` change nothing here.
         reattaching = detaching and bool(getattr(args, "if_not_running", False))
         outcome = preflight(
             mode, plan_path, args, records,

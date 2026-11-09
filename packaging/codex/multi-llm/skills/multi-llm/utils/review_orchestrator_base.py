@@ -225,7 +225,7 @@ def recompute_consolidation_recommendation(
     args: argparse.Namespace,
     supports_consolidation: bool,
 ) -> Optional[Dict[str, Any]]:
-    """Recompute ``consolidation_recommended`` from ``groups``, up **or down** (§7.2a).
+    """Recompute ``consolidation_recommended`` from ``groups``, up **or down**.
 
     Called by both completion paths — the fan-out's first run and
     ``reaggregate_from_existing_files`` — whenever the phase supports
@@ -445,7 +445,7 @@ def _authoritative_validator_runner(
     batch_metadata: Dict[str, Any],
     batch_hashes: Optional[Dict[str, str]] = None,
 ) -> Dict[int, Optional[str]]:
-    """Per batch, the runner the executor verifiably dispatched it to (F3, §7.3a).
+    """Per batch, the runner the executor verifiably dispatched it to.
 
     A validation batch's own ``metadata.model`` is the subagent's free-hand
     self-report — in one captured run, five different spellings across 11
@@ -455,7 +455,7 @@ def _authoritative_validator_runner(
     carries (``f"{kind}-batch-{batch_index}"``).
 
     That record only speaks for the bytes the executor persisted, so it is
-    decided **per batch and by content hash** (§7.3a), never by mtime:
+    decided **per batch and by content hash**, never by mtime:
 
     - the report's ``batch_provenance`` row for this task matches the file's
       current sha256 *and* the current task file's ``kind``/round → the
@@ -534,13 +534,13 @@ def merge_validation_batches(
     merged — only in who dispatched it.
 
     The written ``validation.json`` is bound to the exact batch bytes it
-    consumed (§7.1a): ``metadata.batch_sha256 = {batch_index: sha256}`` for
+    consumed: ``metadata.batch_sha256 = {batch_index: sha256}`` for
     every batch file present, and ``metadata.batch_manifest = {kind, round}``
     of ``batch_metadata``. ``metadata.runners = {batch_index: model}`` records
-    who answered each batch (§7.3b), and ``metadata.model`` is the single value
+    who answered each batch, and ``metadata.model`` is the single value
     when every batch agrees, else the sorted comma-joined list.
 
-    Scope (plans/scope-policy-and-report-tags.md §3, §3.1): each verdict that
+    Scope: each verdict that
     joined its group by hash is stamped against the host's own copy of that
     group in ``grouped`` and the baseline the task file's ``scope`` block
     names, and the groups get their ``scope_verdict`` by hash only. Under a
@@ -591,7 +591,7 @@ def merge_validation_batches(
     # `save_validation_results` already announces this write
     # ("[validation] Saved validation results to: ..."); a second line here
     # under a different name announced the same file twice in the run log.
-    # F3/§7.3: per batch, the executor's own record of who ran it outranks what
+    # Per batch, the executor's own record of who ran it outranks what
     # the batch said about itself — but only while the batch's bytes are the
     # ones the executor persisted. `model` stays a plain string (compatibility):
     # the single attribution, or the sorted comma-joined list. `runner` carries
@@ -622,7 +622,7 @@ def merge_validation_batches(
         round_id=_review_round.task_document_round(batch_metadata),
         claim=claim,
     )
-    # §2.4: every aggregation re-publishes `validation_context` from the bound
+    # Every aggregation re-publishes `validation_context` from the bound
     # round's own recorded sources (never the live plan), plus how many
     # verdicts said they could not read the snapshot. One site for all four
     # merge callers — the first run, both `--reaggregate` legs and the
@@ -671,7 +671,7 @@ def reopen_phase_for_validation(
 
 
 # ---------------------------------------------------------------------------
-# Scope policy: the review round (plans/scope-policy-and-report-tags.md §2-§4)
+# Scope policy: the review round
 # ---------------------------------------------------------------------------
 
 
@@ -818,7 +818,7 @@ def scope_decisions_for(
     round's own baseline (``round_baseline_id``), and the hash-joined
     validation record of that group carries the same decision, so
     ``validation.json`` records the policy rejection as soon as validation
-    determines it (plan §5) — a read-only review included. ``None`` (and
+    determines it — a read-only review included. ``None`` (and
     nothing stored) under ``expand``.
     """
     from .state_manager import stamped_group_id
@@ -878,7 +878,7 @@ def backfill_deadline_losses(
     neither *results* nor (so far) *failed_models*: without this it is counted
     completed, inflates ``models_done`` and appears in no report section.
 
-    **Only a model that produced nothing.** Until F2 (2026-09-20) the deadline
+    **Only a model that produced nothing.** Until F2 the deadline
     branch discarded ``gather``'s whole result, so a slot that had already
     returned successfully reached here missing from *results* and was named a
     deadline loss beside the ``{model}.json`` it had just written; that branch
@@ -936,8 +936,7 @@ def high_priority_group_count(groups: Optional[List[Dict[str, Any]]]) -> int:
     Three models converging on the same bug is one finding, and grouping is
     what decides that; ``compute_max_importance`` is the same helper the HTML
     report ranks a group by. Counting every model's copy printed
-    ``[HIGH_PRIORITY_ISSUES] 3`` for a single 3-model HIGH finding (measured
-    2026-09-16).
+    ``[HIGH_PRIORITY_ISSUES] 3`` for a single 3-model HIGH finding.
     """
     return sum(
         1 for g in (groups or [])
@@ -965,7 +964,7 @@ def record_high_priority_groups(
     return count
 
 
-#: Group ``validation_status`` → its ``validation_counts`` key (§6 T6.1). Keys
+#: Group ``validation_status`` → its ``validation_counts`` key. Keys
 #: are snake_case (the hyphenated status string is not a good JSON key), and
 #: there is no ``error`` verdict: a model may return only the first three, and
 #: ``validation_failed`` is what a group carries when its batch failed every
@@ -1016,10 +1015,10 @@ def record_validation_counts(
 
     Written to ``.status.json`` and onto the result line the way
     ``high_priority_groups`` is, because a host summarising a finished run
-    reads those two surfaces and never ``report.md`` (§6: run b38de8bb's
+    reads those two surfaces and never ``report.md`` (run b38de8bb's
     summary left out its 3 needs-human-decision groups). Recomputed on every
     completion path, reaggregate included, so a revalidation that lowers a
-    count lowers it here too (the previous plan's §7.2 lesson). When no group
+    count lowers it here too (the previous plan's lesson). When no group
     carries a verdict the key is **deleted** from ``.status.json`` — not
     written as ``null`` — and nothing is recorded, so ``MULTI_LLM_RESULT``
     omits it.
@@ -1116,7 +1115,7 @@ def _print_executor_refusal(
 #: The ``progress.step`` word each dispatched batch reports while it is in
 #: flight, keyed by the caller's ``label``. A dispatch is the *second* long
 #: stretch of a detached run — eleven validation batches ran for 62 s of a
-#: 516 s ``review-plan`` (measured 2026-09-16) under a progress line still
+#: 516 s ``review-plan`` under a progress line still
 #: reading ``grouping`` — and the executor's mirror only says how far the batch
 #: has got, never that one began. Anything not listed falls back to
 #: ``dispatching <label>``, which reads correctly for every label there is.
@@ -1159,7 +1158,7 @@ def validation_context_blocks(
     envelope; an unreadable file degrades to the plan-only context (the batch
     still validates) rather than failing a completed fan-out.
 
-    §2.3 step 5/7: ``plan_document`` is the round's bound plan (one read, one
+ step 5/7: ``plan_document`` is the round's bound plan (one read, one
     snapshot); its text is the context and it rides along as
     ``context_document``. With ``phase_dir`` the tasks file is bound the same
     way — read once as bytes, reusing ``tasks-backup.md`` when its sha256
@@ -1220,7 +1219,7 @@ def review_validation_round(
     The task file's ``reaggregate_mode`` is what every later retry hint is
     rebuilt from (``resolved_reaggregate_command``), so ``orchestrator_script``
     is this phase's own script, never review-plan's default. The scope block
-    carries the policy and baseline the reviewers were given (plan §3.1).
+    carries the policy and baseline the reviewers were given.
     *round_id* is the materializing invocation's claim (utils/review_round.py).
     """
     metadata = extra_validation_metadata or {}
@@ -1309,7 +1308,7 @@ class _NativeReadAdvisory:
 
 
 def materialization_read_refusal(args: Any, plan_path: str) -> Optional[Any]:
-    """Who will read a validation batch's snapshot, decided at materialization (§2.3 step 4a).
+    """Who will read a validation batch's snapshot, decided at materialization.
 
     ``None`` on a native-subagent host (the host's own subagent reads, and the
     one native host that validates, Claude Code, has a read tool) and whenever
@@ -1374,7 +1373,7 @@ def materialization_read_refusal(args: Any, plan_path: str) -> Optional[Any]:
 def bind_plan_for_validation(
     plan_path: str, phase_dir: str, *, data: Optional[bytes] = None
 ) -> BoundDocument:
-    """The round's one read of the plan, bound to ``validation-snapshot.md`` (§2.3 step 5).
+    """The round's one read of the plan, bound to ``validation-snapshot.md``.
 
     Every validating phase (review-plan, review-tasks, review-code) calls this
     at load, the same way, so the plan block of every phase names that phase
@@ -1402,7 +1401,7 @@ def verify_round_context(
     """Verify (and, for a moved phase dir, rebind) a round's snapshots, or exit 3.
 
     Run right before dispatch and on every resume/``--reaggregate`` that
-    reuses a materialized round (§2.3 step 5, task 2.9). A rebound document is
+    reuses a materialized round. A rebound document is
     persisted with its sidecars, so a native host reading the JSON sees the
     same prompt the executor dispatches.
     """
@@ -1505,7 +1504,7 @@ def dispatch_subagent_tasks(
                 f"its marker and its follow-up command."
             )
             return False
-        # §2.3 step 5: right before dispatch, re-hash every snapshot a
+        #  step 5: right before dispatch, re-hash every snapshot a
         # validation prompt names (and rebind a moved phase dir); a snapshot
         # that moved or vanished since materialization refuses the round.
         if document is not None and label in ("validation", "revalidation"):
@@ -1739,7 +1738,7 @@ def retire_unselected_results(
     2026-10-02; the previous ``.status.json`` is no guard, because the
     fan-out has already replaced ``models_requested`` by the time this runs).
     A result of a model that simply left the selection stays, as it did
-    before #30: the fan-out's report never read it. (Since fix round 24 a
+    before #30: the fan-out's report never read it. (Since a
     ``--reaggregate`` does not read it either: it reads only the models
     ``.status.json`` records and sets any other result file aside, named,
     ``utils/result_files.set_aside_unrecorded_results``.)
@@ -1949,7 +1948,7 @@ def retire_validation_for_regroup(
     :func:`retire_stale_validation_round` -- because a surviving
     ``validation_batch_<n>.json`` of another grouping is skipped as "already
     complete" by the executor and then discarded by the merge as a foreign
-    ``group_hash`` (#25, 2026-10-02). When the sets are **equal** the batch
+    ``group_hash``. When the sets are **equal** the batch
     files are that grouping's own verdicts, so only ``validation.json`` is
     retired, as before #25: a ``--force`` resume that skips every model
     regroups deterministically to the same hashes, and retiring the round
@@ -2142,8 +2141,8 @@ def flip_map_entries_to_done(
     terminal-and-failed-only and a ``done`` row carrying one is the
     contradiction this whole function exists to remove.
 
-    **A non-terminal entry has no ending to preserve, so it is given one**
-    (2026-09-21). A ``--reaggregate`` can meet a map that still holds a
+    **A non-terminal entry has no ending to preserve, so it is given one**. A
+    ``--reaggregate`` can meet a map that still holds a
     ``queued``/``staggering``/``running`` row — a run killed with no close-out
     on the foreground lane, where neither the fan-out's sweep nor
     ``progress_tracker.retire_live_entries`` ever ran, or a hand-written file —
@@ -2165,7 +2164,7 @@ def flip_map_entries_to_done(
       the wait ended and its length is unknown. The rule reads ``state``, not
       the absence of ``dispatched_at``, so a queued row in a map written before
       that key existed lands at ``0`` too, rather than at the clamped budget it
-      used to (plan: review-run-scope-salvage-and-failure-visibility §6.2);
+      used to;
     * a running row with no ``dispatched_at`` (such a map again) keeps the old
       ``now - started_at`` and gains no ``queued_s``.
 
@@ -2178,7 +2177,7 @@ def flip_map_entries_to_done(
     whose slot did dispatch, did run, failed to parse and was repaired — so
     :func:`record_models_salvaged` passes ``salvage``, which is deliberately in
     neither set and therefore renders as plain ``done`` in the ``models:`` table
-    and on ``just finished:`` (2026-09-21).
+    and on ``just finished:``.
     """
     stamp = _status_file.now_iso()
     flipped = False
@@ -2532,8 +2531,8 @@ def extract_json_array(text: str) -> Optional[str]:
     return first_to_last_bracket(text, "[")
 
 
-#: The one translation from §7.2's classifier vocabulary into the D3k ladder's
-#: (§7.1.b). That vocabulary (an adapter's ``classify_failure``, or
+#: The one translation from the classifier vocabulary into the D3k ladder's. That
+#: vocabulary (an adapter's ``classify_failure``, or
 #: ``classify_streams`` over the error line) has four ``CATEGORY_*`` names the
 #: ladder has no rung for; two of them are transport-shaped and therefore rung
 #: 4, which is what makes a connection error or a 5xx spend
@@ -2565,8 +2564,7 @@ _LADDER_STATUS_BY_CATEGORY = {
     CATEGORY_SERVER_ERROR: STATUS_RUNNER_ERROR,
 }
 
-#: The ladder status of an attempt the plugin's jail denied (plan
-#: codex-sandbox-unavailable F1 item 6, 2026-09-30). Not one of the ladder's
+#: The ladder status of an attempt the plugin's jail denied. Not one of the ladder's
 #: own statuses on purpose: ``RetryLadder.record`` treats every status it does
 #: not know as "never retried", and a jail denial must never be re-dispatched —
 #: nor moved to another rung.
@@ -2608,7 +2606,7 @@ def attempt_ladder_status(
 
 def slot_exception_error(exc: BaseException) -> str:
     """The recorded reason of a fan-out slot that raised: the exception's type
-    and message, through the one redaction boundary (§4.5), because it reaches
+    and message, through the one redaction boundary, because it reaches
     ``.status.json``, ``error_<model>.log`` and the report."""
     return _redact(f"Exception: {type(exc).__name__}: {exc}")
 
@@ -2618,7 +2616,7 @@ def slot_ladder(
 ) -> RetryLadder:
     """One review fan-out slot's :class:`~utils.retry_ladder.RetryLadder`.
 
-    §7.5 rule 1: its deadline starts HERE, so a lane builds it where the
+ rule 1: its deadline starts HERE, so a lane builds it where the
     slot's budget starts (before its prompt and result baselines are
     prepared, which are charged to the same budget) and hands it to
     :func:`dispatch_with_ladder`. The declared vendor envelope turns on rule
@@ -2661,7 +2659,7 @@ class LadderRun:
     ``{}`` when no attempt returned); ``usage``, ``audits`` and
     ``home_checks`` span every attempt, because a retry replaces ``details``
     and the last attempt alone would understate the spend and let a clean
-    retry excuse an earlier attempt that wrote (plan §4.3). ``exception`` is
+    retry excuse an earlier attempt that wrote. ``exception`` is
     set when a dispatch raised, which ended the slot; that attempt read
     nothing back, so its audit is ``None`` and its home check is the loop's
     own read-back of the jailed children it armed (``None`` when it armed
@@ -2683,7 +2681,7 @@ class LadderRun:
 
     @property
     def refused(self) -> bool:
-        """§7.5 rule 4 refused the slot before anything was spawned."""
+        """ rule 4 refused the slot before anything was spawned."""
         return self.result is None and self.exception is None
 
     def refusal_reason(self, target: str) -> str:
@@ -2697,9 +2695,9 @@ class LadderRun:
 
         A rate limit keeps the attempt's own error first (an adapter's
         ``[USAGE_LIMIT]`` sentence says the fix is another model, not a wait)
-        and adds whether the backoffs ran out or §7.5 rule 6(b) refused an
+        and adds whether the backoffs ran out or rule 6(b) refused an
         identical re-dispatch; a context overflow is terminal and names the two
-        remedies a human can apply (§7.6(a)); anything else is the attempt's
+        remedies a human can apply; anything else is the attempt's
         own error. A retry the ladder granted and the deadline then refused, or
         a grant ``record()`` refused for want of budget, adds the parenthetical
         that says the budget ended the slot.
@@ -2728,7 +2726,7 @@ async def _next_attempt_on_turn(ladder: RetryLadder) -> Optional[float]:
     """``ladder.next_attempt()``, once the slot has its provider's launch turn.
 
     Taken before the slice is computed, so the wait is charged to the slot's
-    one deadline (§7.5 rule 1) and a turn that came too late is refused like
+    one deadline and a turn that came too late is refused like
     any other attempt the deadline cannot hold. A no-op outside a fan-out slot
     and for a provider without a launch interval (`utils/launch_limiter.py`).
     """
@@ -2755,7 +2753,7 @@ async def dispatch_with_ladder(
     ``ladder`` is the slot's :func:`slot_ladder`, built where the slot's
     budget starts; ``timeout`` is that budget as the lane resolved it.
     ``dispatch(attempt_timeout)`` is the lane's own awaited invocation;
-    ``start_line(attempt_index, attempt_timeout)`` is its start print. §7.5
+    ``start_line(attempt_index, attempt_timeout)`` is its start print.
     rule 1: every attempt is spawned with what is LEFT of the one deadline,
     so ``dispatch`` must never be handed a fresh copy of ``timeout``.
 
@@ -2798,7 +2796,7 @@ async def dispatch_with_ladder(
                 result = await dispatch(attempt_timeout)
         except Exception as exc:  # noqa: BLE001 - recorded as the slot's ending
             # Nothing of this attempt was read back: a `None` audit keeps the
-            # combined verdict from reading clean (plan §4.3), so a tree
+            # combined verdict from reading clean, so a tree
             # change in the window still fails the slot closed. A write to
             # `$CODEX_HOME` outlives the jail, so its home is compared here.
             run.exception = exc
@@ -2837,7 +2835,7 @@ async def dispatch_with_ladder(
 # ---------------------------------------------------------------------------
 
 def served_model_fields(details: Dict[str, Any]) -> Dict[str, Any]:
-    """§3.6's attribution keys from an invocation's ``details``, or ``{}``.
+    """The attribution keys from an invocation's ``details``, or ``{}``.
 
     Splatted into a per-model result record so the fan-out carries what the
     adapter read. Absent means "nothing was claimed" — every adapter but
@@ -2845,7 +2843,7 @@ def served_model_fields(details: Dict[str, Any]) -> Dict[str, Any]:
     ``fallback_models`` — and the record then has exactly the keys it has
     always had.
 
-    The D6 override's provenance (2026-09-17) rides the same seam: a slot
+    The D6 override's provenance rides the same seam: a slot
     ``invoke_with_provider`` ran under ``sandbox_fallback`` carries
     ``details["sandbox"] == "bypassed"``, and the record gets a ``sandbox``
     key for it — independent of whether a served model was claimed, so the
@@ -2853,12 +2851,11 @@ def served_model_fields(details: Dict[str, Any]) -> Dict[str, Any]:
     (landlock rung, 2026-09-22) carries the rung id there instead, and the
     record says ``fallback-<rung>`` (``sandbox_record_word``) — only the
     uncontained rung is ever recorded as ``bypassed``. A slot on the plugin's
-    own jail records ``fallback-plugin-landlock`` the same way (2026-09-30).
+    own jail records ``fallback-plugin-landlock`` the same way.
 
     A slot the plugin's jail failed also carries :func:`jail_record_fields`'
     two keys, so ``status`` and the report can say "denied by the plugin's
-    jail: <path>" after the log is gone (plan codex-sandbox-unavailable F1
-    item 6).
+    jail: <path>" after the log is gone.
     """
     fields: Dict[str, Any] = {}
     served = (details or {}).get("served_model")
@@ -2874,8 +2871,7 @@ def served_model_fields(details: Dict[str, Any]) -> Dict[str, Any]:
     return fields
 
 
-#: The per-slot record keys of a slot the plugin's jail failed (plan
-#: codex-sandbox-unavailable-findings-and-fixes §6 F1 item 6, 2026-09-30):
+#: The per-slot record keys of a slot the plugin's jail failed:
 #: ``failure_reason: "jail-denied"`` and the denied path (``$HOME`` shown as
 #: ``~``; ``None`` when codex did not name it). They ride the per-model result
 #: record, ``models_served`` in ``.status.json`` and so ``--reaggregate``, the
@@ -3089,7 +3085,7 @@ def announce_retired_rungs(
     comma-joined), printed after the fan-out and never per slot — the per-slot
     ``[SANDBOX_BYPASSED]`` line has by then already said what each slot did.
 
-    * **Measured retirement** (plan §3.2, 2026-09-24): this process's probe
+    * **Measured retirement**: this process's probe
       cache (``sandbox_walk.recorded_rung_retirements``) recorded the rung
       ``skipped`` because the codex version is at or above its ``removed_at``,
       or ``retired`` because its probe printed the rung's removal panic. The
@@ -3115,8 +3111,7 @@ def announce_retired_rungs(
     # (provider, rung id) -> {"specs": [...], "measured": bool, "version": str}
     groups: Dict[Tuple[str, str], Dict[str, Any]] = {}
     # (provider, incidental rung id) -> [specs]: the plugin's own jail last run,
-    # no sandbox this run (plan codex-sandbox-unavailable §7 step-2 subtask
-    # item 3, 2026-09-30). Named with THIS run's rung-probe outcome — never the
+    # no sandbox this run. Named with THIS run's rung-probe outcome — never the
     # legacy rung's retirement wording, which would blame a codex upgrade for
     # what is usually a skip switch, a kernel or a failed self-test.
     left_jail: Dict[Tuple[str, str], List[str]] = {}
@@ -3313,7 +3308,6 @@ def recorded_usage(phase_dir: str) -> Optional[Dict[str, Dict[str, Any]]]:
 
 # ---------------------------------------------------------------------------
 # What a reaggregate says about the models that produced nothing
-# (plan: review-run-scope-salvage-and-failure-visibility §5)
 # ---------------------------------------------------------------------------
 
 #: The reason a reaggregate gives a requested model that has neither a result
@@ -3590,7 +3584,7 @@ def announce_remaining_failures(phase_dir: str, failures: Dict[str, str]) -> Non
 
     One :data:`MODEL_FAILED_MARKER` line per model with its stored reason —
     the reaggregate's own summary text, since after ``--reaggregate`` nothing
-    else said so (plan §5.1: no ``[PARTIAL_RESULTS]``, no failure section) —
+    else said so (no ``[PARTIAL_RESULTS]``, no failure section) —
     and the same failures written into ``progress.models``
     (:func:`record_failed_models_in_progress`). ``MULTI_LLM_RESULT.state`` and
     the exit code are the completion path's to set, not this function's.
@@ -3639,7 +3633,7 @@ def exit_when_every_reviewer_failed(
 
 
 # The fan-out's own sandbox cache (`_FANOUT_SANDBOX_CACHE`, its lock and its
-# per-key probe locks) is gone (plan §3.6, 2026-09-24): the fan-out and the
+# per-key probe locks) is gone: the fan-out and the
 # executor share one probe cache, `probe_state._SANDBOX_PROBE_CACHE`,
 # keyed by codex version and policy and holding the whole `SandboxProbeResult`.
 
@@ -3666,7 +3660,7 @@ def _fanout_sandbox_verdict(provider_name: str, cwd: Optional[str]) -> Any:
     """Run — or recall — this provider's ``generate`` sandbox self-test.
 
     Blocking, so the caller hands it to a thread. The probe and its cache are
-    the executor's (``sandbox_walk.cached_sandbox_verdict``, plan §3.6),
+    the executor's (``sandbox_walk.cached_sandbox_verdict``),
     which is what makes the fan-out, the subagent preflight and ``doctor``
     read the same adapter-declared command the same way — and the fan-out and
     the preflight share one rung probe per codex version. ``cwd`` is the repo
@@ -3720,7 +3714,7 @@ class SandboxVerdict(NamedTuple):
     reason: Optional[str]
     rung: Optional[str] = None
     #: The probe's fallback walk — ``((rung id, outcome), …)`` — that decided
-    #: this slot (2026-09-24), so a reader of the verdict can tell a contained
+    #: this slot, so a reader of the verdict can tell a contained
     #: rung that was tried and failed from one never measured.
     walk: Tuple[Tuple[str, str], ...] = ()
     #: The selected rung carries the ``incidental`` grade (the plugin's own
@@ -3752,9 +3746,9 @@ class SandboxVerdict(NamedTuple):
 def sandbox_bypassed_notice(provider_name: str, probe: Any = None) -> str:
     """The one line a lane prints for a slot dispatched under the D6 override.
 
-    Its **stem** is verbatim the sentence the design fixed (2026-09-17),
+    Its **stem** is verbatim the sentence the design fixed,
     because it is the whole of what the operator is told at the moment it
-    matters. Since 2026-09-24 (plan §3.1) the rung clause is appended after
+    matters. Since 2026-09-24 the rung clause is appended after
     that stem when ``probe`` — the ``SandboxProbeResult`` — shows the walk
     tried a rung first: each rung with its outcome and, when it was probed,
     its probe tail (``fallback rung 'landlock' unavailable (codex 0.156.1:
@@ -3797,7 +3791,7 @@ def sandbox_incidental_notice(
     provider_name: str, rung: Any, policy: Optional[str], probe: Any,
 ) -> str:
     """The one ``[SANDBOX_INCIDENTAL]`` line a fan-out slot on the plugin's
-    jail prints (plan codex-sandbox-unavailable §7 "Step 2 subtask" item 2).
+    jail prints.
 
     Built by ``base.sandbox_incidental_notice_text`` — the one builder both
     lanes share — with the standard probe's tail and the walk clause of the
@@ -3866,8 +3860,8 @@ def sandbox_refusal(provider_name: str, cwd: Optional[str]) -> SandboxVerdict:
     never a gate, and a sandbox that dies mid-dispatch still lands on the D3k
     ladder as rung 1.
 
-    ``unavailable`` answers ``dispatch_unsandboxed`` — the D6 override
-    (2026-09-17), now a ladder (landlock rung, 2026-09-22) — when the
+    ``unavailable`` answers ``dispatch_unsandboxed`` — the D6 override, now a ladder
+    (landlock rung, 2026-09-22) — when the
     adapter's fallback walk selected a rung it declares for ``generate`` and
     ``providers.<name>.sandbox_fallback`` permits that rung. The key gates
     **every** rung: ``auto`` (the shipped default) takes whichever rung the
@@ -3900,8 +3894,7 @@ def sandbox_refusal(provider_name: str, cwd: Optional[str]) -> SandboxVerdict:
         if rung.contained:
             notice = sandbox_fallback_notice(provider_name, rung, policy or "")
         elif rung_is_incidental(rung):
-            # The plugin's own jail (plan codex-sandbox-unavailable §7 "Step 2
-            # subtask" items 1-2, 2026-09-30): `[SANDBOX_INCIDENTAL]`, never
+            # The plugin's own jail: `[SANDBOX_INCIDENTAL]`, never
             # `[SANDBOX_BYPASSED]` (whose count must stay the uncontained
             # slots) nor `[SANDBOX_FALLBACK]` (a real OS boundary). The walk
             # clause covers the rungs tried before it — the legacy rung
@@ -3942,7 +3935,7 @@ def sandbox_fallback_kwargs(verdict: SandboxVerdict) -> Dict[str, str]:
     return {}
 
 
-#: Plan §4.1 (option A): above this many bytes of dirty/untracked regular
+#: Above this many bytes of dirty/untracked regular
 #: files, a snapshot records no content hashes and the slot's comparison falls
 #: back to path + status only (today's behaviour), with one printed note.
 PORCELAIN_HASH_CAP_BYTES = 50 * 1024 * 1024
@@ -3977,7 +3970,7 @@ class PorcelainEntry(NamedTuple):
 
 
 class PorcelainSnapshot(NamedTuple):
-    """The per-path baseline :func:`porcelain_snapshot` returns (plan §4.1).
+    """The per-path baseline :func:`porcelain_snapshot` returns.
 
     ``hashed`` is False when this snapshot degraded (the dirty set was over
     :data:`PORCELAIN_HASH_CAP_BYTES`, or ``git hash-object`` failed as a whole):
@@ -4044,10 +4037,10 @@ def porcelain_snapshot(
 ) -> Optional[PorcelainSnapshot]:
     """A per-path baseline of the working tree's dirty set, or ``None``.
 
-    The detective half of the D6 override (2026-09-17): a bypassed slot has no
+    The detective half of the D6 override: a bypassed slot has no
     sandbox to *prevent* a write, so the fan-out takes this before the slot and
-    again after it, and :func:`unexpected_writes` compares the two. Since plan
-    §4.1 (option A, 2026-09-24) it is a baseline, not a set of porcelain lines:
+    again after it, and :func:`unexpected_writes` compares the two. Since (option A,
+    2026-09-24) it is a baseline, not a set of porcelain lines:
 
     - ``git status --porcelain -z --untracked-files=all``, so every untracked
       file is its own entry (without the flag an untracked directory is one
@@ -4094,18 +4087,17 @@ def porcelain_snapshot(
     this slot's diff exactly as the slot's own would (the 2026-09-22 and
     2026-09-24 misattributions). The reason line therefore reports the change
     and the count of boundary-less siblings (:func:`bypass_write_violation`),
-    never an author; only the slot's own audited action stream can clear it
-    (plan §4.2, ``utils/readonly_audit.py``). It is a cheap, honest check, not
+    never an author; only the slot's own audited action stream can clear it. It is a
+    cheap, honest check, not
     a boundary.
 
-    Scope, recorded rather than fixed (T7; plan §4.6, Open question 3): only
-    the three fan-out lanes take this snapshot. The executor lane
-    (``subagent_executor``: validation, revalidation, consolidation, task
-    generation) takes none, so a read-only dispatch there on the uncontained
-    rung is unchecked — before T7 and after it. Run ``0c477c4d`` (2026-09-24)
-    dispatched its 16 validation batches to codex on that rung with no check
-    at all. Widening the check (or the §4.2 stream audit, which the executor
-    already has each child's stream for) to that lane is separate work.
+    Scope, recorded rather than fixed: only the three fan-out lanes take this
+    snapshot. The executor lane (``subagent_executor``: validation,
+    revalidation, consolidation, task generation) takes none, so a read-only
+    dispatch there on the uncontained rung is unchecked: a run that sent its 16
+    validation batches to codex on that rung had no check at all. Widening the
+    check (or the stream audit, which the executor already has each child's
+    stream for) to that lane is separate work.
     ``None`` when git cannot answer (no repo, no ``git``), and the caller then
     skips the comparison rather than failing a slot on a check it never ran.
     """
@@ -4301,14 +4293,14 @@ def unexpected_writes(
 ) -> List[str]:
     """Every path whose baseline entry differs between ``before`` and ``after``.
 
-    Walks the **union** of both snapshots (plan §4.1), not ``after - before``:
+    Walks the **union** of both snapshots, not ``after - before``:
     a path that appears, one that disappears (a pre-existing untracked file
     deleted, a dirty file restored to clean) and one whose kind, blob id,
     marker or exec bit changed are all reported. A status change with equal
     content and exec bit (``??`` → ``A ``, ``MM`` → ``M ``) is clean unless
     either side is a deletion; an ``unreadable`` path is always changed. If
     either snapshot degraded (``hashed=False``), both are compared by path and
-    status only, which is the pre-§4.1 behaviour.
+    status only, which is the pre- behaviour.
 
     ``ignore_prefixes`` is where the *plugin* writes during a slot — the
     plan's output directory (logs, result files, ``.status.json``, salvage
@@ -4319,7 +4311,7 @@ def unexpected_writes(
     filtered again here so a snapshot taken without them still compares right.
     The fan-out call sites pass :func:`fanout_ignore_prefixes`, which also
     lists a declared workspace cache of an adapter in the same fan-out
-    (aider's tag cache; plans/ask-answer-recovery-and-false-success.md D4.3).
+    (aider's tag cache; D4.3).
     Either snapshot ``None`` means the check was not run, and the answer is
     "nothing to report". Sorted by path, for the record.
     """
@@ -4410,15 +4402,14 @@ def porcelain_check_applies(verdict: SandboxVerdict) -> bool:
     the fact; a sandboxed or ``not-required`` slot never took a rung at all.
 
     **The plugin's own jail (``plugin-landlock``) skips it too, and that is an
-    accepted trade-off, not a claim that the kernel fences everything** (plan
-    codex-sandbox-unavailable-findings-and-fixes §6 F1 "What it fixes",
-    2026-09-30). The jail stops content writes outside its allow-list; what it
+    accepted trade-off, not a claim that the kernel fences everything**. The jail stops
+    content writes outside its allow-list; what it
     does not stop — a flipped executable bit (checked instead by
     :func:`mode_check_applies`' mode check), ``$CODEX_HOME`` (checked by the
     home check), writes through a pathname Unix socket and timestamps (neither
     checked, by decision) — a whole-tree snapshot could not attribute anyway:
     on the host this was written for, every user edit and every sibling run's
-    log in the window failed a codex review (§2a). Leaving this predicate
+    log in the window failed a codex review. Leaving this predicate
     unchanged *is* that decision; reversing it means changing the code here.
     """
     return (
@@ -4456,7 +4447,7 @@ def boundaryless_sibling_count(
 ) -> int:
     """How many **other** slots of this slot's fan-out had no OS boundary.
 
-    What makes the detective check's verdict ambiguous (T7, 2026-09-22): every
+    What makes the detective check's verdict ambiguous: every
     such slot could have written into the tree during this slot's window. Two
     kinds count — an adapter whose ``generate`` sandbox probe answers
     ``not-required`` (it declares no sandbox by design: cursor-agent, pi,
@@ -4509,7 +4500,7 @@ def bypass_write_violation(
     the outcome): the slot still fails, its ``output`` is still dropped and its
     findings are still discarded — fail-closed, because on a machine with no
     contained rung this diff is the only containment evidence the slot has.
-    Plan §4.4 (2026-09-24) names the writer T7's sentence left out: on run
+ names the writer T7's sentence left out: on run
     ``0c477c4d`` neither path was written by any slot — another session in the
     same repository changed them — so the sibling count alone still read as if
     the fan-out were the only candidate. The one exit from this verdict is the
@@ -4528,7 +4519,7 @@ def bypass_write_violation(
 
 
 def bypass_stream_audit_clears(audits: Sequence[Any]) -> bool:
-    """Whether a porcelain delta on an uncontained slot is downgraded (plan §4.3).
+    """Whether a porcelain delta on an uncontained slot is downgraded.
 
     ``audits`` is every attempt's ``details['readonly_audit']`` in the slot's
     snapshot window, in order — ``None`` for an attempt that carried none.
@@ -4545,7 +4536,7 @@ def bypass_stream_audit_clears(audits: Sequence[Any]) -> bool:
 def bypass_write_not_attributed(provider_name: str, paths: Sequence[str]) -> str:
     """The warning a slot keeps its findings under when its stream cleared it.
 
-    Plan §4.3: the tree changed during the window, and the slot's own audited
+    The tree changed during the window, and the slot's own audited
     stream shows it could not have made that change (every action read-only,
     the stream complete, on every attempt), so the change is reported — never
     attributed — and the slot counts. Recorded on
@@ -4562,9 +4553,7 @@ def bypass_write_not_attributed(provider_name: str, paths: Sequence[str]) -> str
 
 # ---------------------------------------------------------------------------
 # A fan-out slot on the plugin's own jail: the mode check, the home check,
-# the jail's own lines, and the run's closing summary (plan
-# codex-sandbox-unavailable-findings-and-fixes §6 F1 "What it fixes" and
-# Limits, 2026-09-30)
+# the jail's own lines, and the run's closing summary
 # ---------------------------------------------------------------------------
 #
 # A slot on `plugin-landlock` skips the porcelain check (the predicate above is
@@ -4836,7 +4825,7 @@ def foreign_trust_line(provider_name: str, record: Dict[str, Any]) -> Any:
     failure): this run's batch or a concurrent codex session added them. A
     ``landlock_dispatch.TrustEntriesNote``, rendered by
     :func:`print_closing_summary` with the executor lane's wording and naming
-    only the tables still there then (fix round 17)."""
+    only the tables still there then."""
     from .landlock_dispatch import TrustEntriesNote
 
     home = record.get("home") or None
@@ -4928,8 +4917,7 @@ def report_jail_outcome(display_name: str, details: Optional[Dict[str, Any]], su
 FAILURE_JAIL_SETUP_FAILED = "jail-setup-failed"
 
 #: Both fan-out failure reasons of the plugin's jail; each gets the ladder
-#: status ``STATUS_JAIL_DENIED`` (plan codex-sandbox-unavailable Implementation
-#: Notes: "never retried"), whatever its error text classifies as.
+#: status ``STATUS_JAIL_DENIED``, whatever its error text classifies as.
 _JAIL_FAILURE_REASONS = frozenset({FAILURE_JAIL_DENIED, FAILURE_JAIL_SETUP_FAILED})
 
 
@@ -5048,8 +5036,7 @@ def fanout_workspace_caches(anchor: Optional[Union[str, Path]] = None) -> List[s
     Read off the fan-out's roster (:data:`_FANOUT_ROSTER`, the source
     :func:`boundaryless_sibling_count` reads), so aider's
     ``.aider.tags.cache.v4/`` is exempt **only** when an aider slot was
-    scheduled beside this one (plans/ask-answer-recovery-and-false-success.md
-    D4.3, mirroring the container harness's per-CLI ``tool_artifacts``). A slot
+    scheduled beside this one. A slot
     run outside a fan-out has an empty roster and exempts nothing, and a
     roster entry that cannot be resolved contributes nothing — the
     conservative reading, since a change there then still counts.
@@ -5200,7 +5187,7 @@ def _answer_text(data: Any) -> str:
     of :func:`run_single_model` used to test the payload's truthiness, turned
     that ``[]`` into ``""``, and ``save_model_result`` then read a model that
     answered as one that left no output (measured 2026-10-09, plan
-    improve-plan-and-improve-code T3: two mock reviewers each answered ``[]``,
+    Two mock reviewers each answered ``[]``,
     both were recorded failed with ``Unknown error``, and review-plan exited 3
     "All models failed" instead of completing a clean review).
     """
@@ -5228,12 +5215,12 @@ async def run_single_model(
 ) -> Dict[str, Any]:
     """Run a single model review with file-based JSON output.
 
-    Retries are the shared :class:`~utils.retry_ladder.RetryLadder` (§7.1.b),
+    Retries are the shared :class:`~utils.retry_ladder.RetryLadder`,
     **not** the recursion this function used to be. Two self-calls — one for a
     rate limit, one for a network error — each re-entered with the *same*
     ``timeout`` argument, so a claude-code slot at ``default_timeout: 1800``
     could run 4 × 1800 s + 35 s of backoff ≈ 2 h against a configured ceiling of
-    1800 s (§7.5's opening paragraph). Being a tail call inside an ``async def``
+    1800 s (the opening paragraph). Being a tail call inside an ``async def``
     it also kept its retry state in a place no budget could see.
 
     The slot is :func:`utils.review_lane.run_slot`, the core review-code's
@@ -5265,12 +5252,12 @@ async def run_single_model(
             the slot from that. ``None`` (a direct call, a test) keeps every
             line here byte-for-byte what it was.
         retry_count: Vestigial. Retry state lives in the ladder now, which is the
-            point of §7.5 rule 1. Passing a non-zero value has no effect.
+            point rule 1. Passing a non-zero value has no effect.
         out_dir: Optional output directory for log files and JSON output
         prefix: Optional prefix for log file names
         run_model_specs: Every model of this fan-out, forwarded to
             ``invoke_with_file_output`` so a result written under the wrong
-            name is read from where the model put it (live run 10). ``None``
+            name is read from where the model put it. ``None``
             (a direct call) never looks.
 
     Returns:
@@ -5305,7 +5292,7 @@ async def run_single_model(
         ``utils/llm_client._attach_stdout_excerpt`` (:413) attaches on all three
         losing paths — non-zero exit, timeout kill, and the zero exit whose
         output would not parse — already ``_redact``ed then ``_bound_stream``ed
-        in that order (§4.5/§4.4). That is the only copy of the stream that has
+        in that order. That is the only copy of the stream that has
         been through the redactor, and a salvage request is an artifact a human
         reads, so it is the copy that travels. Returns that had no child to
         produce it keep ``""`` and say so in place, rather than attaching an
@@ -5387,7 +5374,7 @@ class BaseSlot:
         self.start_time = start_time
 
         self.project_root = get_project_root(plan_path)
-        # `plan_path` IS the discovery anchor (§9.3.a): no new value is computed
+        # `plan_path` IS the discovery anchor: no new value is computed
         # here, the existing one simply stops being thrown away at the spawn.
         self.provider_name, model_name = parse_model_spec(model_spec, anchor=plan_path)
         self.display_name = f"{self.provider_name}:{model_name}"
@@ -5582,7 +5569,7 @@ class BaseSlot:
             })
 
         if status == STATUS_RATE_LIMITED:
-            # Either the ≤ 3 backoffs are spent, or §7.5 rule 6(b) refused an
+            # Either the ≤ 3 backoffs are spent, or rule 6(b) refused an
             # identical re-dispatch against an adapter whose CLI already ran its
             # own 429 chain; `LadderRun.stop_error` names which.
             return self._ending({
@@ -5606,7 +5593,7 @@ class BaseSlot:
                 **usage_total_fields(slot_usage),
             })
 
-        # §7.6(a): a context overflow is TERMINAL. Splitting the prompt is open
+        # A context overflow is TERMINAL. Splitting the prompt is open
         # question 13 and nobody has designed it, so the shipping behaviour is to
         # classify it, name it, and fail the slot with the two remedies a human
         # can actually apply — never a re-dispatch, because re-sending an
@@ -5618,7 +5605,7 @@ class BaseSlot:
             return self._ending({
                 "success": False, "output": None,
                 "error": run.stop_error(model_spec),
-                # Terminal, never re-dispatched (§7.6(a)) — which is exactly why
+                # Terminal, never re-dispatched  — which is exactly why
                 # whatever the model managed to emit before the window closed is
                 # the only copy anyone will ever get. An overflow hit part-way
                 # through a long array is the shape that matters: there is no
@@ -5646,7 +5633,7 @@ class BaseSlot:
                 "stdout": output_str, "stderr": stderr_text,
                 "duration_seconds": duration, "model_spec": model_spec,
                 "source": source,
-                # §3.6: the served model rides out with the answer it produced.
+                # The served model rides out with the answer it produced.
                 **served_model_fields(details),
                 # Stage U: so does what producing it cost.
                 **usage_total_fields(slot_usage),
@@ -5940,7 +5927,7 @@ async def run_models_concurrent(
             means "not skipped" and the model proceeds normally.
         anchor: Optional discovery anchor (the run's plan-file path). This
             function has no plan path of its own, so without it every per-provider
-            bound and every provider resolution below falls back to CWD (§9.3.c).
+            bound and every provider resolution below falls back to CWD.
             ``run_review_phase`` and ``ask_orchestrator`` both hold the plan path
             and pass it.
         tracker: The caller's :class:`~utils.progress_tracker.FanoutProgress`.
@@ -5985,7 +5972,7 @@ async def run_models_concurrent(
 
     async def run_with_semaphore(model_spec: str, index: int) -> Tuple[str, Any]:
         # Display-only, but still anchored: a bare spec must render the same
-        # provider the router chose, not a second, different guess (§9.3.c).
+        # provider the router chose, not a second, different guess.
         provider_name, model_name = parse_model_spec(model_spec, anchor=anchor)
         display_name = f"{provider_name}:{model_name}"
 
@@ -6051,12 +6038,9 @@ async def run_models_concurrent(
             tracker.record_result(model_spec, result)
         return (model_spec, result)
 
-    # Seeded before the tasks exist, not as they start: the write that claims
-    # the phase dir drops the predecessor's `progress` wholesale, so what this
-    # run writes is all any reader ever sees and a model missing from the map is
-    # a bug rather than a model carried over. (`claim_run` does that on the
-    # detached lane; on the foreground one the launch write does — nothing did
-    # until F1, 2026-09-20.)
+    # Seeded before the tasks exist, not as they start: the launch write drops the
+    # predecessor's `progress`, so a model missing from the map is a bug, never one
+    # carried over (`FanoutProgress.seed`, in `utils/progress_tracker.py`).
     if tracker is not None:
         tracker.seed()
 
@@ -6218,7 +6202,7 @@ async def run_tasks_concurrent(
             backpressure narrows a throttled provider's slots for the rest of the
             batch); defaults to ``get_provider_max_concurrent``.
         anchor: Optional discovery anchor (the run's plan-file path), the Lane B
-            twin of ``run_models_concurrent``'s (§9.3.c). ``subagent_executor``
+            twin of ``run_models_concurrent``'s. ``subagent_executor``
             already holds the phase's plan path and passes it.
 
     Returns:
@@ -6257,7 +6241,7 @@ async def run_tasks_concurrent(
         task_id = str(task.get("task_id", index))
         runner = runners[task_id]
         # Anchored for the same reason the fan-out's display resolution is: the
-        # semaphore this picks must be the one the batch was sized for (§9.3.c).
+        # semaphore this picks must be the one the batch was sized for.
         provider_name, _ = parse_model_spec(runner, anchor=anchor)
 
         if skip_predicate is not None:
@@ -6494,7 +6478,6 @@ def salvage_source(details: Dict[str, Any]) -> str:
     Whatever this returns is also the request's ``raw_output``: the text a
     salvage subagent is asked to repair is the text the gate decided on.
 
-    (plan: review-run-scope-salvage-and-failure-visibility §4, D4.3.)
     """
     if SALVAGE_TEXT_KEY in details:
         text = details.get(SALVAGE_TEXT_KEY)
@@ -6974,7 +6957,7 @@ def save_model_result(
     except (json.JSONDecodeError, ValueError, RecursionError) as e:
         # The fan-out's sibling of code_review_orchestrator's two salvage sites,
         # and it holds the same rule: salvage only when the reply still holds an
-        # answer to repair. A model that answered in prose — §40's write
+        # answer to repair. A model that answered in prose — the write
         # refusals, a provider printing its auth failure on the channel it
         # exited 0 on — reaches this `except` with not one character of JSON,
         # and the salvage prompt's "if nothing recoverable is present, print an
@@ -7081,7 +7064,7 @@ def aggregate_results(
             (forwarded to ``generate_html_report()``).  Defaults to ``'pr'``.
         diff_data: Optional pre-computed diff hunk data (forwarded to
             ``generate_html_report()``).
-        served_models: Optional §3.6 attribution
+        served_models: Optional attribution
             (``{model_spec: {"served_model", "fallback"}}``, from
             :func:`collect_served_models`).  A model that was served by a
             configured fallback is named as such on the ``**Models:**`` line and
@@ -7093,8 +7076,7 @@ def aggregate_results(
             a model that reported nothing renders nothing, so a run of
             duration-only adapters is byte-for-byte what it was.
         scope_state: The ``state.json`` dict holding this review round's
-            ``scope_policy`` record (plans/scope-policy-and-report-tags.md
-            §6); ``None`` reads the saved ``state.json`` beside *phase_dir*.
+            ``scope_policy`` record; ``None`` reads the saved ``state.json`` beside *phase_dir*.
             Both reports show the round's effective policy, each group's
             validated scope tag and each finding's provisional one.
         claim: The writing invocation's round (``review_round.Claim``):
@@ -7173,7 +7155,7 @@ def aggregate_results(
     # the HTML notice below, so the two surfaces render one string.
     salvage_requested = salvage_requested_models(phase_dir, list(failed_models or {}))
     # A jail-denied slot's `models_served` entry makes the line say "denied by
-    # the plugin's jail: <path>" (plan codex-sandbox-unavailable F1 item 6).
+    # the plugin's jail: <path>".
     failure_line = failed_models_line(
         failed_models, requested_models, salvage_requested,
         served_models=served_models,
@@ -7189,27 +7171,27 @@ def aggregate_results(
         # `G<n>` below counts from 1; `group_index` in grouped.json,
         # validation.json and validation_tasks.json counts from 0 (G12 is
         # group_index 11). A host reading both reported "group 11" beside a
-        # report that says G12 (2026-10-01, Claude Code review-plan); the bracketed
+        # report that says G12; the bracketed
         # hash is the number-free key.
         f"**Groups:** {len(groups_to_display) if groups_to_display else 0} "
         "(`G<n>` counts from 1; `group_index` in the JSON files counts from 0)",
         f"**Suggestions:** {high_count} HIGH, {medium_count} MEDIUM, {low_count} LOW ({total_suggestions} total)",
     ]
 
-    # §6 T6.1: the same four counts `record_validation_counts` puts on the
+    #  T6.1: the same four counts `record_validation_counts` puts on the
     # result line below, from the same helper, so a `validation_failed` group
     # shows in the report summary too and the header and payload agree.
     validation_line = validation_counts_line(validation_counts(groups_to_display))
     if validation_line:
         report_lines.append(validation_line)
-    # Plan §2.4: read the published `validation_context`, never recomputed;
+    # Read the published `validation_context`, never recomputed;
     # absent (every source inline) adds nothing, so the report is unchanged.
     report_lines.extend(
         _validation_context.report_header_lines(
             _status_file.read_status(phase_dir).get("validation_context")
         )
     )
-    # Scope tags (plans/scope-policy-and-report-tags.md §6): the round's
+    # Scope tags: the round's
     # effective policy and the distinct-group tag counts, from `state.json`'s
     # record of this review round (a legacy round reads `expand`).
     from . import scope_report as _scope_report
@@ -7306,7 +7288,7 @@ def aggregate_results(
     # plan suggestion carries the same `importance` field, so the same fact
     # is now recorded for all three.
     record_high_priority_groups(phase_dir, groups_to_display)
-    # §6 T6.1: every completion path (the fan-out's first run and
+    #  T6.1: every completion path (the fan-out's first run and
     # `--reaggregate`) reaches this function, so recording here recomputes
     # the counts, up or down, wherever the report is rebuilt.
     record_validation_counts(phase_dir, groups_to_display)
@@ -7332,7 +7314,7 @@ def format_group(
             (``scope_report.round_info``); ``None`` reads ``expand`` with no
             baseline. The group's validated scope tag and, under ``preserve``,
             its policy outcome sit between the checkboxes and the
-            ``**Validation:**`` line (plan §6).
+            ``**Validation:**`` line.
     """
     from . import report_markdown as _rm
     from . import scope_report as _scope_report
@@ -7456,7 +7438,7 @@ def format_suggestion_in_group(
     # The reviewer's own (provisional) scope tag, above the `**Importance:**`
     # line: `report_parser.parse_suggestion_descriptions` reads everything
     # after that line as the editable description, so an unchanged report
-    # shows no edit (plan §6).
+    # shows no edit.
     from . import scope_report as _scope_report
 
     lines.append(_scope_report.md_member_line(suggestion))
@@ -7666,8 +7648,8 @@ async def reaggregate_from_existing_files(
         diff_data: Optional pre-computed diff hunk data (forwarded to
             ``aggregate_results()``).
         supports_consolidation: Whether this phase supports consolidation; when
-            true the recommendation is recomputed from the reaggregated groups
-            (§7.2a), exactly as the first run does.
+            true the recommendation is recomputed from the reaggregated groups, exactly
+            as the first run does.
     """
     # The mode word a zero-result exit names in its `--force` retry command.
     reaggregate_mode = _modes().mode_for_script(orchestrator_script) or phase_name
@@ -7724,8 +7706,8 @@ async def reaggregate_from_existing_files(
         # (utils/review_lane.py): the canonical specs from the checkpoint, one
         # file per logical model, non-record entries dropped before anything
         # is stamped, a model with a file reconciled as completed and the
-        # failures left named. No readable result at all ends here (§7.2a:
-        # zero groups recount the consolidation recommendation too); results
+        # failures left named. No readable result at all ends here (zero groups recount
+        # the consolidation recommendation too); results
         # that hold no findings are a finished review with zero groups.
         def stamp(suggestions: List[Dict[str, Any]], model: str) -> None:
             for s in suggestions:
@@ -7755,7 +7737,7 @@ async def reaggregate_from_existing_files(
         ).groups
 
         plan_content = read_plan(plan_path)
-        # The round on record keeps its policy and baseline (plan §4); an
+        # The round on record keeps its policy and baseline; an
         # explicit policy that differs was refused before the detach boundary.
         scope_state = get_or_create_state(Path(plan_path))
         scope_round_policy = resolve_scope_round(
@@ -7810,7 +7792,7 @@ async def reaggregate_from_existing_files(
         successful_models = loaded.models
 
         # Generate report. `served_models` is what the fan-out recorded in the
-        # checkpoint (§3.6's attribution and the D6 override's `sandbox: bypassed`,
+        # checkpoint (the attribution and the D6 override's `sandbox: bypassed`,
         # 2026-09-17): the per-model files carry neither, so without this read a
         # reaggregated report named a bypassed slot as if it had run sandboxed.
         # With validation skipped (or its verdicts unreadable) the report
@@ -7843,7 +7825,7 @@ async def reaggregate_from_existing_files(
         print("\nReaggregation complete!")
         print(f"Report: {report_path}")
 
-        # §7.2: this completion path had no recommendation block at all (the
+        # This completion path had no recommendation block at all (the
         # first run's lived past the `--reaggregate` branch's early return), so
         # a reaggregate that changed the count left the old one standing.
         print(
@@ -7898,16 +7880,12 @@ def already_completed_lines(
 ) -> List[str]:
     """What a re-run of a review phase the plan already completed says: that
     it is done and nothing ran, where its results are, and the two ways to
-    run it again (fix round 28, live run 12 #11: OpenCode 01f retried a
-    review-plan its killed first attempt had finished and got "ERROR: Phase
-    'review-plan' has already been completed … Use --force", which the host
-    relayed as an error block). Nothing failed: the exit is 2, "nothing to
+    run it again. Nothing failed: the exit is 2, "nothing to
     do / phase already complete", which every route reads as a success, and
     the next phase is the result's ``user_next_step`` as on any exit 2.
 
     *document* is what the user calls the input: ``plan``, or ``commit brief``
-    for a commit review (``commit_paths.document_label``; plans/review-
-    commits.md §2.8 "'Commit brief', never 'plan'"), whose caller also passes
+    for a commit review (``commit_paths.document_label``), whose caller also passes
     the commit mode the user typed as *mode_word*."""
     try:
         shown = os.path.relpath(str(phase_dir)).replace(os.sep, "/")
@@ -8126,7 +8104,7 @@ async def _review_orchestration(
         print(f"       Resolved path: {plan_path}")
         sys.exit(1)
 
-    # §9.3.a/b: the anchor capture point. Absolute, taken before anything can
+    # The anchor capture point. Absolute, taken before anything can
     # chdir and before any provider read that decides routing, so a call site
     # that forgets the keyword still falls back to THIS plan, not to CWD.
     set_run_anchor(plan_path)
@@ -8164,7 +8142,7 @@ async def _review_orchestration(
 
         # A reaggregate belongs to the round on record: its policy and
         # baseline stay. An explicit `--scope-policy` that differs is refused
-        # here, before the boundary (plan §4: never mixed in one round).
+        # here, before the boundary (never mixed in one round).
         resolve_scope_round(
             get_or_create_state(Path(plan_path)), phase_name, args,
             same_round=True, phase_dir=phase_dir,
@@ -8257,7 +8235,7 @@ async def _review_orchestration(
     # review lane").
     detach_launcher = bool(getattr(args, "detach", False)) and not getattr(
         args, "internal_worker", False)
-    # Materialize `state.json` on the phase's first run (2026-10-05). Nothing
+    # Materialize `state.json` on the phase's first run. Nothing
     # else writes it before the phase completes, so on a plan's first phase
     # the instructions' `util metrics start --state-file {plan}/state.json`
     # (run between the fan-out and the validation subagents) failed with
@@ -8284,7 +8262,7 @@ async def _review_orchestration(
     if pre_run_hook:
         pre_run_hook()
 
-    # The round's scope policy, resolved before fan-out (plan §4): it decides
+    # The round's scope policy, resolved before fan-out: it decides
     # the reviewer and validator prompts alike. A same-round resume keeps the
     # recorded policy; an explicit change that would mix reviewer outputs is
     # refused here, in the foreground, before anything is written.
@@ -8297,7 +8275,7 @@ async def _review_orchestration(
     )
     _scope_round.print_round_line(phase_name, scope_round_policy)
 
-    # Read plan content — once, as bytes (§2.3 step 5): the excerpt a
+    # Read plan content — once, as bytes: the excerpt a
     # validator is shown, the snapshot it is pointed at and `inputs.plan_sha256`
     # all derive from this one read, never from a later re-read of a file other
     # sessions may be editing. Only the read and the UTF-8 check happen here, so
@@ -8406,7 +8384,7 @@ async def _review_orchestration(
 
     # The round's scope baseline, bound from the same reads the round already
     # makes: the plan's `validation-snapshot.md` bytes and, for review-tasks,
-    # the `tasks-backup.md` copy of the task list (plan §2). Recorded once per
+    # the `tasks-backup.md` copy of the task list. Recorded once per
     # round; a resume keeps the first binding.
     scope_tasks_source = None
     if tasks_path:
@@ -8450,7 +8428,7 @@ async def _review_orchestration(
 
     # The caller constructs the tracker because the caller is the one that
     # already knows all three of its inputs — the phase dir, the requested
-    # specs, and the plan anchor every config read is resolved against (§9.3.c)
+    # specs, and the plan anchor every config read is resolved against
     # — and because it owns the map afterwards: the deadline backfill, the
     # both-counters restatement and the phase-scoped ticker all happen out here,
     # past the fan-out's return. The fan-out below owns only the mechanics.
@@ -8459,7 +8437,7 @@ async def _review_orchestration(
     )
 
     # A model whose spec changed since the last run has no slot here to retire
-    # its old files; a re-aggregate would read them back (#30).
+    # its old files; a re-aggregate would read them back.
     retire_unselected_results(phase_dir, model_specs)
 
     # Run all models
@@ -8483,7 +8461,7 @@ async def _review_orchestration(
     # review lanes (utils/review_lane.py): each slot saved, the deadline's
     # losses named, the round checked, the bypassed slots recorded, salvage run
     # in-process under `--exec-subagents`, and the exit 3 of a run where no
-    # model answered. §3.6/Stage U: which model served each slot and what it
+    # model answered./Stage U: which model served each slot and what it
     # spent are on its record and nowhere else, and `{model}.json` is a bare
     # suggestion list, so the checkpoint carries both for `--reaggregate`.
     served_models = collect_served_models(results)
@@ -8618,7 +8596,7 @@ async def _review_orchestration(
             diff_data=diff_data,
             served_models=served_models or None,
             usage=usage or None,
-            # Plan §5 T5.2: "N of M requested" counts this fan-out's own specs.
+            #  T5.2: "N of M requested" counts this fan-out's own specs.
             requested_models=len(model_specs),
             claim=claim,
             verdicts=verdicts,
@@ -8626,7 +8604,7 @@ async def _review_orchestration(
         )
 
         # Handle consolidation recommendation (only for phases that support it).
-        # §7.2a: recomputed up *or down* by one helper, shared with the
+        # Recomputed up *or down* by one helper, shared with the
         # reaggregate path, and run even for an empty round so a stale
         # recommendation is removed rather than left standing.
         recompute_consolidation_recommendation(
@@ -8653,7 +8631,7 @@ async def _review_orchestration(
         # because on Claude Code that return IS the background job's completion
         # signal.
         await phase_ticker.stop_ticker()
-        # Plan codex-sandbox-unavailable F1 (2026-09-30): every
+        # Every
         # `[CODEX_HOME_CHECK]` and `[JAIL_DENIED]` line of this run's slots,
         # and the foreign trust tables that appear only here, repeated as the
         # run's last word — the home change outlives the run. On every ending

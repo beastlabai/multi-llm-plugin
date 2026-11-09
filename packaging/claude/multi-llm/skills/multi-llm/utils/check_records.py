@@ -45,7 +45,7 @@ from .state_manager import IMPLEMENT_TASK_GRAPH_KEY
 #: ``task_status`` map's ids belong to THIS phase" has one answer here too.
 #: ``\Z``, never ``$``: ``$`` also matches before a trailing newline, and an
 #: id read back from ``state.json`` (which a repo-wide batch can write) must
-#: be the whole string (fix round 23).
+#: be the whole string.
 _IMPLEMENT_TASK_ID = re.compile(r"^T[0-9]{3}\Z")
 
 #: The line an implement run prints per check task that reported problems
@@ -57,8 +57,7 @@ def check_findings_line(task_id: str, findings: Sequence[str]) -> str:
     """One ``[CHECK_FINDINGS]`` line: a check task that ran and reported
     *findings*. The executor prints it at the end of a run (or a stop); the
     native leg's ``util batch-done --check findings`` prints the same line
-    when it records them (fix round 26, live run 11 #11: that leg keeps no
-    run log, so the line was on the executor's leg alone)."""
+    when it records them."""
     return (
         f"{CHECK_FINDINGS_MARKER} {task_id} {len(findings)} problem(s): "
         f"{'; '.join(findings)}"
@@ -66,7 +65,7 @@ def check_findings_line(task_id: str, findings: Sequence[str]) -> str:
 
 #: The line a code phase prints per batch whose own check failed after its
 #: edits (``CheckHolds.batch_check_lines``, ``util batch-done
-#: --own-check findings`` on a code batch; fix round 14).
+#: --own-check findings`` on a code batch).
 BATCH_CHECK_MARKER = "[BATCH_CHECK_FAILED]"
 
 
@@ -75,11 +74,11 @@ def batch_check_section(
     commit_review: bool = False,
 ) -> List[str]:
     """The ``## Check Findings`` lines for the code batches whose own check
-    failed after their edits (fix round 14), or ``[]``. Shared by the
+    failed after their edits, or ``[]``. Shared by the
     implementation summary (under the check tasks' section when it has one:
     *heading* ``False``) and the apply-code-fixes summary. *commit_review*
     (an apply on a commit brief) names the commit modes rather than the
-    phases they front (plans/review-commits.md §2.8): its edits are
+    phases they front: its edits are
     uncommitted, so they are reviewed once committed, as the new ``HEAD``
     that both modes take with no range."""
     found = [
@@ -114,7 +113,7 @@ def batch_check_section(
         lines += [f"- {finding}" for finding in row_batch_check_findings(row)]
         note = row_batch_check_note(row)
         if note:
-            # Fix round 28: its own words beside the findings, never one.
+            # Its own words beside the findings, never one.
             lines.append(f"- its note (not a finding): {note}")
         lines.append("")
     lines.pop()
@@ -123,8 +122,8 @@ def batch_check_section(
 
 def quoted_findings(findings: Sequence[str], limit: int = 600) -> str:
     """A batch's own check findings, each in double quotes and joined with
-    "; ", bounded at *limit* characters: the batch's words, shown as its words
-    (fix round 16). Cut by :func:`~utils.text_clip.clip` (fix round 22), so
+    "; ", bounded at *limit* characters: the batch's words, shown as its words. Cut by
+    :func:`~utils.text_clip.clip`, so
     a cut quote still closes."""
     return clip("; ".join(f'"{" ".join(str(item).split())}"' for item in findings), limit)
 
@@ -135,7 +134,7 @@ CHECK_NOTE_SHOWN_CHARS = 200
 
 def check_note_clause(note: Optional[str]) -> str:
     """`` (its note: "…")`` for a code batch's own-check note (its
-    ``check.note``, fix round 28), or ``""``: shown beside the check, in its
+    ``check.note``), or ``""``: shown beside the check, in its
     own words, never as a finding."""
     text = " ".join(str(note or "").split())
     if not text:
@@ -145,7 +144,7 @@ def check_note_clause(note: Optional[str]) -> str:
 
 
 def _note_sentence(note: Optional[str]) -> str:
-    """`` Its note: <note>`` for a summary.md line, or ``""`` (fix round 28)."""
+    """`` Its note: <note>`` for a summary.md line, or ``""``."""
     text = " ".join(str(note or "").split())
     return f" Its note: {with_closing_mark(text)}" if text else ""
 
@@ -155,10 +154,10 @@ def batch_check_line(
 ) -> str:
     """The :data:`BATCH_CHECK_MARKER` line for a code batch whose own report
     says a check it ran fails, or could not run; both legs print it
-    (``CheckHolds.batch_check_lines``, ``util batch-done``). Fix
-    round 16 (Codex racing 06r): it says the claim is the batch's own report
-    and quotes it — T006's own words said its corrected check passed. Fix
-    round 28: its own-check *note*, when it gave one, quoted after it
+    (``CheckHolds.batch_check_lines``, ``util batch-done``). It says the claim is the
+    batch's own report
+    and quotes it — T006's own words said its corrected check passed. Its own-check
+    *note*, when it gave one, quoted after it
     (:func:`check_note_clause`)."""
     if batch_check_could_not_run(findings):
         return (
@@ -175,7 +174,7 @@ def batch_check_line(
 
 def write_result_notice(result: Any) -> Optional[str]:
     """What a code phase's result line's ``notice`` owes beyond its check
-    tasks (fix round 14): the batches whose own check failed after their
+    tasks: the batches whose own check failed after their
     edits, and the line saying nothing ran the repository's tests. ``None``
     when there is neither."""
     parts: List[str] = []
@@ -205,16 +204,16 @@ def declined_words(
 
     *positions* maps an item id to its batch and its 1-based number there,
     the number the result contract gave it ("fix 1 = `<id>`"), so the words
-    match what the batch was told (fix round 18).
+    match what the batch was told.
     """
     item = item_word(kind)
     parts = []
     for member, reason in declined.items():
         where = positions.get(str(member))
         label = f"{item} {where[1]} (`{member}`)" if where else f"`{member}`"
-        # Fix round 26: the record keeps the reason's closing stop; every
+        # The record keeps the reason's closing stop; every
         # caller puts a mark after these words (a separator, a bracket, or the
-        # stop `with_closing_mark` adds only where none is, fix round 27).
+        # stop `with_closing_mark` adds only where none is).
         parts.append(f"{label} — {without_closing_mark(reason)}")
     return "; ".join(parts)
 
@@ -222,16 +221,16 @@ def declined_words(
 def batch_check_summary(found: Dict[str, List[str]]) -> str:
     """One sentence naming the code batches whose own check failed, and the
     first problem of each (bounded): the result notice and the RESULT block
-    say it the same way (fix round 14)."""
+    say it the same way."""
     parts = []
     for task_id, findings in found.items():
         first = clip(findings[0], 160) if findings else ""
         more = f" (+{len(findings) - 1} more)" if len(findings) > 1 else ""
-        # Fix round 16 (Codex racing 06r): quoted, so a reader sees the
+        # Quoted, so a reader sees the
         # batch's own words — T006's said its corrected check passed.
         parts.append(f'{task_id} ("{first}"{more})')
     count = len(found)
-    # Fix round 15: a check that could not run is said so, never "failing".
+    # A check that could not run is said so, never "failing".
     could_not = [batch_check_could_not_run(f) for f in found.values()]
     if all(could_not):
         said = "their check could not run"
@@ -250,13 +249,13 @@ def _findings_from_a_failed_claim(data: Any) -> bool:
 
     ``write_verdict.decide`` reads a check's ``failed`` reply that lists
     findings and does not say ``could_not_run`` as findings (``no-op``/ok,
-    labelled ``check-findings``, fix round 12), and ``_stamp_verdict``
+    labelled ``check-findings``), and ``_stamp_verdict``
     records that verdict beside the runner's own words, which stay as the
     runner wrote them: the claim is never the verdict (F1). Resume's
     definition of done read the claim alone, so such a check was never
     done and every plain ``--resume`` dispatched it again on unchanged
-    files, past the rule that keeps its findings (``CheckHolds.check_findings_rerun``;
-    fix round 13). Only the scheduler's own stamp turns the claim into
+    files, past the rule that keeps its findings (``CheckHolds.check_findings_rerun``).
+    Only the scheduler's own stamp turns the claim into
     done-evidence, and only for exactly that verdict.
     """
     if not isinstance(data, dict) or str(data.get("status") or "") != "failed":
@@ -274,7 +273,7 @@ def _findings_from_a_failed_claim(data: Any) -> bool:
 def _declined_from_a_failed_claim(data: Any) -> bool:
     """Whether a result file that claims ``failed`` holds an apply batch read
     as the declined no-op: every item it held declined with a reason, no byte
-    moved (fix round 19, review of round 18 #3).
+    moved.
 
     ``_classify`` reads such a batch as complete whatever word the runner put
     in ``status``, and resume's definition of done read the word alone, so a
@@ -301,7 +300,7 @@ def rerunnable_checks(state: Any) -> List[str]:
     Each implement task with findings on record (``task_check_findings``),
     recorded ``completed`` and not accepted (``--human-task <id>=done``
     writes an ``accepted —`` reason and keeps the findings for review-code).
-    Fix round 11 (review of round 10, T2): such a task used to be done for
+    Such a task used to be done for
     good — ``--resume`` skipped it and ``--human-task <id>=retry`` answered
     only a task recorded ``failed`` — so the tasks it held could never run
     after the user fixed the code. It is materialized again on a resume
@@ -319,7 +318,7 @@ def rerunnable_checks(state: Any) -> List[str]:
         return []
     if not isinstance(recorded, dict):
         return []
-    # Fix round 23 (review of round 22, relay #3): only a task id. The ids
+    # Only a task id. The ids
     # end up in the stop's whys and commands, and state.json sits in the
     # output folder a repo-wide batch can write.
     return sorted(
@@ -334,9 +333,9 @@ def rerunnable_checks(state: Any) -> List[str]:
 def unlanded_on_record(phase_dir: str, state: Any) -> List[str]:
     """Implement tasks recorded done whose change never landed.
 
-    Fix round 15 (review of round 14): a run before fix round 14 recorded an
-    ``applied`` reply that moved not one byte ``completed`` (OpenCode racing
-    run 5's T016). Its result file says so — the verdict is stamped
+    A run recorded an
+    ``applied`` reply that moved not one byte ``completed``. Its result file says so —
+    the verdict is stamped
     ``clean-failure`` at ``ok`` — and the scheduler dispatches such a result
     again (:meth:`ResumeEvidence.result_counts_as_done`), but
     ``--resume`` materializes only unfinished tasks, so it never got the
@@ -372,7 +371,7 @@ def decomposition_graph(
 ) -> List[Dict[str, Any]]:
     """*tasks* plus one node per task of the recorded decomposition they lack.
 
-    Fix round 12 (review of round 11): a ``--resume`` materializes only the
+    A ``--resume`` materializes only the
     unfinished tasks, so a walk over them alone lost every edge through a
     finished one. With T001 → T002 (a check with findings) → T005 (manual,
     answered done) → T006, the first run held T004 and T006; a plain
@@ -385,7 +384,7 @@ def decomposition_graph(
     *tasks* lacks is added as ``{"task_id", "depends_on", "on_record_only":
     True}`` (``executor_role: human`` for a manual one), so a walk passes
     through it. *tasks* win for the ids they hold. A state with no graph on
-    record (one written before fix round 12) adds nothing.
+    record (one written) adds nothing.
     """
     nodes = [task for task in tasks if isinstance(task, dict)]
     if state is None or not hasattr(state, "get"):
@@ -400,7 +399,7 @@ def decomposition_graph(
     have = {str(task.get("task_id", "")) for task in nodes}
     for task_id in sorted(str(key) for key in recorded):
         deps = recorded.get(task_id)
-        # Fix round 23: the record is read back from state.json, so only a
+        # The record is read back from state.json, so only a
         # task id joins the graph, with task ids as its edges.
         if (not _IMPLEMENT_TASK_ID.match(task_id) or task_id in have
                 or not isinstance(deps, list)):
@@ -423,7 +422,7 @@ def held_back_by_checks(
     """``(task id, check id)`` for each implement task a check with findings
     holds back and that has not run, by task id.
 
-    Computed, never read off a recorded reason (fix round 12: two checks
+    Computed, never read off a recorded reason (two checks
     held D, the first was recorded again as passed, D's reason was cleared
     while the second's findings stood, and ``util finalize-tracking
     --mark-completed`` completed implement with D unrun): the held checks are
@@ -495,7 +494,7 @@ def upstream_held_check(
     task depends on that *tasks* does not hold is still compared, just not
     walked further — so pass the whole graph (:func:`decomposition_graph`):
     a task a resume did not materialize is exactly where the walk used to
-    stop short of the check (fix round 12).
+    stop short of the check.
     """
     held_set = {str(item) for item in held}
     if not held_set:
@@ -519,9 +518,7 @@ def upstream_held_check(
 #: Bounds on the note a task's prompt carries about the checks upstream of it
 #: whose findings the user accepted (:func:`accepted_checks_section`): the
 #: findings are a model's words, so a prompt quotes a few of them. Each one is
-#: quoted whole as recorded (fix round 18, live run 7: the native leg's T007
-#: prompt cut a 211-character finding at 200 with "…", while the executor
-#: routes' shorter findings read whole): a finding is bounded once, where it
+#: quoted whole as recorded: a finding is bounded once, where it
 #: is recorded (``check_findings_from``, both legs), and the note's cut is
 #: that same bound, so it only ever shortens a finding written to
 #: ``state.json`` by hand.
@@ -564,7 +561,7 @@ def accepted_upstream_checks(
     """``(check id, title, findings)`` for each check upstream of *task_id*
     whose findings the user accepted, by id.
 
-    Fix round 14 (rerun 5, every host's accept path): ``--human-task
+    ``--human-task
     T002=done`` released T007, held behind T002's findings, and T007's prompt
     showed T002's problems with nothing saying the user had accepted them, so
     every runner refused or failed it. The walk is the hold's own, transitive
@@ -637,11 +634,10 @@ def accepted_checks_section(checks: Sequence[Tuple[str, str, List[str]]]) -> str
         f"what can be done, and say in your `summary` what you left out and why "
         f"(answer `failed` if none of it can be done).",
         "",
-        # Fix round 22 (live run 9, OpenCode accept 02): T007 ran T002's
+        # T007 ran T002's
         # check again while writing the note on it, reported the accepted
         # failure as its own, and the phase read "not a clean finish".
-        # Fix round 28 (live run 12, stop accept 02 on Claude Code and
-        # OpenCode): "you may cite them (for example, in a note on the
+        # "you may cite them (for example, in a note on the
         # check's outcome)" drew notes written into the finding itself,
         # "… (known problem the user accepted in T002)", which the strict
         # match reads as this task's own failure. One exact way to report a
@@ -683,7 +679,7 @@ def accepted_checks_section(checks: Sequence[Tuple[str, str, List[str]]]) -> str
 #: The line a code task prints when its own check reported only findings the
 #: user accepted for a check (``--human-task <check>=done``): both legs
 #: (``CheckHolds.batch_check_lines``, ``util batch-done``), in place
-#: of :data:`BATCH_CHECK_MARKER` for those findings (fix round 22).
+#: of :data:`BATCH_CHECK_MARKER` for those findings.
 BATCH_CHECK_ACCEPTED_MARKER = "[BATCH_CHECK_ACCEPTED]"
 
 #: Words a finding wraps a check's output in ("check failed:", "and
@@ -701,7 +697,7 @@ _FINDING_FILLER = frozenset({
 _FINDING_QUOTES = str.maketrans({mark: " " for mark in "`'\"‘’“”"})
 
 #: An exit status, dropped so the same failure reported with its exit code
-#: still matches — only a whole exit clause (fix round 23: "exited with 9
+#: still matches — only a whole exit clause ("exited with 9
 #: failures in …" lost its count, read as an exit code, and matched an
 #: accepted "exited with 3 failures in …"): a parenthesized one ("(exit 1)",
 #: "(exited with code 2)"), one that says `code`/`status` ("exit code 1",
@@ -769,7 +765,7 @@ def _says_only(words: Sequence[str], accepted: Sequence[Sequence[str]]) -> bool:
     one of them, or (at least :data:`ACCEPTED_MATCH_MIN_WORDS` words) the
     first words of one of them, in its order.
 
-    Fix round 23 (records #3): never a run from the middle of a finding,
+    Never a run from the middle of a finding,
     which matched a slice that dropped its leading qualifier ("x in a.js"
     of "no-unused-vars x in a.js line 10"), and never several accepted
     findings read one after the other, which let a finding straddling two
@@ -782,7 +778,7 @@ def _says_only(words: Sequence[str], accepted: Sequence[Sequence[str]]) -> bool:
     return any(list(item)[:len(words)] == words for item in accepted)
 
 
-#: A word asking the task to fix something (fix round 23), and what such an
+#: A word asking the task to fix something, and what such an
 #: ask names when it is about a check's report; "make … pass" / "until …
 #: passes" asks for a passing check by itself.
 _FIX_ASK = re.compile(
@@ -808,7 +804,7 @@ def task_own_text(task: Mapping[str, Any]) -> str:
     ``## Task`` section and acceptance criteria of its prompt — never the
     plan context, the dependency titles or the prior batches around them.
     Both legs keep it beside a failing own check
-    (``state_manager.TASK_OWN_TEXT_KEY``, fix round 29)."""
+    (``state_manager.TASK_OWN_TEXT_KEY``)."""
     prompt = str(task.get("prompt") or "")
     parts = [str(task.get("task_title") or task.get("title") or ""),
              str(task.get("description") or "")]
@@ -866,7 +862,7 @@ def task_owns_the_check(
     """Whether *task*'s own text (:func:`task_own_text`) makes the accepted
     check's failure its own: it names the check's command (any accepted
     finding's, :func:`_finding_parts`), or asks to fix what it reported or
-    to make it pass (:func:`_asks_to_fix`). Fix round 23 (records #2): "T009:
+    to make it pass (:func:`_asks_to_fix`). "T009:
     run the suite and fix failures", released by the check it fixes, had its
     still-failing check read as the accepted findings."""
     text = task_own_text(task)
@@ -887,7 +883,7 @@ def accepted_findings_for(
     """``{check id: findings}`` an implement task's own check may report
     again as what the user accepted (:func:`split_accepted_findings`).
 
-    Fix round 23 (records #2): round 22 split every implement task's own
+    Round 22 split every implement task's own
     check against every accepted check of the phase. Only a task whose
     prompt carried the accepted-checks section — one that depends on the
     check, directly or transitively (:func:`accepted_upstream_checks`) — was
@@ -908,8 +904,7 @@ def accepted_findings_for(
 def reported_checks_on_record(state: Any) -> Dict[str, List[str]]:
     """``{check id: findings}`` for every implement check task whose check
     reported problems, as recorded: ``task_check_findings`` beside a
-    ``completed`` status, the user's answer either way (fix round 28; the
-    accepted ones are :func:`accepted_checks_on_record`'s subset)."""
+    ``completed`` status, the user's answer either way."""
     if state is None or not hasattr(state, "get"):
         return {}
     try:
@@ -938,7 +933,7 @@ def repeated_findings_for(
     (:func:`task_owns_the_check`). *tasks* is the decomposition, as
     :func:`accepted_findings_for` takes it.
 
-    Fix round 28 (live run 12, OpenCode stop accept 01): T001's runner ran
+    T001's runner ran
     T002's release check unprompted, and the failure T002 exists to report
     was recorded as ``[BATCH_CHECK_FAILED] T001``, "own check fails T001" and
     "T001: a check it ran fails". Split with :func:`split_repeated_findings`
@@ -946,13 +941,13 @@ def repeated_findings_for(
     as repeating that check's finding (``batch_check_repeats``), never as the
     task's own failure, whichever of the two finished first.
 
-    Fix round 29 (review of round 28, checks #2): an accepted check is never
+    An accepted check is never
     one, upstream of the task or not. Its findings are the accepted ones, and
     only a task the acceptance released was told they are known and not its
     own (:func:`accepted_findings_for`, read first); a task it never released
     that reports one again keeps it as its own failure (round 23's scope),
     the same with F3's annotation or without it. T002 not yet accepted when
-    T001 recorded (run 12's case) still makes T001's finding a repeat.
+    T001 recorded still makes T001's finding a repeat.
 
     Only a check of the decomposition implement recorded last
     (``implement_task_ids``, when one is on record) is eligible: a check a
@@ -981,8 +976,7 @@ def repeated_findings_for(
 def move_check_repeats_in_state(
     state: Dict[str, Any], tasks: Sequence[Dict[str, Any]], check_id: str,
 ) -> Dict[str, Tuple[List[str], Dict[str, List[str]]]]:
-    """A check task's findings recorded after a code task's own check (fix
-    round 28, the check recording second): each implement task recorded
+    """A check task's findings recorded after a code task's own check: each implement task recorded
     ``completed`` whose failing own check (``task_batch_check``) holds, by
     :func:`repeated_findings_for`'s strict comparison, the finding
     *check_id* now has on record has that finding moved into
@@ -993,7 +987,7 @@ def move_check_repeats_in_state(
     scheduler's :meth:`WriteBatchScheduler._move_repeats_of` and ``util
     batch-done --check findings``.
 
-    Fix round 29 (review of round 28, checks #1): a ``--resume``
+    A ``--resume``
     materializes only what it hands out, and a completed task was rebuilt
     from its title, so a task whose ``## Task`` asked it to make the check
     pass (:func:`task_owns_the_check`) had its own failure moved when the
@@ -1051,7 +1045,7 @@ def move_check_repeats_in_state(
 
 
 #: The line a code task prints when its own check reported only the same
-#: findings a check task of the run reported (fix round 28): both legs, in
+#: findings a check task of the run reported: both legs, in
 #: place of :data:`BATCH_CHECK_MARKER` for those findings.
 BATCH_CHECK_REPEATED_MARKER = "[BATCH_CHECK_REPEATED]"
 
@@ -1062,7 +1056,7 @@ def batch_check_repeated_line(
     """The :data:`BATCH_CHECK_REPEATED_MARKER` line for a code task whose
     own check reported only what a check task of the run reported
     (:func:`repeated_findings_for`): both legs print it, never as the task's
-    own failure (fix round 28)."""
+    own failure."""
     checks = list(matched)
     named = checks[0] if len(checks) == 1 else ", ".join(checks[:-1]) + f" and {checks[-1]}"
     found = [item for items in matched.values() for item in items]
@@ -1082,7 +1076,7 @@ def split_accepted_findings(
     the user accepted for that check (*accepted*: the task's
     :func:`accepted_findings_for`).
 
-    Fix round 22 (live run 9, OpenCode accept 02): T007, released by
+    T007, released by
     ``--human-task T002=done``, ran T002's check again and reported
     "node scripts/check.mjs: check failed: retries must be 3 (found 2) (exit
     1)" — T002's accepted "node scripts/check.mjs: retries must be 3 (found
@@ -1134,7 +1128,7 @@ def accepted_findings_with_words_added(
 ) -> List[Tuple[str, str, str]]:
     """``[(finding, check id, accepted finding)]`` for each of *findings*
     that holds one of the *accepted* findings word for word (whitespace
-    aside) with more words before or after it (fix round 28).
+    aside) with more words before or after it.
 
     Live run 12 (stop accept 02): the released T007 reported its re-run of
     T002's check with its own comment written into the finding, "…
@@ -1171,7 +1165,7 @@ def words_added_to(finding: str, accepted: str) -> str:
     restate line offers as the ``--note``, one plain line, the separators
     and one pair of brackets around them dropped.
 
-    Fix round 29 (review of round 28, checks #4): a bracket the partition
+    A bracket the partition
     cut from its pair — the ``[`` before and the ``]`` after an accepted
     finding written ``[<accepted>] — my note`` — is dropped too, so the note
     reads ``my note``, never ``[; ] — my note``."""
@@ -1218,11 +1212,11 @@ def restate_findings_problem(
     task_id: str, flagged: Sequence[Tuple[str, str, str]],
 ) -> str:
     """The one problem the executor's report re-ask names for *flagged*
-    (:func:`accepted_findings_with_words_added`; fix round 28): each finding
+    (:func:`accepted_findings_with_words_added`): each finding
     and the accepted finding it holds, as JSON strings, and the two ways to
     answer — cut it down to the accepted one with the words in ``note``, or
     keep it whole when those words report more than the accepted finding.
-    Fix round 29 (review of round 28, checks #3): it says plainly that a
+    It says plainly that a
     note is a comment, never a failure, so a second failure the check
     printed stays in the finding — the merge cannot tell a comment from a
     failure moved to the note, and no semantic reading is added."""
@@ -1252,8 +1246,7 @@ def split_repeated_findings(
 ) -> Tuple[List[str], Dict[str, List[str]]]:
     """``(own, matched)``: a code task's own check *findings*, split into its
     own and, by check id, the ones that are the same finding a check task of
-    the run reported (*reported*: :func:`repeated_findings_for`; fix round
-    28).
+    the run reported (*reported*: :func:`repeated_findings_for`).
 
     The strict comparison of :func:`split_accepted_findings` — the same
     command, and words one reported finding already says, all of it or its
@@ -1291,8 +1284,8 @@ def batch_check_accepted_line(
 ) -> str:
     """The :data:`BATCH_CHECK_ACCEPTED_MARKER` line for a code task whose own
     check reported again what the user accepted (:func:`split_accepted_findings`):
-    both legs print it, never as the task's own failure (fix round 22). Fix
-    round 28: its own-check *note* after it (:func:`check_note_clause`)."""
+    both legs print it, never as the task's own failure. Its own-check *note* after it
+    (:func:`check_note_clause`)."""
     checks = list(matched)
     named = checks[0] if len(checks) == 1 else ", ".join(checks[:-1]) + f" and {checks[-1]}"
     answers = " ".join(f"--human-task {check_id}=done" for check_id in checks)

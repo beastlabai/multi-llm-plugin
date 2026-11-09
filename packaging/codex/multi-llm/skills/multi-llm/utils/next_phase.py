@@ -1,4 +1,4 @@
-"""The next-phase command a finished phase ends with (plans/next-phase-command.md §2.1).
+"""The next-phase command a finished phase ends with.
 
 One function builds the string, and every emitter (``multi_llm.main``,
 ``run_status``'s terminal poll, ``util next-command``) only passes it through:
@@ -28,8 +28,7 @@ The contract, briefly:
 * On a commit review (the plan's ``state.json`` holds ``commit_range``) a
   command naming review-code, apply-code-fixes or improve-commits is spelled
   as the commit mode with the pinned range instead, through
-  ``utils/commit_spelling`` (plans/review-commits.md §2.8,
-  :func:`commit_view_for`). A plan's run, and a direct ``--head-ref`` run, are
+  ``utils/commit_spelling``. A plan's run, and a direct ``--head-ref`` run, are
   never mapped.
 """
 
@@ -50,7 +49,7 @@ from .text_clip import plain_line
 if TYPE_CHECKING:  # pragma: no cover - annotations only
     from .commit_spelling import CommitView
 
-#: The four line kinds of the block (§2.2(2)). The text after a command
+#: The four line kinds of the block. The text after a command
 #: marker and one space is the builder's ``command`` byte for byte; an
 #: optional entry's ``why`` sits on its own line directly above its command.
 NEXT_COMMAND_MARKER = "[NEXT_COMMAND]"
@@ -61,12 +60,11 @@ WORKFLOW_COMPLETE_MARKER = "[WORKFLOW_COMPLETE]"
 #: then the title when ``state.json`` recorded one. Not a command marker.
 MANUAL_TASK_MARKER = "[MANUAL_TASK]"
 #: One line after the ``[MANUAL_TASK]`` lines: how to record them done
-#: (:func:`manual_close_note`, fix round 14). Not a command marker: the line
+#: (:func:`manual_close_note`). Not a command marker: the line
 #: is a sentence that carries the command, never the command alone.
 MANUAL_TASK_NOTE_MARKER = "[MANUAL_TASK_NOTE]"
 #: The line after ``[MANUAL_TASK_NOTE]``: the command that records the
-#: manual tasks done, alone (fix round 22, live run 9: the note carried it at
-#: its end, and the tool-route hosts folded it into prose). A command marker
+#: manual tasks done, alone. A command marker
 #: like ``[NEXT_COMMAND]``: the Stop hook holds the report to it.
 MANUAL_TASK_COMMAND_MARKER = "[MANUAL_TASK_COMMAND]"
 #: One line above the block when the command it names is certain to be refused
@@ -75,14 +73,14 @@ MANUAL_TASK_COMMAND_MARKER = "[MANUAL_TASK_COMMAND]"
 RUNNER_WARNING_MARKER = "[RUNNER_WARNING]"
 
 #: The answers line pair ``util next-command`` prints under a resume of a
-#: stopped native implement (fix round 14): the why on its own line, then one
+#: stopped native implement: the why on its own line, then one
 #: resume command carrying every ``--human-task`` answer the stop waits for.
 #: A command marker like the others: the text after it is the command alone.
 NEXT_COMMAND_ANSWERS_WHY_MARKER = "[NEXT_COMMAND_ANSWERS_WHY]"
 NEXT_COMMAND_ANSWERS_MARKER = "[NEXT_COMMAND_ANSWERS]"
 
 #: The line ``util next-command`` prints directly above the ``--resume`` of a
-#: stopped native implement (fix round 22): what that plain resume does on an
+#: stopped native implement: what that plain resume does on an
 #: unchanged tree (``stop_answers.native_resume_why``), as the
 #: answers' why lines say what each answer does. Not a command marker.
 NEXT_COMMAND_WHY_MARKER = "[NEXT_COMMAND_WHY]"
@@ -96,7 +94,7 @@ MAX_RECORDED_WHY_CHARS = 600
 #: the executor composes — an implement task's ``done``/``skip``/``retry``
 #: (``stop_answers.compose_stop_answers``) and an apply batch's
 #: ``skip`` of a partial application (``WriteBatchScheduler._stop_answers``).
-#: Matched whole (fix round 23).
+#: Matched whole.
 _RECORDED_ANSWER = re.compile(
     r"T[0-9]{3}=(?:done|skip|retry)|apply-(?:task-|fix-)?batch-[0-9]+=skip")
 
@@ -106,14 +104,12 @@ RESUME_COMMAND_MARKER = "[RESUME_COMMAND]"
 
 #: The line ``util next-command`` prints above a stopped native implement's
 #: commands when nothing ran the repository's tests
-#: (``verification_lines.native_stop_unverified_line``, fix round 18): the
+#: (``verification_lines.native_stop_unverified_line``): the
 #: executor stop's own line, for the report. Not a command marker: the text
 #: after it is a sentence that names a setting, never a command to copy.
 TESTS_NOT_RUN_MARKER = "[TESTS_NOT_RUN]"
 
-#: The lines ``util next-command`` prints around its answer's ``markdown``
-#: (fix round 24, live run 10: Claude Code racing 06 put the manual tasks
-#: before the next-step fence, and its stops captioned the resume three ways):
+#: The lines ``util next-command`` prints around its answer's ``markdown``:
 #: the report's closing section already written, below the marker lines, for
 #: the report to copy as it is. Every line between the two is the section's;
 #: the Stop hook reads no marker line there (``report_check.find_blocks``).
@@ -123,9 +119,7 @@ NEXT_STEP_MARKDOWN_END_MARKER = "[NEXT_STEP_MARKDOWN_END]"
 #: The block's markers whose lines say what ``user_next_step`` carries itself
 #: (its ``complete``, ``command``, ``why``, ``optional_before``, ``answers``
 #: and ``manual_tasks`` keys, all in its ``markdown``). A tool server drops
-#: these lines from the ``output`` of a result that carries the key (fix
-#: round 27, the Fable review of round 26: the model was handed the manual
-#: note and the optional whys in both), shipped as the surface's
+#: these lines from the ``output`` of a result that carries the key, shipped as the surface's
 #: ``dispatcher.next_step_markers``. ``[RUNNER_WARNING]`` and
 #: ``[TESTS_NOT_RUN]`` are not among them: the key does not carry them. A
 #: shell and the Claude Code leg read every line (its Stop hook does).
@@ -147,8 +141,7 @@ CARRIED_BLOCK_MARKERS: Tuple[str, ...] = (
 ARGS_SLOT = "{args}"
 
 #: Appended when the phase a command names is recorded ``in_progress``: a bare
-#: re-invocation of a write phase starts it over (§2.1, "``--resume`` is built
-#: from state"). Never copied from the finished invocation's argv.
+#: re-invocation of a write phase starts it over. Never copied from the finished invocation's argv.
 RESUME_FLAG = "--resume"
 
 #: The route key of a plain-skill install, told apart from the plugin by the
@@ -157,7 +150,7 @@ SKILL_ROUTE = "skill"
 
 #: An implement task id, the whole string (``task_decomposer.TASK_ID_PATTERN``).
 #: The manual tasks and the ids a close command answers are read back from
-#: ``state.json``, which a repo-wide batch can write (fix round 23).
+#: ``state.json``, which a repo-wide batch can write.
 _TASK_ID = re.compile(r"T[0-9]{3}")
 
 #: Whitespace-free path components in ``install_paths`` that stand for a
@@ -186,7 +179,7 @@ class OptionalStep:
 class ManualTask:
     """One implement task the run deferred to the user (``state.json``: ``skipped``).
 
-    ``waits_on`` (fix round 17) is set on a task skipped because it depends
+    ``waits_on`` is set on a task skipped because it depends
     on a deferred manual task: a task implement runs itself once that one is
     recorded done, which the old wording ("no phase will run") denied.
     """
@@ -194,9 +187,8 @@ class ManualTask:
     id: str
     title: Optional[str] = None
     waits_on: Optional[str] = None
-    #: A manual task that comes after code tasks implement has not run yet
-    #: (fix round 28, live run 12, Codex racing 06: T008 and T009 depend on
-    #: code the manual T010 held back): those code tasks, by id. Such a task is not in
+    #: A manual task that comes after code tasks implement has not run yet: those
+    #: code tasks, by id. Such a task is not in
     #: the command that records manual tasks done until they have run.
     after: Tuple[str, ...] = ()
 
@@ -226,7 +218,7 @@ AFTER_IDS_SHOWN = 5
 
 def after_code_note(task_ids: Sequence[str]) -> str:
     """What a manual task that comes after code not run yet says after its
-    title (fix round 28): ``(after T001: do it once implement has run that
+    title: ``(after T001: do it once implement has run that
     task)``."""
     ids = [str(task_id) for task_id in task_ids]
     shown = ids[:AFTER_IDS_SHOWN]
@@ -238,7 +230,7 @@ def after_code_note(task_ids: Sequence[str]) -> str:
 
 def waits_on_note(task_id: str) -> str:
     """What a task skipped with deferred manual task *task_id* is: implement
-    runs it on the resume that records *task_id* done (fix round 17)."""
+    runs it on the resume that records *task_id* done."""
     return f"(waits on {task_id}: implement runs it once {task_id} is recorded done)"
 
 
@@ -274,63 +266,52 @@ class NextPhase:
     warning: Optional[str] = None
     #: The implement tasks the run deferred: the manual tasks the user still
     #: owes, and the tasks skipped with one, which implement runs once it is
-    #: recorded done (``waits_on``, fix round 17; 2026-10-04, OpenCode: `[WORKFLOW_COMPLETE]`
-    #: beside two deferred manual playthroughs said nothing about them). On a
-    #: ``complete`` answer since then, and on a command answer too since fix
-    #: round 16 (Codex racing 06r/07: the host named T009 as manual from the
-    #: notice but never the command that records it done; only the complete
-    #: answer of 08 carried it). Every block renders them: under
-    #: ``[WORKFLOW_COMPLETE]``, and after a command block's commands
-    #: (:func:`render_next_phase_lines`).
+    #: recorded done (``waits_on``). Present on a ``complete`` answer and on a
+    #: command answer. Every block renders them: under ``[WORKFLOW_COMPLETE]``,
+    #: and after a command block's commands (:func:`render_next_phase_lines`).
     manual_tasks: Tuple[ManualTask, ...] = ()
     #: On a ``--resume`` of a stopped implement, from ``util next-command``
     #: only: each answer the stop offers, the one combined command first
-    #: (:func:`implement_answers`; fix round 20: each alone too, as the tool
+    #: (:func:`implement_answers`; each alone too, as the tool
     #: routes list them). Rendered after the primary and the optional
     #: entries, a why line above each command, and carried as the list
     #: ``user_next_step.answers``.
     answers: Tuple[AnswersStep, ...] = ()
     #: Beside ``manual_tasks``: how the user records them done
     #: (:func:`manual_close_lead`, a sentence leading into
-    #: ``manual_tasks_command``; fix round 14, the command apart since fix
-    #: round 22).
+    #: ``manual_tasks_command``, the command apart).
     manual_tasks_note: Optional[str] = None
     #: The command that records the manual tasks done, in the host's spelling
-    #: (:func:`close_command`; fix round 22).
+    #: (:func:`close_command`).
     manual_tasks_command: Optional[str] = None
     #: On a stopped native implement's ``--resume``, from ``util
-    #: next-command`` only: the line saying nothing ran the repository's tests
-    #: (fix round 18), printed as ``[TESTS_NOT_RUN]`` above the commands and
+    #: next-command`` only: the line saying nothing ran the repository's tests, printed
+    #: as ``[TESTS_NOT_RUN]`` above the commands and
     #: never part of ``user_next_step`` (the tool routes carry it in the
     #: stop's ``error``).
     tests_note: Optional[str] = None
     #: On a stopped native implement's ``--resume``, from ``util
-    #: next-command`` only: what that plain resume does on an unchanged tree
-    #: (fix round 22, live run 9: the hosts gave it a why of their own, "re-runs
-    #: the T002 check", false while the files are unchanged). Printed as
+    #: next-command`` only: what that plain resume does on an unchanged tree. Printed as
     #: ``[NEXT_COMMAND_WHY]`` above the command and carried as
     #: ``user_next_step.why``.
     why: Optional[str] = None
-    #: On a resume of a stopped phase (fix round 24): the line the section
+    #: On a resume of a stopped phase: the line the section
     #: opens with (:func:`resume_lead`), in ``markdown`` only.
     lead: Optional[str] = None
     #: Another way on instead of the primary, each with its why above its
-    #: command, rendered after the primary and its optional entries (fix
-    #: round 28, live run 12, Codex racing 06: implement left code tasks
-    #: waiting on a manual task, and review-code of what ran so far is the
-    #: other way on beside the resume that runs them). Carried as
+    #: command, rendered after the primary and its optional entries. Carried as
     #: ``user_next_step.instead``; the block prints each as an optional pair.
     instead: Tuple[OptionalStep, ...] = ()
 
     def to_dict(self) -> Dict[str, Any]:
-        """The ``user_next_step`` value (§2.1's outcome table).
+        """The ``user_next_step`` value (the outcome table).
 
         Complete is ``{"phase": null, "command": null, "complete": true}``,
         plus ``manual_tasks`` (``[{id, title}]``) when the run deferred any —
         additive, so a reader that knows only the three keys reads the same
         completion; otherwise ``optional_before`` is present only when non-empty.
         Every answer ends with ``markdown``, the step as the report's closing
-        section (:func:`render_next_step_markdown`, fix round 22), also additive.
+        section (:func:`render_next_step_markdown`), also additive.
         """
         if self.complete:
             payload = {"phase": None, "command": None, "complete": True}
@@ -349,7 +330,7 @@ class NextPhase:
         if self.answers:
             payload["answers"] = [step.to_dict() for step in self.answers]
         if self.manual_tasks:
-            # Fix round 16: the tool routes relay this key, and `util
+            # The tool routes relay this key, and `util
             # next-command` prints it as [MANUAL_TASK_NOTE].
             payload["manual_tasks"] = [task.to_dict() for task in self.manual_tasks]
             self._close_keys(payload)
@@ -395,7 +376,7 @@ def _manual_tasks(
     them and the command that does (both ``None`` without a template and
     plan, or with nothing to answer).
 
-    The command answers :func:`manual_close_ids` only (fix round 16).
+    The command answers :func:`manual_close_ids` only.
     """
     implement = phases.get("implement") or {}
     entries = implement.get("manual_tasks") or ()
@@ -432,7 +413,7 @@ def manual_note_ids(implement: Mapping[str, Any]) -> List[str]:
     (:func:`manual_gate_ids`) — the resume the stop's section leads with —
     else every one the user can do now (:func:`manual_close_ids`).
 
-    Fix round 29 (review of round 28 #2): with a free manual task beside the
+    With a free manual task beside the
     gating one, summary.md's note, ``status``'s trailer and the lookup's note
     gave ``--human-task T001=done --human-task T002=done`` beside the
     section's ``--human-task T002=done``: two different record-done commands
@@ -449,7 +430,7 @@ def manual_note_named(
     implement: Mapping[str, Any], ids: Sequence[str],
 ) -> Optional[List[str]]:
     """*ids*, when the note's command records fewer manual tasks than the
-    deferred list names (a gate beside a free manual task, fix round 29), so
+    deferred list names (a gate beside a free manual task), so
     its lead names them rather than saying "this manual task"; else
     ``None``."""
     if not implement.get("manual_gate"):
@@ -468,8 +449,7 @@ def manual_waiting_count(
 ) -> int:
     """How many code tasks wait on the manual tasks *ids* (every one the
     workflow payload's ``implement`` entry names, by default): the
-    ``manual_waiting`` map ``check_workflow_prerequisites`` records (fix
-    round 28), each code task once."""
+    ``manual_waiting`` map ``check_workflow_prerequisites`` records, each code task once."""
     waiting = implement.get("manual_waiting")
     if not isinstance(waiting, Mapping):
         return 0
@@ -492,7 +472,7 @@ GATE_TITLE_CHARS = 80
 def manual_gate_ids(implement: Mapping[str, Any]) -> List[str]:
     """The manual tasks code tasks wait on that the user can do now: the
     workflow payload's ``manual_close_ids`` that its ``manual_waiting`` map
-    names (fix round 28). Recording them done is what lets implement run
+    names. Recording them done is what lets implement run
     the code tasks they hold."""
     waiting = implement.get("manual_waiting")
     if not isinstance(waiting, Mapping):
@@ -506,7 +486,7 @@ def manual_gate_ids(implement: Mapping[str, Any]) -> List[str]:
 def manual_gate_flags(implement: Mapping[str, Any]) -> List[str]:
     """``--resume --human-task <id>=done …`` for :func:`manual_gate_ids`,
     or ``[]`` when no code task waits on a manual task the user can do now
-    (fix round 28): the one resume that runs them, recording only those
+    The one resume that runs them, recording only those
     manual tasks done, never a later one that comes after code not run."""
     ids = manual_gate_ids(implement)
     if not ids:
@@ -520,9 +500,9 @@ def manual_gate_flags(implement: Mapping[str, Any]) -> List[str]:
 def gate_resume_closes_the_manual_tasks(implement: Mapping[str, Any]) -> bool:
     """Whether the resume a stopped implement's section leads with
     (:func:`_resume_flags` under ``manual_gate``) is the very command the
-    note under the deferred list gives (the merge of fix round 28): while a
+    note under the deferred list gives: while a
     gate holds, the note records the gate's manual tasks done and no other
-    (:func:`manual_note_ids`, fix round 29). A stop's notice then names the
+    (:func:`manual_note_ids`). A stop's notice then names the
     tasks and leaves that command to the section."""
     if not implement.get("manual_gate"):
         return False
@@ -551,8 +531,7 @@ def _manual_gate_names(implement: Mapping[str, Any], ids: Sequence[str]) -> str:
 
 
 def manual_gate_why(implement: Mapping[str, Any], *, stopped: bool = True) -> Optional[str]:
-    """What the resume :func:`manual_gate_flags` spells does (fix round 28,
-    live run 12, Codex racing 06), one plain line, or ``None``.
+    """What the resume :func:`manual_gate_flags` spells does, one plain line, or ``None``.
 
     *stopped*: implement is not finished and a plain resume runs nothing
     (``manual_gate`` on the payload); else it finished with these code tasks
@@ -591,8 +570,8 @@ def manual_gate_why(implement: Mapping[str, Any], *, stopped: bool = True) -> Op
 
 def manual_gate_decline_answers(implement: Mapping[str, Any]) -> List[Dict[str, Any]]:
     """The other ways on from a manual-task gate, as stop answers
-    (``[{"flags", "why"}]``, ``--resume`` first), or ``[]`` (fix round 29,
-    review of round 28 #1: under ``--yes`` the gate re-stopped on every
+    (``[{"flags", "why"}]``, ``--resume`` first), or ``[]`` (under ``--yes`` the gate
+    re-stopped on every
     ``--human-task <id>=skip`` and only a false ``=done`` went on).
 
     For each manual task the gate's resume records done
@@ -637,8 +616,8 @@ def manual_gate_decline_answers(implement: Mapping[str, Any]) -> List[Dict[str, 
 
 def gate_resume_suggested(workflow: Mapping[str, Any]) -> List[str]:
     """The flags of implement's resume when it, not the payload's
-    ``suggested_next``, is the next step, else ``[]`` (fix round 29, review
-    of round 28 #4): implement completed with code tasks still waiting on a
+    ``suggested_next``, is the next step, else ``[]``: implement completed with code
+    tasks still waiting on a
     manual task the user can do now (:func:`manual_gate_flags`) and the
     suggestion is a phase after it. ``next_phase_commands`` then leads with
     that resume, the suggested phase kept as the other way on, as its
@@ -657,7 +636,7 @@ def gate_resume_suggested(workflow: Mapping[str, Any]) -> List[str]:
 
 def instead_why(phase: str) -> str:
     """The why above the way on that stays beside the resume running code
-    tasks left waiting on a manual task (fix round 28)."""
+    tasks left waiting on a manual task."""
     if phase == "code-review":
         return "Or review the code implement has run so far:"
     return "Or go on with the workflow on the code implement has run so far:"
@@ -667,7 +646,7 @@ def manual_close_ids(implement: Mapping[str, Any]) -> List[str]:
     """The deferred ids a ``--human-task <id>=done`` closes, off the workflow
     payload's ``implement`` entry: ``manual_close_ids`` (the manual tasks
     themselves, ``StateManager.manual_tasks_to_close``) when present, else
-    every ``manual_tasks`` id (a payload built before fix round 16)."""
+    every ``manual_tasks`` id (a payload built)."""
     recorded = implement.get("manual_close_ids")
     if isinstance(recorded, list):
         return [str(task_id) for task_id in recorded
@@ -687,7 +666,7 @@ def _with_manual_tasks(
     plan_arg: str,
 ) -> NextPhase:
     """*answer* (a command answer) carrying the deferred manual tasks and the
-    note on recording them done, when the run deferred any (fix round 16)."""
+    note on recording them done, when the run deferred any."""
     manual, note, command = _manual_tasks(phases, template=template, plan_arg=plan_arg)
     if not manual:
         return answer
@@ -700,8 +679,7 @@ def _with_manual_tasks(
 def close_command(template: str, plan_arg: str, task_ids: Sequence[str]) -> str:
     """``--implement <plan> --resume --human-task <id>=done …``, host-spelled.
 
-    How the user records deferred manual tasks done (fix round 14, Codex
-    racing 06/08: T007 was deferred and nothing said how to close it). On
+    How the user records deferred manual tasks done. On
     implement's resume a ``done`` answer completes a manual task under every
     strategy, and a resume that only records answers keeps implement's
     completion date, so the review after it does not go stale.
@@ -718,21 +696,19 @@ def manual_close_lead(
     """The sentence that leads into the command closing deferred manual
     tasks (:func:`close_command`), ending with a colon: what
     ``user_next_step.manual_tasks_note`` and ``[MANUAL_TASK_NOTE]`` say, the
-    command beside it on its own (fix round 22).
+    command beside it on its own.
 
-    *count* is how many tasks the command records done. Fix round 26 (live
-    run 11, Codex 06): for one task the plural sentence ("these manual
+    *count* is how many tasks the command records done. For one task the plural sentence
+    ("these manual
     tasks … keeping a --human-task answer only for each task you did") read
     wrong, and the host rewrote it, dropping the clause; one task gets the
     singular sentence, which has nothing to keep or drop.
 
-    *waiting* is how many code tasks wait on them (fix round 28, live run
-    12, Codex racing 06: "No later phase waits for these manual tasks" beside
-    nine code tasks waiting on T010): implement has not run those, and the
+    *waiting* is how many code tasks wait on them: implement has not run those, and the
     command that records the manual task done runs them, so the sentence
     says that instead.
 
-    *named* (fix round 29): the ids the command records, when the list
+    *named*: the ids the command records, when the list
     above it names other manual tasks too (a manual-task gate beside a free
     one): the sentence names them instead of saying "this manual task".
     """
@@ -775,9 +751,7 @@ def manual_close_note(
     """The one plain line that says how to close deferred manual tasks, for a
     surface that is one line of text (a summary, ``status``'s trailer).
 
-    The command ends the line, with nothing after it (live run 8, Codex
-    racing 08: the advice used to follow it in parentheses, and the host
-    copied that into the command's fence). *count* and *waiting* as in
+    The command ends the line, with nothing after it. *count* and *waiting* as in
     :func:`manual_close_lead`.
     """
     return f"{manual_close_lead(count, waiting=waiting, named=named)} {command}"
@@ -853,8 +827,7 @@ def recorded_plan_spelling(recorded: Any, plan: str) -> Optional[str]:
     * resolves, from this process's cwd and with ``strict=True``, to the same
       existing file as *plan*. Non-strict ``realpath`` collapses a component
       that does not exist against a later ``..``, so
-      ``plans/$(touch${IFS}pwned)/../foo.md`` "named" ``plans/foo.md``
-      (hooks review of fix round 10).
+      ``plans/$(touch${IFS}pwned)/../foo.md`` "named" ``plans/foo.md``.
 
     Otherwise the caller prints the plan as it received it.
     """
@@ -931,7 +904,7 @@ def resolve_route(
 ) -> Optional[str]:
     """The ``next_command`` route key for this process, or ``None`` for ``default``.
 
-    The only reader of a route signal (§2.1, "Knowing the route"); every
+    The only reader of a route signal; every
     emitter calls it once and passes the result to :func:`next_phase_commands`.
 
     * A host whose ``next_command`` carries a ``skill`` key (claude-code) is
@@ -947,7 +920,7 @@ def resolve_route(
       route this host has no cell for) is ``None`` plus one stderr line naming
       the ignored value.
     * *recorded* is the route the run whose commands are printed was started
-      on (:func:`recorded_route`, fix round 24): when the environment names
+      on (:func:`recorded_route`): when the environment names
       none, it is honoured under the same test, silently. Live run 10: a
       shell's ``status --host codex`` spelled a run the Codex plugin's tool
       had started in the file shim's words. The environment still wins, and
@@ -998,7 +971,7 @@ def recorded_route(
     mode_word: Optional[str] = None,
 ) -> Optional[str]:
     """The tool route a run of *plan_path* on *host_id* was started on, or
-    ``None`` (fix round 24).
+    ``None``.
 
     The detached worker records its route as ``run.route`` in its phase's
     ``.status.json`` (``detach.RunHandle``): the tool servers set
@@ -1050,7 +1023,7 @@ def recorded_route(
 
 
 # ---------------------------------------------------------------------------
-# The commit spelling (plans/review-commits.md §2.8)
+# The commit spelling
 # ---------------------------------------------------------------------------
 #
 # The two phase front doors re-record as the code modes, so every command
@@ -1058,7 +1031,7 @@ def recorded_route(
 # itself is `commit_spelling`'s; this module only decides, per printed
 # command, whether it applies.
 
-#: The why above ``--apply-commit-fixes`` after a commit review (§2.10): the
+#: The why above ``--apply-commit-fixes`` after a commit review: the
 #: user works through the two reports before applying, and the composite is
 #: the way to skip that step.
 COMMIT_REPORTS_WHY = (
@@ -1112,13 +1085,13 @@ def commit_view_for(
     plan_path: Optional[Union[str, Path]] = None,
 ) -> Optional["CommitView"]:
     """The ``CommitView`` a printed ``--<mode_word> <plan_arg> …`` is spelled
-    with, or ``None`` to print it as today (§2.8, "Spelling of commands").
+    with, or ``None`` to print it as today.
 
     Set only when the plan's ``state.json`` holds ``commit_range`` and the
     mode, through the hook, takes a range (:func:`spelled_view`). A plan's
     run and a direct ``review-code --head-ref`` run (``head_ref`` only) are
     never mapped: their commands stay review-code's own and the plan is still
-    a plan (§2.5, "Printed commands").
+    a plan.
     """
     return spelled_view(mode_word, brief_view(plan_arg, plan_path))
 
@@ -1256,8 +1229,7 @@ def next_phase_commands(
         (``complete`` when none is left), with the open optional phases in
         between as ``optional_before``. A composite that is not the whole
         workflow (``improve-plan``, ``improve-code``) answers as the phase it
-        ends on, ``Mode.last_phase``, gate included (plans/improve-plan-and-
-        improve-code.md §2.6). ``full``, and both modes ``None``, answer from
+        ends on, ``Mode.last_phase``, gate included. ``full``, and both modes ``None``, answer from
         ``suggested_next`` instead (the fallback).
     """
     modes = _skill_module("modes")
@@ -1302,7 +1274,7 @@ def next_phase_commands(
         return (phases.get(phase) or {}).get("warning") or None
 
     implement_entry: Mapping[str, Any] = phases.get("implement") or {}
-    # Fix round 28 (live run 12, Codex racing 06): while every code task
+    # While every code task
     # implement has left waits on a manual task not recorded done, its plain
     # resume runs nothing; the resume records the manual tasks the user can
     # do now done, and only those.
@@ -1310,14 +1282,14 @@ def next_phase_commands(
         manual_gate_flags(implement_entry)
         if implement_entry.get("manual_gate") else []
     )
-    # plans/review-commits.md §2.8: a commit review's commands read as the
+    # A commit review's commands read as the
     # commit modes, with the pinned range (read once; `None` for a plan).
     commit_brief = brief_view(plan_arg, plan_path)
 
     def command_answer(answer: NextPhase) -> NextPhase:
-        # Fix round 16: a command answer names the deferred manual tasks
+        # A command answer names the deferred manual tasks
         # and how to record them done, as the complete answer does. The one
-        # place a command answer gets them (fix round 17: `emit_answer` had a
+        # place a command answer gets them (`emit_answer` had a
         # second writer for `--after implement`, and the two packages that
         # wrote them disagreed on what the answer carries).
         from dataclasses import replace as _replace
@@ -1328,13 +1300,13 @@ def next_phase_commands(
         if (answer.phase == "apply-code-fixes" and not answer.why
                 and status_of("apply-code-fixes") != "in_progress"
                 and spelled_view("apply-code-fixes", commit_brief) is not None):
-            # §2.10: after a commit review, the reports come before the
+            # After a commit review, the reports come before the
             # apply, and the composite is the way to skip reading them.
             answer = _replace(answer, why=commit_reports_why(plan_arg, plan_path))
         answer = _with_manual_tasks(answer, phases, template=template, plan_arg=plan_arg)
         if (answer.manual_tasks_command
                 and answer.manual_tasks_command == answer.command):
-            # Fix round 28: the command already leads the section.
+            # The command already leads the section.
             answer = _replace(answer, manual_tasks_note=None, manual_tasks_command=None)
         return answer
 
@@ -1373,7 +1345,7 @@ def next_phase_commands(
         return tuple(steps)
 
     if start is None and gate_resume_suggested(workflow):
-        # Fix round 29 (review of round 28 #4): implement finished with code
+        # Implement finished with code
         # tasks waiting on a manual task the user can do now; the answer
         # leads with its resume, as the `--after implement` walk's does.
         start = "implement"
@@ -1384,7 +1356,7 @@ def next_phase_commands(
         # The optional phases offered are the ones between the furthest phase
         # on record before the suggestion and the suggestion itself, as an
         # `--after` walk offers them: `suggested_next` follows the phase
-        # position (fix round 14), so a review-code suggested after a
+        # position, so a review-code suggested after a
         # completed implement no longer offers the review-tasks "before
         # implementing" that the implement it follows made moot.
         reached = max(
@@ -1440,7 +1412,7 @@ def next_phase_commands(
         return _complete(phases, template=template, plan_arg=plan_arg)
     waiting_flags = manual_gate_flags(implement_entry) if start == "implement" else []
     if waiting_flags:
-        # Fix round 28 (live run 12, Codex racing 06): implement finished
+        # Implement finished
         # with code tasks still waiting on a manual task the user can do
         # now. The section leads with that resume, which runs them; the
         # next phase stays the other way on, over what ran so far.
@@ -1563,8 +1535,7 @@ def phase_command(
     it names. Raises ``ValueError`` for a (host, route) pair with no template.
 
     Every flag token goes through the plan argument's own rule,
-    :func:`quote_plan_arg` (plan improve-plan-and-improve-code §2.4, *Every
-    argument is rendered token-safe*): a composite's continuation carries
+    :func:`quote_plan_arg`: a composite's continuation carries
     ``--files``/``--files-from`` paths, which may hold a space or a quote.
     Every token the other callers pass (``--resume``, ``--human-task``,
     ``T003=done``, ``{task_id}=skip``) has neither and comes back bare.
@@ -1572,7 +1543,7 @@ def phase_command(
     On a commit review (the plan's ``state.json``, read at *plan_path* else
     at *plan_arg*, holds ``commit_range``) the command is spelled as the
     commit mode with the pinned range and none of the flags a front door
-    synthesises (:func:`commit_spelled_args`, plans/review-commits.md §2.8):
+    synthesises (:func:`commit_spelled_args`):
     ``[IMPROVE_RERUN]``, an apply stop's ``skip`` answer and the resume
     answers all come through here.
     """
@@ -1606,8 +1577,8 @@ def resume_command(
     The next-phase rule prints no command after a failure, and that stays right
     for the next PHASE. A resume of the phase that just stopped is a different
     thing: a bare re-invocation of a write phase starts it over, so the user's
-    way forward is ``--<mode> <plan> --resume`` (§2.1, "``--resume`` is built
-    from state"), and 2026-10-02 neither tool route could say it: Codex ended a
+    way forward is ``--<mode> <plan> --resume``, and 2026-10-02 neither tool route could
+    say it: Codex ended a
     blocked ``implement`` with the MCP tool's JSON arguments, OpenCode with a
     raw ``uv run`` argv, and neither is something a user types. Built from the
     same ``next_command`` template and the same quoting as
@@ -1639,7 +1610,7 @@ def resume_command(
     (:func:`_prerequisites_unmet`): a gate refusal writes no status, so the
     file still describes the attempt before it. The servers pass through whatever this
     says and attach nothing when it says nothing; before the adversarial
-    review (2026-10-02) they attached ``--resume`` to every write-phase exit 3,
+    review they attached ``--resume`` to every write-phase exit 3,
     and ``util next-command does-not-exist.md --blocked implement`` printed
     one for a plan that does not exist. The same rule as
     :func:`next_phase_commands`'s ``command_for``: ``in_progress`` is the one
@@ -1647,7 +1618,7 @@ def resume_command(
 
     A commit front door's word (``apply-commit-fixes``) answers as the phase
     it fronts, and on a commit review the command is spelled back as the
-    commit mode with the pinned range (plans/review-commits.md §2.8).
+    commit mode with the pinned range.
     """
     modes = _skill_module("modes")
     mode = modes.resolve(fronted_mode_word(mode_word))
@@ -1686,8 +1657,7 @@ def resume_command(
 def _resume_flags(phases: Mapping[str, Mapping[str, Any]], phase: str) -> List[str]:
     """The flags after the plan in *phase*'s resume: ``--resume``, and for an
     implement whose every code task left waits on a manual task the user can
-    do now, that task's ``--human-task <id>=done`` too (fix round 28, live run
-    12, Codex racing 06: a plain resume of it runs nothing)."""
+    do now, that task's ``--human-task <id>=done`` too."""
     if phase == "implement":
         implement = phases.get("implement") or {}
         if implement.get("manual_gate"):
@@ -1702,7 +1672,7 @@ def _resume_flags(phases: Mapping[str, Mapping[str, Any]], phase: str) -> List[s
 # ---------------------------------------------------------------------------
 
 def render_next_phase_lines(answer: NextPhase) -> List[str]:
-    """The block's lines, primary first (§2.2(2), §2.1 "Primary first").
+    """The block's lines, primary first.
 
     Complete renders ``[WORKFLOW_COMPLETE]``, then one ``[MANUAL_TASK]`` line
     per task the run deferred to the user (none when it deferred nothing), the
@@ -1712,7 +1682,7 @@ def render_next_phase_lines(answer: NextPhase) -> List[str]:
     ``[NEXT_COMMAND_OPTIONAL_WHY]`` / ``[NEXT_COMMAND_OPTIONAL]`` pair in the
     answer's order, the answers pair, and then the same manual-task lines. A
     command line holds the command and nothing else, and every other line
-    holds one plain line (:func:`~utils.text_clip.plain_line`, fix round 23):
+    holds one plain line (:func:`~utils.text_clip.plain_line`):
     a why, a note or a task title comes from records a batch can write, and a
     newline in one would forge a marker line of its own.
     """
@@ -1741,19 +1711,18 @@ def render_next_phase_lines(answer: NextPhase) -> List[str]:
     for step in answer.answers:
         lines.append(f"{NEXT_COMMAND_ANSWERS_WHY_MARKER} {plain_line(step.why)}")
         lines.append(f"{NEXT_COMMAND_ANSWERS_MARKER} {step.command}")
-    # After the commands, on every command answer that carries them (fix
-    # round 16): the tasks implement deferred to the user, and how to record
+    # After the commands, on every command answer that carries them: the tasks implement
+    # deferred to the user, and how to record
     # them done.
     return lines + manual_lines
 
 
 #: The labels :func:`render_next_step_markdown` writes.
-#: Above a stopped phase's resume (fix round 24); ``{phase}`` is its mode word.
+#: Above a stopped phase's resume; ``{phase}`` is its mode word.
 RESUME_LEAD = "To go on with {phase}:"
 OPTIONAL_LEAD = "Optional, before that:"
 MANUAL_TASKS_LEAD = "Manual tasks left for you:"
-#: The same lead over one task (fix round 26, live run 11: Codex 06 wrote
-#: "Manual task left for you:" over the one task the section listed).
+#: The same lead over one task.
 MANUAL_TASK_LEAD = "Manual task left for you:"
 #: Above a stopped implement's answers (status says "or answer the stop
 #: with:"): what the user types instead of the resume.
@@ -1762,7 +1731,7 @@ WORKFLOW_COMPLETE_SENTENCE = "Workflow complete."
 
 
 def resume_lead(phase: str) -> str:
-    """:data:`RESUME_LEAD` for *phase* (fix round 24)."""
+    """:data:`RESUME_LEAD` for *phase*."""
     return RESUME_LEAD.replace("{phase}", str(phase))
 
 
@@ -1774,7 +1743,7 @@ _MARKDOWN_OPENERS = frozenset("`~#>[<-*+_|=")
 def markdown_text(text: Any) -> str:
     """*text* as one plain text line of the section (:func:`plain_line`),
     its first character escaped (CommonMark's backslash) when it could open
-    a block of its own (fix round 24): a why or a note is read back from a
+    a block of its own: a why or a note is read back from a
     run's records, which a jailed batch can write, and one starting with
     ``` would fence the commands after it, one starting with ``[`` would
     read as a marker line where the native lookup prints the section."""
@@ -1795,7 +1764,7 @@ def fenced_command(command: str) -> str:
 
 def render_next_step_markdown(answer: "NextPhase") -> str:
     """*answer* as the report's closing section, already written
-    (``user_next_step.markdown``; fix round 22).
+    (``user_next_step.markdown``).
 
     Live run 9: Codex 04 printed the primary and the optional command as bare
     paragraphs, and the manual-task close command reached the user folded
@@ -1807,7 +1776,7 @@ def render_next_step_markdown(answer: "NextPhase") -> str:
     the answers, then the manual tasks, the note and its command — or
     "Workflow complete." in the command's place. The routes copy it as it
     is; the Claude Code leg keeps reading the marker lines. Every why, note
-    and task line is one plain line (fix round 23), so nothing read back
+    and task line is one plain line, so nothing read back
     from a run's records opens a fence or a heading of its own.
     """
     blocks: List[str] = []
@@ -1846,9 +1815,7 @@ def render_resume_markdown(
     answers: Sequence[Mapping[str, Any]],
 ) -> str:
     """A stopped phase's ways forward as the report's closing section, by
-    :func:`render_next_step_markdown`'s rules (fix round 24, live run 10:
-    with ``user_next_step`` null at a stop, the hosts composed their own
-    blocks, reworded the whys and listed tool calls as options): the lead
+    :func:`render_next_step_markdown`'s rules: the lead
     line naming *phase*, the resume's *why* and *command*, then
     :data:`ANSWERS_LEAD` and each answer's why and command. Carried as
     ``user_resume.markdown`` (the tool routes' ``resume_markdown``)."""
@@ -1871,11 +1838,10 @@ def implement_answers(
 ) -> Tuple[AnswersStep, ...]:
     """Each ``--resume`` answer a stopped native implement waits for.
 
-    Fix round 14 (stop fixture, Claude Code fix/accept 01): the native leg's
+    The native leg's
     stop printed no command, so the host wrote "re-run with --resume" as
     prose, or two separate commands the user had to merge; this answered with
-    one command carrying every answer. Fix round 20 (live run 8, Claude Code
-    stop 01): that one command was all, while the tool routes list each
+    one command carrying every answer. That one command was all, while the tool routes list each
     answer alone too (``T005=skip`` alone, ``T002=done`` alone, …), so the
     host described answers the plugin never printed and the fix path had no
     T005-only command to run. The answers now come from the executor's own
@@ -1920,7 +1886,7 @@ def gate_decline_steps(
     """:func:`manual_gate_decline_answers` for the workflow payload's
     implement entry while its manual-task gate holds (``manual_gate``),
     each command in this host's spelling (:func:`phase_command`); ``()``
-    otherwise (fix round 29)."""
+    otherwise."""
     implement = phases.get("implement") or {}
     if not implement.get("manual_gate"):
         return ()
@@ -1943,7 +1909,7 @@ def implement_resume_why(
     """What the plain ``--resume`` of a stopped native implement does on an
     unchanged tree (``stop_answers.native_resume_why`` over
     ``state.json`` as recorded, and the implement folder for the executor's
-    check stamps), or ``None`` (fix round 22)."""
+    check stamps), or ``None``."""
     import json as _json
 
     from .output_handler import phase_dir_path
@@ -1962,7 +1928,7 @@ def implement_resume_why(
 
 
 # ---------------------------------------------------------------------------
-# The emitters' shared step (§2.2)
+# The emitters' shared step
 # ---------------------------------------------------------------------------
 
 class LookupFailed(Exception):
@@ -1970,7 +1936,7 @@ class LookupFailed(Exception):
 
 
 #: How the one stderr line a failed lookup prints opens. ``util next-command``
-#: exits 3 with it, and the Claude Code report quotes it (§2.3).
+#: exits 3 with it, and the Claude Code report quotes it.
 LOOKUP_FAILED_PREFIX = "multi-llm: next-command lookup failed"
 
 
@@ -2009,20 +1975,19 @@ def emit_answer(
     poll, ``util next-command``), so the block and the key are one rendering of
     one answer. The route is resolved here, once, in the emitting process
     (:func:`resolve_route`); the caller supplies ``plan_arg``, ``host_id`` and
-    ``finished_mode`` from its own sources (§2.1, "Where each emitter gets its
-    inputs"). The block goes to *stream* (``sys.stdout`` by default; an
+    ``finished_mode`` from its own sources. The block goes to *stream* (``sys.stdout``
+    by default; an
     invocation that asked for JSON output passes ``sys.stderr``).
 
-    Outcomes, per §2.1's table: an answer prints the block and records the key
+    Outcomes, per the table: an answer prints the block and records the key
     (``complete`` included); ``None`` prints and records nothing. Any exception
     — the workflow read, the route, the builder — prints and records nothing
     either: one stderr line (:func:`lookup_failure_line`) names it and this
     returns ``None``, or raises :class:`LookupFailed` under *strict*. The block
     is written before the key is recorded, so a failed write leaves no key.
     *recorded_route* is the route the run being answered for was started on
-    (:func:`recorded_route`), used when this process names none (fix round
-    24).
-    With *with_markdown* (``util next-command``, fix round 24) the block is
+    (:func:`recorded_route`), used when this process names none.
+    With *with_markdown* (``util next-command``) the block is
     followed by the answer's ``markdown`` between
     :data:`NEXT_STEP_MARKDOWN_MARKER` and :data:`NEXT_STEP_MARKDOWN_END_MARKER`,
     the section the Claude Code report copies as it is.
@@ -2049,7 +2014,7 @@ def emit_answer(
         if answer is None:
             return None
         plain_resume = str(answer.command or "").endswith(f" {RESUME_FLAG}")
-        # Fix round 28: the resume of an implement every code task of which
+        # The resume of an implement every code task of which
         # waits on a manual task carries that task's `=done` answer, and its
         # why is the answer's own (`next_phase_commands`).
         gated_resume = (
@@ -2061,8 +2026,7 @@ def emit_answer(
             and (plain_resume or gated_resume)
         ):
             # `util next-command` only (with_answers): a stopped implement's
-            # answers, beside its resume (fix round 14; each alone too since
-            # fix round 20).
+            # answers, beside its resume.
             from dataclasses import replace as _replace
 
             if plain_resume:
@@ -2071,12 +2035,12 @@ def emit_answer(
                 )
                 if answers:
                     answer = _replace(answer, answers=answers)
-                # Fix round 22: and what the plain resume does.
+                # And what the plain resume does.
                 why = implement_resume_why(plan_arg, plan_path=plan_path)
                 if why:
                     answer = _replace(answer, why=why)
             else:
-                # Fix round 29 (review of round 28 #1): a manual-task gate's
+                # A manual-task gate's
                 # other way on, the user's decline, as the executor's stop
                 # records it for the tool routes.
                 if workflow is None:
@@ -2086,9 +2050,9 @@ def emit_answer(
                     plan_arg, host_id, route, workflow.get("phases") or {})
                 if declines:
                     answer = _replace(answer, answers=declines)
-            # Fix round 24: under the line the tool routes' section opens with.
+            # Under the line the tool routes' section opens with.
             answer = _replace(answer, lead=resume_lead(answer.phase))
-            # Fix round 18 (live run 7, Claude Code stop 01): the native
+            # The native
             # stop's line saying nothing ran the repository's tests, which
             # the executor stop prints itself.
             from .verification_lines import native_stop_unverified_line
@@ -2121,11 +2085,10 @@ def emit_answer(
 
 class AlreadyComplete(Exception):
     """Raised by :func:`emit_resume` for a composite whose every step is on
-    record for the review on file, after it printed :attr:`line` (§2.3's
+    record for the review on file, after it printed :attr:`line` (the
     ``[ALREADY_COMPLETE]`` line) on its stream. Not a failed lookup: ``util
     next-command --blocked`` exits 2 on it, the code the composite's own
-    re-run exits with in the same state (plans/improve-plan-and-improve-code.md
-    §2.6), and records no ``user_resume``."""
+    re-run exits with in the same state, and records no ``user_resume``."""
 
     def __init__(self, line: str):
         super().__init__(line)
@@ -2142,7 +2105,7 @@ def _composite_of(mode_word: str):
 
 
 def _blocked_step(mode_word: str, plan_path: Union[str, Path]) -> str:
-    """The mode word ``--blocked <mode_word>`` answers for (§2.6).
+    """The mode word ``--blocked <mode_word>`` answers for.
 
     *mode_word* itself, unless it names a composite. For a composite, the first
     word of its ``sequence`` that ``improve_workflow.skip_reason`` runs, on the
@@ -2168,7 +2131,7 @@ def _blocked_step(mode_word: str, plan_path: Union[str, Path]) -> str:
 
 
 def _composite_continuation(mode_word: str, plan_path: Union[str, Path]) -> List[str]:
-    """The flags after the plan in a composite's own continuation (§2.6).
+    """The flags after the plan in a composite's own continuation.
 
     ``improve_workflow.recorded_continuation`` of the ``replay_flags`` the
     composite's ``run`` record holds in its run dir (``{plan}/improve-plan/``):
@@ -2219,7 +2182,7 @@ def emit_resume(
     A composite (``improve-plan``, ``improve-code``) is resolved first, before
     the route, the command, the answers and the why are read, so all of them
     and the payload's ``phase`` read the one mode word whose command is
-    printed (§2.6): the step a bare re-run would run first
+    printed: the step a bare re-run would run first
     (:func:`_blocked_step`), with that phase's own resume, answers, why and
     section when it has a resume; else the composite's own continuation
     (:func:`_composite_continuation`), the composite's word, in the host's
@@ -2228,7 +2191,7 @@ def emit_resume(
     ``user_resume.mode`` names the mode its command runs, which the tool
     routes build their option calls from.
 
-    On a commit review (plans/review-commits.md §2.8) a front door's word
+    On a commit review a front door's word
     is asked as the phase it fronts, and the command, ``mode``, ``flags``
     and section are spelled back as the commit mode with the pinned range.
     """
@@ -2244,8 +2207,8 @@ def emit_resume(
         asked = fronted_mode_word(mode_word)
         mode_word = _blocked_step(asked, source)
         route = resolve_route(host_id, stderr=err, recorded=recorded_route)
-        # Read once here only for a phase whose resume reads it (fix round
-        # 28: an implement's resume also carries a manual task's answer);
+        # Read once here only for a phase whose resume reads it (an implement's resume
+        # also carries a manual task's answer);
         # generate-tasks' plain re-invoke reads its own status file.
         from .subagent_tasks import PHASE_BY_WRITE_KIND
 
@@ -2288,7 +2251,7 @@ def emit_resume(
         return None
     modes = _skill_module("modes")
     mode = modes.resolve(mode_word)
-    # §2.8: the mode word the printed command runs, a commit mode on a commit
+    # The mode word the printed command runs, a commit mode on a commit
     # review, and the flags it carries without the front doors' own.
     view = commit_view_for(mode.name, plan_arg, plan_path) if mode is not None else None
     shown_mode = commit_mode_word(mode.name, view) if mode is not None else mode_word
@@ -2312,27 +2275,27 @@ def emit_resume(
     phases = (workflow or {}).get("phases") or {}
     resume: Dict[str, Any] = {
         "phase": mode.phase,
-        # The mode its command runs (§2.6): a composite asked about answers
+        # The mode its command runs: a composite asked about answers
         # with an inner phase's resume, and an option call built from the word
         # asked would hand `--human-task` to the composite's parser.
         "mode": shown_mode,
         "command": command,
         # The flags the command carries after the plan, so a tool route
-        # offers this very command as its first `options` entry (fix round
-        # 14: the first option and `resume_command` must be one command).
+        # offers this very command as its first `options` entry (the first option and
+        # `resume_command` must be one command).
         "flags": (
             [] if mode.phase in RERUN_RESUME_PHASES
             else _resume_flags(phases, mode.phase)
         ),
     }
-    # Fix round 28: a resume that records a manual task done says why.
+    # A resume that records a manual task done says why.
     gate_why = (
         manual_gate_why(phases.get("implement") or {})
         if len(resume["flags"]) > 1 else None
     )
     try:
         if gate_why is not None:
-            # Fix round 29 (review of round 28 #1): a manual-task gate's
+            # A manual-task gate's
             # answers are the user's decline, read off the workflow on both
             # legs (the executor's stop records the same ones).
             answers = [
@@ -2353,14 +2316,14 @@ def emit_resume(
     if answers:
         resume["answers"] = answers
         resume["answers_text"] = render_resume_answers(answers)
-    # Fix round 22: what the plain resume does, as each answer says.
+    # What the plain resume does, as each answer says.
     why = gate_why or stop_resume_why_on_record(
         plan_arg if plan_path is None else plan_path, mode_word)
     if why:
         resume["why"] = why
-    # Fix round 24: all of it as the report's closing section, ready to copy.
+    # All of it as the report's closing section, ready to copy.
     resume["markdown"] = render_resume_markdown(shown_mode, command, why, answers or [])
-    # Fix round 28 (live run 12 #5): the stop's own line as recorded, and the
+    # The stop's own line as recorded, and the
     # same line without the ways forward this section carries, which the
     # servers relay in its place beside the section.
     try:
@@ -2386,8 +2349,8 @@ def stop_answers_on_record(
     ``write_batch_scheduler._stop_answers``): the run's own record of which
     ``--human-task`` answers its stop named. The folder is writable by every
     jailed batch and the entries become the tool routes' options, so each is
-    kept only in the shape the plugin composes (fix round 23, review of round
-    22 relay #5): ``flags`` as :func:`recorded_answer_flags` reads them and a
+    kept only in the shape the plugin composes: ``flags`` as
+    :func:`recorded_answer_flags` reads them and a
     ``why`` that passes :func:`recorded_why`. Any other entry is dropped,
     never relayed.
     """
@@ -2421,8 +2384,7 @@ def stop_headlines_on_record(
 ) -> Optional[Tuple[str, str]]:
     """``(headline, beside_section)`` of the phase's last stop, as it
     recorded them (``progress.write_subagents.stop``: ``headline`` and
-    ``stop_answers.HEADLINE_BESIDE_SECTION_KEY``), or ``None``
-    (fix round 28, live run 12 #5).
+    ``stop_answers.HEADLINE_BESIDE_SECTION_KEY``), or ``None``.
 
     The second is the first without the ways forward the stop's resume
     section carries: what stopped, what it reported, what did not run, the
@@ -2434,7 +2396,7 @@ def stop_headlines_on_record(
     answer the stop recorded must have passed :func:`stop_answers_on_record`
     (the section lists all of them), else ``None``: the folder is writable
     by every jailed batch. A stop whose own resume carries answers (a
-    manual-task gate's ``resume_flags``, the merge of fix round 28) hands
+    manual-task gate's ``resume_flags``) hands
     the lines back only while those flags are the plugin's shape and the
     section's resume, *section_flags*, is that very resume.
     """
@@ -2481,7 +2443,7 @@ def recorded_answer_flags(flags: Any) -> Optional[List[str]]:
     """*flags*, a stop answer's flags read back from a run's output folder,
     when they are what the plugin composes: ``--resume`` and then one or
     more ``--human-task <answer>`` pairs, each answer one
-    :data:`_RECORDED_ANSWER`; else ``None`` (fix round 23)."""
+    :data:`_RECORDED_ANSWER`; else ``None``."""
     if (not isinstance(flags, list) or len(flags) < 3 or len(flags) % 2 == 0
             or flags[0] != RESUME_FLAG):
         return None
@@ -2497,7 +2459,7 @@ def stop_resume_why_on_record(
 ) -> Optional[str]:
     """What the plain resume of the phase's last stop does, as the stop
     recorded it (``progress.write_subagents.stop.resume_why``, written by
-    ``write_batch_scheduler._stop_resume_why``; fix round 22), or ``None``.
+    ``write_batch_scheduler._stop_resume_why``), or ``None``.
 
     The run's output folder is writable by every jailed batch, so the value
     is relayed only when it is one plain line of at most
@@ -2542,7 +2504,7 @@ def resume_answers(
 
     ``[{"command", "flags", "why"}]`` from :func:`stop_answers_on_record`,
     each command built by :func:`phase_command` — the same template and
-    quoting as the resume command beside it. Fix round 14 (live run 5): the
+    quoting as the resume command beside it. The
     tool routes handed the user only the bare ``--resume`` in ``message`` and
     ``options`` while the answers the stop named sat in ``error``, and hosts
     relayed them in two of four first stops.
@@ -2566,7 +2528,7 @@ def render_resume_answers(answers: Sequence[Mapping[str, Any]]) -> str:
     What the tool routes put in their needs-human ``message`` through the
     surface's ``needs_human_message.answers`` clause, so a host that relays
     only the message relays every way forward. Python owns the wording.
-    The merge of fix round 28: each why was bracketed and the answers
+    The: each why was bracketed and the answers
     ``; ``-joined, so a why that ends in a bracket of its own ("… depend on
     it (T006)", a quoted finding "… (found 2)") read "(T006))", and the
     clause's stop after the last doubled one that ends in "…"; ``status``
@@ -2582,7 +2544,7 @@ def render_resume_answers(answers: Sequence[Mapping[str, Any]]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# `multi_llm.py util next-command` (§2.2(3))
+# `multi_llm.py util next-command`
 # ---------------------------------------------------------------------------
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -2597,7 +2559,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     ``state.json`` and refuses a missing plan the same way (adversarial review,
     2026-10-02: it skipped the plan check and read no state). ``--blocked`` of
     a composite whose every step is on record prints the ``[ALREADY_COMPLETE]``
-    line and exits 2 (plans/improve-plan-and-improve-code.md §2.6).
+    line and exits 2.
     """
     import argparse
 
@@ -2668,7 +2630,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 3
     plan_path = os.path.abspath(args.plan)
     if not os.path.isfile(plan_path):
-        # plans/review-commits.md §2.8/§2.9: a commit review's pinned
+        # A commit review's pinned
         # `<base12>..<head12>` names its brief by name, as `status` maps it
         # (the tool routes' `--blocked` lookup carries the pinned range).
         brief = _pinned_brief(args.plan)
@@ -2678,13 +2640,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"ERROR: plan file not found: {plan_path}", file=sys.stderr)
         return 3
     # A commit front door's word reads state as the phase it fronts; the
-    # commands printed are spelled back as the commit mode (§2.8).
+    # commands printed are spelled back as the commit mode.
     if args.after is not None:
         args.after = fronted_mode_word(args.after)
     if args.blocked is not None:
         args.blocked = fronted_mode_word(args.blocked)
     host_id = _host_capabilities().resolve_host_id(explicit=args.host)
-    # Fix round 24: from a shell, the route the plan's run was started on.
+    # From a shell, the route the plan's run was started on.
     recorded = recorded_route(plan_path, host_id, args.blocked or args.after)
 
     if args.blocked is not None:

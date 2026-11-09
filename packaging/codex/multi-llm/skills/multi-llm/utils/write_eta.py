@@ -1,4 +1,4 @@
-"""A write phase's ``[ETA]`` lines on the executor leg (F3, F4; fix rounds 18 to 24).
+"""A write phase's ``[ETA]`` lines on the executor leg (F3, F4).
 
 :class:`EtaLines` counts the tasks one run finishes against the tasks it will
 dispatch, stamps the phase's baseline before the first dispatch
@@ -50,7 +50,7 @@ class EtaLines:
         self._ran_out_of_time = ran_out_of_time
         self._started_a_runner = started_a_runner
         #: Dispatched-or-skipped tasks finished so far, the `[ETA]` line's
-        #: numerator (F3, 2026-09-17). It counts TASKS because the denominator
+        #: numerator. It counts TASKS because the denominator
         #: beside it does — `len(self.tasks) - human skips`, the same total
         #: `WriteReports.mirror_status` publishes — and because an `implement` batch is a
         #: dependency level with k tasks in it: `len(batches_dispatched) + 1`
@@ -58,29 +58,29 @@ class EtaLines:
         #: parallelizable plan could never reach `N/N` or print
         #: `ALL BATCHES COMPLETE`. Read and incremented under `_effects_lock`
         #: because a disjoint group finishes on several threads. A set of
-        #: task ids since fix round 20: the numerator is the finished tasks
+        #: task ids: the numerator is the finished tasks
         #: the total counts (:meth:`progress`).
         self.finished: set = set()
         #: Implement only: the tasks this run will dispatch, from the walk
-        #: the `Organized into …` line prints (`_dispatch_walk`, fix
-        #: round 20, live run 8 #1: the first run's `[ETA]` total still
+        #: the `Organized into …` line prints (`_dispatch_walk`, live run 8 #1: the
+        #: first run's `[ETA]` total still
         #: counted T005, refused before dispatch, and T006 after it, so the
         #: lines read 1/7 … 4/6 under "5 task(s) to dispatch"). `None`: no
         #: walk (an apply phase), and the total counts every task.
         self.scope: Optional[set] = None
         #: Whether this run stamped an `[ETA]` baseline (:meth:`start`).
         self.started = False
-        #: Fix round 21 (review of round 20, #1): whether this run printed an
+        #: Whether this run printed an
         #: `[ETA]` line, and whether its one closing line is out
         #: (:meth:`close`, or `phase complete` from :meth:`finish`).
         self.printed = False
         self.closed = False
         #: The tasks a check this run recorded with findings holds back, out
-        #: of the `[ETA]` total from that check's own line on (fix round 21),
-        #: before `CheckHolds.block_dependents_of_checks` holds them for the loop. Fix
-        #: round 22: each with its check, which the closing line names.
+        #: of the `[ETA]` total from that check's own line on,
+        #: before `CheckHolds.block_dependents_of_checks` holds them for the loop. Each
+        #: with its check, which the closing line names.
         self.held: Dict[str, str] = {}
-        #: Fix round 22 (live run 9 #1): the tasks this run dispatched that
+        #: The tasks this run dispatched that
         #: failed, and the tasks the dispatch walk foresaw it would not run
         #: (`{task id: how}`, `metrics.left_out_tail`'s words) — a task the
         #: write policy refuses, the tasks after a stop, a task a check on
@@ -90,7 +90,7 @@ class EtaLines:
         self.failed: set = set()
         self.unrun: set = set()
         self.walk_left: Dict[str, str] = {}
-        #: Fix round 24 (live run 10 #7): the tasks the last `[ETA]` line
+        #: The tasks the last `[ETA]` line
         #: counted, so the next line whose total dropped names what left it
         #: (:meth:`dropped`). `None` before the baseline.
         self.line_ids: Optional[set] = None
@@ -123,7 +123,7 @@ class EtaLines:
         made every line on a resumed run read `batch 7/6 done in 0m 51s ...
         WARNING: batch_index > total_batches` (N1, 2026-09-16).
 
-        **Both halves count tasks** (F3, 2026-09-17). ``len(result.batches_
+        **Both halves count tasks**. ``len(result.batches_
         dispatched) + 1`` was the numerator, and it is a *batch* ordinal against
         a *task* denominator: for the three apply kinds one task is one batch and
         the two agree, but an ``implement`` dependency level with k independent
@@ -131,9 +131,7 @@ class EtaLines:
         the same ordinal, so a 14-task plan in 9 batches ended at
         ``batch 9/14 · ~Nm remaining``, never reached ``N/N`` and never printed
         ``ALL BATCHES COMPLETE``. Both come from :meth:`progress`: the
-        finished tasks among the ones :meth:`total` counts (fix round
-        18: not an accepted task, a manual one, or one a check holds; fix
-        round 20: on implement, only what the run dispatches).
+        finished tasks among the ones :meth:`total` counts.
         """
         if not hasattr(self._ctx.state, "record_metric"):
             return
@@ -144,15 +142,14 @@ class EtaLines:
             f"[{outcome.write_outcome or outcome.status}]"
         ).strip()
         run_batch_index, total_batches = self.progress(result)
-        # Fix round 22 (live run 9 #1): the line that reaches N/N said "ALL
+        # The line that reaches N/N said "ALL
         # BATCHES COMPLETE" before the run stopped on T005.
         ends_short = (
             run_batch_index >= total_batches and self.ends_short(result)
         )
-        # Fix round 24 (live run 10): a failed task's line says what
-        # happened (#5), the line whose total dropped says why (#7), and a
-        # complete run's N/N line names the tasks the plan set aside
-        # (Claude Code racing #6).
+        # A failed task's line says what
+        # happened, the line whose total dropped says why, and a
+        # complete run's N/N line names the tasks the plan set aside.
         failed = not outcome.ok
         failure, half_applied = self.failure(outcome) if failed else ("", False)
         dropped = self.dropped(result)
@@ -203,25 +200,24 @@ class EtaLines:
         Every materialized task but the ones it never dispatches: a task the
         human-task plan skips or accepts, a manual task (no runner ever runs
         one), and a task a check with findings holds back
-        (``result.blocked_by_check``, which grows as checks report). Fix round
-        18 (live run 7): the accept path's resume counted the accepted check
+        (``result.blocked_by_check``, which grows as checks report). The accept path's
+        resume counted the accepted check
         T002 and its last line read "batch 1/2 … ~0m 24s remaining" after the
         one task it dispatched; a check holding T007 left "6/7" the same way.
-        On implement, only the tasks the run dispatches (fix round 20,
-        :meth:`task_ids`). The numerator never counts the others.
+        On implement, only the tasks the run dispatches. The numerator never counts the others.
         """
         return len(self.task_ids(result))
 
     def task_ids(self, result: Any) -> List[str]:
         """The tasks :meth:`total` counts, in the task file's order.
 
-        Fix round 19 (review of round 18, #1): the run mirror counted its
+        The run mirror counted its
         ``total`` over another set — a held task and a manual one in — so one
         run read "batch 6/6 … ALL BATCHES COMPLETE" in its log and
         "implement 6/7 batches ok" on ``status`` and the OpenCode poll.
         :meth:`WriteReports.mirror_status` counts over this one too.
 
-        Fix round 20 (live run 8 #1): on implement, the set starts from what
+        On implement, the set starts from what
         the run will dispatch (``scope``, the walk the ``Organized into
         …`` line counts), so a task the write policy refuses before dispatch,
         the tasks after it that the run never reaches, a task kept from an
@@ -230,7 +226,7 @@ class EtaLines:
         "5 task(s) to dispatch" and stopped at "4/6". A task that finishes
         without a runner leaves it, one dispatched against the walk's
         reading joins it (:meth:`mark`), and a held task leaves it as
-        before. Fix round 23 (review of round 22, #1): on every phase, a task
+        before. On every phase, a task
         that ended without a runner and not ok (an apply batch refused before
         dispatch) is out, so "run stopped after batch 2/3" no longer counts
         the refused batch among the ones done; a resume's kept batch stays in.
@@ -252,7 +248,7 @@ class EtaLines:
         """One more finished task for the ``[ETA]`` numerator (F3).
 
         *ran*: a runner was started for it (its metric is recorded). On
-        implement (fix round 20) a task finished without one — kept from an
+        implement a task finished without one — kept from an
         earlier run, refused before dispatch, a check not run again — was
         not dispatched, so it leaves the counted set, as the native leg's
         ``util batch-done`` withdraws a refused task; a task dispatched that
@@ -260,7 +256,7 @@ class EtaLines:
         own total. Called under ``_effects_lock``.
 
         *ok*: how it ended; a dispatched task that failed stops the run
-        short of its phase (fix round 22), so the line it drives at N/N
+        short of its phase, so the line it drives at N/N
         claims no completion.
         """
         task_id = str(task_id)
@@ -285,7 +281,7 @@ class EtaLines:
 
     def left_out(self, result: Any) -> Dict[str, str]:
         """``{task id: how}`` for every task this run leaves undone, in
-        ``metrics.left_out_tail``'s words (fix round 22, live run 9 #1): the
+        ``metrics.left_out_tail``'s words: the
         stop fixture's executor closed on a bare "run stopped after batch
         4/4" while T005 (refused), T006 (after it) and T007 (held by check
         T002) had not run. What the dispatch walk foresaw and the run has
@@ -318,13 +314,12 @@ class EtaLines:
     def ends_short(self, result: Any) -> bool:
         """Whether this run will end short of completing its phase: a task
         failed or was left (:meth:`left_out`). The ``[ETA]`` line that
-        reaches N/N then claims no completion (fix round 22)."""
+        reaches N/N then claims no completion."""
         return bool(self.failed or self.unrun or self.left_out(result))
 
     def failure(self, outcome: TaskOutcome) -> Tuple[str, bool]:
         """What a failed dispatch's ``[ETA]`` line says happened, and whether
-        its edits are half-applied (fix round 24, live run 10 #5: OpenCode's
-        T002 timed out and its line read "task 2/11 done in 20m 5s"). The
+        its edits are half-applied. The
         status its batch line shows (``timeout``, ``batch failed``); for a
         partial application, what stopped it."""
         half = outcome.write_outcome == WRITE_PARTIAL or outcome.status == STATUS_PARTIAL
@@ -343,9 +338,7 @@ class EtaLines:
 
     def dropped(self, result: Any) -> str:
         """Why this line's total is lower than the last line's, in
-        ``metrics.left_out_tail``'s words, or ``""`` (fix round 24, live run
-        10 #7: the stop fixture's lines went "task 1/5", "task 2/4" with
-        nothing saying T007 left when check T002 reported problems). Moves
+        ``metrics.left_out_tail``'s words, or ``""``. Moves
         the baseline to this line's tasks."""
         counted = set(self.task_ids(result))
         before, self.line_ids = self.line_ids, counted
@@ -378,7 +371,7 @@ class EtaLines:
         """The closing ``[ETA]`` line of a run that ends short of completing
         its phase (``metrics.closing_line``: the native leg's ``util metrics
         finish`` words it the same), or ``None`` when there is nothing to
-        close (no baseline). Fix round 22: it names what the run left
+        close (no baseline). It names what the run left
         (:meth:`left_out`), and a run that dispatched nothing closes
         too ("run stopped with nothing dispatched · …"; 01b and 01c of live
         run 9 logged no line). Pure: it logs and saves nothing, so an
@@ -399,10 +392,10 @@ class EtaLines:
     ) -> None:
         """Close this run's ``[ETA]`` lines on an ending short of completion.
 
-        Fix round 20 (live run 8 #1): a stop that came before any "N/N" left
+        A stop that came before any "N/N" left
         "batch 4/6 done in 0m 15s · ~0m 37s remaining" standing, so a stop
-        short of its total logged one closing line. Fix round 21 (review of
-        round 20, #1): every ending of a write phase closes them, once — a
+        short of its total logged one closing line. Every ending of a write phase closes
+        them, once — a
         stop, a refusal, the tasks a check holds back, a failed
         ``driver.verify_command``, an exception out of the loop, a
         foreground Ctrl-C (``verb="interrupted"``), a detached worker's
@@ -429,7 +422,7 @@ class EtaLines:
 
     def restamp(self, total: int) -> None:
         """Keep ``metrics_progress.{phase}.total_batches`` at the total the
-        ``[ETA]`` lines and the write mirror count (N1; fix round 21: an
+        ``[ETA]`` lines and the write mirror count (N1;: an
         ending with no later metric re-stamps it here)."""
         live = getattr(self._ctx.state, "state", None)
         progress = (
@@ -446,7 +439,7 @@ class EtaLines:
 
     def abort_line(self, cause: str) -> Optional[str]:
         """The closing line a detached worker's abort prints for this run
-        (``metrics.aborted_eta_line``, fix round 21): the signal handler ends
+        (``metrics.aborted_eta_line``): the signal handler ends
         the process with ``os._exit``, so no ``finally`` of this run closes
         its lines. Reads, takes no lock, logs nothing."""
         return self.closing_line(self.run_result, verb=f"aborted ({cause})")
@@ -473,9 +466,9 @@ class EtaLines:
         total_batches = self.total(result)
         try:
             self._ctx.state.start_metrics_phase(self._ctx.phase, total_batches)
-            # A native emit's left-out tasks are that leg's (fix round
-            # 22): this run closes its own lines. Its set-aside tasks
-            # too (fix round 24): this run names its own.
+            # A native emit's left-out tasks are that leg's: this run closes its own
+            # lines. Its set-aside tasks
+            # too: this run names its own.
             self._ctx.state.set_metrics_left_out(self._ctx.phase, {})
             self._ctx.state.set_metrics_set_aside(self._ctx.phase, {})
             self.started = True
@@ -483,11 +476,11 @@ class EtaLines:
         except Exception:  # noqa: BLE001 - bookkeeping must not fail a phase
             pass
         if self.started:
-            # Fix round 21: what an ending with no other hold on the run
+            # What an ending with no other hold on the run
             # counts over, and the line a detached worker's abort prints.
             self.run_result = result
             _metrics.open_eta_run(self.abort_line)
-            # Fix round 24: the total the first line is held to.
+            # The total the first line is held to.
             self.line_ids = set(self.task_ids(result))
 
     def finish(self, result: Optional[Any] = None) -> None:
@@ -499,14 +492,14 @@ class EtaLines:
         stderr itself, which on a foreground or in-process ``full`` run put the
         closing line somewhere none of the others went.
 
-        Fix round 29 (review of round 28 #1): an implement run that started
+        An implement run that started
         no runner has no N/N line to name the tasks its plan set aside, so
         its ``phase complete`` line names them (a manual task declined with
         ``--human-task <id>=skip`` and the tasks skipped with it, say).
         """
         if not hasattr(self._ctx.state, "finish_metrics_phase"):
             return
-        # The finished phase's closing line (fix round 21: one per ending).
+        # The finished phase's closing line (one per ending).
         self.closed = True
         _metrics.close_eta_run(self.abort_line)
         try:

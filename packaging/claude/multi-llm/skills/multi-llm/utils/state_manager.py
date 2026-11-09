@@ -25,10 +25,7 @@ CURRENT_FORMAT_VERSION = 2
 #: The phases that judge implement's output. A completion of one of them that
 #: predates implement's latest completion reviewed (or fixed) an earlier
 #: state of the code: typically the empty repository a review was run against
-#: before implement existed, or code implement has since rewritten
-#: (2026-10-02, Codex racing run: a plain `--review-code` was refused as
-#: already done, and implement's next step pointed at `--apply-code-fixes` on
-#: that stale review).
+#: before implement existed, or code implement has since rewritten.
 PHASES_STALED_BY_IMPLEMENT = ("code-review", "apply-code-fixes")
 
 
@@ -145,7 +142,7 @@ def mark_phase_completed_in_state(state: Dict[str, Any], phase: str) -> None:
 def _pop_phase_started(state: Dict[str, Any], phase: str) -> None:
     """Drop *phase*'s started record, and the map once it is empty.
 
-    Fix round 18 (run 7 #9): a run that recorded a phase started and then
+    A run that recorded a phase started and then
     completed it left ``phases_started: {}`` behind, so a plain first
     implement on the executor leg wrote a key that says nothing.
     """
@@ -184,7 +181,7 @@ def _consume_answer(
 ) -> None:
     """Drop *task_id*'s recorded ``--human-task`` answer once its task moved on.
 
-    An answer answers one stop (fix round 15, review of round 14): it is
+    An answer answers one stop: it is
     applied when the run that recorded it resolves its plan, and the status
     it writes keeps it (an accepted ``completed``, an answered ``skipped``).
     Any other status written for the task afterwards — it ran again (a
@@ -236,7 +233,7 @@ def update_task_status_in_state(
         # A reason describes the status it was written with: a status written
         # without one drops it. A task accepted after failing (`accepted —`)
         # and later run to completion kept the old reason, and a resume read
-        # it back as an accepted failure (fix round 9).
+        # it back as an accepted failure.
         state["task_status_reasons"].pop(task_id, None)
 
 
@@ -249,8 +246,8 @@ TASK_CHECK_FINDINGS_KEY = "task_check_findings"
 #: (:meth:`StateManager.record_task_titles`). A ``--resume`` materializes only
 #: the unfinished tasks, so a walk over ``write_tasks.json`` alone lost every
 #: edge through a finished one: a check's findings held back T004 but not
-#: T006, whose chain to the check ran through a manual task answered done
-#: (fix round 12). ``check_records.decomposition_graph`` reads it.
+#: T006, whose chain to the check ran through a manual task answered done.
+#: ``check_records.decomposition_graph`` reads it.
 IMPLEMENT_TASK_GRAPH_KEY = "implement_task_depends_on"
 
 
@@ -264,7 +261,7 @@ def manual_task_gates(
 ) -> Dict[str, Any]:
     """Which owed manual tasks the user can do now, and what waits on them.
 
-    Fix round 28 (live run 12, Codex racing 06): T010, a manual task every
+    T010, a manual task every
     code task depended on, was deferred under ``--yes``; implement ran
     nothing, reported done, said "No later phase waits for these manual
     tasks" and offered a command recording T008, T009 and T010 done at once,
@@ -443,7 +440,7 @@ def set_task_check_findings_in_state(
 
 #: ``state.json``'s map of what the checks an implement task ran on its OWN
 #: edits reported when one failed: ``{task_id: [finding, ...]}``, present only
-#: while some task's own check fails (fix round 15). Never
+#: while some task's own check fails. Never
 #: :data:`TASK_CHECK_FINDINGS_KEY`: a code task whose own test fails keeps its
 #: edits and holds nothing back, where a check task's findings hold its
 #: dependents. Written by both legs (``util batch-done --own-check findings`` on a
@@ -468,8 +465,7 @@ def set_task_batch_check_in_state(
 #: ``state.json``'s map of what an implement task with a failing own check
 #: (:data:`TASK_BATCH_CHECK_KEY`) itself says — its title, ``## Task``
 #: section and acceptance criteria (``check_records.task_own_text``)
-#: — ``{task_id: text}``, present only while some such task has one (fix
-#: round 29, review of round 28, checks #1). A check task that reports the
+#: — ``{task_id: text}``, present only while some such task has one. A check task that reports the
 #: same finding in a later run (a ``--resume`` materializes only what it
 #: hands out) reads it to judge whether the check is the task's own job
 #: (``task_owns_the_check``) before recording the task's finding as a
@@ -495,7 +491,7 @@ def set_task_own_text_in_state(
 
 #: ``state.json``'s map of an implement task's own words about the checks it
 #: ran on its edits (its reply's ``check.note``): ``{task_id: note}``,
-#: present only while some task has one (fix round 28, live run 12: the
+#: present only while some task has one (live run 12: the
 #: released T007 wrote "(known problem the user accepted in T002)" into its
 #: finding, which the strict match then read as its own failure). Recorded
 #: and shown, never read as a finding or matched on. Written by both legs
@@ -516,10 +512,7 @@ def set_task_own_check_note_in_state(
 
 #: ``state.json``'s list of the implement tasks whose last record carried a
 #: report of their OWN checks (passed, failing, or repeating only accepted
-#: findings), sorted, present only while some task has one (fix round 24,
-#: live run 10: every racing task ran ``npm test`` and passed, and the tests
-#: line still said that nothing had run the repository's tests — a passing
-#: own check was recorded nowhere). Written by both legs (``util batch-done
+#: findings), sorted, present only while some task has one. Written by both legs (``util batch-done
 #: --own-check``, the scheduler from ``TaskOutcome.batch_check``); every
 #: other record of the task clears it; the tests line reads it
 #: (``verification_lines.implement_checks_ran``).
@@ -537,7 +530,7 @@ def set_task_own_check_ran_in_state(
 #: ``state.json``'s map of what an implement task's own check reported again
 #: of findings the user accepted for a check (``--human-task <check>=done``),
 #: by check: ``{task_id: {check_id: [finding, ...]}}``, present only while
-#: some task has one (fix round 23: round 22 kept them only in the result
+#: some task has one (round 22 kept them only in the result
 #: row and the printed line, so ``status`` showed the task as plainly
 #: ``completed``). Beside :data:`TASK_BATCH_CHECK_KEY`, never in it: they
 #: are not the task's own failure. Written by both legs
@@ -562,8 +555,7 @@ def set_task_batch_check_accepted_in_state(
 #: is the same finding a check task of the run reported (the strict
 #: comparison of ``check_records.split_accepted_findings``), by that
 #: check: ``{task_id: {check_id: [finding, ...]}}``, present only while some
-#: task has one (fix round 28, live run 12 OpenCode accept 01: T001 ran
-#: T002's release check and was recorded as failing it). Beside
+#: task has one. Beside
 #: :data:`TASK_BATCH_CHECK_KEY`, never in it: T002's own record covers the
 #: finding. Written by both legs (``check_records.repeated_findings_for``:
 #: the scheduler and ``util batch-done``, when the code task's record comes
@@ -597,7 +589,7 @@ def _set_by_check_in_state(
 
 
 #: ``task id -> tree fingerprint`` for each check with findings on the native
-#: leg (fix round 14): the files git saw when the run that recorded the
+#: leg: the files git saw when the run that recorded the
 #: findings ended (``write_prompt.check_tree_fingerprint``). A native
 #: ``--resume`` hands the check out again only when the tree moved since —
 #: the executor keeps the same stamp on the check's verdict
@@ -647,7 +639,7 @@ def clear_task_verdict(state: Dict[str, Any], task_id: str) -> None:
 
 
 #: ``task id -> when a run that hands the implement task out again set its
-#: earlier record aside`` (fix round 17): a start-over (``--fresh``, or a
+#: earlier record aside``: a start-over (``--fresh``, or a
 #: plain run after a finished implement) for every code task, an explicit
 #: ``--task`` rerun for the one it names. The task is ``pending`` again, but
 #: the prior-changes log still holds the line its earlier run wrote, and a
@@ -694,7 +686,7 @@ def mark_item_processed_in_state(
     }
 
 
-#: ``details.leg`` of a ``processed_<phase>`` record (fix round 22): which
+#: ``details.leg`` of a ``processed_<phase>`` record: which
 #: leg wrote it — the write executor's scheduler, or ``util batch-done`` for
 #: the native host.
 PROCESSED_LEG_EXECUTOR = "executor"
@@ -714,14 +706,12 @@ def record_batch_items_in_state(
 ) -> List[str]:
     """Record every item of an apply batch in ``processed_<phase>``; the ids.
 
-    One shape on both legs (fix round 22, live run 9: the executor leg wrote
-    no record at all, so ``state.json`` named a declined fix on Claude Code
-    and nowhere on Codex or OpenCode). Each of *task*'s ``expected_ids`` gets
+    One shape on both legs. Each of *task*'s ``expected_ids`` gets
     ``{status, details: {task_id, prior_changes_id, grouped_sha256, leg,
     reason?}, timestamp}``: ``declined`` / ``skipped`` with its reason
     (never ``applied``), else ``applied`` — ``no-op`` for a batch the
     executor read as changing nothing; the native leg has no such reading
-    and records a verified no-op ``applied`` (fix round 23: documented, no
+    and records a verified no-op ``applied`` (documented, no
     reader tells the two apart) — for a finished batch, and ``failed``
     for every item of a batch that did not finish, which keeps it in a
     ``--resume``'s work set. ``grouped_sha256`` is the review the batch
@@ -769,7 +759,7 @@ def processed_record_counts(
     a ``declined`` or ``skipped`` one stamped with another review than
     *review_stamp* (the current ``grouped.json``'s hash): an item an earlier
     review's batch did not apply, which a later review reports again, is
-    offered again (fix round 22) — as the executor leg offers it in the
+    offered again — as the executor leg offers it in the
     batch the later review makes — and never counted as applied. An
     ``applied`` record counts whatever review it names, so a native
     ``--resume`` never hands an applied item out twice. A record with no
@@ -1831,7 +1821,7 @@ class StateManager:
         save — a native-leg ``--resume`` of an apply phase saves nothing until
         the host's ``--mark-completed`` — and the host reads this file raw,
         filtering ``human_decisions_{phase}`` on the new names, for its
-        "Decided by the judge agent" section (review 2026-10-02). Not under
+        "Decided by the judge agent" section. Not under
         ``read_only``, and never when nothing changed.
 
         Raises what ``open``/``json.loads`` raise; a failed write-back does not.
@@ -2231,8 +2221,7 @@ class StateManager:
 
         ``implement`` records them when it decomposes the task list, on both
         legs, so a deferred task can be named later by what it is and not only
-        by its id (2026-10-04: a complete workflow said nothing about the two
-        manual tasks it left the user). *titles* is that whole decomposition:
+        by its id. *titles* is that whole decomposition:
         the titles merge, but its id set REPLACES ``implement_task_ids``, which
         is what :meth:`deferred_implementation_tasks` scopes to — nothing
         resets ``task_status`` on a fresh implement, so an id an earlier
@@ -2240,11 +2229,11 @@ class StateManager:
         (adversarial review, 2026-10-05). *human_ids*, when given, are that
         decomposition's manual tasks and REPLACE ``implement_human_task_ids``
         the same way — the key is absent when there are none, so a plan with
-        no manual task gains no key (fix round 7: the backstop in
+        no manual task gains no key (the backstop in
         :meth:`deferred_implementation_tasks`). *depends_on*, when given, is
         that decomposition's graph (every task's ``depends_on``, each list
         stored sorted and de-duplicated) and REPLACES
-        :data:`IMPLEMENT_TASK_GRAPH_KEY` (fix round 12). Returns whether
+        :data:`IMPLEMENT_TASK_GRAPH_KEY`. Returns whether
         anything changed; the caller saves.
         """
         recorded = dict(self.state.get("task_titles") or {})
@@ -2258,7 +2247,7 @@ class StateManager:
             human_ids is not None
             and self.state.get("implement_human_task_ids") != human
         )
-        # Each list sorted and de-duplicated (fix round 13), so the record
+        # Each list sorted and de-duplicated, so the record
         # does not depend on the order tasks.md lists a task's dependencies.
         graph = (
             None if depends_on is None
@@ -2328,7 +2317,7 @@ class StateManager:
         its ``skipped — depends on skipped task …`` chain (the manual task),
         or ``None`` when *task_id* was not skipped as a dependent.
 
-        Fix round 17: such a task is a code task (or a check) the run did not
+        Such a task is a code task (or a check) the run did not
         do, not manual work. It runs on the resume that records its manual
         task done (``--human-task <id>=done``), so every surface names it
         apart: ``waits_on`` on its :meth:`deferred_implementation_tasks`
@@ -2349,7 +2338,7 @@ class StateManager:
         ``None`` when ``task_titles`` has no entry (a state written before
         titles were recorded). A task skipped because it depends on a
         deferral also carries ``waits_on``, the deferred task it waits on
-        (:meth:`deferral_root`, fix round 17): implement runs it once that
+        (:meth:`deferral_root`): implement runs it once that
         one is recorded done.
         """
         titles = self.state.get("task_titles") or {}
@@ -2360,7 +2349,7 @@ class StateManager:
             task_id for task_id, status in statuses.items()
             if status == "skipped" and self._deferred_to_user(task_id)
         }
-        # The backstop (fix round 7): implement is on record as completed and
+        # The backstop: implement is on record as completed and
         # a manual task of its decomposition has no answer at all — neither
         # `completed` (done) nor a recorded skip. Nobody did it, so it is
         # owed: a host that resolved the strategy itself and recorded nothing
@@ -2386,12 +2375,12 @@ class StateManager:
         """The ids of *deferred* (:meth:`deferred_implementation_tasks`) that a
         ``--human-task <id>=done`` closes: the manual tasks themselves.
 
-        Fix round 16: the how-to-close note answered every deferred id, so a
+        The how-to-close note answered every deferred id, so a
         code task ``skip-dependents`` skipped with a manual task got
         ``--human-task <id>=done`` too, which implement refuses (a code task is
         answerable only once it failed); it runs on that same resume once its
         manual task is done. A state with no ``implement_human_task_ids`` (one
-        written before fix round 7) keeps every id, as before.
+        written) keeps every id, as before.
         """
         ids = [str(entry.get("id")) for entry in deferred
                if isinstance(entry, dict) and entry.get("id")]
@@ -2399,7 +2388,7 @@ class StateManager:
         if not isinstance(human, list):
             return ids
         manual = {str(task_id) for task_id in human}
-        # Fix round 28 (live run 12, Codex racing 06): only the ones the user
+        # Only the ones the user
         # can do now. T008 and T009 depend on code nothing had run yet, and
         # the command recorded them done beside T010.
         gates = self.manual_task_gates(deferred)
@@ -2449,7 +2438,7 @@ class StateManager:
         tasks recorded ``completed`` (a check with findings is a completed
         task; a later failure or re-run clears its entry) or ``skipped`` (the
         user answered ``--human-task <id>=skip`` to a check with findings: the
-        problems are still in the code, fix round 11) and scoped to the
+        problems are still in the code) and scoped to the
         decomposition implement ran last, as
         :meth:`deferred_implementation_tasks` is.
         """
@@ -2482,7 +2471,7 @@ class StateManager:
         ``[{id, title, findings}]`` from :data:`TASK_BATCH_CHECK_KEY`, for
         tasks recorded ``completed`` (a later record of the task clears its
         entry) and scoped to the decomposition implement ran last, as
-        :meth:`implementation_check_findings` is (fix round 15).
+        :meth:`implementation_check_findings` is.
         """
         recorded = self.state.get(TASK_BATCH_CHECK_KEY)
         if not isinstance(recorded, dict) or not recorded:
@@ -2509,7 +2498,7 @@ class StateManager:
 
     def implementation_batch_check_accepted(self) -> List[Dict[str, Any]]:
         """The implement tasks whose own check reported again only what the
-        user accepted for a check (fix round 23).
+        user accepted for a check.
 
         ``[{id, title, checks: {check_id: findings}}]`` from
         :data:`TASK_BATCH_CHECK_ACCEPTED_KEY`, for tasks recorded
@@ -2520,7 +2509,7 @@ class StateManager:
 
     def implementation_batch_check_repeats(self) -> List[Dict[str, Any]]:
         """The implement tasks whose own check reported only what a check
-        task of the run reported (fix round 28): ``[{id, title, checks:
+        task of the run reported: ``[{id, title, checks:
         {check_id: findings}}]`` from :data:`TASK_BATCH_CHECK_REPEATS_KEY`,
         by :meth:`implementation_batch_check_accepted`'s rule."""
         return self._implementation_batch_check_by_check(TASK_BATCH_CHECK_REPEATS_KEY)
@@ -2857,8 +2846,7 @@ class StateManager:
     ) -> None:
         """Replace only the given ``commit_range`` fields, and save.
 
-        The one writer of a commit front door's record (plans/review-commits.md
-        §2.1, "Who writes ``commit_range``"): step 6 of ``--review-commits``,
+        The one writer of a commit front door's record: step 6 of ``--review-commits``,
         ``--apply-commit-fixes``, ``--improve-commits`` and ``util
         commit-brief``, and a detached worker applying its launch's stage. A new
         brief passes every field; an existing one passes what this entry
@@ -2878,7 +2866,7 @@ class StateManager:
         *clear_phases* are popped from ``phases_completed`` in the same save:
         a restart's archived round (``["code-review"]``) stops reading as a
         completed review the moment it is recorded, whether or not the
-        restarted phase ever runs (§2.7, "Not candidates").
+        restarted phase ever runs.
         """
         if self.read_only:
             raise RuntimeError(

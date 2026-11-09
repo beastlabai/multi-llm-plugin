@@ -97,7 +97,7 @@ def rerunnable_checks(state: Any) -> List[str]:
 
 def _unlanded_on_record(plan_path: Path, state: Any) -> List[str]:
     """``check_records.unlanded_on_record`` for this plan, each id
-    named on stdout with why it runs again (fix round 15)."""
+    named on stdout with why it runs again."""
     from utils.check_records import unlanded_on_record
 
     phase_dir = get_phase_dir(plan_path, "implement")
@@ -119,7 +119,7 @@ def check_apply_suggestions_prerequisite(state, plan_dir: Path) -> dict:
     shape and returns the ``valid_count``/``importance_breakdown`` the unmet
     block below renders. The copy this used to be read only the v1 flat dict
     and crashed on the v2 envelope (``validation.values()`` handed it an int)
-    whenever the gate was actually reached (fix round 6, 2026-10-05).
+    whenever the gate was actually reached.
     """
     return _shared_apply_suggestions_prerequisite(state, plan_dir)
 
@@ -352,8 +352,7 @@ def record_pre_existing_changes(state: StateManager) -> None:
     # implement's first run, so a baseline without it was left by a planning
     # phase (apply-suggestions records one at its own start), before that
     # phase edited the plan: kept, it counted the plan edit as implement's
-    # change (2026-10-05, OpenCode racing run 3: the plan listed `modified`
-    # by implementation). Implement's first run takes its own.
+    # change. Implement's first run takes its own.
     if state.get("pre_existing_changes") is not None:
         if state.get("head_before_implement") is not None:
             print(f"Pre-existing changes already recorded ({len(state.get('pre_existing_changes', []))} paths)")
@@ -770,11 +769,11 @@ def format_batches_for_output(
     ``resolve_human_task_plan`` had no human id to resolve, and the resumed
     phase's ``write_batch_report.json`` reported ``skipped_tasks: {}`` while its
     ``summary.md`` lost the ``## Manual Tasks (Deferred)`` section that is the
-    only place the finished run tells the reader what is still owed by hand
-    (measured 2026-09-16). A human task is never dispatched by either invoker,
+    only place the finished run tells the reader what is still owed by hand. A human
+    task is never dispatched by either invoker,
     so carrying it through costs the resume nothing.
 
-    A **skipped code task** rides along for the same reason (fix round 8): a
+    A **skipped code task** rides along for the same reason: a
     dependent skipped with a deferred manual task, or a failed task answered
     ``--human-task <id>=skip`` and its dependents, is ``skipped`` too, and
     dropping it put it in no bucket of the resumed run's account — the
@@ -786,7 +785,7 @@ def format_batches_for_output(
 
     *rerun_ids* (``check_records.rerunnable_checks``) are ``completed``
     check tasks whose findings hold back the tasks after them, kept as well
-    (fix round 11): dropped, the check could never run again and the tasks
+    Dropped, the check could never run again and the tasks
     it held never ran. The executor runs it again only when the files
     changed (or on ``--human-task <id>=retry``); a native host runs it again.
     """
@@ -801,7 +800,7 @@ def format_batches_for_output(
             # clean failure or partial application stops the loop at exit 3
             # promising "--resume re-dispatches this batch", and the resumed
             # run then never materialized it, ran the rest and stamped the
-            # phase completed with that task undone (2026-09-16).
+            # phase completed with that task undone.
             # IN_PROGRESS is a run killed mid-dispatch — the same debt.
             tasks_to_include = [
                 t for t in batch
@@ -894,15 +893,14 @@ def _applicable_task_decisions(
     recorded) and a recorded ``done``/``skip`` for a code task only while
     the state still says that task ``failed`` — or, for ``skip``, ``skipped``:
     the answer that skipped it is what keeps it skipped on the next resume,
-    now that a skipped code task is materialized again (fix round 8). Once
+    now that a skipped code task is materialized again. Once
     it ran again or was accepted, a stale answer must not mark it done
     behind the user's back — and once its task has a status the answer did
-    not write, it is gone from the record (``state_manager._consume_answer``,
-    fix round 15).
+    not write, it is gone from the record (``state_manager._consume_answer``).
 
     *rerun_task* is ``--task <id>``: the user asked to run that code task,
     so an answer an earlier run recorded for it does not apply (a recorded
-    ``skip`` used to leave ``--task`` nothing to hand out, fix round 15);
+    ``skip`` used to leave ``--task`` nothing to hand out);
     the status its run writes retires the answer.
     """
     recorded = dict(recorded)
@@ -910,7 +908,7 @@ def _applicable_task_decisions(
         recorded.pop(rerun_task, None)
     decisions: Dict[str, str] = {}
     # A check whose findings hold back the tasks after it is answered like a
-    # failed task (fix round 11), until the answer is taken.
+    # failed task, until the answer is taken.
     held_by = set(held_by)
     for task_id, action in recorded.items():
         status = statuses.get(task_id)
@@ -981,7 +979,7 @@ def _prepare_selected_task(
     from utils.state_manager import clear_task_verdict
 
     clear_task_verdict(state.state, task.id)
-    # Fix round 17: the log line its earlier run wrote is not this rerun's
+    # The log line its earlier run wrote is not this rerun's
     # (`batch_done.unrecorded_logged_batches`): a host gone before its
     # `batch-done` left T001 refused on the next plain emit.
     mark_tasks_reset_in_state(state.state, [task.id])
@@ -993,7 +991,7 @@ def _start_over(
     state: StateManager, plan_path: Path, tasks: Iterable[Task],
 ) -> None:
     """Set aside what earlier runs recorded for each code task, and record
-    implement started (fix round 17, review of fix round 16).
+    implement started.
 
     A start-over (``--fresh``, or a plain run on an implement that finished)
     hands every task out again. It used to leave the earlier run's records in
@@ -1024,9 +1022,7 @@ def _start_over(
     legs, as the native emit records it.
 
     A first implement has nothing to set aside, and this writes nothing then
-    (fix round 18, run 7 #9: a plain first run stamped a reset for every code
-    task and recorded implement started, which the executor's completion
-    popped into an empty ``phases_started``): see
+    See
     :func:`_has_earlier_implement_records`.
     """
     from utils.state_manager import clear_task_verdict
@@ -1111,7 +1107,7 @@ def _has_earlier_implement_records(
     code task in *code_ids*; a line the prior-changes log holds for one of
     them under implement; a kept prompt. Absent all of these the run is the
     plan's first implement, and starting it over would only stamp resets and
-    a started record for work that never ran (fix round 18, run 7 #9). A
+    a started record for work that never ran. A
     snapshot that cannot be read counts as a record, so the start-over that
     would warn about it still runs.
     """
@@ -1172,8 +1168,8 @@ def _remove_kept_prompts(phase_dir: Path) -> int:
 
     The batch prompts each dispatch keeps (``<id>.prompt.txt``, and
     ``<id>.attempt-<n>.prompt.txt`` for a re-ask) are one run's: after a
-    start-over, a task the new run refuses before dispatch must have none
-    (fix round 17, review of fix round 16). Anything else in the folder — a
+    start-over, a task the new run refuses before dispatch must have none. Anything else
+    in the folder — a
     check's ``<id>.tree.json``, which the native leg binds there — stays.
 
     A jailed repo-wide batch can write the phase dir, so nothing here
@@ -1289,7 +1285,7 @@ def _manual_close_note(
     """``next_phase.manual_close_note`` for *task_ids*, in this host's own
     command spelling (the template the result line's ``user_next_step``
     uses); ``None`` when nothing can be spelled. *waiting*: how many code
-    tasks wait on them (fix round 28)."""
+    tasks wait on them."""
     import io
 
     try:
@@ -1311,11 +1307,10 @@ def _native_manual_gates(
 ) -> Optional[Dict[str, Any]]:
     """``human_task_plan.plan_manual_gates`` over the native handoff's
     tasks, the recorded decomposition and ``state.json`` as it stands (the
-    emit has not persisted *plan* yet); ``None`` when it cannot be read
-    (fix round 28).
+    emit has not persisted *plan* yet); ``None`` when it cannot be read.
 
-    A code task this emit hands out is not done yet. Fix round 29 (review of
-    round 28 #3): it used to count as done, so the note named a manual task
+    A code task this emit hands out is not done yet. It used to count as done, so the
+    note named a manual task
     that comes after it as one the user can do, and the host copied that
     note into summary.md even when the task then failed, while ``status``
     and ``util next-command`` said the manual task comes after it. Such a
@@ -1351,9 +1346,7 @@ def _native_manual_gate_stop(
 ) -> Optional[Tuple[List[str], str, str]]:
     """``(lines, headline, closing [ETA] line)`` of a native emit that hands
     out nothing because every code task left waits on a manual task not
-    recorded done, one the user can do now among them; ``None`` otherwise
-    (fix round 28, live run 12, Codex racing 06: implement reported done
-    having run nothing, next step review-code on an empty tree). The words
+    recorded done, one the user can do now among them; ``None`` otherwise. The words
     are the executor stop's."""
     gates = _native_manual_gates(plan, output_data, state)
     if not gates or not gates.get("gated") or not gates.get("waiting"):
@@ -1372,7 +1365,7 @@ def _native_manual_gate_stop(
     it = "it" if len(gating) == 1 else "them"
     head = manual_gate_head("implement", {t: label(t) for t in gating}, waiting)
     headline = f"{head}. {manual_gate_way_on(gating)}"
-    # The merge of fix round 28: the line the report relays says what stopped
+    # The: the line the report relays says what stopped
     # and why, as the tool routes' line beside the section does; the way on
     # is the section's resume alone (the result line's `error` keeps it).
     lines = [
@@ -1399,8 +1392,8 @@ def _native_manual_gate_stop(
 
 def _refuse_answer(message: str) -> int:
     """Refuse a ``--human-task`` answer: exit 3, the message on stderr and,
-    whole, as the result line's ``error`` (fix round 19, review of round 18:
-    a refused answer printed its reason on stderr alone, and the tool routes
+    whole, as the result line's ``error`` (a refused answer printed its reason on stderr
+    alone, and the tool routes
     said the result line named no error)."""
     record_error(message.replace("ERROR: ", "", 1))
     return unattended_mod.fail_closed(
@@ -1441,7 +1434,7 @@ def _stop_user_commands(args: argparse.Namespace) -> Dict[str, str]:
             "accept": command("implement", "--resume", "--human-task", "{task_id}=done"),
             "skip": command("implement", "--resume", "--human-task", "{task_id}=skip"),
             "retry": command("implement", "--resume", "--human-task", "{task_id}=retry"),
-            # One resume carrying several answers (fix round 13: a stop that
+            # One resume carrying several answers (a stop that
             # needs a check's findings accepted and a refused task skipped).
             "answers": command("implement", "--resume", "{answers}"),
         }
@@ -1660,16 +1653,16 @@ def run_implement_write_phase(
         record_error(stop["headline"])
     found = result.check_findings() if hasattr(result, "check_findings") else {}
     notice = [check_findings_notice(found)] if found else []
-    # Fix round 14: a task whose own check failed after its edits, and a run
+    # A task whose own check failed after its edits, and a run
     # nothing verified, are on the same line.
     extra = write_result_notice(result) if hasattr(result, "report_rows") else None
     if extra:
         notice.append(extra)
     if notice:
-        # Racing re-run 4 (2026-10-05): a check task's problems were on no
+        # Racing re-run 4: a check task's problems were on no
         # surface a host reads. The result line's `notice` carries them,
         # beside the `[CHECK_FINDINGS]` lines above.
-        # Fix round 28 (live run 12 #7): joined so a clause gives up its
+        # Joined so a clause gives up its
         # closing stop to the separator, never ".;".
         record_notice(join_clauses(notice))
     if result.report_path:
@@ -1692,7 +1685,7 @@ def _materialize_native_write_tasks(
     The same two bridge calls :func:`run_implement_write_phase` makes, with
     the same inputs, so the file a native host's ``util write-prompt`` reads
     is the one the executor leg would have dispatched from. Stamped native
-    with *host* (fix round 26), so ``status`` shows this run rather than an
+    with *host*, so ``status`` shows this run rather than an
     earlier executor run's ``.status.json``.
     """
     from utils.write_phase_bridge import (
@@ -1741,7 +1734,7 @@ def _native_human_task_plan(
     A failed code task the user accepted (``--human-task <id>=done`` on a
     resume) is **taken out of the batches**, exactly as a completed task is,
     and named in a top-level ``accepted_tasks`` map with its reason: a task
-    left in the batches is one the host dispatches, and until fix round 8
+    left in the batches is one the host dispatches, and until
     the native leg recorded the acceptance in ``state.json`` while handing
     the task out again as ``failed`` — whose ``util batch-done`` then
     overwrote the acceptance (reviewer repro, 2026-10-05).
@@ -1751,13 +1744,13 @@ def _native_human_task_plan(
     materialize: an answer an earlier run recorded keeps its place in
     ``accepted_tasks``, and a manual task answered ``done`` is named in a
     top-level ``completed_manual_tasks`` list, on every later resume too
-    (fix round 9: both dropped out once the task was recorded completed).
+    (both dropped out once the task was recorded completed).
 
     A task *recorded_statuses* (``state.json``'s ``task_status``) says
     ``skipped`` that this plan no longer skips — ``--resume --force-strategy
     skip-continue`` after a ``skip-dependents`` run — is handed out
     ``pending`` and recorded so (``human_task_plan.mark_no_longer_skipped``),
-    never left ``skipped`` for the host to pass over (fix round 9).
+    never left ``skipped`` for the host to pass over.
     """
     from utils.check_records import decomposition_graph
     from utils.human_task_plan import (
@@ -1783,7 +1776,7 @@ def _native_human_task_plan(
         strategy=strategy,
         decisions=decisions,
         check_findings_ids=check_findings_ids,
-        # The whole decomposition (fix round 12): a resume's batches lack
+        # The whole decomposition: a resume's batches lack
         # the finished tasks a skip's walk must go through.
         graph=decomposition_graph(nodes, state_record),
     )
@@ -1845,7 +1838,7 @@ def _native_check_reruns(
 ) -> Tuple[List[str], Dict[str, List[str]]]:
     """``(checks handed out again, checks kept)`` for a native ``--resume``.
 
-    Fix round 14 (stop fixture, Claude Code 01b): the native leg handed every
+    The native leg handed every
     check whose findings hold tasks back out again on every ``--resume``, so a
     resume the user changed nothing for spent a new subagent (~23k tokens) on
     the same findings — the executor refuses that run
@@ -1863,7 +1856,7 @@ def _native_check_reruns(
     A check whose findings the ``--exec-subagents`` leg recorded has no
     ``task_check_trees`` stamp: the executor stamps its verdict instead
     (:func:`_executor_check_stamp`), which is read when the state holds none
-    (fix round 15: an executor stop resumed natively handed the check out
+    (an executor stop resumed natively handed the check out
     again on unchanged files). A check kept on that stamp adopts it, so the
     native run's closing ``util finalize-tracking`` re-stamps it like its own.
     """
@@ -1922,8 +1915,7 @@ def _executor_check_stamp(
     (*findings*), so a stamp is never read off another run of the check than
     the one on record. ``None`` otherwise.
     """
-    # One reader for both the resume and its why (fix round 23:
-    # `stop_answers.check_kept_on_resume`).
+    # One reader for both the resume and its why (`stop_answers.check_kept_on_resume`).
     from utils.stop_answers import executor_check_stamp
 
     return executor_check_stamp(
@@ -1941,7 +1933,7 @@ def _native_withheld(
     """Take out of the native handoff's batches every task the host must not
     dispatch; what was taken out, by bucket.
 
-    Fix round 14 (stop fixture, Claude Code accept 02): T005 and T006,
+    T005 and T006,
     skipped by ``--human-task T005=skip``, were in ``skipped_tasks`` and the
     prose said "do not dispatch", yet they sat in ``batches`` 3 and 4, and the
     emit counted "4 task(s) to dispatch" beside "Pending tasks: 3". The
@@ -2038,10 +2030,10 @@ def _native_withheld(
             if violation is None:
                 continue
             message = violation.message
-            # Fix round 20 (live run 8 #4): the refusal ends with allowing
+            # The refusal ends with allowing
             # the file as the user's call (`write_safety.policy_allow_clause`);
-            # beside it, the skip answer, in the executor stop's words. Fix
-            # round 21: per rule, and the skip alone for a file outside the
+            # beside it, the skip answer, in the executor stop's words. Per rule, and
+            # the skip alone for a file outside the
             # repository, which no policy change can allow.
             skip = policy_skip_clause(
                 task_id, alone=policy_allow_clause(violation.hits) is None)
@@ -2100,7 +2092,7 @@ def _native_withheld(
         output_data["refused_tasks"] = dict(sorted(refused.items()))
     if not_run:
         output_data["not_run_tasks"] = dict(sorted(not_run.items()))
-    # Fix round 22 (live run 9 #1): what the host's `util metrics finish`
+    # What the host's `util metrics finish`
     # names on its closing `[ETA]` line, as the executor's closing line
     # names the same tasks — also when this emit hands out nothing and the
     # host runs no `util metrics start`. Replaced by every native emit.
@@ -2140,8 +2132,7 @@ def _kept_labels(state: StateManager, plan: Any = None) -> Dict[str, str]:
     answers on record, in the words the executor's ``resume: kept`` line and
     summary.md use (``human_task_plan.answered_done_label``); and a
     check whose findings stand, not accepted, as
-    ``task_ledger.KEPT_WITH_FINDINGS_LABEL`` (fix round 20, live
-    run 8 #6: 01b and 01c listed T002 as if it had passed)."""
+    ``task_ledger.KEPT_WITH_FINDINGS_LABEL``."""
     from types import SimpleNamespace
 
     from utils.task_ledger import KEPT_WITH_FINDINGS_LABEL
@@ -2183,7 +2174,7 @@ def _kept_named(kept: Sequence[str], labels: Dict[str, str]) -> str:
 
 
 def _continued_line(kept: Sequence[str], labels: Optional[Dict[str, str]] = None) -> str:
-    """The one line a continued run prints (fix round 16)."""
+    """The one line a continued run prints."""
     named = _kept_named(kept, labels or {})
     return (
         "resume: implement started earlier and did not finish, so this run "
@@ -2200,7 +2191,7 @@ def _native_kept_line(
     """The ``resume: kept …`` line of a native ``--resume`` typed by the user,
     or ``None`` when it keeps nothing.
 
-    Fix round 18 (live run 7, Claude Code stop 01b and accept 02): only the
+    Only the
     plain ``--implement`` that continues a started run said what it kept, so
     on the native leg an explicit ``--resume`` never showed "T002 (accepted
     with its check findings)", which both tool routes print (the executor's
@@ -2234,7 +2225,7 @@ def _waiting_on_checks(
     """Each handed-out task that depends, directly or through another task,
     on a check task handed out in the same batches: ``{task id: [check ids]}``.
 
-    Fix round 16 (live run 6, Claude Code stop 01): T007 sat in the first
+    T007 sat in the first
     emit's batches beside T004 although it depends on check T002, whose
     verdict nobody knows until T002 runs — rightly, since a pass releases it,
     but nothing said so, and the counts read as one more task than ran. Its
@@ -2266,8 +2257,7 @@ def _waiting_on_checks(
 
 def _handoff_counts(output_data: Dict[str, Any]) -> Dict[str, int]:
     """Every count the emit prints and hands over, read off one source: the
-    batches as handed out (fix round 16, live run 6: "5 execution batches"
-    beside "Batches: 3")."""
+    batches as handed out."""
     batches = output_data.get("batches") or []
     entries = [t for b in batches for t in b.get("tasks") or []]
     manual = sum(
@@ -2795,7 +2785,7 @@ def open_run(run: ImplementRun) -> Optional[int]:
         print(f"       Resolved path: {plan_path}")
         return 1
 
-    # §9.3.a/b: the anchor capture point — absolute, before anything can chdir
+    # The anchor capture point — absolute, before anything can chdir
     # and before any provider read that decides routing.
     set_run_anchor(str(plan_path))
 
@@ -3766,7 +3756,7 @@ def _closes_a_completed_implement(state: StateManager, output_data: Dict[str, An
 
     True when ``implement`` is on record completed and the handoff holds no
     code task left to run — every task it lists is a manual one or already
-    ``completed``/``skipped`` (fix round 14). Never asked for ``--task``,
+    ``completed``/``skipped``. Never asked for ``--task``,
     which hands one task out to be run again whatever its status.
     """
     if not state.is_phase_completed("implement"):

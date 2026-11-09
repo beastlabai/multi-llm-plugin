@@ -41,7 +41,7 @@ from typing import (
     Tuple,
 )
 
-# The status vocabulary is the retry ladder's, never a second copy of it (§7.2).
+# The status vocabulary is the retry ladder's, never a second copy of it.
 # Adapters and callers read ``STATUS_*`` through this module, so it stays
 # imported here; the classifier that uses it is ``failure_classifier``.
 try:  # pragma: no cover - import shim mirrors the rest of utils/
@@ -388,7 +388,7 @@ class LLMProvider(ABC):
     # truncating.
     supported_prompt_transports: Tuple[str, ...] = ("argv",)
 
-    # Where ``build_command`` puts the prompt in the argv it returns (§9.4).
+    # Where ``build_command`` puts the prompt in the argv it returns.
     #
     # ``-1`` — the last element — is the assumption every ``cmd[:-1]`` override
     # and :meth:`build_agent_command_for_transport` already relied on, silently.
@@ -434,7 +434,7 @@ class LLMProvider(ABC):
     #: so the inline copy would only duplicate it — aider attaches every
     #: absolute path its prompt names as a ``--read`` file, and an inlined body
     #: also feeds aider's mention scan, which auto-adds every repo path the plan
-    #: names (plans/ask-answer-recovery-and-false-success.md D4.2). An adapter
+    #: names. An adapter
     #: that declares ``False`` with no such route would get no plan at all, and
     #: ``tests/test_provider_housekeeping.py`` fails it by name.
     wants_inline_plan: bool = True
@@ -488,7 +488,7 @@ class LLMProvider(ABC):
     #: ``--sandbox read-only`` reads anywhere. A validation batch may name a
     #: snapshot in a phase dir outside the repo (a plan kept elsewhere), so an
     #: adapter that is neither this nor :attr:`read_scope_flag` is treated as
-    #: unable to read such a path (plans/validation-context-by-path-and-codex-0156-fallout.md §2.2).
+    #: unable to read such a path.
     reads_outside_cwd: bool = False
 
     #: The flag that widens the ``agent-readonly`` read scope to one more
@@ -545,13 +545,13 @@ class LLMProvider(ABC):
     #: Declared usage fidelity (D3j): ``none`` | ``partial`` | ``full``.
     usage_support: str = types.USAGE_NONE
 
-    #: What the vendor CLI does *inside* one awaited subprocess before it returns
-    #: (§7.6(b)). ``None`` means unmeasured: the ladder then assumes a single
-    #: request and refuses to hand the adapter a retry-count env var (§7.3).
+    #: What the vendor CLI does *inside* one awaited subprocess before it returns.
+    #: ``None`` means unmeasured: the ladder then assumes a single
+    #: request and refuses to hand the adapter a retry-count env var.
     #:
     #: The converse is a test, not a convention — an adapter whose ``get_env``
     #: sets a retry-shaped variable while this stays ``None`` is a budget bug,
-    #: because §7.5 rule 4 would subtract one request's worth of wall clock from
+    #: because rule 4 would subtract one request's worth of wall clock from
     #: the deadline while the child quietly makes several.
     #:
     #: An adapter whose envelope depends on the *resolved* slot timeout (as
@@ -560,21 +560,21 @@ class LLMProvider(ABC):
     #: one derivation rather than two copies of it.
     internal_retries: Optional[types.InternalRetryEnvelope] = None
 
-    #: Whether this adapter really emits a schema flag when handed a ``schema=``
-    #: (§4.2.2). ``False`` is the default and the honest one: the default
+    #: Whether this adapter really emits a schema flag when handed a ``schema=``.
+    #: ``False`` is the default and the honest one: the default
     #: builders below **ignore** ``schema`` entirely, so a caller that assumed
     #: otherwise would be reading prose as validated output.
     #:
     #: The caller reads this **before** dispatch: ``False`` ⇒ the phase runs its
     #: prompt-level JSON path and the result is marked ``recovered`` /
-    #: ``unvalidated`` per §4.2.1, never ``native``. Only ``claude-code`` and
+    #: ``unvalidated``, never ``native``. Only ``claude-code`` and
     #: ``codex`` set it ``True``, and an adapter that sets it ``True`` while
     #: emitting no flag is a bug ``tests/test_structured_output.py`` catches.
     structured_output_support: bool = False
 
     #: How this adapter carries a schema: ``"inline"`` (claude's
     #: ``--json-schema <json>``) or ``"file"`` (codex's
-    #: ``--output-schema <FILE>``). §4.2's contract asymmetry, **declared** so
+    #: ``--output-schema <FILE>``). The contract asymmetry, **declared** so
     #: the caller knows whether to materialize a sidecar without branching on an
     #: adapter name. Meaningless while ``structured_output_support`` is ``False``.
     structured_output_transport: str = "inline"
@@ -584,7 +584,7 @@ class LLMProvider(ABC):
     #: were captured from (D3m). Empty means "not declared" — the executor
     #: records ``unknown`` and warns rather than blocking.
     #:
-    #: **M14/§5.4: a declared floor carries a comment naming the FEATURE it
+    #: **: a declared floor carries a comment naming the FEATURE it
     #: protects, never a bare number.** A measured-at version is an upper bound
     #: on the true floor, so a floor raised to "the version this happened to be
     #: probed on" disables installs that work — which is why the flags verified
@@ -598,7 +598,7 @@ class LLMProvider(ABC):
     #: (:func:`version_verdict`). Printed, never run; ``""`` names none.
     upgrade_hint: str = ""
 
-    #: M14 (§5.4) — the first build this release **refuses**, exclusive, or ``""``
+    #: M14 — the first build this release **refuses**, exclusive, or ``""``
     #: for "no ceiling". The mirror of ``min_version`` and subject to the same
     #: rule: it carries a comment naming the feature (or the breakage) behind it.
     #: Overridable per install through ``providers.<name>.max_version_exclusive``
@@ -609,19 +609,19 @@ class LLMProvider(ABC):
     #: block every new release or refuse nothing.
     max_version_exclusive: str = ""
 
-    #: M14 (§5.4.1) — the argv, after the binary, that prints the help
+    #: M14 — the argv, after the binary, that prints the help
     #: documenting this adapter's gated flags. An adapter whose flags live on a
     #: subcommand declares that subcommand here (``("run", "--help")``); the
     #: default is the CLI's top-level help.
     help_argv: Tuple[str, ...] = ("--help",)
 
-    #: M14/§5.4.1(a) — flags this adapter emits **unconditionally** because each
+    #: Flags this adapter emits **unconditionally** because each
     #: was verified *functionally* at the declared ``min_version``, not merely
     #: found in help text. The shared gate answers :meth:`supports_flag` ``True``
     #: for these **without probing**: there is no release in the supported range
     #: that would need gating, and a runtime probe would only add a failure mode.
     #:
-    #: This is the exemption §5.4.1 grants, written as data rather than as prose
+    #: This is the gate's one exemption, written as data rather than as prose
     #: in one adapter's comment block, so the claim is assertable: every flag
     #: named here must really be documented by that CLI at its floor, and every
     #: flag *not* named here that an adapter adds to argv takes a gate.
@@ -686,7 +686,7 @@ class LLMProvider(ABC):
         self, profile: str, anchor: Optional[str] = None
     ) -> Optional[str]:
         """The resolved ``sandbox_fallback`` policy this adapter honours for
-        ``profile``, or ``None`` (D6, 2026-09-17).
+        ``profile``, or ``None``.
 
         ``None`` — the default, and the answer for every adapter without an OS
         sandbox of its own — means "no fallback exists here": a dispatch under
@@ -695,7 +695,7 @@ class LLMProvider(ABC):
         :data:`SANDBOX_FALLBACK_POLICIES`, read through the normal config
         layering, and **only for a profile in**
         :data:`SANDBOX_FALLBACK_PROFILES` — or, for an adapter that declares a
-        write ladder (plan step 3, 2026-09-30), for ``agent-write`` while its
+        write ladder, for ``agent-write`` while its
         opt-in is in force, and then only a policy :func:`write_rung_allowed`
         reads: a wrapping, ``incidental``-grade rung under ``auto``. Every other
         adapter answers ``None`` for ``agent-write`` whatever the config says.
@@ -743,7 +743,7 @@ class LLMProvider(ABC):
         scope reach the CLI argv (``developer_instructions``). A wrapping rung
         with no context must raise, never render the bare in-CLI atoms.
         ``consent`` is F5's :class:`WritePostureConsent`, the one way a write
-        profile renders the uncontained rung (plan step 6).
+        profile renders the uncontained rung.
 
         Called by the transport builders only when a gate has already selected
         ``rung`` (a :class:`SandboxRung` ``name``), so the default — ``argv``
@@ -799,7 +799,7 @@ class LLMProvider(ABC):
         except Exception:  # noqa: BLE001 - a malformed ladder splits nothing
             return frozenset()
 
-    #: M13 (§5.2) — an optional **metadata** readout: the cheap, non-generating
+    #: M13 — an optional **metadata** readout: the cheap, non-generating
     #: argv that reports what a *status* surface prints beside the auth verdict
     #: (a plan tier, an entitlement), and nothing else. It is emphatically **not**
     #: a second auth probe: :meth:`classify_auth_probe` never sees it, no verdict
@@ -815,14 +815,14 @@ class LLMProvider(ABC):
     #: without a decision.
     setup_probe: Tuple[str, ...] = ()
 
-    #: M13 (§5.3) — how a human installs this CLI, verbatim. It is printed, and
+    #: M13 — how a human installs this CLI, verbatim. It is printed, and
     #: **never run**: no auto-install, because installing a vendor's binary
     #: because a probe said ``binary-missing`` crosses the same trust boundary
     #: M16 was declined on. Empty means "not declared", which is the honest
     #: state for a CLI whose install route this repo has not measured.
     install_hint: str = ""
 
-    #: M13 (§5.3) — one sentence naming what this CLI's credential actually *is*
+    #: M13 — one sentence naming what this CLI's credential actually *is*
     #: (a profile directory, an OS keyring, an env var), for the adapters where
     #: ``login_cmd`` is not the whole story. Declared data only: it is rendered
     #: beside a probe verdict, so it may never carry a credential, a path from
@@ -843,9 +843,9 @@ class LLMProvider(ABC):
     #: never-retried failure an unlimited retry path.
     rate_limit_patterns: Tuple[str, ...] = failure_classifier.RATE_LIMIT_PATTERNS
 
-    #: Regexes that make an **exit-0** run a failure (§7.2). Four shipped CLIs
+    #: Regexes that make an **exit-0** run a failure. Four shipped CLIs
     #: report a provider failure with exit code 0 — goose, aider, cline and
-    #: cursor-agent (measured in all six auth states, §5.3) — so for them the
+    #: cursor-agent (measured in all six auth states) — so for them the
     #: exit code carries no verdict at all and only a stream marker does. These
     #: are consulted **last** in :func:`classify_streams`: they say "this run
     #: failed", never *why*, so every specific category gets its chance first.
@@ -955,7 +955,7 @@ class LLMProvider(ABC):
         :meth:`classify_exit_zero`'s, behind :attr:`EXIT0_CLASSIFIABLE`.
 
         A caller-supplied ``vendor_text=`` argument could not fix it: every
-        existing call site would have to opt in, and the §6.2 fixture rig calls
+        existing call site would have to opt in, and the fixture rig calls
         ``adapter.classify_failure(stdout, stderr, exit_code)`` with no extra
         argument. The reduction therefore happens *inside* this class, where the
         default is identity and every caller inherits it for free.
@@ -992,7 +992,8 @@ class LLMProvider(ABC):
         :func:`classify_streams` (and its quote-only twin
         :func:`match_streams`) deliberately does **not** grow it:
         Lane A's error-line fallback calls that function with no adapter in
-        hand, and §7.2 depends on it staying the one rule both lanes share. :meth:`classify_auth_probe`'s haystack — the second place
+        hand, and depends on it staying the one rule both lanes share.
+        :meth:`classify_auth_probe`'s haystack — the second place
         this module builds ``f"{stdout}\\n{stderr}".lower()``, over an
         ``auth_check`` run — is out of scope too: an auth probe never carries
         our prompt, so narrowing it fixes nothing and risks the one verdict
@@ -1007,7 +1008,7 @@ class LLMProvider(ABC):
 
         The adapter supplies the *data* — its declared pattern sets and its own
         exit-0 markers — and :func:`classify_streams` is the one implementation
-        of the rule. That split is the point of §7.2: before it, Lane A carried
+        of the rule. That split is the point: before it, Lane A carried
         five substring copies of this decision and ``validation.py`` a sixth, and
         they disagreed with each other and with this method about the same
         streams.
@@ -1021,7 +1022,7 @@ class LLMProvider(ABC):
         1 (no retry, whole batch fails), and misreading it as a rate limit would
         retry a condition no retry can fix. What now precedes **both** is the
         launch-failure tuple, because a refused exec prints text that reads like
-        a credential problem (§7.2's root-cause-before-auth rule).
+        a credential problem (the root-cause-before-auth rule).
 
         Every declared pattern is still matched through :func:`stream_pattern`,
         never as a bare substring: the sets contain a status code (``429``) and
@@ -1102,7 +1103,7 @@ class LLMProvider(ABC):
         return True
 
     def describe_setup(self) -> types.SetupHints:
-        """This adapter's install / login / status metadata (M13, §5.3).
+        """This adapter's install / login / status metadata (M13).
 
         Derived from what the adapter already declares — ``install_hint``,
         ``login_cmd``, ``auth_check``, ``auth_hint`` — so the four rows and the
@@ -1182,7 +1183,7 @@ class LLMProvider(ABC):
         with no genuinely read-only mode raises rather than being dispatched with
         write access to an untrusted prompt.
 
-        The profile also scopes the child's git environment (§2.2), and that
+        The profile also scopes the child's git environment, and that
         scoping is asymmetric on purpose: ``generate`` and ``agent-readonly`` run
         with ``credential.helper=""`` so a hanging helper fails in ~0.27 s instead
         of burning the slot and orphaning a child, while ``agent-write`` keeps
@@ -1195,10 +1196,10 @@ class LLMProvider(ABC):
             model: The model identifier.
             profile: ``agent-readonly`` or ``agent-write``.
             timeout_s: The caller's already-resolved outer timeout, in whole
-                seconds (§9.6.a). Keyword-only, optional, and ignored by every
+                seconds. Keyword-only, optional, and ignored by every
                 adapter with no internal cutoff of its own — see
                 :meth:`build_command` for why it exists and what ``None`` means.
-            schema: §4.2.2's optional structured-output schema. Keyword-only,
+            schema: the optional structured-output schema. Keyword-only,
                 optional, and **ignored by this default implementation** — see
                 :attr:`structured_output_support`.
 
@@ -1236,7 +1237,7 @@ class LLMProvider(ABC):
         (which every profile command this repo ships builds that way), so a
         ``stdin`` transport simply drops it and returns it as the child's input.
 
-        ``sandbox_fallback`` is the executor's D6 override (2026-09-17), now the
+        ``sandbox_fallback`` is the executor's D6 override, now the
         **rung id** the preflight selected (landlock rung, 2026-09-22): set only
         when ``_detect_sandbox`` recorded a rung for this runner and profile,
         and it reaches the argv through :meth:`apply_sandbox_fallback` —
@@ -1246,7 +1247,7 @@ class LLMProvider(ABC):
         (:func:`sandbox_rung_id`). Ignored by every adapter that keeps the
         default hook.
 
-        ``jail_context`` (plan codex-sandbox-unavailable §6 F1) is the attempt's
+        ``jail_context`` is the attempt's
         :class:`JailContext`, set by the spawn site only for a dispatch on a
         wrapping rung (the plugin-landlock jail); it reaches
         :meth:`apply_sandbox_fallback` as ``context=`` and is passed only when
@@ -1291,7 +1292,7 @@ class LLMProvider(ABC):
         return None
 
     def audit_readonly_stream(self, raw_stream: str) -> Optional[Any]:
-        """Could this attempt have written to the tree? (plan §4.2, option B.)
+        """Could this attempt have written to the tree?
 
         Called by ``llm_client.invoke_with_provider`` on the attempt's **full**
         stdout, before ``_attach_stdout_excerpt`` bounds it, on every outcome
@@ -1317,7 +1318,7 @@ class LLMProvider(ABC):
         its events carry ``content`` arrays (``thinking``/``toolCall`` parts)
         that pass ``has_salvageable_json`` as if they were findings, so a
         reviewer killed mid-tool-call would otherwise be "salvaged" from pure
-        event data (plan: review-run-scope-salvage-and-failure-visibility §4).
+        event data.
 
         The contract has three answers:
 
@@ -1358,7 +1359,7 @@ class LLMProvider(ABC):
 
         The default finds the first dotted numeric token on either stream, which
         covers ``codex-cli 0.146.0``, ``1.18.12`` and ``2.1.224 (Claude Code)``
-        alike. **Both streams are read** (§5.4): some CLIs banner their version
+        alike. **Both streams are read**: some CLIs banner their version
         to stderr and opencode is stdout-only, so a probe that read one stream
         would report ``unknown`` for whichever half of the roster it guessed
         wrong. Unparseable output is ``None`` (recorded ``unknown`` plus a
@@ -1373,7 +1374,7 @@ class LLMProvider(ABC):
                 return match.group(1)
         return None
 
-    # ── M14 (§5.4.1) — the shared per-flag capability gate ────────────────
+    # ── M14 — the shared per-flag capability gate ────────────────
     #
     # Implemented once, here. The three one-off gates this replaced (L7's
     # `--fallback-model`, M7's `--json-schema` and M1's `--trust --mode ask`)
@@ -1418,13 +1419,13 @@ class LLMProvider(ABC):
         return binary
 
     def gate_probe_env(self) -> Dict[str, str]:
-        """The environment one help probe runs in — §5.4.1's containment clause.
+        """The environment one help probe runs in — the containment clause.
 
         Composed by :func:`build_child_env`, the same builder both spawn lanes
         go through, so the flags a run emits cannot depend on which lane asked.
         On top of it: the ``generate`` profile's git block (a probe must never
         reach a credential helper), and ``TERM=dumb`` / a wide ``COLUMNS`` /
-        ``NO_COLOR`` so the help is rendered in full — §3.6's own history is a
+        ``NO_COLOR`` so the help is rendered in full — the own history is a
         *truncated* help rendering that hid what a flag required.
 
         The adapter's ``get_remove_env`` is applied through the builder, which is
@@ -1445,7 +1446,7 @@ class LLMProvider(ABC):
         )
 
     def supports_flag(self, flag: str) -> bool:
-        """§5.4.1's gate in its **optional-flag** form: undecidable ⇒ ``False``.
+        """The gate in its **optional-flag** form: undecidable ⇒ ``False``.
 
         On an older CLI an unrecognised flag is not a degraded run, it is
         ``unknown option`` and a dead slot, so this declines toward the status
@@ -1453,7 +1454,7 @@ class LLMProvider(ABC):
         naming the capability the run is doing without.
 
         A flag the adapter declares in :attr:`flags_verified_at_floor` is
-        supported **without a probe** — §5.4.1(a)'s exemption, granted only to a
+        supported **without a probe**; the exemption is granted only to a
         flag verified functionally at the declared ``min_version``.
         """
         if flag in tuple(self.flags_verified_at_floor):
@@ -1461,7 +1462,7 @@ class LLMProvider(ABC):
         return flag in self.flag_tokens()
 
     def missing_flags(self, flags: Iterable[str]) -> Tuple[str, ...]:
-        """§5.4.1's gate in its **load-bearing** form: which of ``flags`` is unconfirmed.
+        """The gate in its **load-bearing** form: which of ``flags`` is unconfirmed.
 
         For an argv that has no safe degraded form — cursor's ``--trust``/
         ``--mode`` pair, where dropping ``--trust`` fails the launch and the only
@@ -1508,10 +1509,10 @@ class LLMProvider(ABC):
                 ``prompt_file``, whose path travels on argv).
             prompt_file: Path the prompt was written to, for ``"file"``.
             timeout_s: The caller's already-resolved outer timeout, forwarded to
-                :meth:`build_command` (§9.6.a/b). This is the Lane A leg:
+                :meth:`build_command`. This is the Lane A leg:
                 ``invoke_with_provider`` computes ``effective_timeout`` before it
                 builds anything, so the adapter never re-derives it.
-            sandbox_fallback: The fan-out's D6 override (2026-09-17): the rung
+            sandbox_fallback: The fan-out's D6 override: the rung
                 id ``sandbox_refusal`` selected for this slot (probe
                 ``unavailable``, a rung the policy permits, profile
                 ``generate``), rendered through :meth:`apply_sandbox_fallback`.
@@ -1547,8 +1548,7 @@ class LLMProvider(ABC):
             child's stdin. That is the prompt under ``"stdin"``; on ``"argv"``
             it is ``None`` unless the adapter feeds the child interactive
             answers — aider, whose decline supply answers its "Add file to the
-            chat?" prompts (plans/ask-answer-recovery-and-false-success.md
-            D4.2). This base composition returns ``None`` on ``"argv"``.
+            chat?" prompts. This base composition returns ``None`` on ``"argv"``.
 
         Raises:
             ValueError: when this adapter does not support ``transport``.
@@ -1614,7 +1614,7 @@ class LLMProvider(ABC):
             model: The model identifier to use for generation.
             timeout_s: The caller's already-resolved outer timeout in whole
                 seconds, for the adapters whose CLI has an internal cutoff of
-                its own to keep *under* it (§9.6.a). Most adapters have no
+                its own to keep *under* it. Most adapters have no
                 such flag and ignore it.
 
                 It is **keyword-only and optional on purpose**. Adapter
@@ -1624,14 +1624,14 @@ class LLMProvider(ABC):
                 argv byte-for-byte identical to what the adapter emitted before
                 this parameter existed, which is what makes dropping the one
                 call site in ``llm_client`` a complete rollback.
-            schema: §4.2.2's optional structured-output schema, on the same terms
+            schema: the optional structured-output schema, on the same terms
                 and for the same reasons as ``timeout_s``: keyword-only,
                 optional, ignored by every adapter that declares no
                 :attr:`structured_output_support`, and ``schema=None`` — the
                 default and the only value those adapters ever see — renders argv
                 **byte-for-byte identical** to today's. That is what keeps every
                 existing ``expected_argv.yaml`` row green and what makes the
-                per-adapter flag the off switch (§14.4).
+                per-adapter flag the off switch.
 
         Returns:
             A list of command line arguments suitable for subprocess.run().
@@ -1687,7 +1687,7 @@ class LLMProvider(ABC):
         cwd: Optional[str] = None,
         env_builder: Optional[Callable[[], Optional[Mapping[str, str]]]] = None,
     ) -> str:
-        """Does the dispatch's own config supply this model's credential? (§8)
+        """Does the dispatch's own config supply this model's credential?
 
         Asked by the executor's auth leg only when ``auth_check`` said ``False``
         for a model that needs a credential. Two answers, never a third:
@@ -1748,7 +1748,7 @@ class LLMProvider(ABC):
         for configuration (e.g., model selection).
 
         This is deliberately *not* where the non-interactive git block lives:
-        that block is profile-scoped (§2.2) and this hook has no profile, and it
+        that block is profile-scoped and this hook has no profile, and it
         must reach adapters that override this method too. It is composed in
         :meth:`resolve_env`, which is what both spawn sites call. **Never move
         ``git_env``'s ``GIT_CONFIG_COUNT`` / ``credential.helper=""`` keys in
@@ -1765,7 +1765,7 @@ class LLMProvider(ABC):
         return {}
 
     def git_credential_helper_policy(self, anchor: Optional[str] = None) -> str:
-        """This provider's resolved ``git_env.credential_helper`` (§2.2).
+        """This provider's resolved ``git_env.credential_helper``.
 
         ``MULTI_LLM_GIT_CREDENTIAL_HELPER`` → ``providers.<name>.git_env`` →
         top-level ``git_env`` → ``auto``. Read through the registry accessor
@@ -1787,7 +1787,7 @@ class LLMProvider(ABC):
         anchor: Optional[str] = None,
         cwd: Optional[str] = None,
     ) -> Dict[str, str]:
-        """The full env delta a spawn applies: the §2.2 git block, then the adapter's.
+        """The full env delta a spawn applies: the git block, then the adapter's.
 
         The one composition point, called by both spawn sites
         (``llm_client.call_llm`` for the Lane A fan-out under ``generate``, and
@@ -1847,7 +1847,7 @@ class LLMProvider(ABC):
         """
         return []
 
-    # ── M10 (§5.1) — the typed status that sits beside is_available() ────────
+    # ── M10 — the typed status that sits beside is_available() ────────
 
     def describe_availability(
         self,
@@ -1856,7 +1856,7 @@ class LLMProvider(ABC):
         version: Optional[str] = None,
         credentials_required: bool = True,
     ) -> types.AvailabilityReport:
-        """Why this runner is or is not usable, as a typed state (§5.1).
+        """Why this runner is or is not usable, as a typed state.
 
         **This does not replace :meth:`is_available`, and it does not widen it.**
         ``is_available()`` keeps its ``-> bool`` signature, its name and its

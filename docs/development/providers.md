@@ -19,6 +19,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [Child Python environments](#child-python-environments)
 - [Private config roots](#private-config-roots)
 - [Provider outcome logs](#provider-outcome-logs)
+- [Version floors and measured versions](#version-floors-and-measured-versions)
 
 ## Adding a provider adapter
 
@@ -941,3 +942,35 @@ when `source` is `file`/`file_extracted`; a
 `stdout_fallback` source — the model never wrote there — says "Result will be saved to" instead
 (F14). The `save_agent_log` that once lived in `review_orchestrator_base` had no callers and is
 gone.
+
+## Version floors and measured versions
+
+**A floor (`min_version`) is declared only where the break was measured; `verified_version` is
+the release the captures were taken on and only warns.** A version a capture was taken on is an
+upper bound on the true floor, never the floor: pinning `min_version` to it would refuse installs
+that work, with exit 3 and no evidence that anything broke there. An adapter whose probes landed
+with it keeps a floor (copilot, kimi, qwen-code, vibe); an adapter that existed before its probes
+leaves `min_version` empty (grok, muse, cursor-agent, agy) and carries the measurement in
+`verified_version`. `tests/container/cli-versions.lock` pins the same release for the container.
+
+Code comments next to these two values state this rule and point here. The measurement history
+lives in this section, not in the adapter.
+
+### grok
+
+- 0.2.93 (2026-08-19): every fixture in `tests/fixtures/grok/` was first captured on it with the
+  step-5 probe (`--network none`, the stub and the failserver both inside the container, no
+  credential). A `min_version` of 0.2.93 was set that day and removed the same day for the reason
+  above.
+- 1.0.46 (2026-10-08): every row re-captured on it with the same rig in the pinned image, and
+  `cli-versions.lock` moved with it. The parser needed no change; the three `no_visible_content`
+  rows and the pre-flight row are byte-identical. What moved: five requests per answered exec (a
+  root probe and a reply-summary call on the `-m` model), the title model `grok-4.6`, `stopReason`
+  `end_turn`, a 429 passing the vendor's own words (with the wait), no `Request URL` or
+  response-header lines, and a 5xx or zero-byte response retried for about 1,340 s instead of
+  335 s. Re-captured again the same day with `get_env`'s two switches in force: four requests per
+  answered exec, and every retry chain short.
+- `grok --version` prints `grok 1.0.46 (<commit>)` on stdout; the base `parse_version` reads its
+  first dotted token without an override. The two shapes the parser depends on (`{"text": …}` for
+  an answer, `{"type": "error", …}` for a failure) are vendor-internal envelopes, so the pin is
+  one to re-confirm rather than a range to trust.

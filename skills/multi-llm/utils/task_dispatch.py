@@ -186,7 +186,7 @@ STATUS_POLICY_VIOLATION = "policy_violation"
 #: ``status: ok``, the loop went on, and the phase completed at exit 0.
 STATUS_BATCH_FAILED = "batch_failed"
 
-#: §4.2.2's phase → schema table is keyed by **phase**; a Lane B dispatch's
+#: The phase → schema table is keyed by **phase**; a Lane B dispatch's
 #: document contract is its **kind**. The two are not interchangeable here: the
 #: ``code-review`` phase dispatches ``validation`` tasks whose result is a
 #: validation batch, not the phase's ``code_review_issues`` array, so handing a
@@ -197,7 +197,7 @@ STATUS_BATCH_FAILED = "batch_failed"
 #: intersection where the kind's own result schema (``validate_result``) and
 #: ``structured_output.PHASE_SCHEMA_FILE`` resolve to the **same file**:
 #: ``task_generation`` → ``generated_tasks.schema.json`` and ``consolidation``
-#: → ``consolidation_batch.schema.json``. That identity is what lets §4.2.1's
+#: → ``consolidation_batch.schema.json``. That identity is what lets the
 #: recovery branch stay this lane's own (see :func:`_parse_with_schema_policy`)
 #: instead of validating the same document twice against two files, and it is
 #: asserted functionally in ``tests/test_lane_b_structured_output.py`` rather
@@ -205,7 +205,7 @@ STATUS_BATCH_FAILED = "batch_failed"
 #:
 #: Every other kind maps to nothing, which is the off switch: no phase, no
 #: schema resolve, no flag, and an argv byte-identical to the pre-M7 lane. The
-#: write kinds are absent for §4.2.1's own reason — their product is a file
+#: write kinds are absent for the own reason — their product is a file
 #: diff, and ``PHASE_SCHEMA_FILE`` puts every apply/implement phase at ``None``.
 #:
 #: **W1 disposition: DEFER — repository owner, 2026-08-20.** Emptying this table
@@ -216,7 +216,8 @@ STATUS_BATCH_FAILED = "batch_failed"
 #: is a contract change for every consumer of them, so the decision is the
 #: repository owner's and it has not been made.
 #: **Re-check trigger:** claude-code accepts an array-rooted ``--json-schema``.
-#: **Re-read date:** 2027-02-20. See ``plans/harness-residual-work.md`` §3, W1.
+#: **Re-read date:** 2027-02-20. Where the verdict sits:
+#: docs/development/providers.md#reading-a-capture (the schema verdict).
 SCHEMA_PHASE_BY_KIND = {
     "task_generation": "generate-tasks",
     "consolidation": "consolidation",
@@ -226,12 +227,12 @@ SCHEMA_PHASE_BY_KIND = {
 #: The ladder's rule 7, granted per kind: how many schema-repair re-asks a
 #: ``schema_invalid`` attempt of that kind gets before rung 6 is terminal.
 #:
-#: * ``task_generation`` (2026-10-05): the one kind whose prompt is the *only*
+#: * ``task_generation``: the one kind whose prompt is the *only*
 #:   contract on a runner with no structured output (opencode declares none),
 #:   and the one whose rung-6 failure dead-ends a whole phase — measured
 #:   2026-10-04, ``opencode/big-pickle`` answered the wrong shape twice and
 #:   generate-tasks exited 3 both times.
-#: * the three apply kinds (2026-10-05, run 3): one big-pickle apply batch's
+#: * the three apply kinds: one big-pickle apply batch's
 #:   report was unreadable and the whole phase stopped at exit 3 until a
 #:   ``--resume`` re-ran the batch. A write kind's reply is the report of edits
 #:   already on disk, so its re-ask is a different question
@@ -239,7 +240,7 @@ SCHEMA_PHASE_BY_KIND = {
 #:   original prompt is not re-sent, the runner restates its own previous
 #:   reply without touching a file, and the dispatch fails as a partial
 #:   application if any file moved during it (``tree_fingerprint``).
-#: * ``implement`` (fix round 14, OpenCode racing run 5): T013 edited
+#: * ``implement``: T013 edited
 #:   ``index.html`` for 442 s, replied in prose ("No valid JSON found in
 #:   text"), and the stop called a finished edit a partial application. The
 #:   same report re-ask, with the same guards: it restates the report and
@@ -259,15 +260,13 @@ SCHEMA_REPAIRS_BY_KIND = {
 
 
 def schema_phase_for_kind(kind: str) -> Optional[str]:
-    """The §4.2.2 phase whose schema governs ``kind``'s result, or ``None``."""
+    """The phase whose schema governs ``kind``'s result, or ``None``."""
     return SCHEMA_PHASE_BY_KIND.get(kind)
 
 
 #: The ladder's rule 9, granted per kind: how many times a write batch whose
 #: reply said ``applied`` while not one byte moved is sent again, told so,
-#: before it is recorded failed (fix round 14, OpenCode racing run 5: T016
-#: said ``applied`` and named ``index.html``, the file was unchanged, and the
-#: task was recorded completed). Every write kind, because the classification
+#: before it is recorded failed. Every write kind, because the classification
 #: is shared; the scheduler's ``nothing_changed`` hook is what decides an
 #: attempt qualifies (never a check task, which changes nothing by design).
 RESENDS_BY_KIND = {
@@ -331,7 +330,7 @@ class DispatchPlan:
     """What every attempt of one dispatch sends, resolved once by
     :func:`plan_dispatch`: the runner and its adapter, the profile and the
     grant replayed from the preflight, the result's target, the prompt, the
-    budgets and §4.2.2's schema leg."""
+    budgets and the schema leg."""
 
     task: Dict[str, Any]
     task_id: str
@@ -386,7 +385,7 @@ class AttemptState:
     #: The re-ask this attempt carries (rule 7: ``REPAIR_SCHEMA_INVALID`` or
     #: ``REPAIR_INCOMPLETE_REPORT``), or ``None``.
     repair: Optional[str] = None
-    #: Rule 9's re-send (fix round 14) is the batch again, not a re-ask: it
+    #: Rule 9's re-send is the batch again, not a re-ask: it
     #: keeps every guard a first dispatch has (the pre-retry check included),
     #: so it is marked on the attempt it produced and nowhere else.
     resend: Optional[str] = None
@@ -400,10 +399,10 @@ class AttemptState:
     #: it ran its checks. Applied before persisting the restated report so
     #: the result file and the scheduler's verdict read the same evidence.
     repair_check: Optional[Dict[str, Any]] = None
-    #: Fix round 28: a restatement of a check's findings, the first report's
+    #: A restatement of a check's findings, the first report's
     #: check and the accepted findings a changed finding may be cut down to.
     restate_check: Optional[Tuple[Dict[str, Any], List[str]]] = None
-    #: Fix round 18: the ``after_result`` context of a readable report that
+    #: The ``after_result`` context of a readable report that
     #: left items out, kept while its re-ask runs, so a re-ask that cannot
     #: restate it leaves this one to be classified.
     reask_fallback: Optional[Dict[str, Any]] = None
@@ -436,7 +435,7 @@ class AttemptState:
         restate_check: Optional[Tuple[Dict[str, Any], List[str]]],
         fallback: Dict[str, Any],
     ) -> None:
-        """Rule 7's second form (fix rounds 18 and 28): restate a readable
+        """Rule 7's second form: restate a readable
         report, guarded by the files' state *baseline*, with *fallback* to
         classify if the restatement fails."""
         self.repair_baseline = baseline
@@ -641,12 +640,12 @@ def dispatch_task(
     spent from it, and a retry is refused once no usable slice remains. So a
     dispatch is bounded by the configured ceiling however many times it retries.
 
-    §4.2.2's structured-output leg is read **here, before dispatch**, and it is
+    The structured-output leg is read **here, before dispatch**, and it is
     the second of M7's two phase callers (``llm_client.invoke_with_provider`` is
     the first). The phase comes from the task's *kind*
     (:data:`SCHEMA_PHASE_BY_KIND`), the schema file is loaded once per dispatch,
     codex's sidecar is written per attempt inside :func:`_spawn`'s ``finally``,
-    and §4.2.1's verdict lands on this lane's own rungs (see
+    and the verdict lands on this lane's own rungs (see
     :func:`_parse_with_schema_policy`) plus ``TaskOutcome.structured_output``. A
     kind with no schema phase — every kind but ``task_generation`` and
     ``consolidation`` — takes none of it and renders the argv it always did.
@@ -672,13 +671,12 @@ def dispatch_task(
         after_attempt: Called with each :class:`Attempt` the moment it is
             recorded — before ``after_result``, ``ladder.record`` and any backoff
             sleep — so a caller can react to one attempt while the task is still
-            retrying (§5: rate-limit backpressure narrows on the attempt, not on
+            retrying (rate-limit backpressure narrows on the attempt, not on
             the finished task). It runs on the dispatching thread. It is an
             observer: an exception it raises is reported on stderr and
             swallowed, never allowed to fail the attempt.
-        changed_files: The write lane's pre-retry check (plan
-            opencode-validator-false-rate-limit-and-denied-turn §4.4 step 4,
-            T4.8). Called only for an ``agent-write`` attempt that the adapter's
+        changed_files: The write lane's pre-retry check. Called only for an
+        ``agent-write`` attempt that the adapter's
             structural check classified ``runner_error`` (a turn ended by an
             auto-rejected permission, so no result exists and ``after_result``
             never runs), with ``{task, task_id, kind, attempt, cwd, outcome}``;
@@ -689,8 +687,7 @@ def dispatch_task(
             any other. A hook that raises is read as "could not tell", which
             fails closed the same way as a non-empty answer.
         jail_request: The grant a dispatch on the plugin's Landlock jail
-            carries (plan codex-sandbox-unavailable §6 F1 "How a dispatch
-            receives its grant", 2026-09-30). A read kind needs none — one is
+            carries. A read kind needs none — one is
             built from ``cwd`` — and is refused (rung 7, nothing spawned) if
             handed one that carries a write scope or target: a read kind never
             carries a grant. A write kind on the rung must carry one whose
@@ -713,7 +710,7 @@ def dispatch_task(
             asked only to restate the batch's report, so a file it moved is an
             edit nobody verified. Without the hook a write kind gets no re-ask.
         nothing_changed: The write lane's question before ``after_result``
-            (the ladder's rule 9, :data:`RESENDS_BY_KIND`, fix round 14),
+            (the ladder's rule 9, :data:`RESENDS_BY_KIND`),
             with the ``after_result`` context: why this schema-valid reply
             said ``applied`` while not one byte moved, or ``None`` when that
             is not the case (any byte moved, a check task, a crash, a jail
@@ -725,24 +722,23 @@ def dispatch_task(
             ``batch_failed`` with that reason and a failure capture. A hook
             that raises is "no re-send": the classification decides.
         incomplete_report: The write lane's other question before
-            ``after_result`` (an apply kind, fix round 18), with the same
+            ``after_result`` (an apply kind), with the same
             context: why this readable report, after edits that moved bytes,
             leaves some of the batch's items out of both ``ids`` and
             ``declined``, or ``None``. A reason, while the schema-repair
             allowance and the deadline admit it (:meth:`RetryLadder.
             record_report_reask`) and ``tree_fingerprint`` can guard it,
             sends the report re-ask (``incomplete=True``, the reason as its
-            one problem) instead of classifying: Codex racing run 7's batch
-            left a fix out of its report on purpose and stopped as a partial
-            application on every resume. The restated report is classified
+            one problem) instead of classifying, so a batch that left an item
+            out of its report on purpose does not stop as a partial application
+            on every resume. The restated report is classified
             like any; a re-ask that cannot restate it (prose, a timeout)
             leaves the original reply to be classified, and one that moved a
             file is a partial application. A hook that raises is "no re-ask".
         restate_findings: The implement lane's third question before
-            ``after_result`` (fix round 28), with the same context:
+            ``after_result``, with the same context:
             ``(problem, accepted findings)`` when the reply's own check holds
-            an accepted finding verbatim with words added (live run 12: "…
-            (known problem the user accepted in T002)"), or ``None``. It
+            an accepted finding verbatim with words added, or ``None``. It
             sends the same one report re-ask, the problem as its one problem
             and the check's findings open to restating
             (``restate_findings=True``), and nothing is recorded as accepted
@@ -783,11 +779,11 @@ def dispatch_task(
         return outcome
     outcome.output_path = str(plan.target)
 
-    # §7.1.b: what the two invocation lanes share is the *policy*, not the loop.
+    # What the two invocation lanes share is the *policy*, not the loop.
     # `RetryLadder` owns D3i's single monotonic deadline — taken once, every
     # attempt spawned with what is LEFT of it, every backoff sleep charged to the
     # same deadline, so a task with N retries can never run for (N+1) × the
-    # configured ceiling — plus D3k's two separate counters and §7.5's admission
+    # configured ceiling — plus D3k's two separate counters and the admission
     # tests. The only lane-specific lines below are the blocking `_spawn` and the
     # `sleep` call. `ladder.elapsed()` is D3j's wall clock: across *every*
     # attempt, including the backoff sleeps between them — not the sum of the
@@ -795,7 +791,7 @@ def dispatch_task(
     # exponential backoffs report only the seconds its children ran and never
     # reach `effective_timeout`. Monotonic, so a clock step cannot rewind it.
     #
-    # The adapter's DECLARED vendor envelope (§7.6(b)) switches on §7.5's two
+    # The adapter's DECLARED vendor envelope  switches on the two
     # composition rules: rule 4's pre-dispatch admission test ("would one
     # worst-case attempt fit in what is left?", recorded `budget_exhausted` with
     # nothing spawned) and rule 6(b)'s refusal to re-issue an identical
@@ -882,7 +878,7 @@ def plan_dispatch(
     The D2 pre-dispatch refusals and D3f's output containment, the grant
     replayed from the preflight (never re-taken here), the directories a
     runner must be able to read, D3n's token check and D2d's argv budget;
-    then the budgets and §4.2.2's schema leg, read once per dispatch.
+    then the budgets and the schema leg, read once per dispatch.
     """
     task_id = str(task.get("task_id", ""))
     kind = str(task.get("kind", ""))
@@ -909,10 +905,10 @@ def plan_dispatch(
             f"read/analyze task is never downgraded to a write-capable "
             f"invocation, so this fails dispatch"
         )
-    # D6 override (2026-09-17): replay the preflight's decision, never re-take
+    # D6 override: replay the preflight's decision, never re-take
     # it here. A read kind reads the id of the rung its argv must render
     # (landlock rung); a write kind reads the decision taken for its own write
-    # scope (plan step 3, 2026-09-30) — the plugin's jail, the F5 floor, or
+    # scope — the plugin's jail, the F5 floor, or
     # none, in which case its argv renders unchanged.
     grant_refusal, jail_request, fallback = _dispatch_spawn._dispatch_grant(
         task, kind=kind, profile=profile, runner=runner, cwd=cwd,
@@ -928,7 +924,7 @@ def plan_dispatch(
         if profile == PROFILE_AGENT_WRITE and fallback == SANDBOX_RUNG_UNSANDBOXED
         else None
     )
-    # §2.2 (validation context by path): a snapshot named by path may sit in a
+    # A snapshot named by path may sit in a
     # phase dir outside the runner's cwd. A runner that reads anywhere needs
     # nothing; one that can widen its read scope gets the flag for exactly
     # those directories; any other is refused here rather than handed a path
@@ -984,14 +980,14 @@ def plan_dispatch(
     effective_timeout = timeout or get_subagent_timeout(provider_name, anchor=anchor)
     budget = retries if retries is not None else get_subagent_retries(anchor=anchor)
 
-    # §4.2.2's "the caller reads the flag before dispatch", on this lane and once
+    # The "the caller reads the flag before dispatch", on this lane and once
     # per dispatch — the schema file is read here, not per attempt, and the
     # per-(provider, phase) WARN is emitted once per process by
     # `schema_for_dispatch`. The phase comes from the KIND (see
     # `SCHEMA_PHASE_BY_KIND`): `None` means no schema, no flag and an argv
     # byte-identical to the pre-M7 lane. A `None` schema with a phase means the
     # adapter declined — no `structured_output_support`, or a schema this CLI
-    # provably cannot carry — which resolves exactly like a failed §5.4.1 gate:
+    # provably cannot carry — which resolves exactly like a failed gate:
     # prompt-level JSON, marked `recovered`/`unvalidated`, never `native`.
     schema_phase = schema_phase_for_kind(kind)
     schema = None
@@ -1048,7 +1044,7 @@ def admit_attempt(
     attempt_turn_blocking(budget=max(0.0, ladder.remaining()))
     if ladder.next_attempt() is not None:
         return None
-    # §7.5 rules 3 and 4: no attempt starts with less than
+    #  rules 3 and 4: no attempt starts with less than
     # MIN_ATTEMPT_BUDGET_S of the deadline left, and none starts at all
     # when what is left cannot hold one worst-case attempt of this
     # adapter's *declared* vendor envelope — better a slot that spawned
@@ -1063,7 +1059,7 @@ def admit_attempt(
         # same admission test to every grant, so only a clock that
         # moved in between (an overslept backoff) lands here. The last
         # attempt RAN, so its own status stands — `budget_exhausted`
-        # means nothing was spawned (fix round 6). An attempt ran, so
+        # means nothing was spawned. An attempt ran, so
         # *previous* is set.
         return Next.stop(previous.status, (  # type: ignore[union-attr]
             f"{previous.error} (no further attempt: "  # type: ignore[union-attr]
@@ -1112,7 +1108,7 @@ def spawn_attempt(
     except (
         StructuredOutputUnavailable, structured_output.SchemaConfigError
     ) as exc:
-        # §4.2.1's sixth acceptance case: raised while the sidecar was being
+        # The sixth acceptance case: raised while the sidecar was being
         # written or while the argv was being rendered, so **nothing was
         # spawned and no partial argv reached the CLI**. Rung 7 — a
         # configuration error, never retried, because re-running produces the
@@ -1228,8 +1224,7 @@ def ask_about_reply(
     except _task_outcome.ResultRejected as exc:
         # The byte cap, not the shape: the document validated, so a
         # re-ask quoting "the validator's errors" would quote none
-        # and tell the runner its reply has the wrong shape (fix
-        # round 6). Rung 6 stays terminal for it.
+        # and tell the runner its reply has the wrong shape. Rung 6 stays terminal for it.
         return replace(reading, status=exc.status, error=exc.message, data=None), None
     outcome.output_path = written
     outcome.result_sha256 = (
@@ -1254,7 +1249,7 @@ def ask_about_reply(
         and state.repair is None
         and ladder.schema_repairs_left > 0 else None
     )
-    # Fix round 28: or its own check holds an accepted
+    # Or its own check holds an accepted
     # finding with words added; the same one re-ask.
     restate = (
         _ask_restate_findings(hooks.restate_findings, reply)
@@ -1334,15 +1329,15 @@ def _start_report_reask(
     reask_why: str,
     restate: Optional[Tuple[str, List[str]]],
 ) -> Next:
-    """Rule 7, second form (fix round 18): the report read but left items
-    out, or restated an accepted finding (fix round 28); the runner restates
-    it once. The attempt keeps its own status and no failure capture (fix
-    round 19: a readable report, which the re-ask's prompt file quotes)."""
+    """Rule 7, second form: the report read but left items
+    out, or restated an accepted finding; the runner restates
+    it once. The attempt keeps its own status and no failure capture (a readable report,
+    which the re-ask's prompt file quotes)."""
     reask_prompt, baseline = reask
     data = reading.data
     restate_check = state.restate_check
     if restate is not None:
-        # Fix round 28: only its findings and note may
+        # Only its findings and note may
         # change, and only as `merge_restated_check` lets.
         original = data.get("check") if isinstance(data, dict) else None
         restate_check = (
@@ -1432,7 +1427,7 @@ def check_moved_before_retry(
     outcome: _task_outcome.TaskOutcome,
     reading: AttemptReading,
 ) -> Tuple[AttemptReading, RetryGuard]:
-    """The write path's pre-retry check (T4.8, widened in fix round 8).
+    """The write path's pre-retry check (T4.8, widened).
 
     A write attempt the ladder could answer by sending the batch's own
     prompt again — a timeout, a runner error, a prose reply, a rate limit —
@@ -1466,7 +1461,7 @@ def check_moved_before_retry(
         if _write_report_repairable(reading.capture, reply_text, hooks.tree_fingerprint):
             partial_if_refused = checked_error
     if partial_if_refused is None:
-        # Fix round 16: a batch killed at its time limit after its
+        # A batch killed at its time limit after its
         # edits landed is said so on the stop, edits kept.
         outcome.ran_out_of_time = status == STATUS_TIMEOUT
         status, error = checked_status, checked_error
@@ -1524,7 +1519,7 @@ def decide_next(
     capture = reading.capture
     data = reading.data
     reply_text = reading.reply_text
-    # One `record` call is the whole decision (D3k, §7.5 rules 2/3/6): rung 1
+    # One `record` call is the whole decision (D3k rules 2/3/6): rung 1
     # is fatal to the batch; rung 3 backs off with jitter, at most three
     # times, without consuming the transport budget; rungs 2/4/5 spend
     # `driver.subagent_retries`; rungs 6/7 are never retried — rung 6 only
@@ -1533,7 +1528,7 @@ def decide_next(
     # deadline the spawns are charged to, which is what keeps the counters a
     # ceiling the wall clock usually reaches first.
     # A schema-invalid attempt with no extracted document is the CLI's own
-    # exhausted structured-output budget (§4.2.1: the CLI already spent the
+    # exhausted structured-output budget (the CLI already spent the
     # pinned re-ask), so it is not repairable here either; nor is a valid
     # document `persist_result` refused for its size (`data` dropped).
     repairable = data is not None
@@ -1677,7 +1672,7 @@ def close_outcome(
         state.reask_fallback is not None and hooks.after_result is not None
         and status != STATUS_PARTIAL
     ):
-        # Fix round 18: the re-ask of a report that left items out could not
+        # The re-ask of a report that left items out could not
         # restate it (prose, a timeout, a refused runner) and moved nothing,
         # so the report the batch did send is classified as it stands.
         outcome.status = STATUS_OK
@@ -1757,7 +1752,7 @@ def _record_attempt(
     notify_first: bool = False,
 ) -> None:
     """Add *attempt*'s row, count its usage (D3j) and hand it to the
-    observer (§5), before the ladder decides and before any backoff sleep, so
+    observer, before the ladder decides and before any backoff sleep, so
     a caller that narrows on a rate limit reacts while this task is still
     retrying.
 
@@ -1782,8 +1777,8 @@ def _denied_write_turn(
 ) -> Tuple[str, str]:
     """``(status, reason)`` for a failed write attempt a retry would re-send.
 
-    T4.8 asked it for a turn a denial ended (``runner_error``); since fix
-    round 8 it is asked for every write attempt whose ``status`` the ladder
+    T4.8 asked it for a turn a denial ended (``runner_error``); it is asked for every
+    write attempt whose ``status`` the ladder
     could answer with the batch's own prompt again (a timeout, a prose reply,
     a rate limit). With changed files, ``partial_application`` in the
     scheduler's own words (``PARTIAL APPLICATION: …``, stop the loop, keep the
@@ -1881,7 +1876,7 @@ def _ask_restate_findings(
     hook: Optional[Callable[[Dict[str, Any]], Optional[Tuple[str, Sequence[str]]]]],
     context: Dict[str, Any],
 ) -> Optional[Tuple[str, List[str]]]:
-    """The ``restate_findings`` hook's answer (fix round 28): ``(problem,
+    """The ``restate_findings`` hook's answer: ``(problem,
     accepted findings)``, or ``None`` (no hook, no answer or a malformed one)."""
     answer = _ask_write_hook(
         hook, context, "'s check findings need restating"
@@ -1895,7 +1890,7 @@ def _ask_restate_findings(
 def merge_restated_check(
     original: Dict[str, Any], restated: Any, allowed: Sequence[str],
 ) -> Dict[str, Any]:
-    """The ``check`` a restated report is classified with (fix round 28):
+    """The ``check`` a restated report is classified with:
     the first report's whole ``check`` — ``passed``, ``ran``, ``listed``,
     everything its checks observed, as :func:`_report_check_evidence` keeps
     it across any report-only turn — with only two things taken from the
@@ -1973,14 +1968,14 @@ def _incomplete_report_reask(
     restate_findings: bool = False,
 ) -> Optional[Tuple[str, Any]]:
     """``(re-ask prompt, files' state)`` when the report re-ask for an
-    incomplete report may go out, else ``None`` (fix round 18).
+    incomplete report may go out, else ``None``.
 
     The same guards as the rule-7 re-ask of an unreadable report: a reply to
     quote, the hook that proves the re-ask moved nothing, no jail denial on
     the attempt's stream, a prompt the transport carries — and then the
     ladder's grant, which spends the schema-repair allowance. Any guard that
     does not hold leaves the reply to be classified as it stands.
-    *restate_findings* (fix round 28) asks for the restatement of a check
+    *restate_findings* asks for the restatement of a check
     finding instead of the items' account (the re-ask prompt's
     ``restate_findings`` form); the guards and the grant are the same.
     """
@@ -2075,7 +2070,7 @@ def _prompt_over_budget(
     on the fan-out path.
 
     On the plugin's Landlock jail (``sandbox_fallback`` a wrapping rung; plan
-    codex-sandbox-unavailable §6 F1 "Dispatch shape" item 4, 2026-09-30) the
+    codex-sandbox-unavailable F1 "Dispatch shape" item 4, 2026-09-30) the
     argv measured is the WRAPPED one — the interpreter, the wrapper, the
     ``--allow`` entries and the rung's in-CLI atoms — rendered with
     placeholder paths, creating nothing: ``dispatch_spawn.render_audit_argv``,
@@ -2189,7 +2184,7 @@ def _safe_parse_usage(provider: Any, capture: _dispatch_spawn._Capture) -> Optio
 def _notify_after_attempt(
     callback: Optional[Callable[[_task_outcome.Attempt], None]], attempt: _task_outcome.Attempt
 ) -> None:
-    """Hand one recorded attempt to ``dispatch_task``'s observer (§5).
+    """Hand one recorded attempt to ``dispatch_task``'s observer.
 
     An observer can never fail the attempt it observes: whatever it raises is
     reported on stderr and dropped, and the attempt loop carries on exactly as

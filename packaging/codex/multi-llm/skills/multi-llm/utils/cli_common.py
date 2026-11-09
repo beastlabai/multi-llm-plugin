@@ -70,8 +70,8 @@ INTERNAL_FLAG_PREFIX = "--internal-"
 #: The marker every dispatcher invocation ends its stdout with.
 RESULT_MARKER = "MULTI_LLM_RESULT:"
 
-# `plain_line` and its control-character set live in `text_clip` (fix round
-# 22), beside the one rule for cutting a preview short; re-exported here, the
+# `plain_line` and its control-character set live in `text_clip`, beside the one rule
+# for cutting a preview short; re-exported here, the
 # name every caller has always imported.
 try:
     from .text_clip import _CONTROL_CHARACTERS, clip, join_clauses, plain_line  # noqa: E402,F401
@@ -95,7 +95,7 @@ _STATE_BY_EXIT = {
 
 #: The one override word on ``EXIT_NOTHING_TO_DO`` that is not "nothing to
 #: do": ``status`` reuses exit 2 for "come back later" as well as "already
-#: complete" / "no run recorded" (F11, 2026-09-16), and a poll loop's own
+#: complete" / "no run recorded", and a poll loop's own
 #: contract is the exit code, never the word — ``run_status.py``'s poll
 #: command and the opencode plugin's loop (``poll.code !== nothing_to_do``)
 #: both key off ``EXIT_NOTHING_TO_DO`` itself. So a live run gets this word
@@ -320,7 +320,7 @@ def retry_tokens(
     The same edits as that command (recorded verbs stripped, ``--fresh``
     dropped under ``--resume``, judge spellings folded) without the
     dispatcher prefix, so ``status`` can spell the same retry the way a
-    host's user types it (fix round 18).
+    host's user types it.
     """
     positionals: List[str] = []
     verbs: List[str] = []
@@ -647,8 +647,7 @@ def add_retired_flag(parser: argparse.ArgumentParser, flag: str) -> None:
 # --scope-policy: declared once, for every mode that takes it
 # ---------------------------------------------------------------------------
 
-#: The modes whose parser takes ``--scope-policy``
-#: (plans/scope-policy-and-report-tags.md §4): the review and apply phases,
+#: The modes whose parser takes ``--scope-policy``: the review and apply phases,
 #: the commit front doors (which forward it to the phase they front),
 #: generate-tasks and implement, the three improve composites and ``full``.
 #: ``ask``, ``status``, ``init``, ``doctor`` and the utilities take none.
@@ -726,7 +725,7 @@ def add_scope_policy_argument(parser: Any, *, role: str = "review") -> argparse.
 # ---------------------------------------------------------------------------
 
 #: The result-line key naming the repository root a command typed in a
-#: subdirectory ran from (fix round 27). The tool servers read it off a
+#: subdirectory ran from. The tool servers read it off a
 #: launch's line to name a plan typed from that root for their polls, their
 #: abort and the resume lookup, instead of walking to a ``.git`` themselves
 #: (the walk named the root's plan where the dispatcher refused to move:
@@ -766,18 +765,17 @@ class ResultContext:
         #: implement's result line named no error and the host said so).
         self.error: Optional[str] = None
         #: The repository root a command typed in a subdirectory ran from
-        #: (``multi_llm._run_from_repository_root``, fix round 27), so a tool
+        #: (``multi_llm._run_from_repository_root``), so a tool
         #: server names the plan the way the dispatcher read it; ``None`` when
         #: the command ran where it was typed.
         self.ran_from_root: Optional[str] = None
         #: The commit range a commit front door acts on, as the tool routes
-        #: render the commit block from it (plans/review-commits.md §2.3,
-        #: "Relay"): ``{brief, base, head, commits, more, full_list, window,
+        #: render the commit block from it: ``{brief, base, head, commits, more, full_list, window,
         #: drifted, size}`` plus ``selected`` on a no-argument apply, built by
         #: ``commit_range.result_payload``. ``None`` on every other run.
         self.commit_range: Optional[Dict[str, Any]] = None
         #: The apply guard's decision as the ``[COMMIT_FIXES]`` block shows
-        #: it, read from the saved ``commit_range.guard`` (§2.3), so a
+        #: it, read from the saved ``commit_range.guard``, so a
         #: detached apply's terminal ``status`` poll carries it too. ``None``
         #: on every run that applied no commit review.
         self.commit_fixes: Optional[Dict[str, Any]] = None
@@ -826,7 +824,7 @@ class ResultContext:
         self.high_priority_groups = dict(data) if data else None
 
     def set_validation_context(self, obj: Optional[Dict[str, Any]]) -> None:
-        """Record the published ``validation_context`` object (§2.4), if any.
+        """Record the published ``validation_context`` object, if any.
 
         Mirrors ``set_consolidation_recommended``: the one writer,
         ``utils.validation.publish_validation_context``, puts the same object
@@ -837,7 +835,7 @@ class ResultContext:
         self.validation_context = dict(obj) if obj else None
 
     def set_validation_counts(self, counts: Optional[Dict[str, int]]) -> None:
-        """Record the per-verdict group counts (§6 T6.1), if validation ran.
+        """Record the per-verdict group counts, if validation ran.
 
         ``{valid, invalid, needs_human_decision, validation_failed}`` — one key
         per group ``validation_status``, snake_case. Mirrors
@@ -850,8 +848,7 @@ class ResultContext:
         self.validation_counts = dict(counts) if counts else None
 
     def set_answer_origins(self, origins: Optional[Dict[str, Any]]) -> None:
-        """Record an ask run's answer counts by origin (plans/ask-answer-
-        recovery-and-false-success.md D7.2), if this is one.
+        """Record an ask run's answer counts by origin, if this is one.
 
         ``{answered, file, stdout, fallback, accepted, unrecorded, kept,
         warn_all_fallback}`` — the numbers of the ask closing report's
@@ -877,8 +874,7 @@ class ResultContext:
         workflow view entirely, so a terminal run's real follow-up lived only
         in text nothing read: the model saw `next: null`, said "nothing
         further to run", then invented `--apply-task-suggestions` from general
-        knowledge instead of the notice already sitting in `--view all`
-        (F7, 2026-09-16).
+        knowledge instead of the notice already sitting in `--view all`.
         """
         self.notice = text or None
 
@@ -946,7 +942,7 @@ class ResultContext:
         ``{"phase", "command", "optional_before": [{"phase", "command",
         "why"}], "complete": false}`` (``optional_before`` omitted when empty),
         or exactly ``{"phase": null, "command": null, "complete": true}`` when
-        the workflow is complete (plans/next-phase-command.md §2.1).
+        the workflow is complete.
 
         Deliberately **not** ``next``: ``next`` is a follow-up for the *caller*,
         and a tool route (the opencode plugin, the codex MCP server)
@@ -968,8 +964,7 @@ class ResultContext:
         as a :func:`plain_line`: every host shows it, and it carries text a
         runner or a task file wrote."""
         # One line the hosts quote inside their message: bounded, so a long
-        # refusal cannot bury the message it decorates; cut at a word, marked
-        # (fix round 22).
+        # refusal cannot bury the message it decorates; cut at a word, marked.
         self.error = clip(text, ERROR_MAX_CHARS) or None
 
     def set_user_resume(self, obj: Optional[Dict[str, Any]]) -> None:
@@ -980,15 +975,13 @@ class ResultContext:
         carries after the plan; plus, when the phase's last stop named
         ``--human-task`` answers, ``answers`` (``[{command, flags, why}]``)
         and ``answers_text`` (them as one run of text), so a tool route offers
-        each as an option and names each in its message (fix round 14). Not
+        each as an option and names each in its message. Not
         ``user_next_step``, which
         names the *next* phase and is never set on a failed run, and never
         ``next``, which a tool route auto-follows: a needs-human stop is where a
         person decides, so this is for the user to type and nothing may run it.
         Set only by ``util next-command --blocked``, which the tool routes ask
-        after an exit 3 (2026-10-02: both routes ended a blocked ``implement``
-        with tool-call JSON or a raw ``uv run`` argv, and no command the user
-        could type). ``None`` leaves the line byte-for-byte what it was.
+        after an exit 3. ``None`` leaves the line byte-for-byte what it was.
         """
         self.user_resume = copy.deepcopy(obj) if obj is not None else None
 
@@ -997,8 +990,7 @@ class ResultContext:
 
         ``MULTI_LLM_RESULT`` is one JSON line a host parses, and a tool route
         has no agent reading the printed ``[COMMIT_RANGE]`` block, so its
-        server renders the block from this key instead
-        (plans/review-commits.md §2.3, "Relay"). The commit list is capped
+        server renders the block from this key instead. The commit list is capped
         as the block is (``commits`` holds the 20 newest, ``more`` counts the
         rest, ``full_list`` names where they are), so ``this branch`` over
         hundreds of commits stays one readable line. Stored as a copy;
@@ -1012,7 +1004,7 @@ class ResultContext:
         Read from the saved guard decision rather than from the printed
         block, so a foreground apply, improve-commits' apply step and the
         terminal ``status`` poll of a detached apply all carry the same
-        object (plans/review-commits.md §2.3). Stored as a copy; ``None``
+        object. Stored as a copy; ``None``
         leaves every other run's line byte-for-byte what it was.
         """
         self.commit_fixes = copy.deepcopy(payload) if payload is not None else None
@@ -1063,8 +1055,8 @@ class ResultContext:
             payload["user_next_step"] = copy.deepcopy(self.user_next_step)
         if self.user_resume is not None:
             payload["user_resume"] = copy.deepcopy(self.user_resume)
-        # The commit modes' two blocks, for the tool routes to render
-        # (plans/review-commits.md §2.3): present only when set, on any exit,
+        # The commit modes' two blocks, for the tool routes to render, present only
+        # when set, on any exit,
         # since a refusal after resolution still printed the commit block.
         if self.commit_range is not None:
             payload["commit_range"] = copy.deepcopy(self.commit_range)
@@ -1074,7 +1066,7 @@ class ResultContext:
         # `status --exit-zero` the verdict's word stays (`keep_state_word`)
         # while the code is 0, and the stop's headline the poll relays as
         # "the last line it left" used to drop off exactly that line
-        # (reviewer repro, fix round 8).
+        # (reviewer repro).
         if self.error and payload["state"] in (
             _STATE_BY_EXIT[EXIT_ERROR], _STATE_BY_EXIT[EXIT_NEEDS_HUMAN],
         ):
@@ -1134,7 +1126,7 @@ def record_artifacts(paths: Iterable[Union[str, Path]]) -> None:
 
 
 def record_ran_from_root(root: str) -> None:
-    """The active result's :data:`RAN_FROM_ROOT_KEY` (fix round 27)."""
+    """The active result's :data:`RAN_FROM_ROOT_KEY`."""
     if _ACTIVE is not None:
         _ACTIVE.ran_from_root = root
 
@@ -1233,9 +1225,9 @@ def record_notice(text: Optional[str]) -> None:
 def add_notice(text: Optional[str]) -> None:
     """Append *text* to the notice already recorded (``; ``-joined), if any.
 
-    For a phase's own notes (fix round 14: a consistency warning, the items
+    For a phase's own notes (a consistency warning, the items
     a judge skipped), which must not replace a notice another site set.
-    Joined by ``text_clip.join_clauses`` (fix round 28), so the notice
+    Joined by ``text_clip.join_clauses``, so the notice
     before it gives up its closing stop to the separator.
     """
     if _ACTIVE is None or not text:
@@ -1267,8 +1259,8 @@ def record_user_next_step(obj: Optional[Dict[str, Any]]) -> None:
 
 
 #: How long the result line's ``error`` may be (:meth:`set_error`). A stop's
-#: headline is fitted to it by one rule (``stop_answers.fit_stop_headline``,
-#: fix round 19): the model's quoted words give way
+#: headline is fitted to it by one rule (``stop_answers.fit_stop_headline``): the
+#: model's quoted words give way
 #: first, then the not-run list and the task titles, never the remedy, the
 #: answers or the line saying nothing ran the repository's tests.
 ERROR_MAX_CHARS = 1200
@@ -1359,11 +1351,10 @@ def invocation_plan_arg() -> Optional[str]:
 def typed_plan_for(plan: Union[str, Path]) -> str:
     """*plan* as this invocation's user typed it, when that spelling names it.
 
-    What a native leg's printed hand-off names the plan with (fix round 14,
-    racing run 5, Claude Code 03): generate-tasks' "then continue with: …
-    generate-tasks /tmp/…/plans/racing-game.md --reaggregate" and its
-    ``MULTI_LLM_RESULT.next`` carried the absolute path although the user
-    typed ``plans/racing-game.md``, and the host ran and quoted it. The typed
+    What a native leg's printed hand-off names the plan with: generate-tasks' "then continue with: …
+    generate-tasks /tmp/…/ --reaggregate" and its
+    ``MULTI_LLM_RESULT.next`` would carry the absolute path although the user
+    typed a relative one, and the host would run and quote that spelling. The typed
     spelling (:func:`invocation_plan_arg`) is used only when
     ``next_phase.recorded_plan_spelling`` passes it — it resolves from this
     cwd to the same existing file and holds no character a shell would act
@@ -1433,7 +1424,7 @@ _REPLAY_YES = _option_table(("yes",))
 #: ``full`` hands it to them under ``--yes`` (``apply_flags``), and the
 #: review-then-apply composites give their apply step ``--agent-decide``
 #: always (``improve_workflow.step_flags``). The commit modes join under the
-#: same rules (plans/review-commits.md §2.8): ``apply-commit-fixes`` runs
+#: same rules: ``apply-commit-fixes`` runs
 #: apply-code-fixes, and ``improve-commits`` is a review-then-apply composite.
 YES_IMPLIES_JUDGE_MODES: FrozenSet[str] = frozenset({
     "apply-suggestions", "apply-task-suggestions", "apply-code-fixes", "full",
@@ -1449,7 +1440,7 @@ def drop_implied_judge_flag(mode: str, tokens: Iterable[str]) -> List[str]:
     same phase with ``--agent-decide`` as without it, and the decisions an
     earlier run recorded are replayed by ``--resume`` from ``state.json``,
     not by the flag. Kept, it made the two commands one needs-human result
-    hands back disagree (OpenCode racing run 4): ``status``'s ``resume with:``
+    hands back disagree: ``status``'s ``resume with:``
     line, offered as a tool call, read ``--agent-decide --resume`` while the
     result's ``resume_command`` read ``--resume``. Without ``--yes`` the flag is
     the caller's own choice and stays.
@@ -1479,11 +1470,10 @@ def drop_implied_judge_flag(mode: str, tokens: Iterable[str]) -> List[str]:
 #: ``POS_REVS`` becomes ``--revs "<joined words>"`` (or ``--plan-file`` for a
 #: commit brief's path), and a replay never carries the words as typed: a
 #: phrase such as ``last two days`` names another range tomorrow, so every
-#: record and command carries the pinned ``<base12>..<head12>`` instead
-#: (plans/review-commits.md §2.2, "Ranges are pinned once resolved"). The
+#: record and command carries the pinned ``<base12>..<head12>`` instead. The
 #: hidden ``--commit-stage <file>`` names one detached launch's staged brief
-#: header and ``commit_range``, which the worker applies once and deletes
-#: (§2.1, "Under ``--detach``"), so it is dropped the same way. Both take one
+#: header and ``commit_range``, which the worker applies once and deletes, so it is
+#: dropped the same way. Both take one
 #: value.
 _REPLAY_DROP_POSITIONAL: Dict[str, Tuple[Tuple[str, ...], bool]] = {
     "plan_file": (("--plan-file",), True),
@@ -1499,8 +1489,8 @@ _REPLAY_DROP_POSITIONAL: Dict[str, Tuple[Tuple[str, ...], bool]] = {
 #: ``done``/``skip`` is recorded in ``state.json``'s ``human_task_decisions``
 #: and a plain ``--resume`` applies it again
 #: (``implement_orchestrator._applicable_task_decisions``), and a ``retry`` is
-#: one-shot. Replayed, the answer was both redundant and wrong (fix round 14,
-#: live run 5): ``status``'s ``resume with:`` line, offered as the tool
+#: one-shot. Replayed, the answer was both redundant and wrong: ``status``'s ``resume
+#: with:`` line, offered as the tool
 #: route's first option, read ``--human-task T002=done --human-task T005=skip
 #: --resume`` beside a ``resume_command`` of plain ``--resume`` — and run as
 #: printed it is refused, since T005 is ``skipped`` by then and an answer is
@@ -1534,7 +1524,7 @@ def drop_answer_flags(tokens: Iterable[str]) -> List[str]:
 #: printed for its user never carries: exactly the ones the tool routes
 #: reserve (``packaging/common/surface.py``'s ``reserved_flags``: ``exact``,
 #: the ``named_exception`` and the ``--internal-`` prefix; a test holds the two
-#: lists together). Fix round 18 (Codex racing run 7): ``status``'s
+#: lists together). ``status``'s
 #: ``resume with:`` line was the raw ``uv run … --host codex --detach
 #: --resume`` while every other next-step line was the host's spelling. A file
 #: route composes less (:func:`file_route_composed_flags`).
@@ -1555,7 +1545,7 @@ def file_route_composed_flags(
     not, and offers ``--yes`` and ``--interactive`` to the user),
     ``--exec-subagents`` (the *spawn subagents* verb of an ``executor`` host)
     and ``--detach`` (the *run detached* verb of a host that is not
-    ``native``: Claude Code never passes it). Fix round 19: the tool routes'
+    ``native``: Claude Code never passes it). The tool routes'
     reserved set was dropped on every route, so a Claude Code run the user
     started with ``--exec-subagents --yes`` printed a resume without them,
     which ran on the other leg, and the shims lost ``--interactive``, the one

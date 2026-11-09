@@ -1,14 +1,14 @@
-"""Commit reviews' front-door core: §2.1's seven steps, shared by the commit modes.
+"""Commit reviews' front-door core: the seven steps, shared by the commit modes.
 
 ``--review-commits``, ``--apply-commit-fixes`` and ``--improve-commits`` do not
 fork the review pipeline. Each is a front door that resolves a commit range
 (``utils/commit_range.py``), writes a generated **commit brief** for it, and
-runs review-code or apply-code-fixes on that brief as if it were a plan
-(plans/review-commits.md §2.1). What the brief is and where it lives is the
+runs review-code or apply-code-fixes on that brief as if it were a plan. What the brief
+is and where it lives is the
 path layer, ``utils/commit_paths.py``; its names are re-exported here.
 
 **The front-door core** is the one
-implementation of §2.1's seven steps that ``--review-commits``,
+implementation of the seven steps that ``--review-commits``,
 ``--apply-commit-fixes``, ``--improve-commits`` and ``util commit-brief``
 share, so the four entry points cannot drift apart:
 
@@ -91,7 +91,7 @@ from .commit_paths import (  # noqa: F401
 
 
 # ===========================================================================
-# The front-door core (plans/review-commits.md §2.1)
+# The front-door core
 # ===========================================================================
 #
 # Everything below is shared by the three commit modes' thin orchestrators and
@@ -104,8 +104,7 @@ from .commit_paths import (  # noqa: F401
 #: The three front doors, by mode word.
 COMMIT_MODES: Tuple[str, ...] = ("review-commits", "apply-commit-fixes", "improve-commits")
 
-#: The mode word each front door re-records under (§2.1, "What step 7
-#: records"): the phase it fronts, or the composite itself.
+#: The mode word each front door re-records under: the phase it fronts, or the composite itself.
 FRONTED: Dict[str, str] = {
     "review-commits": "review-code",
     "apply-commit-fixes": "apply-code-fixes",
@@ -140,8 +139,7 @@ COMMIT_REVIEW_KEPT = "[COMMIT_REVIEW_KEPT]"
 COMMIT_REVIEW_NOT_FOUND = "[COMMIT_REVIEW_NOT_FOUND]"
 COMMIT_REMAINING_FLAGS = "[COMMIT_REMAINING_FLAGS]"
 RANGE_AFTER_FLAGS = "[RANGE_AFTER_FLAGS]"
-#: Step 6 replaced a ``state.json`` that did not parse (§2.1 allows it; the
-#: apply door refuses the same file loudly, so this one says it too).
+#: Step 6 replaced a ``state.json`` that did not parse.
 STATE_REPLACED = "[STATE_REPLACED]"
 
 _REVIEW_DIR = "code-review"
@@ -245,7 +243,7 @@ def _stop(message: str, exit_code: int) -> FrontDoorExit:
 def add_commit_options(parser: argparse.ArgumentParser, *, skip_present: bool = False) -> None:
     """Add the front doors' own options to *parser*.
 
-    ``--focus <text>`` and ``--context-plan <path>`` (§2.4): only the front
+    ``--focus <text>`` and ``--context-plan <path>``: only the front
     doors and ``util commit-brief`` take them; the fronted phases' parsers
     never do, so ``--review-code x.md --focus y`` keeps argparse's error.
     Hidden: ``--revs`` (the dispatcher's joined range words) and
@@ -488,8 +486,7 @@ def _split_door_tokens(
 
 
 def _swallowed_by_models(values: Sequence[str]) -> List[str]:
-    """The ``--models`` values that are really a range (§2.2, "Words a list
-    flag swallowed"): a run of values the pure phrase matcher recognizes
+    """The ``--models`` values that are really a range: a run of values the pure phrase matcher recognizes
     (``last 2 commits``), else every value holding ``..``, ``~``, ``^`` or
     ``@{`` (or a bare ``-N``). No model id has those shapes."""
     from .commit_range import looks_like_range_word, match_phrase
@@ -517,7 +514,7 @@ def _check_range_after_flags(
     door: str, argv: Sequence[str], namespace: argparse.Namespace, extras: Sequence[str],
     parser: argparse.ArgumentParser, own: Mapping[str, str],
 ) -> None:
-    """§2.2's ``[RANGE_AFTER_FLAGS]``, before step 1 and before any write.
+    """The ``[RANGE_AFTER_FLAGS]``, before step 1 and before any write.
 
     A leftover bare word or ``-N``, or ``--models`` values shaped like a
     range, is exit 3 naming the command with those words moved right after
@@ -658,7 +655,7 @@ def _from_brief(path: Path, shown: str, root: Path) -> _Resolution:
 
 
 def _from_text(text: str, mode: str, root: Path, cwd: str) -> _Resolution:
-    """Step 1 for typed words, with §2.2's markdown-path messages."""
+    """Step 1 for typed words, with the markdown-path messages."""
     from .commit_range import RANGE_BAD_REF, RANGE_UNRECOGNIZED, RangeError, resolve_range
 
     word = " ".join(text.split())
@@ -701,7 +698,7 @@ def _from_text(text: str, mode: str, root: Path, cwd: str) -> _Resolution:
 
 
 def _refuse_unborn(root: Path) -> None:
-    """§2.2's unborn ``HEAD`` (exit 2), before a no-argument apply's lookup."""
+    """The unborn ``HEAD`` (exit 2), before a no-argument apply's lookup."""
     from .commit_range import NOTHING_TO_REVIEW, RangeError
     from .git_utils import run_git
 
@@ -749,8 +746,8 @@ def _resolve(mode: str, typed: _Typed, root: Path, cwd: str) -> _Resolution:
 
 def _block_view(cr: Any, record: Optional[Mapping[str, Any]]) -> Any:
     """The range as a reuse shows it: this resolution's commits, with the
-    first resolution's phrase, window, ``(outside window)`` tags and notes
-    (§2.4, "The first phrase is kept"), plus any note this resolution adds."""
+    first resolution's phrase, window, ``(outside window)`` tags and notes, plus any
+    note this resolution adds."""
     if record is None:
         return cr
     from .commit_range import Window
@@ -798,7 +795,7 @@ def _typed_scope(typed: _Typed, root: Path) -> Optional[List[str]]:
 
 def _review_scope(cr: Any, typed: _Typed, root: Path) -> List[str]:
     """``git diff --name-only <diff_base> <head>`` minus every commit review's
-    own files, narrowed by the typed scope (§2.5, "Drift")."""
+    own files, narrowed by the typed scope."""
     from .commit_range import diff_base
     from .git_utils import attribute_source_args, run_git_for_paths
 
@@ -888,8 +885,8 @@ def _identity(mode: str, cr: Any, record: Optional[Mapping[str, Any]], typed: _T
     """Step 3: the identity this invocation asks for, against the record.
 
     An omitted ``--focus``/``--context-plan`` inherits the recorded value; a
-    typed one is compared, ``""`` clearing it (§2.4, "Omitted options
-    inherit"). apply-commit-fixes never changes the identity: a typed value
+    typed one is compared, ``""`` clearing it. apply-commit-fixes never changes the
+    identity: a typed value
     that differs prints ``[COMMIT_REVIEW_KEPT]`` and the recorded review is
     applied. Prints ``[CONTEXT_PLAN_CHANGED]`` for an inherited plan whose
     file moved on, on the doors that review (*check_plan*).
@@ -975,7 +972,7 @@ def _identity(mode: str, cr: Any, record: Optional[Mapping[str, Any]], typed: _T
 def _print_kept(typed: _Typed, rec_focus: Optional[str], rec_plan: Optional[str],
                 rec_sha: Optional[str], pinned: str, root: Path, cwd: str) -> None:
     """apply-commit-fixes' ``[COMMIT_REVIEW_KEPT]`` for each typed value that
-    is not what the review on record used (§2.4, "Per mode")."""
+    is not what the review on record used."""
     checks: List[Tuple[str, str, str]] = []
     if typed.focus is not None and (typed.focus or None) != rec_focus:
         checks.append(("--focus", typed.focus,
@@ -1257,7 +1254,7 @@ def _unparseable_state(path: Path) -> bool:
 def _record_state(brief: Path, fields: Mapping[str, Any], refresh_plan_hash: bool) -> None:
     """Step 6: ``StateManager.record_commit_range``, which creates
     ``state.json`` with the ordinary initial state when there is none, and
-    replaces one that does not parse (§2.1). That replacement drops every
+    replaces one that does not parse. That replacement drops every
     record the earlier round left, while the apply door refuses the same
     file loudly, so it is said in one ``[STATE_REPLACED]`` line."""
     from .state_manager import StateManager
@@ -1312,8 +1309,7 @@ def _write_stage(directory: Path, *, mode: str, brief: Path, cr: Any, base_ref: 
                 "data": base64.b64encode(decision.snapshot_data).decode("ascii"),
             }
         ),
-        # The live-run decision is the typed flags' (§2.1, "The restart's
-        # --force decides nothing about ownership"): detach.launch reads this.
+        # The live-run decision is the typed flags': detach.launch reads this.
         "typed_force": bool(typed_force),
         "created_at": _now_iso(),
     }
@@ -1345,7 +1341,7 @@ def stage_takes_over(stage: Optional[PathLike]) -> bool:
     """Whether a launch carrying *stage* may take a live run over with its
     ``--force``: only when the user typed ``--force``. A restart's
     synthesised ``--force`` restarts the round and never takes over a live
-    run (§2.1). True when there is no readable stage (the flag decides)."""
+    run. True when there is no readable stage (the flag decides)."""
     if not stage:
         return True
     try:
@@ -1431,7 +1427,7 @@ class Prepared:
 
 
 def _refuse_before_step1(mode: str, typed: _Typed, detaching: bool) -> None:
-    """The composite's refusals that must come before any write (§2.8)."""
+    """The composite's refusals that must come before any write."""
     if mode != "improve-commits":
         if mode == "review-commits" and detaching and typed.flag("files_from") == "-":
             import code_review_orchestrator as review_code
@@ -1447,7 +1443,7 @@ def _refuse_before_step1(mode: str, typed: _Typed, detaching: bool) -> None:
 
 
 def prepare(mode: str, argv: Sequence[str], *, util: bool = False) -> Prepared:
-    """Steps 1 to 6 of §2.1 for *mode* (``util``: ``util commit-brief``).
+    """Steps 1 to 6 for *mode* (``util``: ``util commit-brief``).
 
     Prints the commit block, ``[COMMIT_BRIEF]`` and every marker a step owes;
     returns with the door's lock held in the foreground (the caller releases
@@ -1666,8 +1662,7 @@ def _prepare(mode: str, argv: List[str], *, util: bool, door: str) -> Prepared:
 
 
 def _fronted_argv(prep: Prepared) -> Tuple[str, List[str], List[str]]:
-    """``(record mode, recorded argv, argv the fronted main is called with)``
-    (§2.1, "What step 7 records")."""
+    """``(record mode, recorded argv, argv the fronted main is called with)``."""
     from .cli_common import flag_present
 
     forwarded = list(prep.remaining)
@@ -1793,7 +1788,7 @@ def _improve_worker(argv: Sequence[str]) -> int:
 
 
 def front_door(mode: str, argv: Sequence[str]) -> int:
-    """A commit mode: §2.1's steps 1 to 7, then the fronted ``main``'s exit.
+    """A commit mode: the steps 1 to 7, then the fronted ``main``'s exit.
 
     ``review-commits`` runs ``code_review_orchestrator.main`` recorded as
     ``review-code``; ``apply-commit-fixes`` runs ``apply_code_fixes_orchestrator.main``
@@ -1837,7 +1832,7 @@ def front_door(mode: str, argv: Sequence[str]) -> int:
 
 
 # ---------------------------------------------------------------------------
-# util commit-brief: steps 1 to 6 on their own (§2.8)
+# util commit-brief: steps 1 to 6 on their own
 # ---------------------------------------------------------------------------
 
 

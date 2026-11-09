@@ -172,7 +172,7 @@ UTIL_COMMANDS: Dict[str, Tuple[Optional[str], str, str]] = {
 }
 
 #: The ``util`` command that is a commit front door's steps 1 to 6 on their
-#: own (plans/review-commits.md §2.8): the native leg's preparation entrypoint.
+#: own: the native leg's preparation entrypoint.
 COMMIT_BRIEF_UTIL = "commit-brief"
 
 
@@ -334,7 +334,7 @@ def _unknown_mode_message(word: str) -> str:
 # Grammar
 # ---------------------------------------------------------------------------
 
-#: A ``-N`` range word (plans/review-commits.md §2.2): a hyphen and ASCII
+#: A ``-N`` range word: a hyphen and ASCII
 #: digits, nothing else. ``-h``, ``-2h``, ``--2``, ``-2.5`` and a lone ``-``
 #: are not one; they end the leading run as any flag does.
 _RANGE_COUNT_WORD = re.compile(r"-[0-9]+")
@@ -426,7 +426,7 @@ def _revs_flags(words: Sequence[str]) -> List[str]:
     value, since revisions never contain spaces (``last 2 commits`` needs no
     quotes). So a markdown path is never a plan on these modes: a plan or a
     README goes to the range grammar, which refuses it naming
-    ``--context-plan`` (plans/review-commits.md §2.2).
+    ``--context-plan``.
     """
     if not words:
         return []
@@ -446,7 +446,7 @@ def _names_a_commit_brief(word: str) -> bool:
     repository the cwd is in is asked about there: a brief path spelled from
     the root and typed in a subdirectory then becomes ``--plan-file``, and
     :func:`_run_from_repository_root` moves the command to the root as it
-    would for a plan (live run 11's shape).
+    would for a plan.
     """
     if not word.endswith(_COMMIT_BRIEF_SUFFIX):
         return False
@@ -484,8 +484,7 @@ def _root_holding(path: str) -> Optional[str]:
 
 
 #: The flags a commit front door synthesises for the phase it fronts, which a
-#: user may never type there (plans/review-commits.md §2.1, "Flags the front
-#: doors own"), each with the commit spelling that replaces it.
+#: user may never type there, each with the commit spelling that replaces it.
 COMMIT_OWNED_FLAGS: Tuple[Tuple[str, str], ...] = (
     ("--plan-file",
      "there is no plan by default: the commit messages are the stated intent. "
@@ -722,9 +721,8 @@ def _call_target(target: Callable[[Sequence[str]], int], argv: Sequence[str]) ->
 
 
 def _validate_skip_rung(mode_name: str) -> None:
-    """Reject a bad ``MULTI_LLM_CODEX_SKIP_RUNG`` before any mode runs (plan
-    codex-sandbox-unavailable-findings-and-fixes §6 F1 "Where it sits" item 6,
-    2026-09-30): any value but ``plugin-landlock`` is exit 3 naming the
+    """Reject a bad ``MULTI_LLM_CODEX_SKIP_RUNG`` before any mode runs: any value but
+``plugin-landlock`` is exit 3 naming the
     variable and the accepted value, never silently ignored. ``doctor`` is
     exempt — it is where a user looks when something is wrong, so it reports
     the bad value on its ``plugin-landlock`` row instead of dying on it."""
@@ -797,7 +795,7 @@ def _run_mode(word: str, rest: Sequence[str], ctx: ResultContext) -> int:
         # capable runner is exit 3 here rather than a marker nobody continues.
         _require_executor_capability(argv)
         # A plan spelled from the repository root, typed in a subdirectory of
-        # it (live run 11): the whole command runs from the root, before
+        # it: the whole command runs from the root, before
         # anything reads a path or records the invocation.
         _run_from_repository_root(
             [flag_value(argv, option) for option in _MODE_INPUT_PATH_OPTIONS],
@@ -839,7 +837,7 @@ def _run_util(rest: Sequence[str], ctx: ResultContext) -> int:
     assert module_path is not None
     if name == COMMIT_BRIEF_UTIL and not flag_present(args, "--help", "-h"):
         # The front doors' preparation half takes the same typed tokens, so
-        # it refuses the same three flags (plans/review-commits.md §2.8).
+        # it refuses the same three flags.
         _reject_commit_owned_flags(
             f"{mode_table.UTIL_NAMESPACE} {COMMIT_BRIEF_UTIL}", args)
     if not flag_present(args, "--help", "-h"):
@@ -853,15 +851,12 @@ def _run_util(rest: Sequence[str], ctx: ResultContext) -> int:
 # ---------------------------------------------------------------------------
 # A command run from a subdirectory of the repository
 # ---------------------------------------------------------------------------
-# Live run 11 (Claude Code racing 03, 2026-10-08): the host had `cd`'d into the
-# phase folder to look at its files, then ran `generate-tasks
-# plans/racing-game.md --reaggregate` there, and the plan "was not found" at
-# plans/racing-game/generate-tasks/plans/racing-game.md. Every path a workflow
-# command names (the plan, its folder, state.json, a phase folder, tasks.md) is
-# spelled from the repository root, so when the relative ones name nothing from
-# the cwd and each names something inside the root of the repository the cwd is
-# in, the command runs from that root, exactly as it would have there, and says
-# so on one line.
+# Every path a workflow command names (the plan, its folder, state.json, a phase
+# folder, tasks.md) is spelled from the repository root. When the relative ones
+# name nothing from the cwd and each names something inside the root of the
+# repository the cwd is in (a host that `cd`s into a phase folder and re-runs a
+# command there), the command runs from that root, exactly as it would have there,
+# and says so on one line.
 
 #: A mode's options whose value is an existing file the command reads (a plan
 #: positional is ``--plan-file`` by now, and so is a commit brief's path; a
@@ -873,9 +868,7 @@ _MODE_INPUT_PATH_OPTIONS: Tuple[str, ...] = (
 )
 
 #: A mode's options whose value is a path the command creates, so it need not
-#: exist yet (fix round 27, the Fable review of round 26: review-plan's
-#: ``--out-dir`` was read by nothing, so ``--out-dir out`` beside a ``sub/out``
-#: moved with the plan and wrote ``<root>/out``): review-plan's output folder
+#: exist yet: review-plan's output folder
 #: and implement's task JSON. ``--files`` and ``--touched`` are
 #: repository-relative wherever they are typed, and init's ``--dir`` is its
 #: target as typed; none of them is read here.
@@ -893,7 +886,7 @@ _UTIL_INPUT_PATH_OPTIONS: Tuple[str, ...] = (
 )
 
 #: A ``util`` command's options whose value is a path it creates:
-#: ``write-prompt``'s prompt file (fix round 27).
+#: ``write-prompt``'s prompt file.
 _UTIL_OUTPUT_PATH_OPTIONS: Tuple[str, ...] = ("--output",)
 
 #: The ``util`` commands whose first positional is such a path, with their
@@ -1000,7 +993,7 @@ def _run_from_repository_root(
     when the cwd is the root already, or when a path is missing from the root
     too or resolves outside it (a ``..`` or a link out of the repository).
 
-    *outputs* are paths the command creates (fix round 27): one need not
+    *outputs* are paths the command creates: one need not
     exist at the root, but it keeps the command here when it, or the first
     folder it names, exists from the cwd, and it must stay inside the root as
     spelled and resolved. Outputs alone never move a command: only a path it
@@ -1033,7 +1026,7 @@ def _run_from_repository_root(
             return
     os.chdir(root)
     _CWD_BEFORE_ROOT.append(cwd)
-    # Fix round 27: on the result line too, so a tool server names the plan
+    # On the result line too, so a tool server names the plan
     # the way this command reads it, never by a `.git` walk of its own.
     from utils.cli_common import record_ran_from_root
 
@@ -1167,7 +1160,7 @@ def _dispatcher_only_answer(mode_name: str) -> str:
         f"  {dispatcher_command(mode_name)} --help",
     ]
     if mode_name == "status":
-        # 2026-10-04 (Claude Code racing re-run): a host reading `status`
+        # 2026-10-04: a host reading `status`
         # only to report it showed "Exit code 2" as a tool error. The code
         # is the poll contract and never moves; the read step says so.
         lines += [
@@ -1804,8 +1797,7 @@ def _sweep_live_clis_on_interrupt() -> None:
 
     A fan-out's slots wait on their CLIs from worker threads, where
     ``KeyboardInterrupt`` is never raised, and an agent CLI's tool shells run in
-    sessions of their own that a terminal SIGINT does not reach (plan
-    review-run-scope-salvage-and-failure-visibility D3.3, decision 11.9). The
+    sessions of their own that a terminal SIGINT does not reach. The
     registry holds each live CLI with a refreshed snapshot of its descendants,
     so this reaps what those slots started before the process exits.
 
@@ -1899,7 +1891,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ctx.emit(exit_code)
         return exit_code
     finally:
-        # Plan codex-sandbox-unavailable I12 (option B, 2026-09-30): every codex
+        # Unavailable I12 (option B, 2026-09-30): every codex
         # child of this run has exited by now, so remove the
         # `[projects."<repo>"] trust_level = "trusted"` tables they added to the
         # user's codex config — and nothing else. A detached worker's `--abort`
@@ -1929,7 +1921,7 @@ def _write_phases() -> "frozenset":
 
 
 def _emit_user_next_step(ctx: ResultContext, exit_code: int) -> None:
-    """Set ``user_next_step`` and print its block (plans/next-phase-command.md §2.2(1)).
+    """Set ``user_next_step`` and print its block.
 
     Only for the recorded invocation of a workflow-phase mode or a
     review-then-apply composite (``improve-plan``, ``improve-code``) that exits
@@ -1952,10 +1944,9 @@ def _emit_user_next_step(ctx: ResultContext, exit_code: int) -> None:
     output.
 
     A commit review's front doors record the phase they front (``review-code``,
-    ``apply-code-fixes``) or ``improve-commits`` with its pinned range
-    (plans/review-commits.md §2.1, "What step 7 records"), so the gate below
+    ``apply-code-fixes``) or ``improve-commits`` with its pinned range, so the gate below
     passes as for any phase, and the builder spells the answer back in the
-    commit spelling (§2.8): after ``review-commits``, ``--apply-commit-fixes
+    commit spelling: after ``review-commits``, ``--apply-commit-fixes
     <base12>..<head12>`` under a why naming both reports.
     """
     record = invocation()
@@ -1971,8 +1962,7 @@ def _emit_user_next_step(ctx: ResultContext, exit_code: int) -> None:
         (mode.is_workflow_phase or mode.is_composite)
         and exit_code in (EXIT_OK, EXIT_NOTHING_TO_DO)
     ):
-        # A review-then-apply composite answers on 0 and on 2 too
-        # (plans/improve-plan-and-improve-code.md §2.6): its exit 2 is
+        # A review-then-apply composite answers on 0 and on 2 too: its exit 2 is
         # `[ALREADY_COMPLETE]`, returned before its detach boundary, so a tool
         # route's `--detach` re-run of a finished composite carries the next
         # step like any foreground exit 2. The builder answers as the phase
@@ -2023,10 +2013,10 @@ def _typed_plan(argv: Sequence[str]) -> Tuple[Optional[str], Optional[str]]:
     ``plan_arg`` (else its ``plan_file``) instead.
 
     ``improve-commits`` is recorded with its pinned range, not a plan
-    (``--revs <base12>..<head12>``, plans/review-commits.md §2.1, "What step
+    (``--revs <base12>..<head12>``, "What step
     7 records"): the plan is the brief that spelling names
     (``commit_paths.brief_for_pinned``), and the typed spelling is the
-    pinned range itself, which every command printed for it carries (§2.8).
+    pinned range itself, which every command printed for it carries.
     """
     plan_file = flag_value(argv, "--plan-file")
     plan_arg = invocation_plan_arg() or plan_file
@@ -2065,8 +2055,8 @@ def _continuation_target(command: str) -> Optional[Tuple["mode_table.Mode", str]
     or ``--plan-file <plan>``) carrying one of
     :data:`utils.cli_common.CONTINUATION_VERBS`; its *mode* is a workflow phase.
 
-    A continuation in the commit spelling (plans/review-commits.md §2.8:
-    ``review-commits <base12>..<head12> --reaggregate``, or the brief path on
+    A continuation in the commit spelling (``review-commits <base12>..<head12>
+    --reaggregate``, or the brief path on
     a root range) names the phase its front door fronts
     (``Mode.commit_view_of``) and the brief its range names.
     """
@@ -2149,8 +2139,8 @@ def _continued_plan_arg(
     ``.status.json`` — else, when the hand-off recorded none (or one that does
     not pass), the phase's detached run record's ``plan_arg``, the plan as its
     launcher typed it: a detached launch records no hand-off spelling, and its
-    status read's "advance it with: … --reaggregate" names the plan absolutely
-    (hooks review of fix round 10). Either is printed only when
+    status read's "advance it with: … --reaggregate" names the plan absolutely. Either
+    is printed only when
     ``next_phase.recorded_plan_spelling`` passes it — the folder is writable by
     every jailed batch, so a spelling that does not resolve strictly to this
     plan from this cwd, or that holds a character a shell would act on, is
@@ -2263,7 +2253,7 @@ def _close_detached_run(
 
     *result_state* is the result context's state; ``detach`` records it as
     ``run.result_state`` only when the exit code cannot express it
-    (``partial``), so a ``status`` poll can restate it (plan §5).
+    (``partial``), so a ``status`` poll can restate it.
     """
     detach = sys.modules.get("utils.detach")
     if detach is None:

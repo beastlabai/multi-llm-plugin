@@ -396,7 +396,9 @@ class TestAKeylessSubscriptionRunIsNotRefusedAsEmpty:
     def test_the_makefile_gate_no_longer_exits(self):
         makefile = (Path(__file__).resolve().parents[3] / "Makefile").read_text(
             encoding="utf-8")
-        body = makefile.split("\ne2e-container-host: e2e-image\n", 1)[1].split(
-            "\n\n", 1)[0]
+        # the recipe lines only: the rule line also carries a `## description`
+        body = makefile.split("\ne2e-container-host: e2e-image", 1)[1].split(
+            "\n", 1)[1].split("\n\n", 1)[0]
+        assert body.startswith("\t"), body
         assert "exit 1" not in body, "a subscription-only run must be allowed"
         assert "OPENROUTER_API_KEY" in body

@@ -96,7 +96,7 @@ JailReadBack = Callable[..., Tuple[Optional[str], str]]
 LogWriter = Callable[["Capture", Dict[str, Any]], None]
 
 
-#: ``details["sandbox"]`` for a slot that ran under the D6 fallback (2026-09-17)
+#: ``details["sandbox"]`` for a slot that ran under the D6 fallback
 #: on the **uncontained** rung: the runner's own OS sandbox could not start and
 #: ``sandbox_fallback: auto`` (the default) let the read-only dispatch run
 #: without any boundary. Absent means "ran as the adapter's default argv renders
@@ -117,8 +117,7 @@ SANDBOX_FALLBACK_WORD_PREFIX = "fallback-"
 #: always was, so a stray string can never read as a sandbox.
 _CONTAINED_RUNG_IDS = frozenset({SANDBOX_RUNG_LANDLOCK})
 
-#: The ``incidental``-grade rung ids a record word may name (plan
-#: codex-sandbox-unavailable §7 "Step 2 subtask" item 3, 2026-09-30): the
+#: The ``incidental``-grade rung ids a record word may name: the
 #: plugin's own Landlock jail. A **separate** closed set beside
 #: :data:`_CONTAINED_RUNG_IDS`, which stays ``{landlock}`` so nothing that reads
 #: "contained" widens; without this set ``llm_client.sandbox_record_word`` would drop the
@@ -153,7 +152,7 @@ def _attach_sandbox_word(details: Dict[str, Any], sandbox_fallback: Any) -> None
         )
 
 
-#: §4.4's storage caps. A *successful* ``review-plan`` against a provider
+#: The storage caps. A *successful* ``review-plan`` against a provider
 #: emitting 3 MiB per stream wrote a 6,254,326 B ``log_gemini_*.txt``:
 #: ``llm_client._save_log`` truncated the prompt and nothing else. Lane B already ``_tail``s its
 #: failure captures at 64 KiB, so the log path is the one that was uncapped.
@@ -171,7 +170,7 @@ MAX_LOG_STREAM_BYTES = 45 * 1024
 
 
 def _redact(text: str) -> str:
-    """§4.5's one redaction boundary (``write_safety.redact_text``), imported late.
+    """The one redaction boundary (``write_safety.redact_text``), imported late.
 
     ``write_safety`` reaches this module through ``subagent_tasks`` and
     ``llm_client``, so a module-level import here would close an import cycle;
@@ -205,9 +204,7 @@ def _cut_bytes_middle(text: str, limit: int, marker: str) -> str:
     """``text`` cut to ``limit`` UTF-8 bytes, head **and tail** kept, ``marker`` between.
 
     A stream's end is where its answer is: codex's final ``agent_message`` and
-    ``turn.completed`` come last, after a few multi-KB ``aggregated_output`` lines
-    (2026-10-01, Claude Code review-code: a head-only cut left a log ending at the
-    diff read, and its "0 issues" verdict could not be audited). A quarter of the
+    ``turn.completed`` come last, after a few multi-KB ``aggregated_output`` lines. A quarter of the
     budget keeps the opening, the rest keeps the ending. The marker is charged
     against ``limit``, as in :func:`_cut_bytes`.
     """
@@ -225,7 +222,7 @@ def _cut_bytes_middle(text: str, limit: int, marker: str) -> str:
 
 
 def _bound_stream(text: str) -> str:
-    """One captured stream, bounded per §4.4 — **after** it has been redacted.
+    """One captured stream, bounded — **after** it has been redacted.
 
     Order is normative and is the reason L3 and L4 are one atomic change: every
     cut below slices by construction, and a cut applied first leaves a remnant no
@@ -259,11 +256,11 @@ def _attach_stdout_excerpt(details: Dict[str, Any], stdout: Optional[str]) -> No
     three ways — a non-zero exit, a timeout kill, and a zero exit whose output
     would not parse — and all three are cases where the provider may already have
     said the thing the caller needs. The rule for carrying that text out is not
-    one line but four decisions (``_redact`` *before* ``_bound_stream``, per
-    §4.5/§4.4; ``.strip()``; set the key only when something survives; never the
+    one line but four decisions (``_redact`` *before* ``_bound_stream``, per;
+    ``.strip()``; set the key only when something survives; never the
     raw stream), and this module argues elsewhere that a rule spelled three times
     is a rule that drifts twice — see ``_bound_stream``'s own note that the
-    redact/bound order "is normative", and §2's forward-maintenance case against
+    redact/bound order "is normative", and the forward-maintenance case against
     two hand-aligned blocks plus a comment. A cap tightened or a pattern added at
     one copy and not the others would leak from whichever site was forgotten, and
     the leak would be invisible until an artifact was read by a human. So it is
@@ -376,8 +373,6 @@ def _salvage_hook_text(provider: Any, stdout: Optional[str]) -> Optional[str]:
     The one place the hook's three-answer contract is read, so
     ``salvage_text`` and ``answer_text`` can never disagree about what the
     hook said, and a losing path that attaches both runs the hook once
-    (plans/ask-answer-recovery-and-false-success.md D2.2):
-
     * the hook's string, as it returned it (``""`` included: "nothing there");
     * ``""`` when the hook raised: by overriding, the adapter declared its
       stdout a transport, so falling back to the raw stream would restore the
@@ -407,8 +402,7 @@ def _attach_salvage_text(
     20 lines — and on a transport-stream adapter (pi, omp) those lines are
     event data whose ``content`` arrays pass ``has_salvageable_json``: a
     reviewer killed mid-tool-call was sent to salvage over its own
-    ``thinking``/``toolCall`` parts (plan:
-    review-run-scope-salvage-and-failure-visibility §4). The adapter's
+    ``thinking``/``toolCall`` parts. The adapter's
     :meth:`~utils.providers.base.LLMProvider.salvage_text` hook reads the
     **full** stdout, before any bounding, and says which words are the answer.
 
@@ -440,8 +434,7 @@ def _attach_salvage_text(
 #: ``want_answer_text=True`` to :func:`invoke_with_provider` (the ask lane).
 #: Its value is the model's **whole** answer text, reduced from the full stdout,
 #: redacted and head-capped. It goes to that caller alone — never into
-#: ``.status.json``, a result record or the log
-#: (plans/ask-answer-recovery-and-false-success.md D2.2).
+#: ``.status.json``, a result record or the log.
 ANSWER_TEXT_KEY = "answer_text"
 
 #: ``answer_text``'s cap. An answer is read from the top, so the **head** is
@@ -462,7 +455,7 @@ def _clean_envelope_answer(value: Any, text: str) -> str:
       absent or ``"SUCCESS"`` (gemini, agy). Without the ``status`` test an
       agy failure that carries no ``error`` would pass. An ``error`` that is
       present but empty (``null``, ``""``) says no error either: agy's success
-      shape is uncaptured (§14), and an answer lost to an empty field is the
+      shape is uncaptured, and an answer lost to an empty field is the
       loss this plan fixes.
 
     Any other JSON value — a refusing envelope, grok's ``{"type":"error",…}``
@@ -612,11 +605,10 @@ def _readonly_audit(
     2026-09-30): the first is the one slot the porcelain check brackets, the
     second the one the mode check and the home check bracket, and both read
     this verdict to decide whether a change seen in the window is downgraded to
-    a not-attributed warning (plan codex-sandbox-unavailable §6 F1, "What it
-    fixes"). A default or contained-rung run adds no key — the same rule the D6
+    a not-attributed warning. A default or contained-rung run adds no key — the same rule the D6
     ``sandbox`` provenance key follows.
 
-    Plan §4.2 option B / 4.2: the audit must see the whole in-memory stream —
+ option B / 4.2: the audit must see the whole in-memory stream —
     the persisted log and ``stdout_excerpt`` are both cut at
     ``MAX_LOG_STREAM_BYTES``, and a cut stream has no ``turn.completed`` and
     would fail every long slot. So it runs here, at parse time, on every
@@ -745,7 +737,7 @@ def _adapter_failure_category(
 def _served_model_attribution(
     provider: Any, model: str, stdout: str
 ) -> Optional[Tuple[str, bool, Optional[str]]]:
-    """§3.6's ``(served_model, is_fallback, warning)`` for one attempt, or None.
+    """The ``(served_model, is_fallback, warning)`` for one attempt, or None.
 
     **Gated on a configured fallback list, which ships empty.** Attribution is
     mandatory *whenever a fallback is configured* — without it a report
@@ -754,7 +746,7 @@ def _served_model_attribution(
     nothing is recorded and nothing is printed: the result dict is byte-for-byte
     what it has always been.
 
-    Only claude-code answers here (its envelope carries ``modelUsage``); §4.6
+    Only claude-code answers here (its envelope carries ``modelUsage``);
     stays closed, so every other adapter lacks both methods and returns None.
 
     **Read, never depended on.** Any failure to answer degrades to None — an
@@ -852,12 +844,12 @@ def _exit_line(provider: Any, provider_name: str, capture: Capture) -> str:
     except Exception:  # noqa: BLE001 - diagnostics must not raise
         reason = None
     if reason:
-        # §4.5: the reason is the vendor's own sentence quoted off a stream, and
+        # The reason is the vendor's own sentence quoted off a stream, and
         # it lands in `.status.json`'s `models_failed` and on the fan-out's
         # stdout — neither of which goes through `_save_log`'s redaction. The
         # one boundary applies here too.
         line = f"{line}: {_redact(reason)}"
-    # M10 (§5.1) — the **status**-consumer half of this site. A failure whose
+    # M10 — the **status**-consumer half of this site. A failure whose
     # own streams carry a login notice is an availability verdict, not a parse,
     # so name it instead of leaving the caller with a generic tail. Only the
     # named negatives speak (see `availability_from_failure`), and nothing is
@@ -901,7 +893,7 @@ def _schema_verdict(
     schema_phase: str,
     structured_marker: str,
 ) -> Dict[str, Any]:
-    """§4.2.1's verdict on a dispatch that carried a phase schema; returns the
+    """The verdict on a dispatch that carried a phase schema; returns the
     result, replaced when an exit 0 fails it.
 
     Lane A only, and no production caller passes ``schema_phase`` (W1, deferred
@@ -909,7 +901,7 @@ def _schema_verdict(
     ``tests/test_structured_output.py`` is its standing check.
     """
     if capture.exit_code != 0:
-        # §4.2.1 cases 2 and 4 both arrive here as a non-zero exit, and they
+        #  cases 2 and 4 both arrive here as a non-zero exit, and they
         # are NOT the same failure: the CLI exhausting its own structured-output
         # budget is a `schema_violation` our ladder must not re-run, while a
         # malformed schema is a configuration error that made **zero requests**
@@ -933,7 +925,7 @@ def _schema_verdict(
             print(f"[WARN] {verdict.warning}", file=sys.stderr)
         return result
 
-    # §4.2.1's rule, stated as a rule and not only as a case: **no** combination
+    # The rule, stated as a rule and not only as a case: **no** combination
     # of exit 0, `subtype: success` and `is_error: false` is by itself a success
     # for a schema-carrying phase. The only success is `structured_output`
     # present (→ `native`) or a recovered document that validates against the
@@ -1002,7 +994,7 @@ def outcome_from_capture(
     ``sandbox_fallback`` (the D6 rung, recorded as ``details["sandbox"]`` and
     deciding the read-only audit), ``want_answer_text`` (the ask lane's
     ``details["answer_text"]``), ``schema``/``schema_phase``/
-    ``structured_marker`` (§4.2.2, W1-deferred), ``jail`` (the plugin's jail
+    ``structured_marker``, ``jail`` (the plugin's jail
     read-back, :data:`JailReadBack`), ``defer_log`` (an exit 0 hands its
     capture back on ``details["_deferred_log"]`` instead of being logged) and
     ``log`` (the provider log's writer, :data:`LogWriter`).
@@ -1076,7 +1068,7 @@ def outcome_from_capture(
             "duration_seconds": capture.duration,
         }
         # The adapter's completion verdict moves onto `details` straight after
-        # the parse (plans/ask-answer-recovery-and-false-success.md D3.1):
+        # the parse:
         # `incomplete` says the stream's own terminal state shows the answer did
         # not finish (pi's `stopReason: "length"`), or that the capture cut
         # stdout at its bound, whether or not the text parsed. It is not an
@@ -1106,7 +1098,7 @@ def outcome_from_capture(
                 provider, stdout, stderr
             )
 
-    # F1 (2026-09-30): the jailed slot's read-back samples live state (the
+    # F1: the jailed slot's read-back samples live state (the
     # home, other children still running), so it is taken where each path has
     # always taken it: a non-zero exit's here, before the audit, its keys held
     # back so they land after the `sandbox` word as on the other paths; the
@@ -1121,7 +1113,7 @@ def outcome_from_capture(
             returncode=capture.exit_code, failed=True, timed_out=False,
         )
 
-    # Plan §4.2: the read-only verdict on the FULL stream, before anything
+    # The read-only verdict on the FULL stream, before anything
     # below bounds it — a failed attempt of a bypassed slot could still have
     # written, and 4.3 ANDs every attempt's verdict. A capped stdout's audit is
     # never clean (`process_capture`).
@@ -1133,13 +1125,13 @@ def outcome_from_capture(
     _note_stream_cap(details, capped)
     if classified:
         details[FAILURE_CATEGORY_KEY] = category
-    # D6 override (2026-09-17): the child ran, whatever it returned, under the
+    # D6 override: the child ran, whatever it returned, under the
     # rung it was given, so the provenance rides every outcome that ran one.
     _attach_sandbox_word(details, sandbox_fallback)
     details.update(jail_details)
 
     if exited_zero:
-        # §3.6: a fallback that fired rides out on the same details dict the
+        # A fallback that fired rides out on the same details dict the
         # provider/model pair travels on, so every downstream record that names
         # the requested model can name the model that actually served the turn.
         # One WARN per slot — the adapter owns the text; there is no second one.
@@ -1160,7 +1152,7 @@ def outcome_from_capture(
         if not result.get("success", False) and "error_code" not in result:
             result["error_code"] = ERROR_PARSE_ERROR
 
-    # F1 (2026-09-30): the jailed slot's read-back, on every outcome that ran a
+    # F1: the jailed slot's read-back, on every outcome that ran a
     # child — the home check and the in-stream denial count always; a jail
     # failure only on a failed attempt. A deadline kill stays a timeout, as on
     # the executor lane. An exit 0 is failed only when the run produced no
@@ -1215,7 +1207,7 @@ def outcome_from_capture(
         log(capture, result)
 
     # What the model actually said, kept on every failure, redacted then
-    # bounded (§4.5/§4.4) — never the raw stream. A non-zero exit or a kill may
+    # bounded — never the raw stream. A non-zero exit or a kill may
     # come after the answer was written (a truncated array, a crash on
     # teardown), and a JSON-erroring CLI puts its failure body on stdout with
     # stderr empty; an exit-0 parse failure's error describes our

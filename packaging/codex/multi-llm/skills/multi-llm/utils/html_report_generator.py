@@ -102,7 +102,7 @@ def _make_letter_icon_data_uri(letter: str, color: str) -> str:
 
 # Mapping from icon key to (icon_filename_or_None, fallback_letter, fallback_color)
 #
-# Provenance rule (orca-harness-parity.md §6.2): Orca's MIT grant covers its
+# Provenance rule: Orca's MIT grant covers its
 # copyright in the PNGs it bundles, NOT the third-party trademarks they depict.
 # So Orca is used only as the *catalog* — which agent wears which mark — and each
 # asset here is fetched from the vendor's own favicon/brand source, preferring
@@ -521,7 +521,7 @@ def _attribution_notes(model: str, entry: Any) -> List[str]:
         notes.append(SANDBOX_BYPASSED_LABEL)
     elif isinstance(sandbox, str) and sandbox.startswith(SANDBOX_FALLBACK_WORD_PREFIX):
         notes.append(sandbox_fallback_label(sandbox))
-    # A slot the plugin's jail failed (2026-09-30) keeps its rung on the record
+    # A slot the plugin's jail failed keeps its rung on the record
     # (F1 item 6); its reason rides the same parenthesis.
     denied = jail_denied_label(entry)
     if denied:
@@ -532,7 +532,7 @@ def _attribution_notes(model: str, entry: Any) -> List[str]:
 def served_model_label(
     model: str, served_models: Optional[Dict[str, Any]] = None
 ) -> str:
-    """``model`` as a report label, carrying §3.6's served-model attribution.
+    """``model`` as a report label, carrying the served-model attribution.
 
     One renderer for every markdown surface that names a model *without* a
     cost beside it (the code review's per-issue ``**Model:**`` field, which
@@ -543,7 +543,7 @@ def served_model_label(
     that *do* name a cost use :func:`model_label`, which is this plus the
     usage clause in the same parenthesis.
 
-    The D6 override's provenance (2026-09-17) renders on the same label:
+    The D6 override's provenance renders on the same label:
     ``sandbox: "bypassed"`` in the entry appends ``ran unsandboxed:
     sandbox_fallback=auto``, so a report reader sees which slot's findings
     came from a model that ran with the operator's shell rights — beside the
@@ -659,8 +659,7 @@ def failed_models_line(
     """The one-line account of the models that produced no result, or ``""``.
 
     ``**Models:**`` names only the models that produced results, so a reviewer
-    that timed out used to be absent from every surface above the fold (plan
-    review-run-scope-salvage-and-failure-visibility §5.2 item 2). This is the
+    that timed out used to be absent from every surface above the fold. This is the
     line that goes directly under it — and, with ``bold=False``, the HTML
     warning notice's ``message`` — so ``report.md`` and ``report.html`` are
     built from one string and cannot disagree::
@@ -680,10 +679,10 @@ def failed_models_line(
             attempt ask for a salvage of this still-failed model"
             (``review_orchestrator_base.salvage_requested_models``).
         bold: ``True`` for the markdown header line, ``False`` for the notice.
-        served_models: ``models_served`` (2026-09-30). A slot whose entry
+        served_models: ``models_served``. A slot whose entry
             there carries ``failure_reason: jail-denied`` leads with ``denied
             by the plugin's jail: <path>`` — the record outlives the log that
-            printed the ``[JAIL_DENIED]`` line (plan §6 F1 item 6) — and keeps
+            printed the ``[JAIL_DENIED]`` line — and keeps
             its recorded reason after it (a later ``[CODEX_HOME_CHECK]`` or
             ``[MODE_CHECK]`` violation, code-review's ``(spent $X)``), unless
             that reason already carries the label.
@@ -693,8 +692,7 @@ def failed_models_line(
     salvaged = {str(spec) for spec in (salvage_requested or ())}
     entries = []
     for spec, reason in failed_models.items():
-        # A record (2026-09-30: a jailed slot's `failure_reason: jail-denied`
-        # plus its path) renders through the one reason renderer; a string is
+        # A record renders through the one reason renderer; a string is
         # itself, as before. The served record's jail label is prepended, never
         # substituted: the recorded reason can carry what happened after the
         # denial (a check violation, the spend clause).
@@ -764,8 +762,7 @@ SANDBOX_FALLBACK_WORD_PREFIX = "fallback-"
 
 
 #: The recorded words of a slot on an **incidental**-grade rung, and the label
-#: each renders as (plan codex-sandbox-unavailable-findings-and-fixes §7, "Step 2
-#: subtask: messaging and markers", item 3; 2026-09-30). A closed set spelled
+#: each renders as. A closed set spelled
 #: here, because this renderer reads recorded data and imports no provider
 #: code: the plugin's Landlock jail stops stray writes and nothing more, so its
 #: slot is never "sandboxed by fallback rung" — the label a real OS boundary
@@ -798,8 +795,7 @@ def sandbox_fallback_label(word: str) -> str:
 
 
 #: The per-slot failure reason a jailed slot records when codex itself died on
-#: an EACCES the plugin's jail caused (plan §6 F1 "Where it sits" item 6, "When
-#: the jail denies a turn"), and the key carrying the denied path. Spelled here
+#: an EACCES the plugin's jail caused, and the key carrying the denied path. Spelled here
 #: for the same reason as :data:`INCIDENTAL_FALLBACK_LABELS`: the fan-out's
 #: ``llm_client`` sets ``failure_reason: "jail-denied"`` on the slot's record,
 #: and the report reads the record, never the provider code.
@@ -830,7 +826,7 @@ def jail_denied_label(record: Any) -> Optional[str]:
 def failure_reason_text(reason: Any) -> str:
     """A ``failed_models`` value as the one reason a report line carries.
 
-    A string is itself (every lane today). A record (2026-09-30) is its
+    A string is itself (every lane today). A record is its
     jail-denied label when it carries one, else its ``error``/``reason`` text —
     so a lane that starts recording a dict never renders as a Python repr.
     """
@@ -1107,7 +1103,7 @@ def _build_suggestion_data(
         result["displayHash"] = display_hash
 
     # The reviewer's own (provisional) scope tag; ``Scope unclear`` when the
-    # finding predates classification (plans/scope-policy-and-report-tags.md §6).
+    # finding predates classification.
     result[_scope_report.ENTRY_KEY] = _scope_report.member_scope(suggestion)
 
     return result
@@ -1178,7 +1174,7 @@ def _build_group_data(
     if display_hash is not None:
         result["displayHash"] = display_hash
 
-    # A commit review's attribution (plans/review-commits.md §2.6): sibling
+    # A commit review's attribution: sibling
     # fields of the group, present only when the attribution pass ran, so a
     # plan's report data is unchanged.
     if "introduced_by_source" in group:
@@ -1514,7 +1510,7 @@ def _parse_tasks_markdown(content: str) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Scope tags (plans/scope-policy-and-report-tags.md §6)
+# Scope tags
 # ---------------------------------------------------------------------------
 
 #: The consolidated page's persisted payload, decision regeneration's input
@@ -1734,7 +1730,7 @@ def generate_html_report(
             provided, ``capture_file_context()`` uses these snapshots instead
             of reading files from disk, ensuring the report reflects file
             state at review start rather than at report-generation time.
-        served_models: Optional §3.6 attribution, ``{model_spec: {"served_model":
+        served_models: Optional attribution, ``{model_spec: {"served_model":
             str, "fallback": bool}}``.  Only ever non-empty when a
             ``fallback_models`` list is configured; an entry labels that model's
             badge with the model that actually served the turn and adds
@@ -1749,14 +1745,14 @@ def generate_html_report(
             run.  Adds ``reportData.usageTotal`` (the columnwise sum over the
             models that reported) and its rendered label.
         commit_review: A commit review's report payload
-            (``utils.commit_report.report_payload``, plans/review-commits.md
-            §2.10): stored as ``reportData.commitRange`` with the attribution
+            (``utils.commit_report.report_payload``): stored as
+            ``reportData.commitRange`` with the attribution
             per group, so the header's commit block, the commit filter, the
             "Introduced by" lines, the drift badges and the export help's
             apply command render from ``report_data.json`` alone (a
             regenerated report calls no git). ``None`` adds nothing.
         head_ref: The commit a pinned review ends at (``review-code
-            --head-ref``, a commit brief; plans/review-commits.md §2.5). The
+            --head-ref``, a commit brief). The
             diff hunks are then ``capture_diff_hunks(base_ref, files,
             head_ref, cwd=repo_root)`` — two commits, no "uncommitted changes"
             notice — the snapshots default to the files as that commit holds
@@ -1776,7 +1772,7 @@ def generate_html_report(
             reads ``state.json`` beside *phase_dir*. Every group gains
             ``scope`` (its validated tag and the effective policy's outcome),
             every suggestion its provisional ``scope``, every umbrella a
-            derived one, and the payload ``scopePolicy`` (plan §6). A legacy
+            derived one, and the payload ``scopePolicy``. A legacy
             round reads ``expand`` and ``Scope unclear``.
 
     Returns:
@@ -1829,13 +1825,13 @@ COMMIT_RANGE_KEY = "commitRange"
 
 #: The apply commands the flat report's export help names for a plan's review
 #: (every review phase shares that template). A commit review passes its own
-#: list (``commitRange.applyCommands``) instead, plans/review-commits.md §2.10.
+#: list (``commitRange.applyCommands``) instead.
 DEFAULT_APPLY_COMMANDS: Tuple[str, ...] = (
     "apply-suggestions", "apply-code-fixes", "apply-task-suggestions",
 )
 
 #: The label the flat report's header gives the anchor document of a plan's
-#: review; a commit review passes ``commitRange.documentLabel`` (§2.8).
+#: review; a commit review passes ``commitRange.documentLabel``.
 DEFAULT_DOCUMENT_LABEL = "Plan"
 
 #: Template slots the generator fills before the data goes in. Each is an
@@ -2035,7 +2031,7 @@ def script_json(report_data: Any) -> str:
 
     Escapes the sequences that would break out of the surrounding tag:
     ``</script>`` (``</`` in general) and ``<!--`` (an HTML comment opener
-    inside JS). ``\\/`` is valid JSON (RFC 8259 §7). Every report page —
+    inside JS). ``\\/`` is valid JSON (RFC 8259). Every report page —
     flat, PR and consolidated — embeds its payload through this.
     """
     return (
@@ -2536,8 +2532,8 @@ def _missing_template_page(path: Any) -> str:
 
 
 def _overlay_guard_skips(report_data: Dict[str, Any], guard: Optional[Dict[str, Any]]) -> int:
-    """Badge each group the commit apply guard skipped (plans/review-commits.md
-    §2.7, §2.10): ``guardSkip: {reason, files, label}`` on the group, where
+    """Badge each group the commit apply guard skipped: ``guardSkip: {reason, files, label}``
+on the group, where
     the label reads "skipped: file changed since ``<head7>``" or "skipped:
     context plan". A replacement, like the decision overlay: a stamp from an
     earlier overlay that this guard does not name is dropped. Returns the
@@ -2587,7 +2583,7 @@ def regenerate_report_with_human_decisions(
     report whose groups carry no ``groupHash`` (F2) re-renders byte-identical
     with ``matched == 0`` and no error, which only the count exposes.
 
-    Scope (plans/scope-policy-and-report-tags.md §6): each group's scope
+    Scope: each group's scope
     eligibility is recomputed for the round's current effective policy and
     recorded deferrals (*scope_state*: the ``state.json`` dict; ``None`` reads
     the one beside *phase_dir*), keeping the persisted classification intact.
@@ -2756,7 +2752,7 @@ def _read_human_decisions_from_state(
 
 def _read_guard_from_state(state_file: Path) -> Optional[Dict[str, Any]]:
     """The commit apply guard saved in a state.json file (the pinned record's
-    ``guard``, plans/review-commits.md §2.7), or None."""
+    ``guard``), or None."""
     try:
         state = json.loads(Path(state_file).read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -2846,7 +2842,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if (not decisions and not (guard or {}).get("skipped")
                 and not scope_regeneration_needed(phase_dir, scope_state)
                 and (phase_dir / "report_data.json").exists()):
-            # Live run 8 (Claude Code racing 05/08): a phase that decided
+            # Live run 8: a phase that decided
             # nothing by hand or by judge re-rendered the report anyway and
             # printed "0 of 0 human decision(s) matched", which the host
             # relayed. The executor leg's twin

@@ -1163,7 +1163,7 @@ class TestTheNativeLegRecordsADeclinedItem:
     def test_each_apply_runbook_tells_the_host(self, name, record, append):
         text = (INSTRUCTIONS / name).read_text(encoding="utf-8")
         assert '"ids", "declined", "files_touched"' in text
-        assert "- **Declined items** (fix round 18)" in text
+        assert "- **Declined items**" in text
         assert '`--declined "{id}={reason}"`' in text
         assert "`[BATCH_DECLINED]`" in text
         assert (f"record it with step {record}'s `util batch-done` as "

@@ -22,8 +22,7 @@ from .task_ledger import mirror_ids
 
 def why_line(why: str) -> str:
     """A command's why on the line under it, as plain text two columns in,
-    as the ready section prints it above its command. Fix round 28 (live
-    run 12 #7, Claude Code status): it was bracketed, and a why that ends
+    as the ready section prints it above its command. It was bracketed, and a why that ends
     in a bracket of its own ("… depend on it (T006)", a quoted finding)
     read "(T006))"."""
     return f"        {why}"
@@ -35,7 +34,7 @@ def why_line(why: str) -> str:
 #: resume verb it accepts. ``status`` cannot afford to import each
 #: orchestrator's parser to derive this, so these are the two tables in this
 #: module that are typed rather than read. ``review-commits`` forwards every
-#: flag it does not own to review-code (plans/review-commits.md §2.1), so its
+#: flag it does not own to review-code, so its
 #: retry verb is review-code's.
 _REAGGREGATE_MODES = ("review-plan", "review-tasks", "review-code",
                       "review-commits")
@@ -70,7 +69,7 @@ _REAGGREGATE_MODES = ("review-plan", "review-tasks", "review-code",
 #: this verb and the recorded flags but from the composite's own continuation
 #: (:func:`_composite_resume_tokens`); the entries say what that ends with.
 #:
-#: The commit modes (plans/review-commits.md §2.8) take their fronted
+#: The commit modes take their fronted
 #: phase's verb: ``apply-commit-fixes`` is apply-code-fixes' ``--resume``,
 #: and ``improve-commits`` resumes like the other composites.
 _RESUME_VERB_BY_MODE = {
@@ -104,13 +103,13 @@ def user_speller(
 ) -> Optional[Speller]:
     """The run view's commands in *host_id*'s spelling, or ``None``.
 
-    Fix round 18 (Codex racing run 7): ``resume with:`` printed the raw ``uv
+    ``resume with:`` printed the raw ``uv
     run … multi_llm.py … --host codex --detach --resume`` while every other
     next-step line of the same view (the manual-task note, the next phase) was
     the host's own spelling. Built from the same ``next_command`` template and
     quoting as ``next_phase.phase_command``, with the plan as typed and only
     the flags the user typed (:func:`cli_common.drop_host_composed_flags`
-    over what this host's own skill or shim composes, fix round 19:
+    over what this host's own skill or shim composes:
     :func:`cli_common.file_route_composed_flags`).
 
     ``None`` on a tool route (``modes.TOOL_ROUTES``): there the tool's server
@@ -119,14 +118,14 @@ def user_speller(
     dispatcher command. ``None`` too when the host has no template for its
     route; the dispatcher command stands then.
 
-    Fix round 24 (live run 10, Codex): a reader whose environment names no
+    A reader whose environment names no
     route — a shell's ``status`` — spells a run in the route that run was
     started on, passed per call as *route* (its record's ``run.route``,
     :func:`_view_speller`): that route's template and the flags it composes
     (the tool routes' reserved set). A shell's ``status --host codex`` used
     to print the file shim's sentence for a run the plugin's tool started.
 
-    On a commit review (plans/review-commits.md §2.8: the ``state.json`` at
+    On a commit review (the ``state.json`` at
     *plan_path*, else at *plan_arg*, holds ``commit_range``) a command naming
     review-code, apply-code-fixes or improve-commits reads as the commit mode
     with the pinned range, and leaves out every flag a front door synthesises
@@ -187,7 +186,7 @@ def user_speller(
             *extra, *cli_common.drop_host_composed_flags(tokens, table)]]
         # A token this one-line spelling cannot carry as it is — an `ask`
         # question with a newline or a tab, an empty value — keeps the
-        # dispatcher command, which quotes it whole. Fix round 19: those
+        # dispatcher command, which quotes it whole. Those
         # tokens were dropped, so a two-line question vanished from the
         # line and the command printed did not parse.
         if any(not token or not token.isprintable() for token in kept):
@@ -209,8 +208,7 @@ def _retry_command(
 ) -> str:
     """``cli_common.retry_command(mode, plan_path, *args, flags=flags)``, the
     dispatcher spelling of a retry this view prints, in the commit spelling
-    on a commit review (plans/review-commits.md §2.8, "Spelling of
-    commands"): the commit mode, the pinned range (the brief path on a root
+    on a commit review: the commit mode, the pinned range (the brief path on a root
     range) and none of the flags a front door synthesises or consumes, in
     *args* or in the replayed *flags*. A plan's run, and a direct
     ``--head-ref`` run, keep the command byte for byte."""
@@ -229,7 +227,7 @@ def _retry_command(
 
 
 def _run_route(view: Mapping[str, Any], host: Optional[str]) -> Optional[str]:
-    """The route *view*'s run recorded (``run.route``, fix round 24) when
+    """The route *view*'s run recorded (``run.route``) when
     that run is *host*'s, else ``None``: another host's route says nothing
     of how this host's user types a command."""
     run = view.get("run") if isinstance(view.get("run"), Mapping) else {}
@@ -265,8 +263,8 @@ def _resume_command(
     (:func:`user_speller`) the same retry in the host's spelling.
 
     A review-then-apply composite (``improve-plan``, ``improve-code``) takes
-    its tokens from its own continuation instead (:func:`_composite_resume_tokens`,
-    plans/improve-plan-and-improve-code.md §2.6): the selectors its launcher
+    its tokens from its own continuation instead (:func:`_composite_resume_tokens`): the
+    selectors its launcher
     typed, never ``--force``, then ``--resume``. A run launched with ``--force``
     is then not told to start another round, and the line names the command
     ``util next-command --blocked <composite>`` names when no inner phase has a
@@ -286,7 +284,7 @@ def _resume_command(
         verb = _RESUME_VERB_BY_MODE.get(mode) or (
             "--reaggregate" if mode in _REAGGREGATE_MODES else "--force"
         )
-        # *extra*: the answers the resume carries (fix round 28: a manual task
+        # *extra*: the answers the resume carries (a manual task
         # every code task left waits on, `StopAccount.manual_gate_answers`).
         verbs = [verb, *[str(token) for token in extra]]
     if spell is not None:
@@ -294,12 +292,12 @@ def _resume_command(
         spelled = spell(mode, positionals[1:], tokens)
         if spelled:
             return spelled
-    # On a commit review the commit spelling (plans/review-commits.md §2.8).
+    # On a commit review the commit spelling.
     return _retry_command(mode, plan_path, *positionals[1:], *verbs, flags=flags)
 
 
 def _composite_resume_tokens(mode: str, replay_flags: Any) -> List[str]:
-    """A composite run's ``resume with:`` tokens after the plan (§2.6).
+    """A composite run's ``resume with:`` tokens after the plan.
 
     ``improve_workflow.recorded_continuation`` of the run record's own
     ``replay_flags``, the list ``util next-command --blocked`` reads, so the
@@ -314,7 +312,7 @@ def _composite_resume_tokens(mode: str, replay_flags: Any) -> List[str]:
     On a composite whose positional is a range (``improve-commits``) the
     tokens never carry a flag its front door synthesises or consumes
     (``--plan-file``, ``--base-ref``, ``--head-ref``, ``--focus``,
-    ``--context-plan``; plans/review-commits.md §2.8): the front door refuses
+    ``--context-plan``): the front door refuses
     the first three, and the brief inherits the rest.
     """
     from . import improve_workflow
@@ -343,7 +341,7 @@ def _manual_gate_answers(
 ) -> List[str]:
     """``--human-task <id>=done …`` an implement's resume carries while every
     code task it left waits on a manual task the user can do now
-    (``next_phase._resume_flags``, fix round 28), else ``[]``."""
+    (``next_phase._resume_flags``), else ``[]``."""
     if mode != _IMPLEMENT_PHASE:
         return []
     try:
@@ -376,7 +374,7 @@ def _rerun_command(
 ) -> str:
     """The plain re-run of a done run whose phase went stale: no verb at all.
 
-    :func:`_resume_command`'s sibling for the stale case (2026-10-02). A
+    :func:`_resume_command`'s sibling for the stale case. A
     ``--reaggregate`` re-stamps the stale completion from the artifacts the
     old run left, and ``--force`` is the apply parsers' ``--yes`` alias; the
     plain command is what each phase answers with on a stale record
@@ -394,7 +392,7 @@ def _rerun_command(
         word = str(run.get("mode") or view.get("phase") or "review-code")
         flags = cli_common.current_replay_flags(run.get("replay_flags"), mode=word)
     if spell is not None:
-        # Fix round 18: in the host's spelling, as `resume with:` is.
+        # In the host's spelling, as `resume with:` is.
         spelled = spell(word, [], cli_common.retry_tokens(str(plan_path), flags=flags)[1])
         if spelled:
             return spelled
@@ -465,7 +463,7 @@ def _write_mirror_as_counts(mirror: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _stop_resume_why(view: Dict[str, Any]) -> Optional[str]:
-    """The write run's stop's ``resume_why`` (fix round 22), from its mirror,
+    """The write run's stop's ``resume_why``, from its mirror,
     under ``next_phase.stop_resume_why_on_record``'s rule: one plain line of
     a sane length, since a jailed batch can write the folder it lives in."""
     from .next_phase import recorded_why
@@ -484,7 +482,7 @@ def _failed_batches_moved_nothing(view: Dict[str, Any]) -> bool:
 
     ``files_touched`` is the rollback set, so a row also has to name no
     ``unrestorable`` file (moved, with no rollback point) and must not be a
-    partial application, which moved bytes by definition (fix round 15)."""
+    partial application, which moved bytes by definition."""
     progress = view.get("progress") or {}
     mirror = progress.get("write_subagents") if isinstance(progress, dict) else None
     if not isinstance(mirror, dict):
@@ -588,7 +586,7 @@ def _resume_lines(
         return [f"      {NO_RESUME_BEFORE_DISPATCH}"]
     shape, repair, redispatch, kept = _resume_shape(view)
     if mode == _IMPLEMENT_PHASE and redispatch:
-        # Fix round 14: the mirror holds only this run's rows, so a resume
+        # The mirror holds only this run's rows, so a resume
         # that kept T001/T003/T004 from an earlier run (and T002's findings)
         # read "keeps the 1 already applied". state.json counts every task
         # of the decomposition on record as done.
@@ -601,17 +599,17 @@ def _resume_lines(
     resume = _resume_command(
         view, plan_path, spell, extra=_manual_gate_answers(mode, plan_path, workflow))
     lines.append(f"      resume with: {resume}")
-    # Fix round 22 (live run 9): a write run's stop says what its plain
+    # A write run's stop says what its plain
     # resume does on an unchanged tree; that replaces the cost line, which
     # read "re-dispatches the 1 failed batch(es)" of a task the write policy
     # refuses again.
-    # Fix round 23 (review of round 22, relay #6): printed as recorded,
+    # Printed as recorded,
     # which ends with what the resume keeps and whether a failed batch is
     # half-applied, so it reads word for word as the tool routes'
     # `resume_why` and `util next-command --blocked` relay it.
     why = _stop_resume_why(view) if mode in _WRITE_MODES else None
     if why:
-        # Fix round 28: under the command, unbracketed (`why_line`).
+        # Under the command, unbracketed (`why_line`).
         lines.append(why_line(why))
     elif redispatch:
         mode = str(view["run"].get("mode") or view.get("phase") or "")
@@ -623,10 +621,10 @@ def _resume_lines(
             if kept:
                 cost += f", keeps the {kept} already applied"
             if _failed_batches_moved_nothing(view):
-                # Fix round 14 (stop fixture 01b): a task refused before
+                # A task refused before
                 # dispatch, a clean failure, a timeout that wrote nothing —
-                # no byte moved, so nothing is half-applied. Fix round 18
-                # (live run 7): the stop's own block says so, and this view
+                # no byte moved, so nothing is half-applied. The stop's own block says
+                # so, and this view
                 # shows its last lines, so the line no longer says it again.
                 lines.append(f"      ({cost})")
             else:
@@ -682,8 +680,8 @@ def _run_runner_facts(
     `status` polled outside the launching session fell through to a fresh
     resolution and named the *polling* host's model instead of the run's.
 
-    **A host-bearing view that recorded no spec must not win outright** (F6,
-    2026-09-16): with several phases listed, the first one carrying a host can
+    **A host-bearing view that recorded no spec must not win outright**: with several
+    phases listed, the first one carrying a host can
     be a run whose executor mirror is empty (a failed-before-dispatch run, a
     stale pre-fix record, ``--dry-run-subagents``) while a *later* view holds
     the real answer. Measured on a `generate-tasks` run: the default view's
@@ -694,7 +692,7 @@ def _run_runner_facts(
     the whole list ever recorded a spec.
 
     **Among the views that DID record a spec, the most recently updated one
-    wins — not whichever sorts first** (F4, 2026-09-16): ``discover_phase_dirs``
+    wins — not whichever sorts first**: ``discover_phase_dirs``
     lists phases in alphabetical directory order, so a `generate-tasks` run's
     pre-`--variant low` record outranked `review-tasks`' own `:low` record
     directly below it, under a line that claimed to be "recorded by this run's
@@ -757,7 +755,7 @@ def render_runner_text(
     * the specs the run's executor mirror recorded, when it has dispatched
       anything — the only account on disk of what its subagents really ran on,
       and, when more than one listed view recorded one, the most recently
-      updated view's (F4, 2026-09-16), named in the printed line rather than
+      updated view's, named in the printed line rather than
       claimed as "this run's own";
     * otherwise a fresh resolution for that host, with the **session** rung
       skipped whenever the run was launched elsewhere: that rung reads

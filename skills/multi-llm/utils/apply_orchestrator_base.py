@@ -445,7 +445,7 @@ def build_common_arg_parser(
         help="Enable verbose/debug output",
     )
 
-    # plans/scope-policy-and-report-tags.md §4: declared once, in cli_common.
+    # Declared once, in cli_common.
     from .cli_common import add_scope_policy_argument
 
     add_scope_policy_argument(parser, role="apply")
@@ -583,14 +583,14 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
     # ``plan_hash`` re-stamp in the ``--mark-completed`` branch below — because
     # for a phase that never opens the plan, drift there is a HUMAN's edit and
     # clearing `plan_changed` would swallow the warning `implement --resume`
-    # exists to print (F1, 2026-09-16). Cannot be derived from
+    # exists to print. Cannot be derived from
     # ``write_phase_artifact()``: that early exit runs before `_load_inputs`
     # has resolved the tasks file.
     edits_the_plan: bool = False
     # Whether this phase applies a review's fixes to code, and so runs the
     # commit apply guard when state pins reviewed endpoints (`commit_range`, or
-    # `head_ref` after a direct `--head-ref` review; plans/review-commits.md
-    # §2.7). Only apply-code-fixes does: the other two phases edit the plan or
+    # `head_ref` after a direct `--head-ref` review). Only apply-code-fixes does: the
+    # other two phases edit the plan or
     # its task list, never code a commit review judged at `head`.
     guards_commit_fixes: bool = False
 
@@ -724,7 +724,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # ran and matched anything (F7) — read by `record_write_artifacts`.
         self._decisions_overlay_path: Optional[str] = None
 
-        # The scope policy (plans/scope-policy-and-report-tags.md §5): its
+        # The scope policy: its
         # effective apply policy, deferrals and policy change (:attr:`scope_gate`).
         self._scope_gate = _scope.ApplyScopeGate()
 
@@ -774,7 +774,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         ``11 task suggestion group(s) loaded: 10 valid (applied), 1 invalid
         (left out)``. The record used to name only the loaded count — "11
         loaded task suggestion group(s)" beside a review that reported 10
-        valid and 1 invalid (2026-10-05, Codex racing run 3) — which read as
+        valid and 1 invalid — which read as
         all eleven being applied. The statuses are the review's verdicts as
         loaded; a later override or the priority floor can still move a
         group, and the ``Filtered …`` block printed next states the final
@@ -787,7 +787,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         ):
             status = str(group.get("validation_status") or "needs-human-decision")
             if status == "valid" and self.scope_gate.counts_as_deferred(group):
-                # Valid, but not applied: the scope policy defers it (plan §5).
+                # Valid, but not applied: the scope policy defers it.
                 deferred += 1
                 continue
             counts[status] = counts.get(status, 0) + 1
@@ -980,7 +980,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             # The scope gate again, after every change to the selected
             # proposals (judge approval and salvage included) and immediately
             # before batching; then this review's earlier materialization
-            # under another policy, if any (plan §5, "Resume").
+            # under another policy, if any.
             gate = self.scope_gate
             gate.gate_work_set(self.valid, self.needs_human)
             gate.apply_policy_change(self.valid, self.needs_human,
@@ -1011,7 +1011,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
     # ==================================================================
 
     def _batch_answers(self) -> List[str]:
-        """The batches answered ``--human-task <batch>=skip``, checked (fix round 18).
+        """The batches answered ``--human-task <batch>=skip``, checked.
 
         An apply phase takes only ``skip``, only on ``--resume`` and only on
         the ``--exec-subagents`` leg, whose own stop record the answer is
@@ -1054,7 +1054,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 f"it takes and the command that carries it.",
                 file=sys.stderr,
             )
-            # Fix round 19 (review of round 18): the refusal is the result
+            # The refusal is the result
             # line's `error`, which the tool routes relay; it used to be on
             # stderr alone, and the line said it named no error.
             from .cli_common import record_error
@@ -1073,8 +1073,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
     def _document_title(self, plan_word: str = "Plan") -> str:
         """*plan_word* (``Plan``, ``Plan file``) as today, or ``Commit brief``
         when the plan's ``state.json`` records a ``commit_range``: the phase's
-        own lines never call a commit brief a plan (plans/review-commits.md
-        §2.8), through the one owner of the word,
+        own lines never call a commit brief a plan, through the one owner of the word,
         ``commit_paths.document_label``. Read-only; no state is a plan."""
         try:
             from .commit_paths import document_label, read_commit_range
@@ -1086,7 +1085,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         return plan_word if word == "plan" else word.capitalize()
 
     def _stop_user_commands(self) -> Dict[str, str]:
-        """The stop's answer in this host's own spelling (fix round 18):
+        """The stop's answer in this host's own spelling:
         ``skip``, the resume carrying ``--human-task {task_id}=skip``. Empty
         when nothing can be spelled; the stop then names the flags."""
         try:
@@ -1174,18 +1173,17 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             # next `StateManager` reads the plugin's own edit as a human
             # editing the plan mid-workflow and `implement --resume` reports
             # "Plan has changed since last session" for a change the plugin
-            # made (F1, 2026-09-16). Gated, because for the two phases that
+            # made. Gated, because for the two phases that
             # never open the plan the same drift is a human's edit.
             if self.edits_the_plan:
                 state.refresh_plan_hash()
-            # The scope policy's completion record (plan §5): "eligible work
+            # The scope policy's completion record: "eligible work
             # completed" with the deferrals kept, or the concrete blockers a
             # `preserve` batch declined with, which stop this call at exit 3.
             scope_blockers = self._scope_close(state)
             state.save()
             self.print_native_tests_not_run()
-            # Fix round 26 (live run 11, OpenCode 05: "applied to
-            # plans/racing-game.md" for edits to tasks/tasks.md): the native
+            # The native
             # leg's closing line names the file its batches edited, as the
             # executor's progress line does.
             target = self._completed_target_label()
@@ -1219,7 +1217,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 exit_code=1,
             )
 
-        # §9.3.a/b: the anchor capture point — absolute, before anything can
+        # The anchor capture point — absolute, before anything can
         # chdir and before any provider read that decides routing. One line
         # here covers all three apply modes. It sits *below* the `--skip` and
         # `--mark-completed` early exits on purpose: those record a phase word
@@ -1267,7 +1265,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                     exit_code=1,
                 )
 
-        # Step 6b (fix round 18): `--human-task <batch>=skip` answers a stopped
+        # Step 6b: `--human-task <batch>=skip` answers a stopped
         # partial application on the executor leg's resume, and nothing else.
         self.partial_skips = self._batch_answers()
 
@@ -1321,11 +1319,11 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # Step 10a: the reviewed endpoints, resolved strictly before anything
         # is written (`--fresh` below), any model runs or any batch is built:
         # a recorded SHA that no longer names a commit is exit 3
-        # `[RANGE_UNRESOLVED]`, never a `HEAD~1` fallback (§2.4).
+        # `[RANGE_UNRESOLVED]`, never a `HEAD~1` fallback.
         self._resolve_pinned_endpoints()
 
-        # Step 10b: the effective scope policy of this apply (plans/
-        # scope-policy-and-report-tags.md §4), before any filtering.
+        # Step 10b: the effective scope policy of this apply, before any filtering
+        # (docs/development/write-scheduler.md#scope-policy-at-the-write-seam).
         self._resolve_scope_policy()
 
         if getattr(self.args, "fresh", False) and not getattr(
@@ -1352,7 +1350,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             self.state.clear_processed_items(self.phase_name)
             self.state.clear_processing_progress(self.phase_name)
             if self.write_kind == "apply_code_fixes":
-                # Fix round 21: what the void run's batches reported about
+                # What the void run's batches reported about
                 # their own checks is no earlier batch of this run.
                 from .known_checks import APPLY_FIX_BATCH_CHECKS_KEY
                 self.state.clear_key(APPLY_FIX_BATCH_CHECKS_KEY)
@@ -1675,14 +1673,14 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # Step 23: Handle --resume
         #
         # `processed_<phase>` is the per-batch record (`util batch-done` on
-        # the native leg, 2026-10-05; the scheduler on the executor leg since
-        # fix round 22): one entry per member id of every batch recorded,
+        # the native leg, the scheduler on the executor leg): one
+        # entry per member id of every batch recorded,
         # keyed by the id the batch's `expected_ids` carry — the group's
         # stamped `group_hash`, which is what the suggestion's `group_id` was
         # copied from. A `failed` record keeps the group in the work set (the
         # batch is dispatched again, as the executor leg re-dispatches a
         # failed batch), and so does a declined or skipped record of an
-        # earlier review (fix round 22: a later review's re-report of an item
+        # earlier review (a later review's re-report of an item
         # its batch did not apply is offered again, on both legs); every other
         # record drops it (`processed_record_counts`). On the
         # executor leg a record the executor wrote drops nothing: its resume
@@ -1733,7 +1731,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             # here: the batches an earlier run finished are kept by the
             # scheduler from their result files, which no batch exists yet to
             # look up. A count here read "0 already processed, 12 remaining"
-            # on a resume that then kept batch 0 (OpenCode racing run 4), so
+            # on a resume that then kept batch 0, so
             # this leg defers to the scheduler's own `resume:` line.
             if executor_leg and not processed_items:
                 print(
@@ -1862,13 +1860,13 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             dry_run=getattr(self.args, "dry_run", False),
         )
 
-        # Step 25a: the commit apply guard (plans/review-commits.md §2.7), on
+        # Step 25a: the commit apply guard, on
         # what filtering left to apply or decide, before the no-items exit,
         # human decisions and batching, so both legs take the same decision
         # and a run whose fixes it skips entirely still prints its block.
         self._apply_commit_guard()
 
-        # Step 25b: the scope-policy gate over what selection left (plan §5),
+        # Step 25b: the scope-policy gate over what selection left,
         # before the counts, the dry-run report, the no-items exit and the
         # judge, so each describes the same eligible set. A pass-through
         # under `expand`; re-applied in `run()` after judging. What an earlier
@@ -1913,7 +1911,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         if not self.valid and not self.needs_human:
             if self.scope_gate.deferred or self._scope_open_blockers():
                 # Everything eligible is done and the rest is deferred by
-                # scope: the phase's eligible work is complete (plan §5) —
+                # scope: the phase's eligible work is complete —
                 # or, when a batch of this review declined a blocker, the
                 # phase stays blocked (exit 3), whatever the subclass's own
                 # nothing-left exit would have recorded.
@@ -1958,7 +1956,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             decision_source = str(g.get("decision_source") or "")
             guard_skip = g.get("_guard_skip")
             if isinstance(guard_skip, dict):
-                # The commit guard's skip (§2.7): the plugin's, decided before
+                # The commit guard's skip: the plugin's, decided before
                 # any judge or batch, so neither a validation nor a judge
                 # bucket. Its reason and files go everywhere a skip is listed.
                 skip_status = guard_skip.get("status") or "commit_guard"
@@ -2007,13 +2005,12 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             self.formatted_skipped.append(entry)
 
     # ==================================================================
-    # The commit apply guard (plans/review-commits.md §2.5, §2.7)
+    # The commit apply guard
     # ==================================================================
 
     def _refuse_unusable_state(self) -> None:
         """Exit 3, before anything is written, when the guard cannot be
-        keyed (plans/review-commits.md §2.7, "The guard is keyed on the
-        endpoints state pins").
+        keyed.
 
         ``StateManager`` replaces a ``state.json`` that does not parse with
         a fresh initial state, so the apply would run with no guard, against
@@ -2027,7 +2024,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
           missing or pins no endpoints is refused.
 
         The file is only read here, never written. The front door's own
-        step-6 load may still replace an unparseable state (§2.1): by then a
+        step-6 load may still replace an unparseable state: by then a
         review is recorded afresh, and its apply refuses an unreadable state
         first (``commit_apply.require_completed_review``).
         """
@@ -2096,7 +2093,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         )
 
     def _resolve_pinned_endpoints(self) -> None:
-        """Resolve the endpoints state pins, strictly, once (§2.4).
+        """Resolve the endpoints state pins, strictly, once.
 
         Keyed on ``commit_range.pinned_endpoints``: ``commit_range`` (a
         commit brief) or ``head_ref`` (a plan after a direct ``--head-ref``
@@ -2153,7 +2150,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             )
 
     def _apply_commit_guard(self) -> None:
-        """Take the §2.7 guard decision over what filtering left, and print
+        """Take the guard decision over what filtering left, and print
         ``[COMMIT_FIXES]``.
 
         Every group it skips (the context plan, a fix file changed since the
@@ -2161,7 +2158,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         ``needs_human`` to ``skipped``, before human decisions and batching,
         so the judge never sees it and no batch carries it. The decision is
         saved to the pinned record's ``guard`` through this phase's own
-        ``StateManager`` (the one it saves with, §2.1), under
+        ``StateManager`` (the one it saves with), under
         ``state_file_lock``. The block is printed once, here, and the result
         line carries ``commit_fixes``. Not on a ``--detach`` launcher, whose
         worker takes the decision (and prints the block into its log); both
@@ -2239,7 +2236,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         records included: step 23 drops those items on the native leg, while
         the executor leg keeps them in the work set so the scheduler can keep
         their batch from its result file. The guard must then leave their
-        batch as it landed (plans/review-commits.md §2.8).
+        batch as it landed.
         """
         if self.state is None:
             return set()
@@ -2254,7 +2251,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         }
 
     # ==================================================================
-    # The scope policy (plans/scope-policy-and-report-tags.md §4, §5)
+    # The scope policy
     # ==================================================================
 
     @property
@@ -2379,7 +2376,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
 
     def scope_annotate(self, formatted: Dict[str, Any], group: Dict[str, Any], *,
                        original_description: Optional[str] = None) -> Dict[str, Any]:
-        """A formatter's last step: the ``preserve`` scope context (plan §3).
+        """A formatter's last step: the ``preserve`` scope context.
 
         Under ``preserve`` a bound selected remedy becomes the item's
         instruction (``scope_apply.annotate_item``); under ``expand`` the
@@ -2398,7 +2395,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         """The blockers this review's batches declined, from the phase's records.
 
         Under ``preserve`` a declined item whose reason starts with
-        ``scope_apply.BLOCKER_PREFIX`` is the concrete blocker plan §5 names.
+        ``scope_apply.BLOCKER_PREFIX`` is the concrete blocker names.
         Read from ``processed_<phase>`` (both legs record declines there), so
         every completion writer derives the same answer — a ``--resume`` that
         drops the declined item still finds it. ``[]`` under ``expand``.
@@ -2468,7 +2465,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             add_notice(note)
 
     def _scope_all_deferred_exit(self) -> None:
-        """Every remaining item is deferred: eligible work completed (plan §5).
+        """Every remaining item is deferred: eligible work completed.
 
         Replaces the subclass's no-items exit for this case, and for the one
         where nothing remains but a batch of this review declined a blocker,
@@ -2609,8 +2606,8 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         artifact = self.write_phase_artifact()
         tasks_file = artifact if artifact != self.plan_path else None
         # On a pinned run the judge rules on findings built from commits and
-        # files read at `head`, all of it data under review (§2.6 "Trust
-        # boundary"): its task says so. Absent otherwise, so a plan's run keeps
+        # files read at `head`, all of it data under review: its task says so. Absent
+        # otherwise, so a plan's run keeps
         # its prompt byte for byte.
         trust_note: Optional[str] = None
         if self._pinned is not None:
@@ -2883,7 +2880,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 f"Phase _write_outputs, step 32: build_output_json failed: {e}",
                 exit_code=1,
             ) from e
-        # The scope policy's block (plan §5): present only under `preserve`
+        # The scope policy's block: present only under `preserve`
         # or when an `expand` override released earlier deferrals, so a
         # default run's payload keeps exactly its keys.
         output.update(self.scope_gate.output_fields())
@@ -2975,7 +2972,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 self.logger.warning("write outcome summary failed: %s", e)
             return scheduled
 
-        # The native leg (2026-10-05): the same materialized task file the
+        # The native leg: the same materialized task file the
         # executor leg writes, so the host's per-batch `util write-prompt`
         # binds each batch's prior-changes context late, from the same seam,
         # and the host loops over task ids instead of guessing the JSON shape.
@@ -3440,7 +3437,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
 
     def _completed_target_label(self) -> Optional[str]:
         """:meth:`_applied_to_label` for the native ``--mark-completed``
-        call, which runs before any setup hook (fix round 26)."""
+        call, which runs before any setup hook."""
         return self._applied_to_label()
 
     def _applied_to_label(self) -> Optional[str]:
@@ -3515,8 +3512,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # into the run's diff.
         self._record_pre_existing_changes()
 
-        # Plan step 3 (codex-sandbox-unavailable-findings-and-fixes, F1 "How a
-        # dispatch receives its grant", 2026-09-30): the phase's one write
+        # The phase's one write
         # target — the plan, or the tasks file — is the grant a dispatch on
         # the plugin-landlock rung carries, and every task's declared set is
         # checked against it. A phase with no single target (apply-code-fixes,
@@ -3547,7 +3543,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 resume=not fresh,
                 dry_run=bool(getattr(self.args, "dry_run_subagents", False)),
                 write_target=write_target,
-                # Fix round 18: the stopped batches answered `=skip`, and the
+                # The stopped batches answered `=skip`, and the
                 # answer the stop offers, in this host's spelling.
                 partial_skips=getattr(self, "partial_skips", None) or None,
                 user_commands=self._stop_user_commands(),
@@ -3568,14 +3564,14 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             print(line, file=sys.stderr if result.exit_code else sys.stdout)
         if result.report_path:
             print(f"[write-subagents] report: {result.report_path}")
-        # Fix round 14: a batch whose own check failed after its edits, and
+        # A batch whose own check failed after its edits, and
         # a code phase nothing verified, are on the result line a host relays.
         from .cli_common import record_error, record_notice
         from .check_records import write_result_notice
 
         stop = getattr(result, "stop", None) or {}
         if stop.get("headline"):
-            # Fix round 18 (live run 7, Codex racing 08): an apply phase's
+            # An apply phase's
             # stop left the result line with no `error`, so the tool's
             # needs-human message said "Its result line names no error" and
             # the host relayed only the resume command — not what stopped,
@@ -3586,7 +3582,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         if notice:
             record_notice(notice)
         if result.exit_code == 0 and not getattr(self.args, "dry_run_subagents", False):
-            # The scope policy's completion record (plan §5); a `preserve`
+            # The scope policy's completion record; a `preserve`
             # batch's blocker decline is the one stop it adds (exit 3).
             blockers = self._scope_close(self.state)
             if self.state is not None and _sp.round_record(
@@ -3634,11 +3630,11 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             **self.scope_gate.materialize_kwargs(),
         )
         self._native_write_tasks = list(tasks)
-        # Fix round 26: stamped native, so `status` shows this run rather
+        # Stamped native, so `status` shows this run rather
         # than an earlier executor run's `.status.json`.
         from .host_capabilities import resolve_host_id
 
-        # Fix round 29: and with the run its batches belong to, read before
+        # The run its batches belong to is read before
         # this rewrite, so `status` counts what the whole run handed out
         # across a `--resume` and none of an earlier run's records.
         run = native_run_record(
@@ -4441,7 +4437,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
     def print_native_tests_not_run(self) -> None:
         """``--mark-completed``'s ``[TESTS_NOT_RUN]`` line, for apply-code-fixes.
 
-        Fix round 20: the native leg's line saying nothing ran the repository's
+        The native leg's line saying nothing ran the repository's
         tests, naming the checks the batches were asked to run and what each
         reported (the executor's own, ``native_apply_fixes_unverified_line``,
         which is ``None`` with a ``driver.verify_command`` set or no batch of

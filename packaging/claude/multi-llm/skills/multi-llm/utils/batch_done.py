@@ -8,8 +8,7 @@ at emit, ``util next-command`` offered ``--<mode> <plan> --resume`` for it,
 and that ``--resume`` — filtering on a ``processed_<phase>`` map nothing had
 ever written — printed ``[resume] 0 already processed`` and re-emitted every
 batch under the same ``prior_changes_id``, so a host following the offered
-command re-applied batches to an already-edited plan (reviewer repro,
-fix round 5).
+command re-applied batches to an already-edited plan (reviewer repro,).
 
 This command is the record. The host runs it once per batch, right after
 it verified the batch's outcome and before it appends the batch's summary
@@ -24,7 +23,7 @@ the writer both legs share (:func:`write_record.record_batch_facts`):
 * for the three apply kinds, ``processed_<phase dir word>[<member id>]`` for
   every id in the task's ``expected_ids`` (``applied`` | ``declined`` |
   ``skipped`` | ``failed``, :func:`state_manager.record_batch_items_in_state`,
-  the scheduler's own writer since fix round 22) — the map
+  the scheduler's own writer) — the map
   ``ApplyOrchestratorBase`` step 23 drops groups on under ``--resume``.
   A ``failed`` record keeps the batch eligible for re-dispatch, as the
   executor leg re-dispatches a failed batch;
@@ -63,43 +62,40 @@ declares no files; its reply's ``check`` object): ``findings`` records each
 ``--finding`` in ``state.json``'s ``task_check_findings`` beside a
 ``completed`` status, which ``status``, the result notice and review-code's
 implementation record read (racing re-run 4, 2026-10-05). It also holds back
-the tasks that depend on the check (fix round 11): each one with no record
+the tasks that depend on the check: each one with no record
 yet is recorded ``pending`` with ``not run — upstream check <id> reported
 problems``, the ``[CHECK_BLOCKED]`` line names them, ``util write-prompt``
 refuses them, and ``util finalize-tracking --mark-completed`` refuses while
 one is left — the plugin's enforcement of what the instructions tell the
 host, as the executor leg enforces it in its loop. Any later record of the
 check (``--check passed``, ``--status failed``) releases them.
-``could-not-run`` (fix round 12) is a check whose reply said
+``could-not-run`` is a check whose reply said
 ``check.could_not_run: true``: recorded ``--status failed`` (its reason
 defaults to saying so), never as findings; a ``failed`` reply that lists
 findings without it ran, and is recorded ``--status completed --check
 findings``. A batch that edits code (implement's tasks that declare files,
-apply-code-fixes' batches; fix round 14) records the checks it ran on its
+apply-code-fixes' batches) records the checks it ran on its
 own edits with ``--own-check passed|findings``: a failing one prints a
 ``[BATCH_CHECK_FAILED]`` line telling the host to list it in summary.md and
-report it, and holds nothing back; ``--own-check none`` (fix round 26) is a
+report it, and holds nothing back; ``--own-check none`` is a
 reply whose ``check`` says it ran no check, recorded as no check. Which of the
 three a reply's ``check`` is, is one rule on both legs, stated in
-``references/own-check.md`` (fix round 27). A ``completed`` record of such a batch
+``references/own-check.md``. A ``completed`` record of such a batch
 given no ``--own-check`` (of a check task, no ``--check``) prints
 ``[OWN_CHECK_NOT_RECORDED]`` (``[CHECK_NOT_RECORDED]``) naming the call that
-records the result with the same flags (fix round 24); beside a recorded
+records the result with the same flags; beside a recorded
 ``--listed-check`` it asks only for the reply's ``passed``/``findings`` and
-never offers a pass beside a listed failure (fix round 25); advisory, and
+never offers a pass beside a listed failure; advisory, and
 nothing is recorded in its place. ``--check`` on such a batch is refused,
-naming the ``--own-check`` call (fix round 18, live run 7: Claude Code
-recorded ``--check passed`` for T008, a "check" task that declares
-``index.html``, and its summary then called the code task ``Verified``), and
+naming the ``--own-check`` call, and
 ``--own-check`` on a check task is refused naming ``--check``: the two words
 are two kinds of task, and the plugin says which one the host has. An
 implement task's ``--finding`` that only repeats what the user accepted for
-a check (``--human-task <check>=done``; ``split_accepted_findings``, fix
-round 22) is printed as ``[BATCH_CHECK_ACCEPTED]`` and never recorded as the
+a check (``--human-task <check>=done``; ``split_accepted_findings``) is printed as
+``[BATCH_CHECK_ACCEPTED]`` and never recorded as the
 task's own failing check; anything else it reports still is.
 
-After a commit review (plans/review-commits.md §2.7, "The commit write
-policy") an apply-code-fixes ``--status completed`` record re-hashes the
+After a commit review an apply-code-fixes ``--status completed`` record re-hashes the
 apply guard's protected set first, against the ids ``util write-prompt``
 read when it bound the batch's prompt (the batch's own window, as on the
 executor): a batch that changed a protected path is refused with exit 3 and
@@ -218,16 +214,14 @@ MARKER = "[BATCH_DONE]"
 #: The line naming the tasks a check with findings holds back (stdout).
 CHECK_BLOCKED_MARKER = "[CHECK_BLOCKED]"
 
-#: Fix round 24 (live run 10, Claude Code racing 06: all ten implement
-#: records lacked ``--own-check passed`` while every reply said its check
-#: passed): a ``completed`` record of a task that edits files given no
+#: A ``completed`` record of a task that edits files given no
 #: ``--own-check``, and of a check task given no ``--check``, draws one line
 #: naming the call to record the result with. Advisory: the record stands,
 #: and no result the host did not pass is recorded.
 OWN_CHECK_NOT_RECORDED_MARKER = "[OWN_CHECK_NOT_RECORDED]"
 CHECK_NOT_RECORDED_MARKER = "[CHECK_NOT_RECORDED]"
 
-#: Fix round 18: one line per item an apply batch declined with a reason
+#: One line per item an apply batch declined with a reason
 #: (``--declined``), and per item the user chose to skip when the batch was
 #: kept as it stood (``--skipped``) — both recorded, neither applied.
 BATCH_DECLINED_MARKER = "[BATCH_DECLINED]"
@@ -251,23 +245,22 @@ STATUSES = ("completed", "failed")
 _RECORDED_TASK_STATUSES = frozenset({"completed", "failed", "skipped"})
 
 #: ``--check``'s words: what a check task's reply said in its ``check``
-#: object (``passed: true`` and no finding, problems found, or — fix round
-#: 12 — ``could_not_run: true``).
+#: object (``passed: true`` and no finding, problems found, or — ``could_not_run: true``).
 CHECK_RESULTS = ("passed", "findings", "could-not-run")
 
 #: ``--own-check``'s words: what a code batch's reply said in its ``check``
-#: object about the checks it ran on its own edits (fix round 18). A code
+#: object about the checks it ran on its own edits. A code
 #: batch has no ``could-not-run``: a check of its own that could not run is
-#: one of its findings. ``none`` (fix round 26): its ``check`` says it ran no
+#: one of its findings. ``none``: its ``check`` says it ran no
 #: check (an empty ``ran``, ``batch_reply.ran_no_check``) — recorded as
-#: no check, never as a pass, as the executor reads the same reply. Fix round
-#: 27: only when it also names no finding and does not say it failed
+#: no check, never as a pass, as the executor reads the same reply. Only when it also
+#: names no finding and does not say it failed
 #: (``references/own-check.md``, the rules the native host maps a reply by).
 OWN_CHECK_RESULTS = ("passed", "findings", "none")
 #: The ``--own-check`` word for a reply that ran no check.
 OWN_CHECK_NONE = "none"
 #: Where the one rule that maps a reply's ``check`` to ``--own-check`` is
-#: stated (fix round 27), as every nudge below names it, and when it is
+#: stated, as every nudge below names it, and when it is
 #: ``none``: the executor's ``batch_check_findings`` follows the same rules.
 OWN_CHECK_RULES = "the rules in references/own-check.md"
 OWN_CHECK_NONE_WHEN = (
@@ -285,8 +278,7 @@ COULD_NOT_RUN_REASON = (
 
 class ProtectedWriteRefused(WritePromptError):
     """A ``--status completed`` record refused because the batch changed a
-    path the commit review protects (plans/review-commits.md §2.7, "The
-    commit write policy"): exit 3, *lines* printed to stdout, nothing
+    path the commit review protects: exit 3, *lines* printed to stdout, nothing
     recorded."""
 
     def __init__(self, lines: List[str]) -> None:
@@ -379,7 +371,7 @@ def _unpinned_root_refusal(
 ) -> str:
     """Why a guarded ``--status completed`` record is refused when
     ``git_utils.pin_repo_root`` pins no repository root: the protected-set
-    check (§2.7) runs against that root, so without it the batch's writes
+    check runs against that root, so without it the batch's writes
     cannot be checked, and *problem* (or the missing ``.git`` entry) is named
     with the way forward."""
     cause = problem or (
@@ -405,8 +397,8 @@ def _commit_completion(
     state: Dict[str, Any], phase_dir: Path, task_id: str, task: Dict[str, Any],
     kind: str,
 ) -> None:
-    """A ``--status completed`` record's half of the commit write policy
-    (§2.7), on the state dict about to be written; no-op without a guard.
+    """A ``--status completed`` record's half of the commit write policy, on the state dict
+about to be written; no-op without a guard.
 
     The protected set's (and the context plan's, ``commit_apply.
     watched_ids``) current blob ids are compared with the ones ``util
@@ -506,8 +498,8 @@ def _tracked_after_batch(
     The native leg's counterpart of the scheduler's per-batch record: a host
     that stops part-way, before the closing ``util finalize-tracking``, has
     still recorded what its finished batches changed, so review-code does
-    not review what an earlier phase left there (2026-10-05, Codex racing
-    run 3). The census alone — this command is given no file list; the
+    not review what an earlier phase left there. The census alone — this command is
+    given no file list; the
     closing ``finalize-tracking --touched …`` adds the verified files — and
     only for the two code kinds: the plan and the task list the planning
     phases edit are never tracked. Never fatal: the batch record is this
@@ -548,14 +540,14 @@ def record_batch(
     """Record *task_id*'s outcome; the ``{task_id, status, items, state_file,
     check_findings}`` written.
 
-    *note* (``--note``, fix round 28) is a code batch's own words about the
+    *note* (``--note``) is a code batch's own words about the
     checks it ran (its reply's ``check.note``): recorded beside its own
     check (``task_own_check_note`` for an implement task, the
     ``apply_fix_batch_checks`` entry for an apply-code-fixes batch) and
     shown on its ``[BATCH_CHECK_*]`` line, never read as a finding. Only
     with ``--own-check``.
 
-    *partial* (``--partial``, fix round 21) is a ``failed`` task whose
+    *partial* (``--partial``) is a ``failed`` task whose
     subagent changed files before it failed: the executor's partial
     application. Its reason is recorded opening with
     ``stop_answers.HALF_APPLIED_PREFIX``, so the native stop offers
@@ -563,7 +555,7 @@ def record_batch(
     inspected (``native_stop_answers``), as the executor's stop offers none.
     Only with ``--status failed``.
 
-    *listed* (``<command>=passed|failed|not run`` each; fix round 20) is an
+    *listed* (``<command>=passed|failed|not run`` each) is an
     apply-code-fixes batch's reply's ``check.listed``: what it says each
     known check its prompt listed did. Recorded with its own check in
     ``state.json``'s ``apply_fix_batch_checks`` (the next batch's prompt and
@@ -572,7 +564,7 @@ def record_batch(
     out and named (``listed_ignored``), never a refusal.
 
     *declined* (``<id>=<reason>`` each) and *skipped* (ids) are an apply
-    batch's items it did not apply (fix round 18): the items its reply
+    batch's items it did not apply: the items its reply
     declined with a reason, and the items the user chose to skip when a
     batch whose reply left them out was kept as it stood. Each is recorded in
     ``processed_<phase>`` as ``declined`` / ``skipped`` with its reason —
@@ -586,11 +578,10 @@ def record_batch(
     ``state.json``'s ``task_check_findings`` beside a ``completed`` status,
     as the executor leg does; every other record of an implement task clears
     that task's entry. *own_check* / *findings* are a code batch's report of
-    the checks it ran on its own edits (fix round 14; its own flag since fix
-    round 18): a failing one is recorded beside the status
+    the checks it ran on its own edits: a failing one is recorded beside the status
     (``task_batch_check``) and holds nothing back. A ``completed`` record of
     either kind given neither is returned as ``check_not_recorded``
-    (``"own-check"`` / ``"check"``, fix round 24), which :func:`main` names
+    (``"own-check"`` / ``"check"``), which :func:`main` names
     with the call to make; nothing is recorded in its place.
 
     Raises :class:`WritePromptError` (exit 3) for a missing task file, an
@@ -689,10 +680,10 @@ def record_batch(
             f"was recorded."
         )
     if check is not None and not checking:
-        # Fix round 18 (live run 7, Claude Code racing 06): `--check passed`
+        # `--check passed`
         # was accepted for T008, which declares index.html, and the host's
         # summary called the code task `Verified`. A code batch's own checks
-        # are `--own-check` (fix round 14 spelled them `--check` too).
+        # are `--own-check`.
         raise WritePromptError(
             _not_a_check_task_message(phase_dir, task_id, task, kind, status)
         )
@@ -717,7 +708,7 @@ def record_batch(
     check_findings: Optional[List[str]] = None
     batch_check: Optional[List[str]] = None
     if partial:
-        # Fix round 21: the executor's partial application, on record.
+        # The executor's partial application, on record.
         reason = HALF_APPLIED_PREFIX + (
             str(reason or "").strip()
             or "its subagent failed after changing some of its files"
@@ -729,7 +720,7 @@ def record_batch(
             "check": {"passed": check == "passed", "findings": list(findings or [])}
         }) or []
     elif own_check is not None and own_check != OWN_CHECK_NONE:
-        # A code batch's own check: reported, never a hold (fix round 14).
+        # A code batch's own check: reported, never a hold.
         batch_check = check_findings_from({
             "check": {"passed": own_check == "passed", "findings": list(findings or [])}
         }) or []
@@ -739,10 +730,10 @@ def record_batch(
         listed_ignored += [f"{c}={w}" for c, w in listed_outcomes.items()]
         listed_outcomes = {}
     if listed_outcomes and status == "completed":
-        # Fix round 20: a known check the reply lists as failed is a failing
+        # A known check the reply lists as failed is a failing
         # check on every surface, as the executor reads it.
         batch_check = _known_checks.with_listed_failures(batch_check, listed_outcomes)
-    # The tree a check with findings leaves (fix round 14): a native
+    # The tree a check with findings leaves: a native
     # `--resume` hands the check out again only once the files moved since,
     # as the executor does from its verdict's stamp. `util finalize-tracking`
     # re-stamps it with the tree the run ends on.
@@ -757,7 +748,7 @@ def record_batch(
             f"No state file at {target}: the phase's orchestrator writes it "
             f"when it emits its batches (pass --state-file if it lives elsewhere)."
         )
-    # One lock from the read to the write (fix round 8): the host may record
+    # One lock from the read to the write: the host may record
     # same-batch tasks in parallel, and the census below takes seconds, so an
     # unlocked pair read the same file and the second write dropped the
     # first one's `task_status`. `update` holds the state lock throughout.
@@ -767,7 +758,7 @@ def record_batch(
     with update_state(target, temp_prefix=METRICS_TEMP_PREFIX,
                       on_invalid=not_an_object) as state:
         if status == "completed":
-            # plans/review-commits.md §2.7: a batch that wrote a protected
+            # A batch that wrote a protected
             # path, or whose repository root cannot be pinned for that
             # check, is refused (nothing recorded); else its fix files are
             # re-pinned. No-op without an apply guard.
@@ -785,23 +776,23 @@ def record_batch(
             if isinstance(t, dict)
         ]
         if kind == "implement" and batch_check:
-            # Fix round 22: what only repeats findings the user accepted for
+            # What only repeats findings the user accepted for
             # a check is that check's, never this task's own failure (the
-            # executor's reading, `split_accepted_findings`). Fix round 23:
-            # only the checks this task was told were accepted, and none
+            # executor's reading, `split_accepted_findings`). Only the checks this task
+            # was told were accepted, and none
             # whose failure is its own job (`accepted_findings_for`).
             accepted = accepted_findings_for(phase_tasks, task, state)
             reported = list(batch_check)
             own, accepted_again = split_accepted_findings(batch_check, accepted)
             if accepted_again:
                 batch_check = own
-            # Fix round 28: and what is the same finding a check task of the
+            # And what is the same finding a check task of the
             # run already reported is that check's (`repeated_findings_for`).
             own, echoed = split_repeated_findings(
                 own, repeated_findings_for(phase_tasks, task, state))
             if echoed:
                 batch_check = own
-            # Fix round 28: a finding that holds an accepted one word for
+            # A finding that holds an accepted one word for
             # word with words added stays the task's own; the host is told
             # how to record it again restated (`main`), never told it is
             # accepted.
@@ -832,7 +823,7 @@ def record_batch(
             blocked = _hold_or_release_dependents(
                 state, document, task_id, held=bool(check_findings),
             )
-        # Fix round 23 (review of round 22, #1): every write kind, so a
+        # Every write kind, so a
         # native apply batch recorded failed closes its run on "run
         # stopped", as the executor's does, and one refused before dispatch
         # leaves its total.
@@ -845,7 +836,7 @@ def record_batch(
         # One record verifies one dispatch: a later record of this check
         # without a new `util write-prompt` has nothing to compare against.
         discard_check_tree(phase_dir, task_id)
-    # Fix round 24: a code kind's `completed` record given no check result
+    # A code kind's `completed` record given no check result
     # at all. Named by `main`; never filled in here.
     result_left_out = (
         ("check" if checking else "own-check")
@@ -923,14 +914,14 @@ def _record_again_call(args: argparse.Namespace, result_flag: str) -> str:
 
 
 #: The line ``util batch-done`` prints for a finding that holds a finding
-#: the user accepted, word for word, with words added (fix round 28).
+#: the user accepted, word for word, with words added.
 FINDING_RESTATE_MARKER = "[FINDING_RESTATE]"
 
 
 def finding_restate_line(
     args: argparse.Namespace, task_id: str, restate: Dict[str, Any],
 ) -> str:
-    """The :data:`FINDING_RESTATE_MARKER` line (fix round 28, live run 12:
+    """The :data:`FINDING_RESTATE_MARKER` line (live run 12:
     Claude Code's host recorded T007's "… (known problem the user accepted
     in T002)" as written, and the strict match read it as T007's own
     failure). It names each such finding and the accepted finding it holds,
@@ -939,7 +930,7 @@ def finding_restate_line(
     added words as its ``--note`` — for the host to run only when those
     words are its subagent's comment. The plugin never records it as
     accepted itself (``check_records.accepted_findings_with_words_added``).
-    Fix round 29 (review of round 28, checks #3): it says plainly that a
+    It says plainly that a
     note is a comment, never a failure, so a failure the added words report
     stays a finding."""
     flagged = list(restate.get("flagged") or [])
@@ -970,8 +961,8 @@ def finding_restate_line(
 def check_not_recorded_line(
     args: argparse.Namespace, which: str, listed: Optional[Dict[str, str]] = None,
 ) -> str:
-    """The line a ``completed`` record given no check result prints (fix
-    round 24): ``[OWN_CHECK_NOT_RECORDED]`` for a task that edits files,
+    """The line a ``completed`` record given no check result prints:
+``[OWN_CHECK_NOT_RECORDED]`` for a task that edits files,
     ``[CHECK_NOT_RECORDED]`` for a check task, each naming the call that
     records the result its reply reported.
 
@@ -979,7 +970,7 @@ def check_not_recorded_line(
     ``check.listed`` (``{command: outcome}``). Those are on record, so the line
     asks only for the rest of the reply's ``check``, its ``passed`` and
     ``findings``, and never offers ``--own-check passed`` beside a listed
-    failure (review of fix round 24: the same call printed
+    failure (review: the same call printed
     ``[BATCH_CHECK_FAILED]`` and then suggested recording a pass). The line is
     kept rather than dropped there, because the runbook records both and a
     failing check outside the known list is named only in ``findings``.
@@ -1035,7 +1026,7 @@ def check_not_recorded_line(
 def _not_a_check_task_message(
     phase_dir: Path, task_id: str, task: Dict[str, Any], kind: str, status: str,
 ) -> str:
-    """The refusal of ``--check`` for a task that edits code (fix round 18):
+    """The refusal of ``--check`` for a task that edits code:
     what the task is, and the call that records it."""
     files = snapshot_file_set(task)
     shown = ", ".join(files[:5]) + (f" (+{len(files) - 5} more)" if len(files) > 5 else "")
@@ -1078,7 +1069,7 @@ def _not_applied_items(
     skipped: Optional[List[str]],
 ) -> Dict[str, Tuple[str, str]]:
     """``{item id: ("declined" | "skipped", reason)}`` from ``--declined`` /
-    ``--skipped``, checked against the batch (fix round 18); raises
+    ``--skipped``, checked against the batch; raises
     :class:`WritePromptError` naming the problem."""
     if not declined and not skipped:
         return {}
@@ -1122,7 +1113,7 @@ def _not_applied_items(
         any(word == "skipped" for word, _why in out.values())
         and all(item in out for item in expected)
     ):
-        # Fix round 19 (review of round 18, decline #2): `--skipped` keeps
+        # `--skipped` keeps
         # what a batch applied, as the executor's `=skip` does, and that
         # answer is offered only for a report that attests an item applied.
         raise WritePromptError(
@@ -1164,7 +1155,7 @@ def _settle_eta_total(
     status: str, reason: Optional[str], held: List[str],
 ) -> None:
     """Take out of this run's ``[ETA]`` total the handed-out tasks this record
-    keeps from being dispatched (fix round 18, live run 7 #2).
+    keeps from being dispatched.
 
     The native emit's ``tasks_to_dispatch`` — what the host passes as
     ``--total-batches``, one ``util metrics record`` per task it dispatches —
@@ -1179,7 +1170,7 @@ def _settle_eta_total(
       6) — and the task itself when ``util write-prompt`` refused it, since
       no subagent ran.
 
-    Every write kind (fix round 23): an apply batch has no dependents and
+    Every write kind: an apply batch has no dependents and
     no check, so its record only marks it failed (its run closes on "run
     stopped") or, refused before dispatch, takes it out of the total.
 
@@ -1204,7 +1195,7 @@ def _settle_eta_total(
     out = [t for t in held if t in handed and not manual(handed[t])]
     refused = status == "failed" and str(reason or "").strip().lower().startswith(
         REFUSED_BEFORE_DISPATCH_REASON)
-    # Fix round 22: a task that ran and failed stops the run short of its
+    # A task that ran and failed stops the run short of its
     # phase, so its closing `[ETA]` line says "run stopped", as the
     # executor's does; a refused one is withdrawn below instead.
     mark_failed_in_progress(
@@ -1234,7 +1225,7 @@ def _still_kept_out(
     (``rerunnable_checks``), else a failed task upstream of it, while it has
     no record of its own.
 
-    Fix round 19 (review of round 18, #3): ``withdrawn`` keeps one cause per
+    ``withdrawn`` keeps one cause per
     task, so a task taken out after a failed T003 was skipped when check
     T002 then held it ("already out"); T003 retried and recorded completed
     put it back although T002's findings still held it, and the native
@@ -1272,11 +1263,11 @@ def _hold_or_release_dependents(
     ``pending`` under this check's reason loses it: the check passed, failed
     or was recorded again, and is no longer why it waits — unless another
     check with findings is still upstream of it, whose reason it then
-    carries (fix round 12: with two checks holding D, recording the first
+    carries (with two checks holding D, recording the first
     passed cleared D's reason while the second's findings stood). The walk
     is over the whole decomposition (``check_records.decomposition_graph``:
     the task file plus ``state.json``'s recorded graph), not only the tasks
-    a resume put in the file (fix round 12). Returns the tasks held (empty
+    a resume put in the file. Returns the tasks held (empty
     on a release).
     """
     tasks = decomposition_graph(
@@ -1358,7 +1349,7 @@ def unrecorded_logged_batches(
     and says the log's failure entry is accounted for). A log line no newer
     than the task's ``state_manager.TASK_RESET_AT_KEY`` stamp is the run's
     before a start-over or a ``--task`` rerun handed the task out again, and
-    does not count (fix round 17). A line the run since wrote with the same
+    does not count. A line the run since wrote with the same
     summary is not appended again (``prior_changes.append``), so such a task
     is handed out again rather than refused.
     """
@@ -1384,7 +1375,7 @@ def unrecorded_logged_batches(
         if any(str(i) in processed for i in (task.get("expected_ids") or [])):
             continue
         if _logged_before_reset(logged[entry_id], reset_at.get(task_id)):
-            # Fix round 17: an earlier run's line, for a task a start-over
+            # An earlier run's line, for a task a start-over
             # or a `--task` rerun handed out again since — not one this run
             # applied and left unrecorded.
             continue
@@ -1533,7 +1524,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
     except ProtectedWriteRefused as exc:
         # The marker and its way back go to stdout, where the host reads
-        # every other line of the loop's (§2.7).
+        # every other line of the loop's.
         for line in exc.lines:
             print(line)
         return int(getattr(exc, "exit_code", 3) or 3)
@@ -1550,11 +1541,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         suffix += f" ({len(found)} check finding(s) recorded)"
     print(f"{MARKER} {written['task_id']} {written['status']}{suffix}")
     if found:
-        # Fix round 26 (live run 11 #11): the executor's own line, which
+        # The executor's own line, which
         # this leg's host would otherwise never see (no run log here).
         print(check_findings_line(written["task_id"], found))
     if written.get("partial"):
-        # Fix round 21: the executor's partial-application stop, in words.
+        # The executor's partial-application stop, in words.
         task_id = written["task_id"]
         print(
             f"{task_id}'s edits are half-applied. List it in the phase's "
@@ -1567,7 +1558,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
     accepted_again = written.get("batch_check_accepted") or {}
     if accepted_again:
-        # Fix round 22: reported again, never the task's own failure.
+        # Reported again, never the task's own failure.
         task_id = written["task_id"]
         print(
             f"{batch_check_accepted_line(task_id, accepted_again, note=written.get('note'))}. List it in "
@@ -1578,7 +1569,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
     echoed = written.get("batch_check_repeats") or {}
     if echoed:
-        # Fix round 28: a check task's finding, never this task's own.
+        # A check task's finding, never this task's own.
         task_id = written["task_id"]
         print(
             f"{batch_check_repeated_line(task_id, echoed, note=written.get('note'))}. "
@@ -1587,7 +1578,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"too: it is not a check of {task_id}'s that fails."
         )
     for moved_id, merged in (written.get("repeats_moved") or {}).items():
-        # Fix round 28: the code task recorded first; this check now owns it.
+        # The code task recorded first; this check now owns it.
         print(
             f"{batch_check_repeated_line(moved_id, merged)}. Recorded again now "
             f"that {written['task_id']} reported it: the [BATCH_CHECK_FAILED] "
@@ -1598,7 +1589,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     failing = written.get("batch_check") or []
     restate = written.get("restate")
     if failing:
-        # Fix round 14: the native leg's counterpart of the executor's line.
+        # The native leg's counterpart of the executor's line.
         print(
             f"{batch_check_line(written['task_id'], failing, note=written.get('note'))}. The edits are "
             f"kept. List it under "
@@ -1607,7 +1598,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"clean success."
         )
     if restate:
-        # Fix round 28: what to run when the added words are a comment;
+        # What to run when the added words are a comment;
         # the plugin never records such a finding as accepted itself.
         print(finding_restate_line(args, written["task_id"], restate))
     ignored = written.get("listed_ignored") or []
@@ -1619,9 +1610,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             file=sys.stderr,
         )
     for item, why in (written.get("declined") or {}).items():
-        # Fix round 18: never applied, and never silent. Fix round 22: in its
-        # own summary.md section, never under an applied heading. Fix round
-        # 26: the record keeps the reason's closing stop; fix round 27: this
+        # Never applied, and never silent. In its
+        # own summary.md section, never under an applied heading. The record keeps the
+        # reason's closing stop;: this
         # line adds one only where the reason has no mark of its own.
         print(
             f"{BATCH_DECLINED_MARKER} {written['task_id']} {item}: not applied, "
@@ -1656,7 +1647,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
     which = written.get("check_not_recorded")
     if which:
-        # Fix round 24: advisory, so the host records it in the same turn.
+        # Advisory, so the host records it in the same turn.
         print(check_not_recorded_line(args, which, written.get("listed")))
     return 0
 

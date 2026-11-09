@@ -440,7 +440,7 @@ class FullWorkflow:
         flags += scope_policy_runs.forwarded_flags(self.scope_policy_choice())
         return flags
 
-    # -- the scope policy (plans/scope-policy-and-report-tags.md §4) ---------
+    # -- the scope policy ---------
     def scope_policy_choice(self) -> Optional[Tuple[str, str]]:
         """``(policy, source)`` of the user's ``--scope-policy`` for this run, or ``None``.
 
@@ -923,7 +923,7 @@ class FullWorkflow:
         point.
 
         A completed ``preserve`` apply that left scope deferrals is not done
-        for an explicit ``expand`` (plans/scope-policy-and-report-tags.md §4):
+        for an explicit ``expand``:
         it runs again to offer them. Asked here, where a step is chosen, never
         in :meth:`_recorded`, which also judges whether a step that ran
         recorded itself.
@@ -963,7 +963,7 @@ class FullWorkflow:
 
         On a commit review (the brief's ``state.json`` holds
         ``commit_range``; ``improve-commits``) it is spelled through the
-        commit spelling hook (plans/review-commits.md §2.8): the pinned
+        commit spelling hook: the pinned
         ``<base12>..<head12>`` (the brief path on a root range) in place of
         the plan, and none of the flags its front door synthesises or
         consumes. Every other run keeps ``dispatcher_command`` byte for byte.
@@ -979,7 +979,7 @@ class FullWorkflow:
     def _commit_spelled(self, command: Optional[str]) -> Optional[str]:
         """*command*, a follow-up the stopped phase printed, in the commit
         spelling when it is a dispatcher command naming this plan and the
-        plan is a commit brief (plans/review-commits.md §2.8: the stop prints
+        plan is a commit brief (the stop prints
         it and records it as ``next``); anything else comes back unchanged."""
         if not command:
             return command
@@ -1087,8 +1087,8 @@ class FullWorkflow:
     # ------------------------------------------------------------------
     def print_report(self) -> None:
         print(f"\n## {self.REPORT_TITLE}\n")
-        # "Commit brief", never "Plan", for a commit review's composite
-        # (plans/review-commits.md §2.8), through the one owner of the word.
+        # "Commit brief", never "Plan", for a commit review's composite, through the one
+        # owner of the word.
         print(f"**{self._document_title()}**: {self.plan_path}")
         print("")
         for report in self.reports:
@@ -1174,8 +1174,7 @@ def consolidation_skip_reason(plan_dir: Union[str, Path]) -> Optional[str]:
     A module function, not a method, so a planner that builds no workflow asks
     the same question with only the plan dir. The step that runs the pass is
     not skippable, so a resumed run re-enters it; without the first check it
-    ran the pass again on groups it had already consolidated (live run 8's
-    stale recommendation, the workflow's copy).
+    ran the pass again on groups it had already consolidated.
     """
     from utils.consolidation import consolidation_is_current
 
