@@ -79,7 +79,8 @@ collaborator's own calls never pass through the scheduler. `_begin_sweep` and
 `_undeclared_writes` stay the scheduler's seams: `_begin_sweep` publishes the dispatch in flight
 after the census, and `_classify` calls `_undeclared_writes`, which
 `tests/test_write_verdict_table.py` stands in for. The command runner (`_run_verify_command`,
-`_kill_verify_tree`) stays on the scheduler for now.
+`_kill_verify_tree`, and the note `_verify_timeout_note` words) stays in the scheduler's module
+for now.
 
 ## Write scheduler contract
 
@@ -152,7 +153,8 @@ in the `.status.json` write mirror and as a `Verification` line in both summarie
 the command and its config layer are logged **before** it starts as well as after, which is what
 `docs/configuration.md`'s safety section promises of the one config key that executes; it is spawned
 with `Popen` in its own process group and a timeout kills that whole group through
-`process_control.kill_tree`, because `subprocess.run`'s timeout SIGKILLs only
+`process_control.kill_tree` (what it reports when the kill cannot confirm that: "When the verify
+command times out", below), because `subprocess.run`'s timeout SIGKILLs only
 `/bin/sh` and left the real `pnpm`/`node` running while
 the phase reported `exited 124` (F4/F3b, 2026-09-17), and its capture goes to a temp file
 read back to the last `VERIFY_OUTPUT_CAP_BYTES` rather than buffering a whole build in memory, under
@@ -163,6 +165,25 @@ and not the phase's guarantee) + `metrics.finish` + `mark_phase_completed` +
 `finalize_tracking` + `state.reload()` + the implementation summary (with its
 `## Manual Tasks (Deferred)` / `## Dependency Override Warnings` / `## Cancelled` sections) +
 `insert_implementation_summary_reference`.
+
+**When the verify command times out.** `WriteBatchScheduler._kill_verify_tree` hands the command
+to `process_control.kill_tree` as an owned child (`child=proc`, no start time; runtime.md's
+[process primitives](runtime.md#process-primitives), "An owned child's kill"), and keeps the rule
+the executor's timeout kill keeps for its runner (`subagent_executor._unconfirmed_kill`): only
+`killed` and `gone` confirm the command stopped. A `survived` that is only the command's own zombie
+becomes `killed` once `process_control.own_child_stopped` confirms its exit and an empty group.
+Every other outcome (`survived`, `unresolved`, `skipped`, `None` for a kill that raised, after which
+the command still gets a kill through its job or its `Popen`, or any other word) is returned as it
+is and logged as a `[write-subagents] warning:` that names the pid and group and says it may still
+be running. In a detached worker that records its launches (the command starts through
+`process_control.popen_tree`), `detach.note_left_running` also writes `run.cleanup` `incomplete`
+with that pid, so `status`, `status --sweep` and an abort see it ("When not everything is confirmed
+stopped" in the same runtime.md section); the warning says so when it did. The exit code is
+`VERIFY_EXIT_TIMEOUT` (124) for every verdict, and the output ends with a note from
+`_verify_timeout_note` that carries the verdict into `verification.output_tail`: `killed after Ns:
+SIGTERM then SIGKILL` for `killed` alone, "had already stopped" for `gone`, and for the rest the pid
+and "may still be running", never a kill. The signals sent are `kill_tree`'s; this only reports
+them. `tests/test_write_verify_kill_verdict.py` pins each verdict.
 
 A run that dispatched every batch and produced none of those is a **failed** run.
 **`state.json` has exactly one writer per run, and it is the scheduler's

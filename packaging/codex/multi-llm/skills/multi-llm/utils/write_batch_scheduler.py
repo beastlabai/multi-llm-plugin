@@ -54,6 +54,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -534,6 +535,41 @@ VERIFY_REAP_S = 5.0
 #: own vocabulary so a reader of `verification.exit_code` learns nothing private.
 VERIFY_EXIT_TIMEOUT = 124
 VERIFY_EXIT_NOT_RUN = 127
+
+
+def _verify_timeout_note(
+    timeout: int, verdict: Optional[str], pid: int, pgid: Optional[int],
+) -> str:
+    """The line a timed-out verify command's output ends with, from its kill's
+    *verdict* (``WriteBatchScheduler._kill_verify_tree``). Only ``killed`` and
+    ``gone`` confirm the command stopped (``subagent_executor._unconfirmed_kill``);
+    every other verdict, ``None`` for a kill that raised included, names the
+    pid and says the command may still be running, never that it was killed
+    (docs/development/write-scheduler.md, "When the verify command times out")."""
+    reason = _executor._unconfirmed_kill(verdict)
+    if reason is None:
+        if verdict == "gone":
+            return (f"\n(timed out after {timeout}s: the command had already stopped, "
+                    f"and nothing of its process group still runs — verdict {verdict})")
+        return (f"\n(killed after {timeout}s: SIGTERM then SIGKILL to the command's "
+                f"whole process group — verdict {verdict})")
+    who = f"pid {pid}" + (f", process group {pgid}" if pgid is not None else "")
+    if verdict == "skipped":
+        # The kill could not trust the command's pid to name it any more.
+        return (f"\n(timed out after {timeout}s: termination attempted, but no signal "
+                f"was sent, so the command ({who}) may still be running — "
+                f"verdict {verdict})")
+    if verdict == "unresolved":
+        # What ran in its group that could not be identified as the command's
+        # got nothing.
+        return (f"\n(timed out after {timeout}s: not every process of the command "
+                f"({who}) could be confirmed stopped; what could not be identified as "
+                f"the command's was not signalled and may still be running — "
+                f"verdict {verdict})")
+    return (f"\n(timed out after {timeout}s: termination attempted, but the command "
+            f"({who}) could not be confirmed stopped: {reason}, so it may still be "
+            f"running — verdict {verdict})")
+
 
 EXIT_OK = 0
 EXIT_NEEDS_HUMAN = 3
@@ -3982,10 +4018,10 @@ class WriteBatchScheduler:
             )
 
         def after_result(context: Dict[str, Any]) -> None:
-            # The executor's own record of the rung this attempt ran on wins;
-            # an executor that predates plan step 3 sends none, and the
-            # preflight's recorded decision stands in for it.
-            seen = context["sandbox_rung"] if "sandbox_rung" in context else rung
+            # The executor's own record of the rung this attempt ran on wins
+            # over the preflight's: every `after_result` context carries it,
+            # `None` included (`subagent_executor._jail_hook_context`).
+            seen = context["sandbox_rung"]
             self._dispatch_rungs[task_id] = seen
             self._classify(task, context["outcome"], snapshot, context["result"],
                            runner=runner, profile=profile,
@@ -7586,26 +7622,7 @@ class WriteBatchScheduler:
                 except subprocess.TimeoutExpired:
                     verdict = self._kill_verify_tree(proc, pgid, job)
                     exit_code = VERIFY_EXIT_TIMEOUT
-                    if verdict == "skipped":
-                        # Nothing was sent: the kill could not trust the
-                        # command's pid to name it any more.
-                        note = (
-                            f"\n(timed out after {timeout}s: termination attempted, "
-                            f"but no signal was sent — verdict {verdict})"
-                        )
-                    elif verdict == "unresolved":
-                        # Something still ran in its group that could not be
-                        # identified as the command's, so nothing reached it.
-                        note = (
-                            f"\n(timed out after {timeout}s: not every process could "
-                            f"be confirmed stopped; what could not be identified as "
-                            f"the command's was not signalled — verdict {verdict})"
-                        )
-                    else:
-                        note = (
-                            f"\n(killed after {timeout}s: SIGTERM then SIGKILL to the "
-                            f"command's whole process group — verdict {verdict})"
-                        )
+                    note = _verify_timeout_note(timeout, verdict, proc.pid, pgid)
             finally:
                 if job is not None:
                     job.close()
@@ -7613,8 +7630,11 @@ class WriteBatchScheduler:
 
     def _kill_verify_tree(
         self, proc: Any, pgid: Optional[int], job: Any = None,
-    ) -> str:
+    ) -> Optional[str]:
         """SIGTERM → SIGKILL the timed-out command *and its group*, then reap it.
+        Returns ``kill_tree``'s verdict; ``None`` when the kill raised (the
+        command was then sent a kill through its job or its ``Popen``,
+        unconfirmed).
 
         ``start_time=None`` is how an unverified kill is *requested*: this pid is
         a child still held open here, not a record read off disk, so there is
@@ -7622,24 +7642,47 @@ class WriteBatchScheduler:
         unreaped until the wait below, it anchors its pid and group through the
         kill where the owned kill runs (Linux, glibc or musl; see ``kill_tree``).
         *job* is the command's Windows Job Object, the group's stand-in there.
+
+        Only ``killed`` and ``gone`` confirm the command stopped, the executor's
+        rule for its timed-out runner (``subagent_executor._unconfirmed_kill``):
+        a ``survived`` that is only the command's own zombie becomes ``killed``
+        once its exit is confirmed (``process_control.own_child_stopped``), and
+        any other outcome is logged as a warning naming the pid, which a
+        detached run's record keeps for a later abort or sweep
+        (``detach.note_left_running``; docs/development/write-scheduler.md,
+        "When the verify command times out").
         """
+        verdict: Optional[str]
         try:
             verdict = _process_control.kill_tree(
                 proc.pid, start_time=None, pgid=pgid,
                 escalate_after_s=VERIFY_KILL_GRACE_S, poll_interval_s=0.05,
                 job=job, child=proc,
             )
+            if verdict == "survived" and _process_control.own_child_stopped(proc, pgid):
+                verdict = "killed"
         except Exception:  # noqa: BLE001 - teardown must never mask the timeout
+            verdict = None
             if job is None or not job.terminate():
                 try:
                     proc.kill()
                 except OSError:  # pragma: no cover - already gone
                     pass
-            verdict = "killed"
         try:
             proc.wait(timeout=VERIFY_REAP_S)
         except subprocess.TimeoutExpired:  # pragma: no cover - survived SIGKILL
             pass
+        reason = _executor._unconfirmed_kill(verdict)
+        if reason is not None:
+            detach = sys.modules.get(f"{__package__}.detach") if __package__ else None
+            kept = detach is not None and detach.note_left_running(proc.pid, pgid, verdict)
+            self.log(
+                f"[write-subagents] warning: the timed-out verification command "
+                f"pid {proc.pid} (process group {pgid if pgid is not None else '?'}) "
+                f"could not be confirmed stopped (kill verdict {verdict}): {reason}, "
+                f"so it may still be running. Check it by hand"
+                + ("; the run's record keeps it for status --abort." if kept else ".")
+            )
         return verdict
 
     def _verify_output_tail(self, sink: Any) -> str:

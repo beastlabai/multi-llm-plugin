@@ -1346,6 +1346,9 @@ class TestTheVerifyKillSaysWhatItSent:
         monkeypatch.setattr(wbs._process_control, "kill_tree", kill_then_report)
         scheduler = object.__new__(wbs.WriteBatchScheduler)
         scheduler.repo_root = tmp_path
+        # An unconfirmed kill is logged as a warning naming the pid.
+        self.logged = []
+        scheduler.log = self.logged.append
         monkeypatch.setattr(scheduler, "_verify_env", lambda: None, raising=False)
         exit_code, tail = scheduler._run_verify_command("echo started; exec sleep 30", 1)
         assert exit_code == wbs.VERIFY_EXIT_TIMEOUT
@@ -1357,8 +1360,10 @@ class TestTheVerifyKillSaysWhatItSent:
         assert "termination attempted" in tail and "no signal was sent" in tail
         assert "SIGTERM then SIGKILL" not in tail and "killed after" not in tail
         assert tail.rstrip().endswith("verdict skipped)")
+        assert [line for line in self.logged if "kill verdict skipped" in line]
 
     def test_a_killed_kill_names_its_signals(self, monkeypatch, tmp_path):
         tail = self._timed_out(monkeypatch, tmp_path, "killed")
         assert "killed after 1s: SIGTERM then SIGKILL" in tail
         assert tail.rstrip().endswith("verdict killed)")
+        assert self.logged == []

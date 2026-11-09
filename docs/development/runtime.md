@@ -698,6 +698,11 @@ say so rather than report the run cleanly stopped, and keep what they need to tr
   `status --sweep` report it, and an abort (or `util runs --sweep` once the worker is gone) stops the
   runner by that identity. A foreground run records no launches, so the warning and the error are
   all there is.
+- The write scheduler's timeout kill of `driver.verify_command`
+  (`WriteBatchScheduler._kill_verify_tree`) keeps the same rule, through the same
+  `_unconfirmed_kill`, and the same `detach.note_left_running` record; its output's closing note
+  names the verdict ([write scheduler contract](write-scheduler.md#write-scheduler-contract),
+  "When the verify command times out").
 
 These verdicts are the same everywhere, the kill by number's included: a kill that could not
 confirm the run's processes stopped is never reported as a clean stop, since a false `aborted`
