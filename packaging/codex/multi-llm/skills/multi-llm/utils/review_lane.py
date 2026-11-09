@@ -2207,7 +2207,9 @@ def record_phase_complete(
     review-code's partial-completion guard, which runs before a round is
     claimed and has proven the files on disk are this round's); then the
     phase machine's terminal word, which ``status`` renders, and the last
-    ``progress.step``.
+    ``progress.step``. Each completion site calls it in its lane's own order,
+    with no shared driver around it (docs/development/review-results.md, "Why
+    each lane keeps its completion tail").
     """
     if claim is not None:
         claim.check("record the phase complete")

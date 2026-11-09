@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import io
 import json
 import os
 import sys
@@ -34,9 +35,12 @@ import review_plan_orchestrator as rpo  # noqa: E402
 from utils import detach  # noqa: E402
 from utils import review_lane  # noqa: E402
 from utils import review_orchestrator_base as rob  # noqa: E402
+from utils import review_round  # noqa: E402
 from utils import status_file  # noqa: E402
 from utils.progress_tracker import FanoutProgress  # noqa: E402
-from utils.state_manager import CURRENT_FORMAT_VERSION, get_or_create_state  # noqa: E402
+from utils.state_manager import (  # noqa: E402
+    CURRENT_FORMAT_VERSION, StateManager, get_or_create_state,
+)
 from utils.subagent_tasks import build_inputs  # noqa: E402
 from tests.support.gitrepo import commit_file, git, init_repo  # noqa: E402
 
@@ -199,6 +203,14 @@ class Lane:
     slot_writes_salvage_requests: bool
     #: Whether the report's hand-back names review-code's ``issues.json``.
     hands_back_issues: bool
+    #: What a completed fan-out and a completed reaggregate write and print
+    #: from the report on, in order (``TestTheCompletionTail``).
+    fanout_tail: Sequence[str]
+    reaggregate_tail: Sequence[str]
+    #: The flags that make a HIGH group exit the lane (review-code's
+    #: ``--fail-on-high``; the base lane has no gate) and the exit they give.
+    gate_flags: Sequence[str]
+    gate_exit: int
 
     def tracker(self) -> FanoutProgress:
         """A seeded one-model fan-out map in the phase dir."""
@@ -242,6 +254,18 @@ class PlanLane(Lane):
     slot_takes_terminal_rows = slot_spend_on_error = False
     slot_catches_its_own_errors, slot_writes_salvage_requests = True, False
     hands_back_issues = False
+    gate_flags, gate_exit = (), 0
+    fanout_tail = (
+        "report.md", "report.html", "artifacts", "high_priority_groups",
+        "state.json: phase recorded", "state: complete", "step: complete",
+        "teardown", "=== Sandbox and jail checks", "exit 0",
+    )
+    reaggregate_tail = (
+        "report.md", "report.html", "artifacts", "high_priority_groups",
+        "validation_counts", "Reaggregation complete!", "Report:",
+        "[consolidation]", "state.json: phase recorded", "state: complete",
+        "step: complete", "teardown", "exit 0",
+    )
 
     def slot_module(self):
         return rob
@@ -326,6 +350,20 @@ class CodeLane(Lane):
     slot_takes_terminal_rows = slot_spend_on_error = True
     slot_catches_its_own_errors, slot_writes_salvage_requests = False, True
     hands_back_issues = True
+    gate_flags, gate_exit = ("--fail-on-high",), 3
+    fanout_tail = (
+        "report.html", "report.md", "Report saved to:", "artifacts",
+        "state.json: phase recorded", "state: complete", "step: complete",
+        "teardown", "=== Sandbox and jail checks", "intent-to-add exit",
+        "high_priority_groups", "=== Review Summary ===",
+        "[HIGH_PRIORITY_ISSUES]", "exit 3",
+    )
+    reaggregate_tail = (
+        "validation_counts", "report.html", "report.md", "Reaggregation complete!",
+        "Report:", "artifacts", "state.json: phase recorded", "state: complete",
+        "step: complete", "high_priority_groups", "=== Review Summary ===",
+        "[HIGH_PRIORITY_ISSUES]", "intent-to-add exit", "teardown", "exit 3",
+    )
 
     def slot_module(self):
         return cro
@@ -1103,6 +1141,187 @@ class TestTheReportsHandBack:
     def test_a_reaggregates_report(self, lane):
         handed = self._handed(lane, lambda: _validated(lane))
         assert handed == [self._expected(lane, validated=True)]
+
+
+#: The checkpoint keys a completion writes, traced when their value changes.
+TAIL_KEYS = ("validation_counts", "high_priority_groups")
+#: The lines a completion prints, traced by a phrase each holds.
+TAIL_LINES = (
+    "Report saved to:", "Reaggregation complete!", "Report:", "[consolidation]",
+    "Auto-healed", "=== Review Summary ===", "[HIGH_PRIORITY_ISSUES]",
+    "=== Sandbox and jail checks",
+)
+#: The closing-summary line each run is seeded with, so the summary has
+#: something to print (it prints nothing for a run that kept no lines).
+CLOSING_LINE = "[JAIL_DENIED] codex: simulated"
+#: Where a completion's trace starts: the first thing a renderer writes.
+TAIL_START = ("validation_counts", "report.html", "report.md", "artifacts")
+
+
+class _TailLines:
+    """A stdout that passes everything through and traces :data:`TAIL_LINES`
+    and the phase ticker's teardown line, whole lines only."""
+
+    def __init__(self, stream: Any, events: List[str]):
+        self.stream, self.events, self.pending = stream, events, ""
+
+    def write(self, text: str) -> int:
+        self.pending += text
+        *lines, self.pending = self.pending.split("\n")
+        for line in lines:
+            if line.startswith("[PROGRESS]") and "step: complete" in line:
+                self.events.append("teardown")
+                continue
+            for phrase in TAIL_LINES:
+                if phrase in line:
+                    self.events.append(phrase)
+                    break
+        return self.stream.write(text)
+
+    def flush(self) -> None:
+        self.stream.flush()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.stream, name)
+
+
+class TestTheCompletionTail:
+    """What a successful round writes and prints from its report on, in order,
+    on each lane's completion sites, up to the process's exit code.
+
+    The pieces are shared (``hand_back_report``, ``record_phase_complete``,
+    ``complete_reaggregate``); the order around them is each lane's own, by
+    decision (code health REVIEW-7): the base's per-group renderer publishes
+    ``report.md`` before ``report.html``, hands the files back and records the
+    HIGH groups and verdict counts before the phase is recorded complete;
+    review-code's per-issue renderer records the verdict counts and writes
+    ``report.html`` before publishing ``report.md``, and its HIGH-group record
+    and ``--fail-on-high`` gate (``finish_code_review``, exit 3 here) follow the
+    completion: on the fan-out after the ticker's teardown line, the closing
+    summary and the ``intent_to_add_untracked`` exit, on a reaggregate before
+    that exit and the teardown line. Every lane records the phase in
+    ``state.json`` before the checkpoint's ``state: complete``.
+
+    Traced: the renderer's writes, the hand-back, the phase record (the
+    ``state.json`` save after ``mark_phase_completed``), the checkpoint's
+    ``state``, ``step`` and HIGH keys, the teardown line, a seeded closing
+    summary, the ``intent_to_add_untracked`` exit and the exit code. A change
+    to any of these orders fails here and is then deliberate
+    (docs/development/review-results.md, "Why each lane keeps its completion
+    tail"). Not covered: a round that fails, is handed to the host, or runs
+    with validation dispatched in-process."""
+
+    @staticmethod
+    def _trace(lane: Lane, run) -> List[str]:
+        """The events of one completion, from the first thing its renderer
+        writes to the process's exit code (``exit N``, what *run* returns)."""
+        events: List[str] = []
+        last = dict(lane.status())
+        write_in_plan_dir = status_file.write_in_plan_dir
+        record_artifacts = rob.record_artifacts
+        mark_phase_completed = StateManager.mark_phase_completed
+        save = StateManager.save
+        intent_to_add_untracked = cro.intent_to_add_untracked
+        marked: set = set()
+
+        def traced_write(path, data, **kwargs):
+            nonlocal last
+            if Path(path).name == status_file.STATUS_FILENAME:
+                document = json.loads(data)
+                events.extend(key for key in TAIL_KEYS
+                              if document.get(key) != last.get(key))
+                if document.get("state") != last.get("state"):
+                    events.append(f"state: {document.get('state')}")
+                step = (document.get("progress") or {}).get("step")
+                if step != (last.get("progress") or {}).get("step"):
+                    events.append(f"step: {step}")
+                last = document
+            return write_in_plan_dir(path, data, **kwargs)
+
+        def traced(event: str, real: Any) -> Any:
+            def call(*args, **kwargs):
+                events.append(event)
+                return real(*args, **kwargs)
+            return call
+
+        def traced_mark(self, phase, *args, **kwargs):
+            result = mark_phase_completed(self, phase, *args, **kwargs)
+            if phase == lane.phase:
+                marked.add(id(self))
+            return result
+
+        def traced_save(self, *args, **kwargs):
+            result = save(self, *args, **kwargs)
+            if id(self) in marked:
+                marked.discard(id(self))
+                events.append("state.json: phase recorded")
+            return result
+
+        @contextlib.contextmanager
+        def traced_intent_to_add(*args, **kwargs):
+            with intent_to_add_untracked(*args, **kwargs) as touched:
+                yield touched
+            events.append("intent-to-add exit")
+
+        # What the run's slots kept for its closing summary.
+        rob.note_for_closing_summary(lane.phase_dir, CLOSING_LINE)
+        with patch.object(status_file, "write_in_plan_dir", traced_write), \
+             patch.object(review_round, "publish_report",
+                          traced("report.md", review_round.publish_report)), \
+             patch.object(rob, "write_html_report",
+                          traced("report.html", rob.write_html_report)), \
+             patch.object(cro, "write_html_report",
+                          traced("report.html", cro.write_html_report)), \
+             patch.object(rob, "record_artifacts",
+                          traced("artifacts", record_artifacts)), \
+             patch.object(StateManager, "mark_phase_completed", traced_mark), \
+             patch.object(StateManager, "save", traced_save), \
+             patch.object(cro, "intent_to_add_untracked", traced_intent_to_add), \
+             contextlib.redirect_stdout(_TailLines(sys.stdout, events)):
+            code = run()
+        # A run that prints no closing summary (a reaggregate, the heal) leaves
+        # the seeded line behind; it is drained, unprinted, for the next test.
+        with contextlib.redirect_stdout(io.StringIO()):
+            rob.print_closing_summary(lane.phase_dir)
+        events.append(f"exit {code}")
+        start = next(i for i, event in enumerate(events) if event in TAIL_START)
+        return events[start:]
+
+    def test_a_fanouts_completion(self, lane):
+        trace = self._trace(lane, lambda: lane.fanout(
+            _two_models(lane, high=["Alpha"]), "--skip-validation",
+            *lane.gate_flags))
+
+        assert trace == list(lane.fanout_tail)
+
+    def test_a_reaggregates_completion(self, lane):
+        tasks = _round_handed_to_the_host(lane, high=["Alpha"])
+        for batch in tasks["batches"]:
+            _write_batch(lane, batch)
+
+        trace = self._trace(lane, lambda: lane.reaggregate(*lane.gate_flags))
+
+        assert trace == list(lane.reaggregate_tail)
+
+    def test_a_healed_completion_ends_as_a_reaggregate_does(self, code_lane):
+        """review-code's heal of a lost completion hands the files back and
+        records the phase before the gate, as its reaggregate does; it has no
+        report to render and no ticker of its own."""
+        _validated(code_lane, high=["Alpha"])
+        TestAPlainRerunOverARoundOnDisk._lose_the_completion(code_lane)
+        # The checkpoint as the reaggregate left it before its completion.
+        status_file.update_status(str(code_lane.phase_dir), {
+            "state": "validation_pending", "progress": {"step": "validation_pending"},
+        })
+
+        trace = self._trace(code_lane, lambda: code_lane.fanout(
+            _two_models(code_lane, high=["Alpha"]), *code_lane.gate_flags))
+
+        assert trace == [
+            "artifacts", "state.json: phase recorded", "state: complete",
+            "step: complete", "Auto-healed", "Report:", "high_priority_groups",
+            "=== Review Summary ===", "[HIGH_PRIORITY_ISSUES]", "exit 3",
+        ]
 
 
 class TestTheSlotCore:

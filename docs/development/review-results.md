@@ -393,7 +393,8 @@ model slots stubbed). A scenario that passes on one lane and fails on the other 
   review-code's heal of a lost completion, hands its files back through
   `hand_back_report`: `.status.json`'s `output_files` and the result line's `artifacts`
   name the same files (report, HTML report, grouping, `validation.json` when it exists,
-  review-code's `issues.json`).
+  review-code's `issues.json`). Each site calls these itself, in its lane's order (below,
+  "Why each lane keeps its completion tail").
 
 Both lanes also record these the same way:
 
@@ -424,8 +425,31 @@ skip predicate); the `model` then `source_model` stamp order on reaggregated iss
 (`grouped_sha256` hashes the file's bytes); the per-issue report with its numbering
 footer, and `issues.json`; the stale-implement guard; the partial-completion guard above;
 consolidation (review-plan) and the tasks document (review-tasks). Still written once per
-lane: the slot functions (`run_single_model`, `run_single_review`) and the report each
-lane renders from its groups.
+lane: the report each lane renders from its groups, and the completion tail around it.
+
+**Why each lane keeps its completion tail.** Four sites complete a round, each lane's
+fan-out and reaggregate. They call the same pieces (`hand_back_report`,
+`record_phase_complete` or `complete_reaggregate`, and on review-code
+`finish_code_review`), each in its lane's order, and that order is what `.status.json`,
+stdout and a detached caller see. The base's per-group renderer (`aggregate_results`,
+which tests also call directly) publishes `report.md`, writes `report.html`, hands the
+files back, then records the HIGH groups and the verdict counts; the consolidation recount
+follows, and then the completion. review-code's per-issue renderer
+(`generate_review_report`) records the verdict counts and writes `report.html` before
+`report.md` is published, and the hand-back follows publication. Its HIGH-group record and
+`--fail-on-high` gate follow the completion. On the fan-out they run after the phase
+ticker's teardown line and the closing summary, outside `intent_to_add_untracked`. On a
+reaggregate they run before the teardown line, since `_reaggregate_entry` owns that ticker.
+One driver with a hook for the lane's report and one for its own completion (code health
+REVIEW-7's render-report and on-complete hooks) was weighed and not built. On the base,
+its hand-back hook and its completion hook would be empty, because the renderer does both.
+On review-code's fan-out, the completion hook could not run inside the driver without
+moving the gate's lines and its `.status.json` write ahead of the teardown line. All the
+driver would have shared is the two `Reaggregation complete!` lines and the choice between
+the two completion calls, each already one shared call. A completion step every lane needs
+goes into `record_phase_complete`, which every site and review-code's heal call.
+`TestTheCompletionTail` in `tests/test_review_lane_parity.py` pins each lane's order on
+both sites, and the heal's.
 
 **review-code's run, stage by stage.** `code_review_orchestrator._main` is a sequence of
 named stages over one frozen `RunScope`: the base ref, the resolved scope and its review
