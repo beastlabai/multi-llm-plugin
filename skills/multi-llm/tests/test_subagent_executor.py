@@ -2572,7 +2572,7 @@ class TestTheBatchDeadline:
         # Three tasks at a 0.1 s budget: the batch cap is 2 x 3 x 0.1 s, no stagger.
         for module in (task_batch, task_dispatch):
             monkeypatch.setattr(module, "get_subagent_timeout", lambda *_a, **_k: 0.1)
-        monkeypatch.setattr(rob, "PROVIDER_STAGGER_DELAY", 0.0)
+        monkeypatch.setattr("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0)
         tasks = [_validation_batch(tmp_path, i, hashes=(h,)) for i, h in enumerate(self.HASHES)]
 
         def write_reply(task, phase_dir):
@@ -2644,7 +2644,7 @@ class TestTheBatchDeadline:
         budget = 0.15
         for module in (task_batch, task_dispatch):
             monkeypatch.setattr(module, "get_subagent_timeout", lambda *_a, **_k: budget)
-        monkeypatch.setattr(rob, "PROVIDER_STAGGER_DELAY", 0.0)
+        monkeypatch.setattr("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0)
         tasks = [_validation_batch(tmp_path, i, hashes=(f"{i:04d}" + "0" * 12,))
                  for i in range(16)]
 

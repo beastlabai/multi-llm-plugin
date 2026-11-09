@@ -1282,13 +1282,14 @@ def _manual_close_note(
 
     try:
         from utils import host_capabilities as _hosts
-        from utils import next_phase as _next
+        from utils import manual_tasks as _manual
+        from utils import routes as _routes
 
         host_id = _hosts.resolve_host_id(explicit=getattr(args, "host", None))
         template = _hosts.next_command_template(
-            host_id, _next.resolve_route(host_id, stderr=io.StringIO()))
-        return _next.manual_close_note(
-            _next.close_command(template, plan_arg, task_ids), len(task_ids),
+            host_id, _routes.resolve_route(host_id, stderr=io.StringIO()))
+        return _manual.manual_close_note(
+            _manual.close_command(template, plan_arg, task_ids), len(task_ids),
             waiting=waiting)
     except Exception:  # noqa: BLE001 - advisory: the deferred list still stands
         return None
@@ -1397,7 +1398,7 @@ def _stop_user_commands(args: argparse.Namespace) -> Dict[str, str]:
     """The way forward after a stop, in this host's own command spelling.
 
     Built from the host's ``next_command`` template the way the result line's
-    ``user_next_step`` and ``resume_command`` are (``next_phase.phase_command``),
+    ``user_next_step`` and ``resume_command`` are (``next_phase_words.phase_command``),
     with the plan as the user typed it (the run record's ``plan_arg``, else
     the ``--plan-file`` value). Empty when nothing can be spelled (no template
     for this host and route): the stop message then names the flags.
@@ -1405,10 +1406,11 @@ def _stop_user_commands(args: argparse.Namespace) -> Dict[str, str]:
     try:
         from utils import detach as _detach
         from utils import host_capabilities as _hosts
-        from utils import next_phase as _next
+        from utils import next_phase_words as _words
+        from utils import routes as _routes
 
         host_id = _hosts.resolve_host_id(explicit=getattr(args, "host", None))
-        route = _next.resolve_route(host_id)
+        route = _routes.resolve_route(host_id)
         handle = _detach.active_run()
         plan_arg = (
             (handle.plan_arg if handle is not None else None)
@@ -1417,7 +1419,7 @@ def _stop_user_commands(args: argparse.Namespace) -> Dict[str, str]:
         )
 
         def command(mode: str, *flags: str) -> str:
-            return _next.phase_command(plan_arg, host_id, route, mode, *flags)
+            return _words.phase_command(plan_arg, host_id, route, mode, *flags)
 
         return {
             "resume": command("implement", "--resume"),
@@ -3555,7 +3557,7 @@ def _human_plan_lines(run: ImplementRun, named: Callable[[str], str]) -> List[st
                "too" if note else "")
             + "):"
         )
-        from utils.next_phase import after_code_note
+        from utils.manual_tasks import after_code_note
 
         for task_id, reason in sorted(deferred.items()):
             # A manual task after code this emit hands out says so; the

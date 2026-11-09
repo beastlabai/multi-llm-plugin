@@ -58,7 +58,7 @@ from utils.providers.cursor_agent import (  # noqa: E402
     status_auth_verdict,
 )
 from utils.provider_registry import _PROVIDERS  # noqa: E402
-from utils.write_safety import redact_text  # noqa: E402
+from utils.redact import redact_text  # noqa: E402
 from tests.source_cache import source_text, source_tree
 from utils import runner_preflight
 

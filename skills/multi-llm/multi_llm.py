@@ -93,6 +93,21 @@ from utils.unattended import (
     require_uv,
     validate_decision_flags,
 )
+# The positional grammar lives in utils/positionals.py, shared with the commit
+# front door; this module reads it there. The private spellings below are
+# read-only aliases for readers of the old names (tests/test_layer_moves.py).
+from utils import positionals as _positionals
+from utils.positionals import (  # noqa: F401 - re-exported for reading only
+    COMMIT_BRIEF_SUFFIX as _COMMIT_BRIEF_SUFFIX,
+    RANGE_COUNT_WORD as _RANGE_COUNT_WORD,
+    inside as _inside,
+    names_a_commit_brief as _names_a_commit_brief,
+    relative_paths as _relative,
+    revs_flags as _revs_flags,
+    root_holding as _root_holding,
+    split_positionals as _split_positionals,
+    takes_revs as _takes_revs,
+)
 
 #: Above this many characters the ``ask`` question is handed over as a file
 #: instead of an argv value. Well under the tightest real ceiling (Windows caps a
@@ -217,7 +232,7 @@ def render_help() -> str:
     ]
     for alias in sorted(mode_table.ALIASES):
         lines.append(f"  {alias} -> {mode_table.alias_expansion(alias)}")
-    revs_modes = [m.name for m in mode_table.MODES if _takes_revs(m)]
+    revs_modes = [m.name for m in mode_table.MODES if _positionals.takes_revs(m)]
     if revs_modes:
         import textwrap
 
@@ -334,63 +349,17 @@ def _unknown_mode_message(word: str) -> str:
 # Grammar
 # ---------------------------------------------------------------------------
 
-#: A ``-N`` range word: a hyphen and ASCII
-#: digits, nothing else. ``-h``, ``-2h``, ``--2``, ``-2.5`` and a lone ``-``
-#: are not one; they end the leading run as any flag does.
-_RANGE_COUNT_WORD = re.compile(r"-[0-9]+")
-
-#: What a commit brief's path ends in (:func:`_names_a_commit_brief` asks no
-#: other word). Its one spelling: the generated CLI surface reads it as
-#: ``revs.brief_suffix``, so a server keeps a ``revs`` value ending in it as
-#: one argv element and a brief path holding a space reaches this dispatcher
-#: as the one word it turns into ``--plan-file``.
-_COMMIT_BRIEF_SUFFIX = ".md"
-
-
-def _takes_revs(mode: Optional["mode_table.Mode"]) -> bool:
-    """Whether *mode* takes the commit modes' range (``POS_REVS``)."""
-    return mode is not None and mode_table.POS_REVS in mode.positionals
-
-
-def _split_positionals(
-    rest: Sequence[str], mode: Optional["mode_table.Mode"] = None,
-) -> Tuple[List[str], List[str]]:
-    """Leading bare words are positionals; everything from the first flag on is
-    forwarded verbatim.
-
-    Deliberately not argparse: ``parse_known_args`` can reorder or swallow the
-    residual argv, and the residual has to reach the target's own parser exactly
-    as the user typed it.
-
-    On a mode that takes a range (``POS_REVS``), a token that fully matches
-    ``-[0-9]+`` continues the leading run instead of ending it: ``-2`` is the
-    range ``last 2``, never a flag. Only the leading run is scanned, so in
-    ``--review-commits --quick -2`` the ``-2`` is forwarded as typed (the front
-    door refuses it as a range word after a flag), and every other mode splits
-    as it always has: ``--review-code -2`` forwards ``-2``. This is the one
-    place that decides what is positional, and it runs before any parser.
-    """
-    revs = _takes_revs(mode)
-    index = 0
-    while index < len(rest):
-        token = rest[index]
-        if token.startswith("-") and not (revs and _RANGE_COUNT_WORD.fullmatch(token)):
-            break
-        index += 1
-    return list(rest[:index]), list(rest[index:])
-
-
 def _normalize_positionals(
     mode: "mode_table.Mode",
     positionals: Sequence[str],
     cleanup: List[Path],
 ) -> List[str]:
     """Turn a mode's positionals into the flags its target already parses."""
-    if _takes_revs(mode):
+    if _positionals.takes_revs(mode):
         # Ahead of the length check: `last 2 commits` is three words for the
         # range's one slot, and the extra-positional error never fires on a
         # commit mode (the range grammar is what refuses a bad range).
-        return _revs_flags(positionals)
+        return _positionals.revs_flags(positionals)
     if len(positionals) > len(mode.positionals):
         expected = " ".join(mode.positionals) or "(none)"
         raise DispatchError(
@@ -414,73 +383,6 @@ def _normalize_positionals(
         else:  # pragma: no cover - guarded by the table
             raise DispatchError(f"ERROR: unhandled positional kind {kind!r}")
     return normalized
-
-
-def _revs_flags(words: Sequence[str]) -> List[str]:
-    """The range words of a commit mode, as the flag its front door parses.
-
-    Zero words emit nothing, which means ``HEAD``. One word that is a commit
-    brief's path (:func:`_names_a_commit_brief`) becomes ``--plan-file``: a
-    root range's pinned spelling, and the re-attach a tool route builds, name
-    the brief. Anything else is joined with single spaces into one ``--revs``
-    value, since revisions never contain spaces (``last 2 commits`` needs no
-    quotes). So a markdown path is never a plan on these modes: a plan or a
-    README goes to the range grammar, which refuses it naming
-    ``--context-plan``.
-    """
-    if not words:
-        return []
-    if len(words) == 1 and _names_a_commit_brief(words[0]):
-        return ["--plan-file", words[0]]
-    return ["--revs", " ".join(words)]
-
-
-def _names_a_commit_brief(word: str) -> bool:
-    """Whether *word* is a commit brief's path: it ends in
-    :data:`_COMMIT_BRIEF_SUFFIX` (``.md``), names an existing file and
-    ``commit_paths.is_commit_brief`` accepts it.
-
-    One helper decides what a brief is (its marker on line 1, or a
-    ``<commit_reviews_dir>/<slug>.md`` path); this only finds the file. A
-    relative path that names nothing from here but a file at the root of the
-    repository the cwd is in is asked about there: a brief path spelled from
-    the root and typed in a subdirectory then becomes ``--plan-file``, and
-    :func:`_run_from_repository_root` moves the command to the root as it
-    would for a plan.
-    """
-    if not word.endswith(_COMMIT_BRIEF_SUFFIX):
-        return False
-    from utils import commit_paths
-
-    if os.path.isfile(word):
-        return bool(commit_paths.is_commit_brief(word))
-    root = _root_holding(word)
-    if root is None:
-        return False
-    return bool(commit_paths.is_commit_brief(os.path.join(root, word), cwd=root))
-
-
-def _root_holding(path: str) -> Optional[str]:
-    """The root of the repository the cwd is in, when relative *path* names a
-    file there and stays inside it; else ``None``."""
-    if not _relative([path]):
-        return None
-    try:
-        from utils.git_utils import pin_repo_root
-
-        root, problem = pin_repo_root(os.getcwd())
-    except Exception:  # noqa: BLE001 - a convenience: the word stays a range
-        return None
-    if root is None or problem:
-        return None
-    candidate = os.path.join(root, path)
-    if not (
-        os.path.isfile(candidate)
-        and _inside(os.path.normpath(candidate), root)
-        and _inside(os.path.realpath(candidate), root)
-    ):
-        return None
-    return root
 
 
 #: The flags a commit front door synthesises for the phase it fronts, which a
@@ -756,7 +658,7 @@ def _run_mode(word: str, rest: Sequence[str], ctx: ResultContext) -> int:
     assert mode.target_module is not None  # every available mode has a target
     cleanup: List[Path] = []
     try:
-        positionals, flags = _split_positionals(rest, mode)
+        positionals, flags = _positionals.split_positionals(rest, mode)
         if flag_present(flags, "--help", "-h"):
             # Forward to the target's own parser: it is the source of truth.
             return _call_target(
@@ -766,7 +668,7 @@ def _run_mode(word: str, rest: Sequence[str], ctx: ResultContext) -> int:
         # entry, and an unknown id must fail as itself rather than as a confusing
         # consequence.
         _validate_host(flags)
-        if _takes_revs(mode) and not flag_present(flags, _WORKER_FLAG):
+        if _positionals.takes_revs(mode) and not flag_present(flags, _WORKER_FLAG):
             # On the tokens as typed, before the brief path becomes the
             # door's own `--plan-file` below.
             _reject_commit_owned_flags(f"--{mode.name}", flags)
@@ -961,17 +863,6 @@ def _util_input_paths(name: str, args: Sequence[str]) -> List[Optional[str]]:
     return paths
 
 
-def _inside(path: str, root: str) -> bool:
-    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
-
-
-def _relative(paths: Sequence[Optional[str]]) -> List[str]:
-    return [
-        path for path in paths
-        if path and path != "-" and not path.startswith("~") and not os.path.isabs(path)
-    ]
-
-
 def _names_something_here(output: str) -> bool:
     """Whether an output path, or the first folder it names, exists from the
     cwd: then it is spelled from here (``out/new`` beside an ``out``, ``..``)."""
@@ -999,8 +890,8 @@ def _run_from_repository_root(
     spelled and resolved. Outputs alone never move a command: only a path it
     reads says it was spelled from the root.
     """
-    relative = _relative(paths)
-    made = _relative(outputs)
+    relative = _positionals.relative_paths(paths)
+    made = _positionals.relative_paths(outputs)
     if (
         not relative
         or any(os.path.lexists(path) for path in relative)
@@ -1020,8 +911,8 @@ def _run_from_repository_root(
         candidate = os.path.join(root, path)
         if not (
             (path in made or os.path.exists(candidate))
-            and _inside(os.path.normpath(candidate), root)
-            and _inside(os.path.realpath(candidate), root)
+            and _positionals.inside(os.path.normpath(candidate), root)
+            and _positionals.inside(os.path.realpath(candidate), root)
         ):
             return
     os.chdir(root)

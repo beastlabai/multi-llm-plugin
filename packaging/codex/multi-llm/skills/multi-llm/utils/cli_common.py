@@ -1349,14 +1349,14 @@ def typed_plan_for(plan: Union[str, Path]) -> str:
     ``MULTI_LLM_RESULT.next`` would carry the absolute path although the user
     typed a relative one, and the host would run and quote that spelling. The typed
     spelling (:func:`invocation_plan_arg`) is used only when
-    ``next_phase.recorded_plan_spelling`` passes it — it resolves from this
+    ``routes.recorded_plan_spelling`` passes it — it resolves from this
     cwd to the same existing file and holds no character a shell would act
     on — else *plan* as given. Session-scoped like every printed command:
     nothing durable stores it.
     """
     typed = invocation_plan_arg()
     if typed:
-        from .next_phase import recorded_plan_spelling
+        from .routes import recorded_plan_spelling
 
         spelling = recorded_plan_spelling(typed, str(plan))
         if spelling is not None:

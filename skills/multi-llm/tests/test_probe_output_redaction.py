@@ -50,7 +50,7 @@ from utils.providers.cursor_agent import (  # noqa: E402
     redact_probe_output,
 )
 from utils.retry_ladder import STATUS_AUTH_FAILED  # noqa: E402
-from utils.write_safety import redact_text  # noqa: E402
+from utils.redact import redact_text  # noqa: E402
 from tests.source_cache import source_tree
 
 # ---------------------------------------------------------------------------

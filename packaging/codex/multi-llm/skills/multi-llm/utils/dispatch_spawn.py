@@ -9,7 +9,7 @@ Landlock jail and what it reported (:func:`_read_jailed_outcome`, its
 ``[JAIL_DENIED]`` line from ``landlock_dispatch.jail_denied_text``), the
 argv an audit record shows (:func:`render_audit_argv`, :func:`audit_argv`),
 and the timeout kill (:func:`_kill_timed_out`,
-:func:`_unconfirmed_kill`, :func:`_drain_after_kill`). The grant a write
+``process_control.unconfirmed_kill``, :func:`_drain_after_kill`). The grant a write
 dispatch's jail gets is derived from its kind (:func:`_dispatch_grant`,
 ``runner_selection.WRITE_SCOPE_BY_KIND``), never from the task JSON.
 
@@ -848,27 +848,6 @@ def _read_jailed_outcome(
             )
 
 
-#: Timeout-kill verdicts that confirm the runner stopped. Every other outcome
-#: (``survived``, ``unresolved``, ``skipped``, ``None`` for a kill that
-#: raised, any other word) is unconfirmed (:func:`_unconfirmed_kill`).
-_CONFIRMED_KILLS = ("killed", "gone")
-
-
-def _unconfirmed_kill(verdict: Optional[str]) -> Optional[str]:
-    """Why a timeout kill that returned *verdict* did not confirm the runner
-    stopped; ``None`` when it did."""
-    if verdict in _CONFIRMED_KILLS:
-        return None
-    if verdict == "survived":
-        return "it was still running after the kill's SIGKILL window"
-    if verdict in ("unresolved", "skipped"):
-        return ("not every process could be identified as this run's child, and "
-                "what could not was not signalled")
-    if verdict is None:
-        return "the kill itself failed"
-    return f"the kill answered {verdict!r}, which confirms nothing"
-
-
 def _kill_timed_out(
     proc: Any, pgid: Optional[int], job: Optional["process_control.TreeJob"] = None,
 ) -> Optional[str]:
@@ -891,7 +870,7 @@ def _kill_timed_out(
     (``process_control.own_child_stopped``).
 
     Only ``killed`` and ``gone`` confirm the runner stopped. Any other outcome
-    (:func:`_unconfirmed_kill`) gets a warning naming the pid, and a detached
+    (``process_control.unconfirmed_kill``) gets a warning naming the pid, and a detached
     run's record keeps it for a later abort or sweep
     (``detach.note_left_running``). *job* is the child's Windows Job Object,
     the group's stand-in there (``None`` elsewhere).
@@ -917,7 +896,7 @@ def _kill_timed_out(
                 proc.kill()
             except OSError:
                 pass
-    reason = _unconfirmed_kill(verdict)
+    reason = process_control.unconfirmed_kill(verdict)
     # A private home lent to the runner outlives a stop that is not confirmed.
     process_control.note_stop(proc, reason is None)
     if reason is not None:

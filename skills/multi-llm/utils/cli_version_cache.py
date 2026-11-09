@@ -77,7 +77,7 @@ _STAT_FIELDS = ("st_size", "st_mtime_ns", "st_ctime_ns", "st_ino")
 
 def cache_dir() -> str:
     """``$XDG_CACHE_HOME/multi-llm`` (default ``~/.cache/multi-llm``), the
-    cache-side twin of ``write_safety.state_home``."""
+    cache-side twin of ``output_handler.state_home``."""
     base = os.environ.get("XDG_CACHE_HOME") or os.path.join(
         os.path.expanduser("~"), ".cache"
     )

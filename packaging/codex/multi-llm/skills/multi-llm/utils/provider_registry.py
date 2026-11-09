@@ -32,6 +32,7 @@ from typing import Dict, List, Mapping, Optional, Tuple, Type, Union
 
 from . import yaml_io
 from .process_state import process_cache
+from . import status_file as _status_file
 from .git_utils import (
     COLLAPSE_PATH_KEYS,
     DEFAULT_COLLAPSE_PATHS,
@@ -1740,18 +1741,13 @@ PROGRESS_FALLBACKS: Dict[str, float] = {
 
 
 def _progress_floor_s() -> float:
-    """The floor both keys share: ``run_status.WAIT_POLL_INTERVAL_S`` (5 s).
+    """The floor both keys share: ``status_file.WAIT_POLL_INTERVAL_S`` (5 s).
 
     Single-sourced rather than retyped, because the two numbers are the same one
     by construction: a cadence faster than the loop that re-reads the status file
-    learns nothing new. Imported lazily because ``utils.run_status`` pulls in the
-    detach/status/metrics subtree, and this module is imported by every entry
-    point — a module-level import would make the registry drag the whole status
-    stack behind it for a constant only the validator reads.
+    learns nothing new.
     """
-    from .run_status import WAIT_POLL_INTERVAL_S
-
-    return float(WAIT_POLL_INTERVAL_S)
+    return float(_status_file.WAIT_POLL_INTERVAL_S)
 
 
 def _progress_error(key: str, value: object, reason: str) -> str:

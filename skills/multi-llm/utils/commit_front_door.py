@@ -1853,10 +1853,11 @@ def commit_brief_main(argv: Optional[Sequence[str]] = None) -> int:
         parse_args("commit-brief", ["--help"])
         return _EXIT_OK
     import modes as mode_table
-    import multi_llm
 
-    words, flags = multi_llm._split_positionals(tokens, mode_table.resolve(_UTIL_MODE))  # noqa: SLF001
-    door_argv = multi_llm._revs_flags(words) + list(flags)  # noqa: SLF001
+    from .positionals import revs_flags, split_positionals
+
+    words, flags = split_positionals(tokens, mode_table.resolve(_UTIL_MODE))
+    door_argv = revs_flags(words) + list(flags)
     try:
         prep = prepare(_UTIL_MODE, door_argv, util=True)
     except FrontDoorExit as stop:

@@ -103,7 +103,7 @@ class TestTasksMarker:
                 continue
             if spelled.search(path.read_text(encoding="utf-8")):
                 owners.append(rel.as_posix())
-        assert owners == ["utils/tasks_file.py"]
+        assert owners == ["utils/tasks_marker.py"]
 
 
 class TestResolveTasksMarker:

@@ -27,7 +27,7 @@ from .retry_ladder import (  # noqa: F401 - re-exported, see below
 )
 from . import batch_reply as _batch_reply
 from . import failure_capture as _failure_capture
-from .write_safety import redact_text
+from .redact import redact_text
 
 
 # ---------------------------------------------------------------------------

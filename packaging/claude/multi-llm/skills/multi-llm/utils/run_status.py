@@ -112,17 +112,13 @@ from .validation_context import pick_worst
 #: shell cap is below its own timeout.
 DEFAULT_WAIT_TIMEOUT_S = 90.0
 
-#: How often ``--wait`` re-reads the status file. The heartbeat is 10 s, so a
-#: faster cadence learns nothing; 5 s keeps the returned view fresh.
-WAIT_POLL_INTERVAL_S = 5.0
-
 #: How far *below* a host's ``timeout_ceiling_s`` a resolved ``--wait`` is
 #: clamped. This is the number that explains :data:`DEFAULT_WAIT_TIMEOUT_S`:
 #: OpenCode's ceiling is 120 s and 120 - 30 = 90.
 #:
 #: The margin is **startup, not slack**. A poll spends process start,
 #: ``load_config`` and the checkpoint read before ``--wait`` begins sleeping, and
-#: ``_wait_for_terminal`` re-checks on a :data:`WAIT_POLL_INTERVAL_S` grid, so it
+#: ``_wait_for_terminal`` re-checks on a ``status_file.WAIT_POLL_INTERVAL_S`` grid, so it
 #: returns a little *after* its own deadline — clamping to the cap itself would
 #: put the return on the wrong side of it. The same constant bounds the tool-call
 #: ``timeout`` a Claude Code poll has to set (``interval + 30``).
@@ -1500,7 +1496,7 @@ def _resolve_wait_timeout(args: argparse.Namespace, plan_path: Path) -> float:
     # hypothetical host whose cap is under the margin — a wait clamped to zero
     # would return instantly, which is exactly what `poll_s: 0`'s rejection
     # exists to prevent.
-    clamped = max(float(cap_s) - WAIT_CAP_MARGIN_S, WAIT_POLL_INTERVAL_S)
+    clamped = max(float(cap_s) - WAIT_CAP_MARGIN_S, status_file.WAIT_POLL_INTERVAL_S)
     if resolved <= clamped:
         return resolved
     if explicit:
@@ -1607,7 +1603,7 @@ def _wait_for_terminal(
     while not views or any(_live(v) for v in views):
         if time.time() >= deadline:
             break
-        time.sleep(min(WAIT_POLL_INTERVAL_S, max(deadline - time.time(), 0.05)))
+        time.sleep(min(status_file.WAIT_POLL_INTERVAL_S, max(deadline - time.time(), 0.05)))
         views = _collect(plan_path, args)
     status_text._attach_finished_during_wait(baseline, views)
     return views

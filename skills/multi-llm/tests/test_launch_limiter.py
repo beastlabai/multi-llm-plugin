@@ -47,7 +47,7 @@ HOLD = {"gemini:gemini-3-flash": 3.0, "claude-code:sonnet": 3.0}
 def adapter_spacing(monkeypatch):
     """The adapters' own intervals: no uniform override, no fast backoff."""
     monkeypatch.delenv("MULTI_LLM_TEST_FAST_BACKOFF", raising=False)
-    monkeypatch.setattr(base, "PROVIDER_STAGGER_DELAY", None)
+    monkeypatch.setattr("utils.concurrency.PROVIDER_STAGGER_DELAY", None)
     assert STEP == 2.0
 
 

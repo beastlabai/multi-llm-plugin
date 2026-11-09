@@ -523,7 +523,7 @@ def test_lane_a_keeps_the_home_of_a_cli_whose_stop_is_unconfirmed(
     homes, monkeypatch, cli_verdict, groups, job_failed, kept,
 ):
     """``llm_client._run_provider_cli``'s deadline stop, verdict by verdict
-    (``subagent_executor._unconfirmed_kill``'s rule for the groups)."""
+    (``process_control.unconfirmed_kill``'s rule for the groups)."""
     from utils import llm_client
 
     def sweep(proc, _snapshot, _grace_s, **_kwargs):

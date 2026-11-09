@@ -275,7 +275,7 @@ class TestCancellationIsNotASlotException:
         """The fan-out's deadline (2 s at ``--timeout 1``) cancels the slot
         while its call is still running; the call raises only afterwards."""
         codex_slot["child"] = lambda _cmd: time.sleep(2.5)
-        monkeypatch.setattr(rob, "PROVIDER_STAGGER_DELAY", 0.0)
+        monkeypatch.setattr("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0)
         rc, reason, entry = _ask(codex_slot, monkeypatch, JAILED, extra=("--timeout", "1"))
         assert codex_slot["spawned"] == 1
         assert rc == 3

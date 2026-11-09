@@ -113,7 +113,7 @@ poll asked for.
 
 **A terminal poll pinned to one run that exits `0` also carries
 `user_next_step`** beside F7's `notice` (plans/next-phase-command.md): built for
-the run record's `mode`, its `plan_arg` when `next_phase.recorded_plan_spelling`
+the run record's `mode`, its `plan_arg` when `routes.recorded_plan_spelling`
 passes it (else the poll's own absolute plan, never the record's `plan_file`), the poll's
 own `--host` and route, from a fresh workflow read taken after any
 `--wait`.

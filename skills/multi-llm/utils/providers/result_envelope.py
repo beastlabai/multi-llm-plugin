@@ -25,16 +25,9 @@ import json
 from typing import Any, Collection, Dict, List, Optional
 
 from ..json_extractor import extract_json_from_text
-from .base import (
-    CATEGORY_INVALID_MODEL,
-    CATEGORY_SERVER_ERROR,
-    STATUS_AUTH_FAILED,
-    STATUS_RATE_LIMITED,
-    STDOUT_ENVELOPE,
-    STDOUT_PLAIN,
-    envelope_signature,
-    read_stdout,
-)
+from ..retry_ladder import STATUS_AUTH_FAILED, STATUS_RATE_LIMITED
+from .failure_classifier import CATEGORY_INVALID_MODEL, CATEGORY_SERVER_ERROR
+from .stdout_shape import STDOUT_ENVELOPE, STDOUT_PLAIN, envelope_signature, read_stdout
 from .parse_kit import answer_from_text, fail, ok
 
 #: How the result envelope opens, from the captures: claude-code 2.1.319 prints

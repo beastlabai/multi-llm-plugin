@@ -132,7 +132,7 @@ class TestTheWorkerRecordsItsRoute:
 
         def planted(name, globals=None, locals=None, fromlist=(), level=0):
             if (level == 1 and (globals or {}).get("__name__") == "utils.detach"
-                    and {"host_capabilities", "next_phase"} <= set(fromlist or ())):
+                    and {"host_capabilities", "routes"} <= set(fromlist or ())):
                 raise ImportError("planted: the route lookup cannot import")
             return real_import(name, globals, locals, fromlist, level)
 

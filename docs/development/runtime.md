@@ -115,7 +115,7 @@ same check (`cli_common.typed_plan_for`: the generate-tasks follow-up, the revie
 validation hand-offs, consolidation's, the salvage reaggregate), and implement's handoff JSON
 carries `plan_arg` for the closing `util finalize-tracking --plan-file`. Both files sit in the run's
 output folder, which every jailed batch can write, so a `plan_arg` read back from either
-is printed only when `next_phase.recorded_plan_spelling` passes it: `realpath(strict=True)` names the same
+is printed only when `routes.recorded_plan_spelling` passes it: `realpath(strict=True)` names the same
 existing file (non-strict collapsed `plans/$(cmd)/../foo.md` onto `plans/foo.md`) and it holds
 only `shlex.quote`'s bare characters or a plain space, else the plan as received (fix round
 11).
@@ -700,7 +700,7 @@ say so rather than report the run cleanly stopped, and keep what they need to tr
   all there is.
 - The write scheduler's timeout kill of `driver.verify_command`
   (`VerifyCommand.kill_tree`) keeps the same rule, through the same
-  `_unconfirmed_kill`, and the same `detach.note_left_running` record; its output's closing note
+  `process_control.unconfirmed_kill`, and the same `detach.note_left_running` record; its output's closing note
   names the verdict ([write scheduler contract](write-scheduler.md#write-scheduler-contract),
   "When the verify command times out").
 

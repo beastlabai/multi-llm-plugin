@@ -595,7 +595,7 @@ def test_a_rerun_counts_no_model_the_deadline_left_undispatched(plan, monkeypatc
         return await real(self, *args, **kwargs)
 
     monkeypatch.setattr(slot_guard.SlotGuard, "finish", finish)
-    monkeypatch.setattr(rob, "PROVIDER_STAGGER_DELAY", 0.0)
+    monkeypatch.setattr("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0)
     rerun = FakeInvoker()
     rerun.configure(SPEC, write_file=True, content="Never checked")
     rerun.configure(OTHER, write_file=True, content="Never asked")

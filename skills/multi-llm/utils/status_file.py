@@ -200,6 +200,24 @@ RUN_SCOPED_KEYS: Tuple[str, ...] = ("high_priority_groups", "validation_counts")
 REFUSAL_STATES: Tuple[str, ...] = ("runner_rejected", "executor_refused")
 REFUSAL_KEYS: Tuple[str, ...] = ("reason_code", "runner", "runner_key", "refused_batch")
 
+#: How often ``status --wait`` re-reads the status file (``run_status``). The
+#: heartbeat is 10 s, so a faster cadence learns nothing; 5 s keeps the
+#: returned view fresh. Also the floor of the registry's ``progress.*`` keys
+#: (``provider_registry._progress_floor_s``).
+WAIT_POLL_INTERVAL_S = 5.0
+
+#: A model slot's two end states in ``progress.models``, from the fan-out's
+#: lifecycle (``progress_tracker``, which re-exports them with its live states):
+#: the result-file reader counts them too.
+STATE_DONE = "done"
+STATE_FAILED = "failed"
+
+#: The two states a slot may end in. There is deliberately no ``skipped``: a
+#: model answered from disk is ``done`` — it has a usable result — and the
+#: distinction lives in ``source`` (see ``progress_tracker.RESUME_SOURCES``), so
+#: ``models_done`` and ``models_succeeded`` stay derivable from ``state`` alone.
+TERMINAL_STATES = frozenset({STATE_DONE, STATE_FAILED})
+
 #: The process state machine. ``stale`` is deliberately absent: it is a *view* of
 #: a ``running`` record whose heartbeat expired, never a stored state.
 RUN_STATE_STARTING = "starting"

@@ -43,6 +43,9 @@ from .subagent_tasks import PromptBudget, build_inputs, make_task, make_task_fil
 logger = logging.getLogger(__name__)
 
 from . import scope_report as _scope_report
+# Whether the consolidation is current, and the file hash it compares, live in
+# output_handler, where the run record reads them; re-exported for reading.
+from .output_handler import _compute_file_hash, consolidation_is_current  # noqa: F401
 from . import importance as _importance
 
 
@@ -2031,54 +2034,6 @@ def generate_consolidated_html(
 # ---------------------------------------------------------------------------
 # File hashing helpers
 # ---------------------------------------------------------------------------
-
-def _compute_file_hash(file_path: str) -> str:
-    """
-    Compute a SHA-256 hash of a file's contents for staleness detection.
-
-    Reads the file as UTF-8 text and returns the full hex digest.
-    Returns an empty string if the file does not exist or cannot be read.
-
-    Args:
-        file_path: Path to the file to hash.
-
-    Returns:
-        Full SHA-256 hex digest string, or empty string on error.
-    """
-    try:
-        content = Path(file_path).read_text(encoding="utf-8")
-        return hashlib.sha256(content.encode("utf-8")).hexdigest()
-    except (FileNotFoundError, OSError, UnicodeDecodeError):
-        return ""
-
-
-def consolidation_is_current(phase_dir: str) -> bool:
-    """Whether ``consolidated.json`` in *phase_dir* was built from today's
-    ``grouped.json``: the consolidation already ran on these groups.
-
-    The staleness rule :func:`load_merged_suggestions` applies, read the
-    same way: the file's ``metadata.grouped_hash`` against the hash of the
-    ``grouped.json`` beside it. A minimal-reduction pass
-    (``skipped_report``) counts too: it ran, and found little to merge.
-    ``False`` when the file is missing, unreadable, carries no hash, or the
-    groups changed since (a later review round rewrote ``grouped.json``).
-
-    Live run 8 (Claude Code racing 01): ``status`` and its result line still
-    said "consolidation recommended: 17 valid groups >= 15 — run
-    --consolidate" after the same run had consolidated them, so every
-    reader of the recommendation asks this first.
-    """
-    path = Path(phase_dir) / "consolidated.json"
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return False
-    metadata = data.get("metadata") if isinstance(data, dict) else None
-    stored = metadata.get("grouped_hash") if isinstance(metadata, dict) else None
-    if not isinstance(stored, str) or not stored:
-        return False
-    return stored == _compute_file_hash(str(Path(phase_dir) / "grouped.json"))
-
 
 # ---------------------------------------------------------------------------
 # Consolidated decision loading for apply-suggestions

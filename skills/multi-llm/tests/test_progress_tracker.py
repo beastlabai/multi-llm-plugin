@@ -769,7 +769,7 @@ class TestAParkedSlotThroughTheRealFanOut:
             release.set()
             await task
 
-        with patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+        with patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             asyncio.run(drive())
 
         assert f"running: {head} (5m00s/30m)" in seen["line"], seen["line"]

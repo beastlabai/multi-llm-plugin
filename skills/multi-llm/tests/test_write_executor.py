@@ -4398,10 +4398,10 @@ class TestFinalizeTrackingSeesTheVerifiedFiles:
     """
 
     def test_every_applied_file_travels_as_touched(self, env, monkeypatch):
-        import finalize_tracking
+        from utils import tracking
 
         seen = []
-        monkeypatch.setattr(finalize_tracking, "main",
+        monkeypatch.setattr(tracking, "main",
                             lambda argv: seen.append(list(argv)) or 0)
         _code_edit(env)
         state = FakeState(env.tmp_path / "state.json")
@@ -4419,7 +4419,7 @@ class TestFinalizeTrackingSeesTheVerifiedFiles:
     def test_a_batch_skipped_on_resume_still_contributes_its_files(self, env, monkeypatch):
         """The earlier run's result file records what it changed; a resumed
         run's finalization must not lose those files."""
-        import finalize_tracking
+        from utils import tracking
 
         state = FakeState(env.tmp_path / "state.json")
         _code_edit(env)
@@ -4427,7 +4427,7 @@ class TestFinalizeTrackingSeesTheVerifiedFiles:
                       finalize=False).run()
 
         seen = []
-        monkeypatch.setattr(finalize_tracking, "main",
+        monkeypatch.setattr(tracking, "main",
                             lambda argv: seen.append(list(argv)) or 0)
         result = env.scheduler([_code_task(env)], kind="implement",
                                state=state).run()
@@ -4444,7 +4444,7 @@ class TestFinalizeTrackingSeesTheVerifiedFiles:
         files come from the earlier run's report rows: without them a file
         that task edited while it was already dirty (the baseline subtracts
         it) left `tracked_files` the moment the resumed run recorded its own."""
-        import finalize_tracking
+        from utils import tracking
 
         state = FakeState(env.tmp_path / "state.json")
         _code_edit(env)
@@ -4452,7 +4452,7 @@ class TestFinalizeTrackingSeesTheVerifiedFiles:
                       finalize=False).run()
 
         seen = []
-        monkeypatch.setattr(finalize_tracking, "main",
+        monkeypatch.setattr(tracking, "main",
                             lambda argv: seen.append(list(argv)) or 0)
         _code_edit(env, "src/b.py", task_id="T002")
         result = env.scheduler(
@@ -4464,10 +4464,10 @@ class TestFinalizeTrackingSeesTheVerifiedFiles:
         assert touched == ["src/a.py", "src/b.py"]
 
     def test_a_no_op_batch_contributes_nothing(self, env, monkeypatch):
-        import finalize_tracking
+        from utils import tracking
 
         seen = []
-        monkeypatch.setattr(finalize_tracking, "main",
+        monkeypatch.setattr(tracking, "main",
                             lambda argv: seen.append(list(argv)) or 0)
         env.edits([], result={"status": "no-op", "ids": ["T001"],
                               "files_touched": [], "summary": "there"})
@@ -4484,15 +4484,15 @@ class TestFinalizeTrackingSeesTheVerifiedFiles:
         "Tracked 1 implementation files: index.html" finalized with the two stale
         entries earlier phases had left, and the metric every batch recorded went
         with it (three audited runs ended `metrics: null`)."""
-        import finalize_tracking
+        from utils import tracking
         from utils.state_manager import StateManager
 
         # The census is `git status` on the *test process's* cwd; the `--touched`
         # set is what this assertion is about, so pin the other half to empty.
-        monkeypatch.setattr(finalize_tracking, "get_all_modified_files", set)
+        monkeypatch.setattr(tracking, "get_all_modified_files", set)
         # Likewise the ignore lookup: the process cwd's own .gitignore covers
         # `plans/`, which is not what this assertion is about.
-        monkeypatch.setattr(finalize_tracking, "ignored_paths",
+        monkeypatch.setattr(tracking, "ignored_paths",
                             lambda paths, cwd=None: set())
         _code_edit(env)
         state = StateManager(env.plan)
@@ -4528,9 +4528,9 @@ class TestFinalizeTrackingSeesTheVerifiedFiles:
         could read, the phase finalized, and `tracked_files` stayed whatever an
         earlier phase had left for `review-code` to review, with nothing in the
         log or the result saying so."""
-        import finalize_tracking
+        from utils import tracking
 
-        monkeypatch.setattr(finalize_tracking, "main", lambda argv: 1)
+        monkeypatch.setattr(tracking, "main", lambda argv: 1)
         _code_edit(env)
         lines = []
         result = env.scheduler(
@@ -4610,10 +4610,10 @@ class TestOnlyACodePhaseRecordsTrackedFiles:
     `index.html` implement created was not in its scope at all."""
 
     def test_a_planning_phase_leaves_tracked_files_alone(self, env, monkeypatch):
-        import finalize_tracking
+        from utils import tracking
 
         seen = []
-        monkeypatch.setattr(finalize_tracking, "main",
+        monkeypatch.setattr(tracking, "main",
                             lambda argv: seen.append(list(argv)) or 0)
         recorded = [{"path": "index.html", "action": "created",
                      "task_id": "implementation"}]
@@ -4920,9 +4920,9 @@ class TestTheClosingEtaLineGoesToThePhaseLog:
     def test_the_phase_complete_line_lands_beside_the_batch_lines(
         self, env, monkeypatch, capsys
     ):
-        import finalize_tracking
+        from utils import tracking
 
-        monkeypatch.setattr(finalize_tracking, "get_all_modified_files", set)
+        monkeypatch.setattr(tracking, "get_all_modified_files", set)
         env.edits([_patch_edit(env.plan)],
                   result={"status": "applied", "ids": ["s0"],
                           "files_touched": ["plans/p.md"], "summary": "S"})

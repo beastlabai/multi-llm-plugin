@@ -912,12 +912,12 @@ def redacted_excerpt(text: Optional[str], limit: Optional[int] = EXCERPT_CHARS) 
     taken from one, and both lanes print it to stdout, the detached run log
     and the closing summary, so it is redacted where it is taken. Redaction
     runs before the cut: a cut inside a token leaves a fragment no pattern
-    matches (``write_safety.redact_text``).
+    matches (``redact.redact_text``).
     """
     try:  # pragma: no cover - import shim mirrors the rest of utils/
-        from .write_safety import redact_text
+        from .redact import redact_text
     except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.write_safety import redact_text
+        from utils.redact import redact_text
     redacted = redact_text(text or "")
     return redacted if limit is None else redacted[:limit]
 
@@ -1978,9 +1978,9 @@ def _write_change_list(lines: Sequence[str]) -> Optional[str]:
     never written through), and the directory keeps the newest
     :data:`HOME_CHANGE_LIST_KEEP` lists."""
     try:
-        from .write_safety import state_home
+        from .output_handler import state_home
     except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.write_safety import state_home  # type: ignore[no-redef]
+        from utils.output_handler import state_home  # type: ignore[no-redef]
     body = ("\n".join(lines) + "\n").encode("utf-8", "backslashreplace")
     name = hashlib.sha256(body).hexdigest()[:24] + ".txt"
     directory = os.path.join(state_home(), HOME_CHANGE_LIST_DIR)

@@ -173,7 +173,7 @@ Under a skip strategy an explicit `--human-task <manual>=skip` is the user's dec
 and `StateManager._deferred_to_user` read it as not owed; under `skip-dependents` its walk runs first and
 takes over a later manual task a deferral reached, while a failed code task's `skip`
 keeps fix round 8's rule; under `skip-continue` the code after it still runs); the gate's
-stop records it as its `answers` (`next_phase.manual_gate_decline_answers`, the combined one first over
+stop records it as its `answers` (`manual_tasks.manual_gate_decline_answers`, the combined one first over
 several gating tasks), `manual_gate_way_on` names it after the resume, `util next-command --blocked` and
 `--after implement` (`gate_decline_steps`) and the native `status` give it on
 both legs, and a run that then dispatches nothing completes, its `phase complete` line naming

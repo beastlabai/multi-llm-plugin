@@ -1,7 +1,7 @@
 """What a timed-out ``driver.verify_command`` reports about its kill.
 
 ``write_verify.VerifyCommand.kill_tree`` keeps the executor's rule for its
-timed-out runner (``subagent_executor._unconfirmed_kill``): only ``killed`` and
+timed-out runner (``process_control.unconfirmed_kill``): only ``killed`` and
 ``gone`` confirm the command stopped, and a ``survived`` that is only the
 command's own zombie becomes ``killed`` once its exit is confirmed. Every other
 verdict (``survived``, ``unresolved``, ``skipped``, ``None`` for a kill that
@@ -96,11 +96,11 @@ class TestOnlyKilledAndGoneConfirmAStop:
 
     def test_the_rule_is_the_executors(self):
         """One rule for both timeout kills: the executor's."""
-        assert executor._CONFIRMED_KILLS == ("killed", "gone")
-        for verdict in executor._CONFIRMED_KILLS:
-            assert executor._unconfirmed_kill(verdict) is None
+        assert process_control.CONFIRMED_KILLS == ("killed", "gone")
+        for verdict in process_control.CONFIRMED_KILLS:
+            assert process_control.unconfirmed_kill(verdict) is None
         for verdict in [*UNCONFIRMED, None]:
-            assert executor._unconfirmed_kill(verdict) is not None
+            assert process_control.unconfirmed_kill(verdict) is not None
 
     @pytest.mark.parametrize("verdict", ["killed", "gone"])
     def test_a_confirmed_stop_warns_nothing(self, scheduler, monkeypatch,
@@ -133,7 +133,7 @@ class TestOnlyKilledAndGoneConfirmAStop:
         assert f"pid {PID} (process group {PGID})" in warning
         assert f"kill verdict {verdict}" in warning
         assert "may still be running" in warning
-        assert executor._unconfirmed_kill(verdict) in warning
+        assert process_control.unconfirmed_kill(verdict) in warning
         assert "killed" not in warning.replace(f"kill verdict {verdict}", "")
         assert left_running == [(PID, PGID, verdict)]
 

@@ -210,7 +210,7 @@ class WriteReports:
                 })
         if not manual:
             return None
-        from .next_phase import manual_close_note
+        from .manual_tasks import manual_close_note
 
         return manual_close_note(template.replace(
             "{answers}", " ".join(f"--human-task {task_id}=done" for task_id in manual)),

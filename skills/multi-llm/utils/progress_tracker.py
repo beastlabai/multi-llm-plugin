@@ -79,6 +79,9 @@ import time
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from .process_state import process_cache
+# A slot's end states live in status_file, where the result-file reader below
+# this module counts them too; read here and re-exported.
+from .status_file import STATE_DONE, STATE_FAILED, TERMINAL_STATES
 
 # ---------------------------------------------------------------------------
 # The lifecycle
@@ -88,14 +91,8 @@ STATE_QUEUED = "queued"
 STATE_STAGGERING = "staggering"
 STATE_RUNNING = "running"
 STATE_RETRYING = "retrying"
-STATE_DONE = "done"
-STATE_FAILED = "failed"
-
-#: The two states a slot may end in. There is deliberately no ``skipped``: a
-#: model answered from disk is ``done`` — it has a usable result — and the
-#: distinction lives in ``source`` (see :data:`RESUME_SOURCES`), so
-#: ``models_done`` and ``models_succeeded`` stay derivable from ``state`` alone.
-TERMINAL_STATES = frozenset({STATE_DONE, STATE_FAILED})
+# STATE_DONE, STATE_FAILED and TERMINAL_STATES, the end states, are imported
+# above from status_file.
 
 #: Render order for the live half of the map: **reverse** lifecycle, most
 #: advanced state first, so a ticker line opens with the models that are really

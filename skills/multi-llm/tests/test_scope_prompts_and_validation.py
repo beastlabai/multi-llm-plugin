@@ -137,7 +137,7 @@ def _review_plan_main(tmp_path: Path, policy: Any, *, findings=None,
     original = rpo.parse_args
     _release_run_anchor()
     with patch.object(base, "invoke_with_file_output", side_effect=dispatch), \
-            patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0), \
+            patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0), \
             patch.object(rpo, "parse_args", lambda a: ns_with_policy(original(a), policy)):
         try:
             code = asyncio.run(rpo.main(argv))
@@ -231,7 +231,7 @@ class TestReviewPlanAndTasksPrompts:
         for policy in ("preserve", None):
             sent.clear()
             with patch.object(base, "invoke_with_file_output", side_effect=dispatch), \
-                    patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0), \
+                    patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0), \
                     patch.object(rto, "parse_args",
                                  lambda a, p=policy: ns_with_policy(original(a), p)):
                 assert asyncio.run(rto.main([

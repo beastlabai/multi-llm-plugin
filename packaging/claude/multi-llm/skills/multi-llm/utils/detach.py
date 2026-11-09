@@ -709,7 +709,7 @@ def effective_age(run: Dict[str, Any], now: Optional[float] = None) -> Optional[
 def _open_recommendation(phase_dir: str, recommendation: Any) -> Any:
     """*recommendation* (the checkpoint's ``consolidation_recommended``), or
     ``None`` once ``consolidated.json`` was built from the phase's current
-    ``grouped.json`` (:func:`consolidation.consolidation_is_current`).
+    ``grouped.json`` (``output_handler.consolidation_is_current``).
 
     The checkpoint loses the key when the consolidation pass finishes, but one
     written before that rule (or by a pass that failed to rewrite it) still
@@ -718,7 +718,7 @@ def _open_recommendation(phase_dir: str, recommendation: Any) -> Any:
     """
     if not recommendation:
         return recommendation
-    from .consolidation import consolidation_is_current
+    from .output_handler import consolidation_is_current
     try:
         if consolidation_is_current(phase_dir):
             return None
@@ -2623,19 +2623,19 @@ def _drop_entry_hold(key: str, lock: process_control.PhaseLock) -> None:
 
 def _tool_route(host: Optional[str]) -> Optional[str]:
     """The tool route (``modes.TOOL_ROUTES``) this process runs on for *host*,
-    or ``None``: ``next_phase.resolve_route`` over this process's
+    or ``None``: ``routes.resolve_route`` over this process's
     environment, which the tool servers set and a launch's ``child_env``
     carries to the worker; its stderr note is the dispatcher's to print.
     Advisory: anything unreadable records nothing."""
     import io
 
     try:
-        from . import host_capabilities, next_phase
+        from . import host_capabilities, routes
 
-        modes = next_phase._skill_module("modes")
+        modes = routes._skill_module("modes")
         try:
             host_id = host_capabilities.resolve_host_id(explicit=host)
-            route = next_phase.resolve_route(host_id, stderr=io.StringIO())
+            route = routes.resolve_route(host_id, stderr=io.StringIO())
         except host_capabilities.UnknownHost:
             return None  # a host the capability data does not list has no tool route
     except Exception as exc:  # noqa: BLE001 - the record stands without it

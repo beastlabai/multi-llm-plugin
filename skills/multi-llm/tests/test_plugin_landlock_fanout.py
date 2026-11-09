@@ -293,7 +293,7 @@ def fake_codex(scratch, monkeypatch):
     monkeypatch.setenv("FAKE_WRAPPER_LOG", str(log))
     monkeypatch.setenv("FAKE_CODEX_COUNT", str(count))
     monkeypatch.setenv("FAKE_CODEX_STREAM", _stream(HEREDOC_COMMAND))
-    monkeypatch.setattr(base, "PROVIDER_STAGGER_DELAY", 0.0)
+    monkeypatch.setattr("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0)
 
     def wrapper_calls():
         if not log.exists():
@@ -818,7 +818,7 @@ class TestTheIncidentalNotice:
         monkeypatch.setattr(base, "sandbox_refusal", gate)
         monkeypatch.setattr(base, "invoke_with_file_output", invoke)
         monkeypatch.setattr(base, "porcelain_snapshot", lambda *_a, **_k: None)
-        monkeypatch.setattr(base, "PROVIDER_STAGGER_DELAY", 0.0)
+        monkeypatch.setattr("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0)
         argv = [
             "--plan-file", str(scratch["plan"]), "--models", SPEC, "claude-code:sonnet",
             "--skip-validation", "--timeout", "3600", "--max-parallel", "2",

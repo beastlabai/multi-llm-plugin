@@ -43,7 +43,8 @@ from . import task_outcome as _task_outcome
 from . import task_result as _task_result
 from . import runner_selection as _runner_selection
 from . import dispatch_spawn as _dispatch_spawn
-from .write_safety import _REDACTIONS, _replace_group, redact_text
+from . import process_control
+from .redact import _REDACTIONS, _replace_group, redact_text
 
 
 def _classify_pre_parse(capture: _dispatch_spawn._Capture) -> Tuple[str, str]:
@@ -63,7 +64,7 @@ def _classify_pre_parse(capture: _dispatch_spawn._Capture) -> Tuple[str, str]:
         # A's shared `Capture` makes none.
         pid = getattr(capture, "kill_pid", None)
         verdict = getattr(capture, "kill_verdict", None)
-        reason = _dispatch_spawn._unconfirmed_kill(verdict) if pid is not None else None
+        reason = process_control.unconfirmed_kill(verdict) if pid is not None else None
         if reason is not None:
             return STATUS_TIMEOUT, (
                 f"the runner exceeded its per-task timeout and could not be "

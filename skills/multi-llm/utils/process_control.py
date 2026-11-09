@@ -991,6 +991,29 @@ def kill_tree(
                            members, members_complete, child, obligations)
 
 
+#: Timeout-kill verdicts that confirm the runner stopped. Every other outcome
+#: (``survived``, ``unresolved``, ``skipped``, ``None`` for a kill that
+#: raised, any other word) is unconfirmed (:func:`unconfirmed_kill`). One rule
+#: for every timeout kill: the executor's, the verify command's and the
+#: provider client's sweep.
+CONFIRMED_KILLS = ("killed", "gone")
+
+
+def unconfirmed_kill(verdict: Optional[str]) -> Optional[str]:
+    """Why a timeout kill that returned *verdict* did not confirm the runner
+    stopped; ``None`` when it did."""
+    if verdict in CONFIRMED_KILLS:
+        return None
+    if verdict == "survived":
+        return "it was still running after the kill's SIGKILL window"
+    if verdict in ("unresolved", "skipped"):
+        return ("not every process could be identified as this run's child, and "
+                "what could not was not signalled")
+    if verdict is None:
+        return "the kill itself failed"
+    return f"the kill answered {verdict!r}, which confirms nothing"
+
+
 def _kill_by_number(
     pid: int,
     start_time: Optional[str],

@@ -432,7 +432,7 @@ def test_a_deadline_loss_whose_file_stays_is_never_resumed(plan, monkeypatch):
         return await real(self, *args, **kwargs)
 
     monkeypatch.setattr(slot_guard.SlotGuard, "finish", finish)
-    monkeypatch.setattr(rob, "PROVIDER_STAGGER_DELAY", 0.0)
+    monkeypatch.setattr("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0)
     inv = FakeInvoker()
     inv.configure(SPEC, write_file=True, content="Never checked")
     blocking = _blocking_during(inv, partial_of(d, SPEC), d / f"error_{STEM}.log")

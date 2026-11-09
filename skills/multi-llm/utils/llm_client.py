@@ -746,7 +746,7 @@ def _sweep_confirmed(sweep: Optional[process_control.TreeSweep]) -> bool:
 
     The CLI was seen to exit, its Windows job (if any) ended, and every process
     group the sweep met has a kill verdict that confirms a stop under the
-    executor's rule (``dispatch_spawn._unconfirmed_kill``). A sweep that
+    executor's rule (``process_control.unconfirmed_kill``). A sweep that
     raised (``None``), or a rule that cannot be read, confirms nothing.
     """
     if sweep is None or sweep.cli not in _CLI_SEEN_TO_EXIT:
@@ -756,9 +756,7 @@ def _sweep_confirmed(sweep: Optional[process_control.TreeSweep]) -> bool:
     if not sweep.groups:
         return True
     try:
-        from . import dispatch_spawn as _dispatch_spawn
-
-        return all(_dispatch_spawn._unconfirmed_kill(verdict) is None
+        return all(process_control.unconfirmed_kill(verdict) is None
                    for verdict in sweep.groups.values())
     except Exception:  # noqa: BLE001 - unknown is unconfirmed
         return False

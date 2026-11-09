@@ -382,7 +382,7 @@ class DiffAccess(NamedTuple):
     read_scope: str
     #: The adapter's ``runs_shell_in_generate`` (``None`` for an unknown one).
     #: Not spelled ``shell``: a ``shell: <value>`` line is the identity-text
-    #: shape ``write_safety.redact_text`` redacts (``tests/test_redaction.py``'s
+    #: shape ``redact.redact_text`` redacts (``tests/test_redaction.py``'s
     #: source-tree tripwire).
     runs_shell: Optional[bool]
     #: UTF-8 size of the inline block measured against

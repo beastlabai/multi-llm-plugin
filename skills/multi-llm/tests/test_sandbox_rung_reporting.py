@@ -203,7 +203,7 @@ def _run_review_plan(tmp_path, monkeypatch, rung, *, prior_served=None):
     with patch("shutil.which", return_value="/usr/bin/codex"), \
          patch("utils.llm_client.subprocess.run", side_effect=fake_run), \
          patch.object(base, "invoke_with_file_output", side_effect=recording_invoke), \
-         patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+         patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
         exit_code = asyncio.run(rpo.main(argv))
     assert exit_code == 0
     return Path(phase_dir), seen

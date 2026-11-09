@@ -44,7 +44,8 @@ import modes as mode_table  # noqa: E402
 import multi_llm  # noqa: E402  (side-effect free at import: main() does the work)
 from utils import (  # noqa: E402
     cli_common, commit_front_door, commit_range, detach, host_capabilities,
-    next_phase, provider_registry, subagent_executor, subagent_tasks, unattended,
+    next_phase, positionals, provider_registry, subagent_executor, subagent_tasks,
+    unattended,
 )
 
 #: The token a generated artifact carries in place of an absolute skill dir.
@@ -303,16 +304,16 @@ def _revs_block() -> Dict[str, Any]:
     """The surface's ``revs`` block (schema v6): everything a server needs to
     compose and read the commit modes' range, so it spells none of it."""
     return {
-        # `multi_llm._RANGE_COUNT_WORD`: on a range mode a word that fully
+        # `positionals.RANGE_COUNT_WORD`: on a range mode a word that fully
         # matches this continues the leading bare-word run instead of ending
         # it, so it is the one range word a server lets start with "-".
-        "count_word": multi_llm._RANGE_COUNT_WORD.pattern,
-        # `multi_llm._COMMIT_BRIEF_SUFFIX`: a commit brief's path ends in it
-        # (`_names_a_commit_brief` asks no other word), so a `revs` value that
+        "count_word": positionals.RANGE_COUNT_WORD.pattern,
+        # `positionals.COMMIT_BRIEF_SUFFIX`: a commit brief's path ends in it
+        # (`names_a_commit_brief` asks no other word), so a `revs` value that
         # ends in it travels as one argv element and a brief path holding a
         # space still reaches the dispatcher as the one word it turns into
         # `--plan-file`.
-        "brief_suffix": multi_llm._COMMIT_BRIEF_SUFFIX,
+        "brief_suffix": positionals.COMMIT_BRIEF_SUFFIX,
         "plan_refusal": _revs_plan_refusal(),
         "pinned": _pinned_shape(),
         "range_key": _RESULT_RANGE_KEY,

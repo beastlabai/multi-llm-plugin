@@ -27,7 +27,7 @@ A wildcard import of a skill module fails
 ``test_no_wildcard_import_of_a_skill_module``.
 
 Dynamic imports are calls of ``importlib.import_module``, ``__import__`` and
-``next_phase._skill_module``, or of an alias of one, found in the syntax tree
+``routes._skill_module``, or of an alias of one, found in the syntax tree
 under the same rules, so comments and strings never make an edge. A call with
 literal arguments is an edge like any import, relative
 ``import_module(".x", package=...)`` and ``__import__(..., level=1)``
@@ -82,11 +82,13 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.providers.result_envelope",
         "utils.providers.stdout_shape",
         "utils.providers.types",
+        "utils.redact",
         "utils.report_markdown",
         "utils.retry_ladder",
         "utils.schema_validator",
         "utils.scope_policy",
         "utils.stream_bootstrap",
+        "utils.tasks_marker",
         "utils.text_clip",
         "utils.text_fmt",
         "utils.yaml_io",
@@ -94,6 +96,9 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
     1: ("state", (
         "utils.cli_common",
         "utils.cli_version_cache",
+        # The commit-range grammar: git and rendering only, read by the
+        # provider prompts (the pinned-head read rule) and every layer above.
+        "utils.commit_range",
         "utils.git_diff",
         "utils.git_utils",
         "utils.host_capabilities",
@@ -101,10 +106,12 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.host_routes",
         "utils.host_routes.*",
         "utils.host_shim",
+        "utils.manual_tasks",
         "utils.metrics",
         "utils.output_handler",
         "utils.review_diff",
         "utils.review_round",
+        "utils.routes",
         "utils.run_registry",
         "utils.state_file",
         "utils.state_manager",
@@ -117,6 +124,9 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.landlock_dispatch",
         "utils.landlock_exec",
         "utils.llm_client",
+        # The per-process runner caches both lanes share: the provider
+        # client (L2) reads them, and they import nothing above L2.
+        "utils.probe_state",
         "utils.prompt_channels",
         "utils.provider_outcome",
         "utils.provider_registry",
@@ -140,9 +150,12 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.check_reply",
         "utils.check_tree",
         "utils.code_fix_batcher",
+        # The commit review's apply guard, which the write legs re-check before
+        # each batch (commit_write_guard); it imports nothing above L3.
+        "utils.commit_apply",
         "utils.commit_paths",
-        "utils.commit_range",
         "utils.commit_write_guard",
+        "utils.concurrency",
         "utils.detach",
         "utils.dispatch_spawn",
         "utils.failure_capture",
@@ -151,7 +164,6 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.known_checks",
         "utils.plan_updater",
         "utils.prior_changes",
-        "utils.probe_state",
         "utils.progress_tracker",
         "utils.report_check",
         "utils.restore_batch",
@@ -171,6 +183,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.task_outcome",
         "utils.task_result",
         "utils.tasks_file",
+        "utils.tracking",
         "utils.validation_batcher",
         "utils.verification_lines",
         "utils.wakeup_check",
@@ -203,7 +216,6 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.apply_selection_helpers",
         "utils.apply_suggestion_phase",
         "utils.backup",
-        "utils.commit_apply",
         "utils.commit_attribution",
         "utils.commit_report",
         "utils.commit_spelling",
@@ -212,6 +224,8 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.filtering",
         "utils.html_report_generator",
         "utils.interactive",
+        "utils.next_phase_words",
+        "utils.positionals",
         "utils.prompt_loader",
         "utils.report_parser",
         "utils.report_view",
@@ -259,73 +273,20 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
 #: (importer, target) -> what crosses the edge and where it belongs instead.
 #: Delete an entry once its edge is gone; never add one without a reason.
 KNOWN_UPWARD: Dict[Tuple[str, str], str] = {
-    # Redaction and the state home live in the 2,500-line write_safety (L3).
-    ("utils.landlock_dispatch", "utils.write_safety"):
-        "state_home: belongs in output_handler (L1)",
-    ("utils.provider_outcome", "utils.write_safety"):
-        "redact_text: belongs in a leaf redaction module that write_safety re-imports",
-    ("utils.providers.codex_stream_audit", "utils.write_safety"):
-        "redact_text: belongs in a leaf redaction module that write_safety re-imports",
-    ("utils.providers.cursor_agent", "utils.write_safety"):
-        "redact_text: belongs in a leaf redaction module that write_safety re-imports",
-    # Small helpers and constants in the wrong house.
-    ("utils.task_dispatch", "utils.review_orchestrator_base"):
-        "get_backoff_delay: belongs in a concurrency module at L3",
-    ("utils.task_batch", "utils.review_orchestrator_base"):
-        "run_tasks_concurrent: belongs in a concurrency module at L3",
-    ("utils.provider_registry", "utils.run_status"):
-        "WAIT_POLL_INTERVAL_S: belongs in status_file (L1)",
-    ("utils.output_handler", "utils.plan_updater"):
-        "get_tasks_file_path: belongs in output_handler itself",
-    ("utils.result_files", "utils.progress_tracker"):
-        "STATE_DONE, TERMINAL_STATES: belong in status_file (L1)",
-    ("utils.llm_client", "utils.probe_state"):
-        "_VERSION_CACHE, _PROBE_VERSION_CACHE: belong in providers.base",
-    ("utils.llm_client", "utils.dispatch_spawn"):
-        "_unconfirmed_kill: belongs in process_control, beside kill_tree's verdicts",
-    ("utils.providers.result_envelope", "utils.providers.base"):
-        "STATUS_* are defined in retry_ladder (L0); the two CATEGORY_* constants belong there too",
-    ("utils.commit_front_door", "multi_llm"):
-        "_split_positionals, _revs_flags: belong in modes or cli_common",
-    # The run record lives in detach (L3).
+    # The run record lives in detach (L3): its writers dispatch through the
+    # active RunHandle (detach._ACTIVE).
     ("utils.result_files", "utils.detach"):
-        "report_progress: belongs in a run-record module at L1",
+        "report_progress: belongs in a run-record module at L1, with _ACTIVE",
     ("utils.unattended", "utils.detach"):
-        "record_resolution: belongs in a run-record module at L1",
+        "record_resolution: belongs in a run-record module at L1, with _ACTIVE",
     ("utils.run_registry", "utils.detach"):
-        "close_out_dead_run: the sweep should take it as an argument from its CLI",
-    ("utils.detach", "utils.consolidation"):
-        "consolidation_is_current: a hash comparison that belongs in output_handler (L1)",
-    # next_phase (L6) also holds words the lower layers need.
-    ("utils.cli_common", "utils.next_phase"):
-        "recorded_plan_spelling: belongs in a routes module at L1, with resolve_route",
-    ("utils.detach", "utils.next_phase"):
-        "resolve_route, _skill_module: belong in a routes module at L1",
-    ("utils.write_stop", "utils.next_phase"):
-        "manual_gate_why, manual_gate_decline_answers: "
-        "belong in a manual-tasks module at L3",
-    ("utils.write_reports", "utils.next_phase"):
-        "manual_close_note: belongs in a manual-tasks module at L3",
-    ("utils.stop_answers", "utils.next_phase"):
-        "MAX_RECORDED_WHY_CHARS: belongs in a manual-tasks module at L3",
-    ("utils.apply_orchestrator_base", "utils.next_phase"):
-        "resolve_route, phase_command: belong in routes (L1) and a command-words module at L4",
-    ("implement_orchestrator", "utils.next_phase"):
-        "after_code_note, close_command, manual_close_note, phase_command, resolve_route: "
-        "belong in routes, manual-tasks and command-words modules",
-    ("full_workflow_orchestrator", "utils.next_phase"):
-        "commit_mode_word, commit_view_for: belong in a command-words module at L4",
-    # The scheduler's verify step reaches up for tracking, its commit-guard helpers for the guard.
-    ("utils.write_verify", "finalize_tracking"):
-        "the tracking body: belongs in a utils module; the script stays a thin CLI",
-    ("utils.commit_write_guard", "utils.commit_apply"):
-        "save_guard, recheck_files, repin_after_batch and the rest of the commit guard: "
-        "belong in this commit-guard module at L3",
-    # The front door (L5) also holds the stage a detached worker applies.
+        "close_out_entry, stop_recorded_run: the sweep should take them as arguments "
+        "from its CLI",
+    # The front door (L5) also holds the stage a detached worker applies; the
+    # stage's brief writer (commit_brief) reaches apply_code_fixes_orchestrator.
     ("utils.detach", "utils.commit_front_door"):
-        "apply_stage, stage_takes_over: belong in a commit-stage module at L3",
-    ("utils.prompt_channels", "utils.commit_range"):
-        "pinned_head_read_rule: belongs in a commit-paths module, or becomes a parameter",
+        "apply_stage, stage_takes_over: belong in a commit-stage module at L3, or come "
+        "in from the orchestrator that names the stage",
 }
 
 
@@ -344,7 +305,7 @@ COMPUTED_IMPORTS: Dict[Tuple[str, str], Tuple[Tuple[str, ...], str]] = {
         ("*_orchestrator",),
         "run_mode loads the orchestrator of each workflow step from the modes table",
     ),
-    ("utils.next_phase", "importlib.import_module(name)"): (
+    ("utils.routes", "importlib.import_module(name)"): (
         (),
         "the body of _skill_module, whose callers pass literal names: each "
         "_skill_module(\"x\") call is an edge of its caller",
@@ -392,7 +353,7 @@ class Graph:
 
 
 #: Callables that import the module a string names. ``_skill_module`` is
-#: ``utils/next_phase.py``'s wrapper around ``importlib.import_module``.
+#: ``utils/routes.py``'s wrapper around ``importlib.import_module``.
 _LOADERS = ("import_module", "__import__", "_skill_module")
 _PARAMETERS = {
     "import_module": ("name", "package"),

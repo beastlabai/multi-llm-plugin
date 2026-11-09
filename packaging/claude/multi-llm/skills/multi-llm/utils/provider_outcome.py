@@ -33,6 +33,7 @@ from .providers.base import (
     sandbox_rung_id,
 )
 from .providers.result_envelope import is_clean_envelope
+from .redact import redact_text
 from .retry_ladder import STATUS_TIMEOUT, STATUS_UNPARSEABLE
 
 
@@ -170,16 +171,10 @@ MAX_LOG_STREAM_BYTES = 45 * 1024
 
 
 def _redact(text: str) -> str:
-    """The one redaction boundary (``write_safety.redact_text``), imported late.
-
-    ``write_safety`` reaches this module through ``subagent_tasks`` and
-    ``llm_client``, so a module-level import here would close an import cycle;
-    this is the late import for the modules on that path (``llm_client`` and
-    the fan-out lanes read it from here). A module off that path imports
-    ``redact_text`` directly. Callers redact before any tail or cut. The call
-    is on a per-invocation path, not a per-line one.
+    """The one redaction boundary (``redact.redact_text``), as ``llm_client``
+    and the fan-out lanes read it from here. Callers redact before any tail or
+    cut. The call is on a per-invocation path, not a per-line one.
     """
-    from .write_safety import redact_text
     return redact_text(text)
 
 

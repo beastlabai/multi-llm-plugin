@@ -5,7 +5,7 @@ Nine realistic secret shapes planted in provider output landed **unredacted** in
 ``log_*.txt`` on a *successful* run, in ``failed/*.attemptN.json``, in
 ``subagent_batch_report.json`` and in the exit-3 stdout block that becomes
 ``orchestrator-run.log`` under ``--detach``. One boundary closes all four:
-``write_safety.redact_text``.
+``redact.redact_text``.
 
 Three ship gates, per §4.5.4:
 
@@ -45,8 +45,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from utils import llm_client, subagent_executor, write_safety  # noqa: E402
-from utils.write_safety import redact_argv, redact_text  # noqa: E402
+from utils import llm_client, redact, subagent_executor, write_safety  # noqa: E402
+from utils.redact import redact_argv, redact_text  # noqa: E402
 
 # The synthesized-vector table is shared with the committed-secret suite so the
 # two cannot drift in their fixtures (§4.5.5). Nothing here is a committed literal
@@ -71,7 +71,7 @@ _RNG = random.Random("multi-llm redaction recall")
 
 #: The charset for the two hex vectors below. A 32-char lowercase-hex token
 #: carries no vendor prefix, so its charset *is* its shape — and it is also what
-#: ``write_safety._looks_like_credential`` gates on (a digit, a case mix, or one
+#: ``redact._looks_like_credential`` gates on (a digit, a case mix, or one
 #: of ``-_./+=``), which is why the alphabet is named rather than improvised.
 _HEX = string.digits + "abcdef"
 
@@ -496,7 +496,7 @@ class TestAKeyGluedToAPrecedingWordCharacterIsStillRedacted:
         glue_tolerant = {
             "pem-private-key", "identity-json", "identity-text", "secret-kv",
         }
-        names = {name for name, _, _, _ in write_safety._REDACTIONS}
+        names = {name for name, _, _, _ in redact._REDACTIONS}
         assert names == covered | anchored_on_purpose | glue_tolerant, (
             "a _REDACTIONS row is not adjudicated for left-anchoring. Add it to "
             "GLUED_SHAPES (re-anchored), to anchored_on_purpose (ambiguous prefix, "
@@ -545,7 +545,7 @@ _SECRET_KV_BEFORE_2026_09_22 = re.compile(
     r"([^\s\"',;]{8,})"
 )
 
-_SECRET_KV_NOW = {name: pattern for name, pattern, _g, _p in write_safety._REDACTIONS}[
+_SECRET_KV_NOW = {name: pattern for name, pattern, _g, _p in redact._REDACTIONS}[
     "secret-kv"
 ]
 
@@ -555,11 +555,11 @@ def _secret_kv_redacted_indices(pattern, text):
     covered = set()
 
     def _sub(match):
-        if not write_safety._looks_like_credential(match.group(1)):
+        if not redact._looks_like_credential(match.group(1)):
             return match.group(0)
         start, end = match.span(1)
         covered.update(range(start, end))
-        return write_safety._replace_group(match, 1, "secret-kv")
+        return redact._replace_group(match, 1, "secret-kv")
 
     pattern.sub(_sub, text)
     return covered
@@ -1321,7 +1321,7 @@ def _linearity_payload(unit: str) -> str:
 _LINEARITY_CASES = [
     (f"{name} on {label}", name, pattern, unit)
     for label, unit in LINEARITY_PAYLOADS
-    for name, pattern, _group, _predicate in write_safety._REDACTIONS
+    for name, pattern, _group, _predicate in redact._REDACTIONS
 ]
 
 
@@ -1339,7 +1339,7 @@ class TestRedactTextIsLinearOnAMegabyteStream:
         exception list is how a quadratic row stays shipped, so the assertion
         that there is none is itself a test.
         """
-        rows = {name for name, _, _, _ in write_safety._REDACTIONS}
+        rows = {name for name, _, _, _ in redact._REDACTIONS}
         covered = {name for _case, name, _pattern, _unit in _LINEARITY_CASES}
         assert covered == rows, (
             f"rows missing from the linearity guard: {sorted(rows - covered)}. "
@@ -1391,11 +1391,39 @@ class TestRedactTextIsLinearOnAMegabyteStream:
 # ---------------------------------------------------------------------------
 
 
-def test_redact_text_lives_in_write_safety_beside_redact_argv():
-    """One helper, one module — never a fourth pattern language in a new file."""
-    assert callable(write_safety.redact_text)
-    assert "redact_text" in write_safety.__all__
-    assert not (SKILL_DIR / "utils" / "redact.py").exists(), (
-        "§4.5.5: redact_text lands beside redact_argv in write_safety.py; splitting "
-        "them into separate modules is the shape that subsection argues against"
-    )
+def _defines(path, name):
+    import ast
+
+    for node in ast.parse(path.read_text(encoding="utf-8")).body:
+        if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name == name:
+            return True
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(isinstance(t, ast.Name) and t.id == name for t in targets):
+                return True
+    return False
+
+
+def test_redact_text_lives_beside_redact_argv_in_one_leaf_module():
+    """One helper, one module — never a fourth pattern language in a new file.
+
+    ``utils/redact.py`` holds the table, :func:`redact_text` and
+    :func:`redact_argv`, and imports nothing from the skill, so every layer can
+    redact through it (docs/development/dispatcher.md#import-layers);
+    ``write_safety`` re-exports the same two functions."""
+    import ast
+
+    tree = ast.parse((SKILL_DIR / "utils" / "redact.py").read_text(encoding="utf-8"))
+    skill_imports = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and (node.level or (node.module or "").startswith("utils"))
+    ]
+    assert skill_imports == []
+    assert write_safety.redact_text is redact.redact_text
+    assert write_safety.redact_argv is redact.redact_argv
+    assert {"redact_text", "redact_argv"} <= set(write_safety.__all__)
+    for name in ("_REDACTIONS", "redact_text", "redact_argv"):
+        owners = [path.relative_to(SKILL_DIR).as_posix()
+                  for path in sorted((SKILL_DIR / "utils").rglob("*.py"))
+                  if _defines(path, name)]
+        assert owners == ["utils/redact.py"], (name, owners)

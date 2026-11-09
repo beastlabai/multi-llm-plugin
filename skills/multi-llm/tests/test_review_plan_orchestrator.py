@@ -80,7 +80,7 @@ def _run_review_plan(tmp_path: Path, models=("cursor-agent:auto",)):
     with patch.object(
         base, "invoke_with_file_output",
         side_effect=lambda **kwargs: _ok_reply(kwargs["model_spec"]),
-    ), patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+    ), patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
         exit_code = asyncio.run(rpo.main(argv))
     phase_dir = base.get_phase_dir(plan, "review-plan")
     return plan, phase_dir, exit_code
@@ -146,7 +146,7 @@ class TestPhaseStateReachesComplete:
         }
         with patch.object(
             base, "invoke_with_file_output", side_effect=lambda **kwargs: dict(empty_reply)
-        ), patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+        ), patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             exit_code = asyncio.run(rpo.main(argv))
 
         assert exit_code == 0
@@ -242,7 +242,7 @@ def _run_with_validation(tmp_path: Path, threshold: int):
         with patch.object(
             base, "invoke_with_file_output",
             side_effect=lambda **kwargs: _three_findings(kwargs["model_spec"]),
-        ), patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0), \
+        ), patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0), \
                 patch.object(base, "dispatch_subagent_tasks", new=_dispatch), \
                 patch.object(base, "merge_validation_batches", new=_merged):
             exit_code = asyncio.run(rpo.main(argv))
@@ -342,7 +342,7 @@ class TestTheRetiredInternalValidationFlag:
             with patch.object(
                 base, "invoke_with_file_output",
                 side_effect=lambda **kwargs: _three_findings(kwargs["model_spec"]),
-            ), patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+            ), patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
                 exit_code = asyncio.run(rpo.main(argv))
         finally:
             cli_common.deactivate_result()
@@ -424,7 +424,7 @@ class TestTheFanOutReportsProgressWhileItRuns:
 
         with patch.object(
             base, "invoke_with_file_output", side_effect=dispatch,
-        ), patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0), patch.object(
+        ), patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0), patch.object(
             base._detach, "report_progress", record
         ):
             assert asyncio.run(rpo.main(argv)) == 0
@@ -673,7 +673,7 @@ class TestTheHighPriorityGroupCountReachesTheHost:
         context = cli_common.activate_result(cli_common.ResultContext())
         try:
             with patch.object(base, "invoke_with_file_output", side_effect=reply), \
-                    patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+                    patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
                 assert asyncio.run(rpo.main(argv)) == 0
         finally:
             cli_common.deactivate_result()
@@ -808,7 +808,7 @@ class TestTheMapIsCompleteBeforeTheFirstSlotStarts:
         with _fast_ticker() as emitted, patch.object(
             base, "invoke_with_file_output",
             side_effect=lambda **kwargs: _ok_reply(kwargs["model_spec"]),
-        ), patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0), patch.object(
+        ), patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0), patch.object(
             base._detach, "report_progress", record
         ):
             assert asyncio.run(rpo.main(argv)) == 0
@@ -877,7 +877,7 @@ class TestTheMapIsCompleteBeforeTheFirstSlotStarts:
         with _fast_ticker(), patch.object(
             base, "invoke_with_file_output",
             side_effect=lambda **kwargs: _ok_reply(kwargs["model_spec"]),
-        ), patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0), patch.object(
+        ), patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0), patch.object(
             base._detach, "report_progress", record
         ):
             assert asyncio.run(rpo.main(argv)) == 0
@@ -941,7 +941,7 @@ class TestAResumedRunDoesNotReportSkippedModelsAsPending:
         with patch.object(
             base, "invoke_with_file_output",
             side_effect=lambda **kwargs: _ok_reply(kwargs["model_spec"]),
-        ), patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+        ), patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             assert asyncio.run(rpo.main(argv)) == 0
         return base.get_phase_dir(plan, "review-plan")
 
@@ -1038,7 +1038,7 @@ class TestASlotWaitingOnTheSemaphoreReadsQueued:
             release.set()
             await task
 
-        with patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+        with patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             asyncio.run(drive())
 
         assert seen["head"] == "running", seen
@@ -1087,7 +1087,7 @@ class TestTheStaggeringRowCarriesItsCountdown:
             return {"success": True, "source": "file"}
 
         from tests.launch_timeline import run_on_virtual_clock
-        with patch.object(base, "PROVIDER_STAGGER_DELAY", 0.02), \
+        with patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.02), \
                 patch.object(tracker, "staggering", spy):
             run_on_virtual_clock(base.run_models_concurrent(
                 list(self.MODELS), factory, 30, 3, tracker=tracker
@@ -1172,7 +1172,7 @@ class TestEveryEndingRetiresEverySlot:
             await asyncio.sleep(30)
             return {"success": True, "source": "file"}
 
-        with patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+        with patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             results = asyncio.run(base.run_models_concurrent(
                 list(self.MODELS), straggle, 0.05, 4, tracker=tracker
             ))
@@ -1210,7 +1210,7 @@ class TestEveryEndingRetiresEverySlot:
                 await asyncio.sleep(30)
             return {"success": True, "source": "file"}
 
-        with patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+        with patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             results = asyncio.run(base.run_models_concurrent(
                 list(self.MODELS), one_answers_one_straggles, 0.05, 4,
                 tracker=tracker,
@@ -1241,7 +1241,7 @@ class TestEveryEndingRetiresEverySlot:
                 raise RuntimeError("provider exploded")
             return {"success": True, "source": "file"}
 
-        with patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+        with patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             results = asyncio.run(base.run_models_concurrent(
                 list(self.MODELS), one_explodes, 60, 4, tracker=tracker
             ))
@@ -1283,7 +1283,7 @@ class TestEveryEndingRetiresEverySlot:
             except asyncio.CancelledError:
                 pass
 
-        with patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+        with patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             asyncio.run(drive())
 
         snapshot = self._assert_agrees_with_the_report(tracker, {})
@@ -1362,7 +1362,7 @@ class TestAnInProcessSalvageMovesTheMapWithTheReport:
         ]
         with patch.object(base, "run_all_models", new=fake_run_all_models), \
              patch.object(base, "dispatch_salvage_tasks", new=fake_salvage), \
-             patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+             patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             assert asyncio.run(rpo.main(argv)) == 0
 
         status = status_file.read_status(str(phase_dir))
@@ -1649,7 +1649,7 @@ class TestThePhaseTickerOutlivesTheFanOut:
         with _realtime_ticker() as emitted, patch.object(
             base, "invoke_with_file_output",
             side_effect=lambda **kwargs: _ok_reply(kwargs["model_spec"]),
-        ), patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0), patch.object(
+        ), patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0), patch.object(
             base, "dispatch_subagent_tasks", new=blocking_dispatch
         ), patch.object(
             base, "merge_validation_batches", new=merged
@@ -1768,7 +1768,7 @@ class TestThePhaseTickerOutlivesTheFanOut:
             base, "run_all_models", new=fake_run_all_models
         ), patch.object(
             base, "dispatch_salvage_tasks", new=blocking_salvage
-        ), patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+        ), patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             assert asyncio.run(rpo.main(argv)) == 0
 
         assert window, "the in-process salvage was never reached"
@@ -1812,7 +1812,7 @@ class TestThePhaseTickerOutlivesTheFanOut:
         with _fast_ticker() as emitted, patch.object(
             base, "invoke_with_file_output",
             side_effect=lambda **kwargs: _ok_reply(kwargs["model_spec"]),
-        ), patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+        ), patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             assert asyncio.run(rpo.main(argv)) == 0
 
         phase_dir = base.get_phase_dir(plan, "review-plan")
@@ -1844,7 +1844,7 @@ class TestThePhaseTickerOutlivesTheFanOut:
         with patch.object(
             base, "invoke_with_file_output",
             side_effect=lambda **kwargs: _ok_reply(kwargs["model_spec"]),
-        ), patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+        ), patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             assert asyncio.run(rpo.main(
                 common + ["--models", "cursor-agent:auto"]
             )) == 0

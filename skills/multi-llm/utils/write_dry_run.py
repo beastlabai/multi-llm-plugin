@@ -3,7 +3,7 @@
 :class:`DryRunReport` walks the phase's batches as the loop would and writes
 ``subagent_dry_run.json`` (:meth:`DryRunReport.write`): per task, the runner it
 resolves to, the exact argv rendered (the prompt replaced by its hash,
-``write_safety.redact_argv``), the prompt transport, the profile, its co-schedule
+``redact.redact_argv``), the prompt transport, the profile, its co-schedule
 group under the disjointness admission, the runner preflight under the phase's
 grant and the rung it recorded, and the write policy's verdict on its declared
 files, then the ceilings. It starts no child and writes nothing else, which is

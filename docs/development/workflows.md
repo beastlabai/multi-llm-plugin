@@ -186,7 +186,8 @@ WARNING-and-parse-the-plan fallback, which fabricated 18 tasks titled ". Overvie
 `camera.update` declared as a file to create (measured 2026-09-16); only a plan with **no**
 marker at all (the legacy embedded-task format) still parses its own content.
 
-The marker has one reader, `utils/tasks_file.py`: `TASKS_FILE_MARKER_PATTERN` (whitespace
+The marker has one reader, `utils/tasks_marker.py` (text only; `utils/tasks_file.py` re-exports it
+and does the rest): `TASKS_FILE_MARKER_PATTERN` (whitespace
 inside the comment tolerated and the value may be empty, since a reader that misses a marker
 parses the plan's prose), `tasks_marker_spans` (the markers that count: none inside a fenced
 code block or inline code, which are examples of the syntax), `tasks_marker` (the first one's
@@ -207,7 +208,7 @@ the task list goes through `read_task_list`: implement (a refusal is the same ex
 known-checks task list. `find_tasks_file` (review-tasks, apply-task-suggestions,
 code-review) keeps its exit 1 for a refusal. Readers that only *name* the file — the
 workflow-file exclusions in `output_handler`, the code-fix batcher's do-not-edit list —
-use `tasks_marker` (through `plan_updater.get_tasks_file_path`) without the containment, since naming one file too many is the
+use `tasks_marker` (directly, or through `plan_updater.get_tasks_file_path`) without the containment, since naming one file too many is the
 conservative side there. Until 2026-11-08 implement read the marker with a second pattern
 that wanted exactly one space after `<!--`, so `<!--TASKS_FILE: …-->` turned the plan's
 `## 1. Overview` headings into tasks, and it opened `../` paths review-tasks refused; every

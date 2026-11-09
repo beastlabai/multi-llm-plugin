@@ -893,7 +893,7 @@ used as it is and never removed.
   dispatch started has ended. The scope holds a `process_control.child_ledger`, which
   `popen_tree` adds each child to. A child has ended when it was seen to exit, or when its spawner
   confirmed the stop (`process_control.note_stop`): the CLI gone and every process group the stop
-  reached `killed` or `gone`, U77's rule (`subagent_executor._unconfirmed_kill`; the executor's
+  reached `killed` or `gone`, U77's rule (`process_control.unconfirmed_kill`; the executor's
   `_kill_timed_out` applies it, its own zombie counting as stopped, and Lane A's
   `llm_client._stop_and_note` applies it to the sweep's groups). Any other stop (`survived`,
   `unresolved`, `skipped`, a kill that raised, a Windows job not ended) keeps the roots, `0700` and

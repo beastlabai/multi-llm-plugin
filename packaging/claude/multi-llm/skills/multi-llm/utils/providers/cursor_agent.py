@@ -977,15 +977,15 @@ def _probe_object(text: str) -> Optional[Dict[str, Any]]:
 def redact_probe_output(text: str) -> str:
     """The redaction, applied at the probe boundary.
 
-    Imported late for the same reason ``provider_outcome._redact`` does it: the
-    redaction module must never become an import-time dependency of an adapter.
-    A redactor that cannot be imported must not silently return the raw
-    envelope, so the fallback drops the text rather than leaking it.
+    Imported late: the redaction module must never become an import-time
+    dependency of an adapter. A redactor that cannot be imported must not
+    silently return the raw envelope, so the fallback drops the text rather
+    than leaking it.
     """
     if not text:
         return ""
     try:
-        from ..write_safety import redact_text
+        from ..redact import redact_text
     except Exception:  # pragma: no cover - a diagnostic never leaks on failure
         return "<redacted:probe-output>"
     return redact_text(text)

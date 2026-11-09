@@ -24,6 +24,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from . import concurrency as _concurrency
 from . import host_capabilities as caps
 from .provider_registry import (
     SESSION_LAYER,
@@ -872,11 +873,6 @@ async def _gather(
     skipped or refused by the fatal gate alike — from this loop and nowhere
     else, which is what lets :func:`run_tasks` mirror progress without a lock.
     """
-    # Imported here: `review_orchestrator_base` sits a layer above (an edge in
-    # tests/test_import_layers.py KNOWN_UPWARD), and a top-level import would load
-    # the review stack with the executor.
-    from .review_orchestrator_base import run_tasks_concurrent
-
     # One flag for the whole batch, consulted at slot-acquisition time — so a
     # task already inside `dispatch_task` when it flips runs to its own verdict,
     # and everything that reaches it afterwards spawns nothing. `spec` is the
@@ -1022,7 +1018,7 @@ async def _gather(
             result_sha256=hashlib.sha256(found).hexdigest(),
         ))
 
-    return await run_tasks_concurrent(
+    return await _concurrency.run_tasks_concurrent(
         list(tasks),
         per_task,
         runner_for_task=lambda task: runners[str(task.get("task_id", ""))],

@@ -1,7 +1,7 @@
 """What the executor writes about a run, and the redaction every one of
 those writes goes through first.
 
-``write_safety.redact_text`` (the one redactor, imported here and applied
+``redact.redact_text`` (the one redactor, imported here and applied
 before any tail or cut) and :func:`_redact_json` (the same over a JSON
 payload), :func:`_redact_probe_tail` (the boundary a probe's
 stream crosses before it reaches a message), :func:`_atomic_write_json`
@@ -28,10 +28,10 @@ from .held_folder import plan_dir_of, write_in_plan_dir
 from .retry_ladder import (  # noqa: F401 - re-exported, see below
     RUNG_BY_STATUS,
 )
+from .redact import redact_text
 from .write_safety import (
     WriteSafetyError,
     contain_local_path,
-    redact_text,
     rename_below_root,
     write_below_root,
 )

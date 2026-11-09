@@ -1091,10 +1091,11 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         try:
             from . import detach as _detach
             from . import host_capabilities as _hosts
-            from . import next_phase as _next
+            from . import next_phase_words as _words
+            from . import routes as _routes
 
             host_id = _hosts.resolve_host_id(explicit=getattr(self.args, "host", None))
-            route = _next.resolve_route(host_id)
+            route = _routes.resolve_route(host_id)
             handle = _detach.active_run()
             plan_arg = (
                 (handle.plan_arg if handle is not None else None)
@@ -1103,7 +1104,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             )
             word = self.confirmation_phase_name or self.phase_name
             return {
-                "skip": _next.phase_command(
+                "skip": _words.phase_command(
                     plan_arg, host_id, route, word,
                     "--resume", "--human-task", "{task_id}=skip",
                 ),

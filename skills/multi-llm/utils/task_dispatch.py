@@ -42,6 +42,7 @@ import time
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
+from . import concurrency as _concurrency
 from . import structured_output
 from .launch_limiter import attempt_turn_blocking
 from .llm_client import (
@@ -2102,11 +2103,7 @@ def _apply_backoff_hook(delay: float) -> float:
     ``MULTI_LLM_TEST_FAST_BACKOFF`` and an exact 10 ms under it — a jittered test
     suite would be both slower and nondeterministic.
     """
-    # Imported here: `review_orchestrator_base` sits a layer above (an edge in
-    # tests/test_import_layers.py KNOWN_UPWARD), and a top-level import would load
-    # the review stack with the executor.
-    from .review_orchestrator_base import get_backoff_delay
-    return get_backoff_delay(delay)
+    return _concurrency.get_backoff_delay(delay)
 
 
 def _safe_parse_usage(provider: Any, capture: _dispatch_spawn._Capture) -> Optional[Dict[str, Any]]:

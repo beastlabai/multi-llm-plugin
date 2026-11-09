@@ -319,7 +319,7 @@ class TestASlotExceptionIsAnError:
         specs = ["cursor-agent:auto"]
         with patch.object(cro, "invoke_with_file_output", invoke), \
              patch.object(cro, "get_project_root", lambda _p: str(tmp_path)), \
-             patch.object(rob, "PROVIDER_STAGGER_DELAY", 0.0):
+             patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             results = asyncio.run(
                 cro.run_all_reviews(specs, plan_path, tmp_path / "out", 30, 2)
             )

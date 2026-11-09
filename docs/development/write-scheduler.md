@@ -51,7 +51,7 @@ imports the scheduler:
 | `utils/write_resume.py` | `ResumeEvidence`, what an earlier run left: whether a result counts as done (`done_evidence`, `result_counts_as_done`, `sibling_results`, `retire_foreign_result`), the inputs binding (`task_fingerprint`, `record_fingerprint`, `WRITE_FINGERPRINT_FILENAME`), the earlier report's rows of this review cycle (`earlier_report_rows`, `review_completed_at`, `REVIEW_PHASE_BY_WRITE_KIND`), the `--human-task <batch>=skip` answers it can keep (`check_partial_skips`, `partial_skip_evidence`, `kept_at_request`, `refused_skips`), and the `resume: kept` line (`report_resume_tally`, `resume_kept_rows`, `resume_answered_ids`). Writes only its inputs binding. |
 | `utils/write_grant.py` | `WriteGrant`, what the phase does with its one grant (plan step 3, F1 "How a dispatch receives its grant"): the target and the request made at construction (`checked_write_target`, `build_jail_request`), the pre-dispatch check that a task declares exactly the grant (`grant_mismatch`), the runner preflight under the request and the rung it recorded (`preflight`, `recorded_rung`, `announce_rung`), the replaced-target check (`target_replacement`, `record_replaced_target`, `replaced_target_unclassified`), the jail's denials as the verdict reads them (`jail_facts`, `jail_scope_sentence`, `in_grant`) and the warn-only `[GIT_CONFIG_CHANGED]` line (`warn_git_metadata_changed`). Its per-dispatch records (`target_identity_before`, `jail_notes`, `jail_denials`, `jail_failed`, `replaced_targets`) are its own. |
 | `utils/write_snapshots.py` | `PreBatchSnapshots`, each dispatch's mandatory pre-batch snapshot, its rollback point (D3h): taken, or reused from the batch's first dispatch on a resume (`take`, `reusable`; another batch's or a previous review cycle's is set aside, never deleted), and, once per admitted group before any of its snapshots, whether a repo-wide phase's snapshots, rollback store and audit log must live outside the phase dir (`decide_rollback_storage`). The snapshots it took (`taken`) and which were reused (`reused`, read by the classification) are its own. |
-| `utils/write_dry_run.py` | `DryRunReport`, `--dry-run-subagents`' report (D3l): the phase's batches walked as the loop would, each task's runner, rendered argv with the prompt replaced by its hash (`write_safety.redact_argv`), prompt transport, co-schedule group, preflight under the grant and recorded rung, and the write policy's verdict, then the ceilings, written to `subagent_dry_run.json` (`write`). Starts no child and writes nothing else. |
+| `utils/write_dry_run.py` | `DryRunReport`, `--dry-run-subagents`' report (D3l): the phase's batches walked as the loop would, each task's runner, rendered argv with the prompt replaced by its hash (`redact.redact_argv`), prompt transport, co-schedule group, preflight under the grant and recorded rung, and the write policy's verdict, then the ceilings, written to `subagent_dry_run.json` (`write`). Starts no child and writes nothing else. |
 
 **The scheduler re-exports every moved name for reading only** (`write_batch_scheduler._MOVED`, the
 contract `git_utils` and `run_status` already follow): `write_batch_scheduler.X` returns the owner's
@@ -232,7 +232,7 @@ and not the phase's guarantee) + `metrics.finish` + `mark_phase_completed` +
 **When the verify command times out.** `VerifyCommand.kill_tree` hands the command
 to `process_control.kill_tree` as an owned child (`child=proc`, no start time; runtime.md's
 [process primitives](runtime.md#process-primitives), "An owned child's kill"), and keeps the rule
-the executor's timeout kill keeps for its runner (`subagent_executor._unconfirmed_kill`): only
+the executor's timeout kill keeps for its runner (`process_control.unconfirmed_kill`): only
 `killed` and `gone` confirm the command stopped. A `survived` that is only the command's own zombie
 becomes `killed` once `process_control.own_child_stopped` confirms its exit and an empty group.
 Every other outcome (`survived`, `unresolved`, `skipped`, `None` for a kill that raised, after which
@@ -676,7 +676,7 @@ the mirror's `not_run_task_ids`, `summary.md`'s accounting line and
 runner's `notes`), whether anything is half-applied (only when a failed batch moved
 bytes, `stop.bytes_moved` — fix round 14; `status`'s resume line reads the mirror
 rows' `files_touched` the same way), the remedy in the host's own command spelling
-(`user_commands`, built by `implement_orchestrator._stop_user_commands` through `next_phase.phase_command`) and the
+(`user_commands`, built by `implement_orchestrator._stop_user_commands` through `next_phase_words.phase_command`) and the
 accept path; the one-line `stop["headline"]` is recorded as the result line's
 `error` (`cli_common.record_error`; the key is gated on the line's
 `state` word, `error`/`needs-human`, not the exit code, so a

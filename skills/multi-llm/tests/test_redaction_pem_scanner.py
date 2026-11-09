@@ -1,4 +1,4 @@
-"""P12, the PEM private-key row of ``write_safety._REDACTIONS``, redacts exactly
+"""P12, the PEM private-key row of ``redact._REDACTIONS``, redacts exactly
 what its regex redacted, in linear time.
 
 The regex ``-----BEGIN [A-Z ]*PRIVATE KEY-----[\\s\\S]*?-----END [A-Z ]*PRIVATE
@@ -37,8 +37,8 @@ from tests.test_redaction import (  # noqa: E402
     SHAPES,
     _differential_corpus,
 )
-from utils import write_safety  # noqa: E402
-from utils.write_safety import redact_text  # noqa: E402
+from utils import redact  # noqa: E402
+from utils.redact import redact_text  # noqa: E402
 
 SKILL_ROOT = Path(__file__).parent.parent
 
@@ -49,14 +49,14 @@ _OLD_PEM = re.compile(
 
 
 def _old_rows():
-    rows = list(write_safety._REDACTIONS)
+    rows = list(redact._REDACTIONS)
     assert rows[0][0] == "pem-private-key", "P12 runs first; see the _REDACTIONS comment"
     rows[0] = ("pem-private-key", _OLD_PEM, 0, None)
     return rows
 
 
 _OLD_ROWS = _old_rows()
-_NEW_PEM = write_safety._REDACTIONS[0][1]
+_NEW_PEM = redact._REDACTIONS[0][1]
 
 
 def _old_redact_text(text):
@@ -68,7 +68,7 @@ def _old_redact_text(text):
         def _sub(match, _name=name, _group=group, _predicate=predicate):
             if _predicate is not None and not _predicate(match.group(_group)):
                 return match.group(0)
-            return write_safety._replace_group(match, _group, _name)
+            return redact._replace_group(match, _group, _name)
 
         out = pattern.sub(_sub, out)
     return out
@@ -256,7 +256,7 @@ def _run_timed(body, what):
             [sys.executable, "-c", script], capture_output=True, text=True, timeout=60)
     except subprocess.TimeoutExpired:
         pytest.fail(f"{what} took over 60 s on 1 MiB: the PEM row is quadratic again "
-                    "(see write_safety._PemPrivateKeyBlocks)")
+                    "(see redact._PemPrivateKeyBlocks)")
     assert completed.returncode == 0, completed.stderr[-3000:]
     assert json.loads(completed.stdout.strip().splitlines()[-1])["elapsed"] < 20
 
@@ -265,7 +265,7 @@ def test_redact_text_takes_a_megabyte_of_unterminated_headers_in_bounded_time():
     """About 0.1 s at 32 KB and four times that per doubling with the regex
     (minutes at a megabyte); milliseconds now."""
     _run_timed("""
-        from utils.write_safety import redact_text
+        from utils.redact import redact_text
         header = "-----BEGIN RSA PRIVATE\\x20KEY-----"
         texts = [
             (header + "\\n") * (size // 32),

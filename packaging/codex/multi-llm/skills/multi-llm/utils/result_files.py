@@ -35,7 +35,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, NamedTuple, Optional, Sequence, Tuple
 
-from . import progress_tracker as _progress
 from . import status_file as _status_file
 from .json_extractor import sanitize_model_name
 from .text_clip import plain_line
@@ -1004,10 +1003,10 @@ def _forget_completed(phase_dir: str, stems: Sequence[str], recorded: Sequence[s
             _status_file.update_progress(phase_dir, {
                 "models": rows,
                 "models_done": sum(
-                    1 for e in entries if e.get("state") in _progress.TERMINAL_STATES
+                    1 for e in entries if e.get("state") in _status_file.TERMINAL_STATES
                 ),
                 "models_succeeded": sum(
-                    1 for e in entries if e.get("state") == _progress.STATE_DONE
+                    1 for e in entries if e.get("state") == _status_file.STATE_DONE
                 ),
             })
         elif dropped and progress.get("models_total") and isinstance(

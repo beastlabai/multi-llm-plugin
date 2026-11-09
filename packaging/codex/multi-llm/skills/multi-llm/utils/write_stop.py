@@ -1062,9 +1062,9 @@ class StopAccount:
     def manual_gate_why(
         self, gating: Sequence[str], waiting: Mapping[str, Sequence[str]],
     ) -> Optional[str]:
-        """What the gate's resume does, in ``next_phase.manual_gate_why``'s
+        """What the gate's resume does, in ``manual_tasks.manual_gate_why``'s
         words, over this run's titles."""
-        from .next_phase import manual_gate_why
+        from .manual_tasks import manual_gate_why
 
         try:
             return manual_gate_why(self.manual_gate_entry(gating, waiting))
@@ -1074,10 +1074,10 @@ class StopAccount:
     def manual_gate_answers(
         self, gating: Sequence[str], waiting: Mapping[str, Sequence[str]],
     ) -> List[Dict[str, Any]]:
-        """The gate's other ways on, ``next_phase.manual_gate_decline_answers``
+        """The gate's other ways on, ``manual_tasks.manual_gate_decline_answers``
         The user's ``--human-task <id>=skip`` for each
         gating manual task, recorded on the stop as its ``answers``."""
-        from .next_phase import manual_gate_decline_answers
+        from .manual_tasks import manual_gate_decline_answers
 
         try:
             return manual_gate_decline_answers(self.manual_gate_entry(gating, waiting))

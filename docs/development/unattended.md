@@ -81,7 +81,7 @@ applies.
 The tool servers own it: `modes.ROUTE_ENV`/`modes.TOOL_ROUTES` are its name and values, the
 surface generator writes each host's pair into `dist/cli-surface.json` as `dispatcher.route_env`, and
 both servers set it on every child they spawn, polls included, so neither server spells the name or
-the value. `utils/next_phase.resolve_route` is the only reader and validates it: a value outside
+the value. `utils/routes.resolve_route` is the only reader and validates it: a value outside
 `TOOL_ROUTES`, or one the resolved host has no `next_command` cell for
 (`package` under claude-code), is treated as unset with one stderr line.
 

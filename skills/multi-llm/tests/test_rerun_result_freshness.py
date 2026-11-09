@@ -464,7 +464,7 @@ class TestTheSalvageLoopAdoptsOnlyWhatASalvageRepaired:
         ]
         with patch.object(rob, "run_all_models", new=fake_run_all_models), \
                 patch.object(rob, "dispatch_salvage_tasks", return_value=[]), \
-                patch.object(rob, "PROVIDER_STAGGER_DELAY", 0.0):
+                patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             assert asyncio.run(rpo.main(argv)) == 0
 
         status = status_file.read_status(str(phase_dir))

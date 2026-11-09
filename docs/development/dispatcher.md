@@ -372,7 +372,7 @@ the `needs_human_message.resume_why` clause) and `status` prints under `resume w
 
 Fix round 23: it ends with what the resume keeps (`keeps the N tasks already done` since fix round 24, a kept
 check task having applied nothing, and the half-applied clause status used to append), so status and
-the tool routes say it word for word; it is cut at a word to `next_phase.MAX_RECORDED_WHY_CHARS`, as each
+the tool routes say it word for word; it is cut at a word to `manual_tasks.MAX_RECORDED_WHY_CHARS`, as each
 answer's why is; a check is said to stay unrun only when the resume keeps it (a verdict
 `tree_fingerprint` equal to the tree the stop leaves, a `task_check_trees` stamp or
 `executor_check_stamp`, or `not_rerun`), else it runs again; every task id
@@ -543,14 +543,14 @@ dual-import shim's bare `from x`. `from package import name` follows Python's lo
 package's `__init__` binds wins and resolves through every re-export and alias to the module that
 defines it, and only an unbound name means the submodule, so `from utils import name` points past
 the barrel. Dynamic imports count too: calls of `importlib.import_module`, `__import__` and
-`next_phase._skill_module` (or an alias of one) are read from the syntax tree, so comments and
+`routes._skill_module` (or an alias of one) are read from the syntax tree, so comments and
 strings never make an edge. A call with literal arguments is an edge, relative ones such as
 `import_module(".x", package="utils")` and `__import__("x", globals(), None, [...], 1)` included.
 `if TYPE_CHECKING:` blocks and the package `__init__` that Python runs implicitly do not count. The
 whole graph is parsed with `ast` in under a second.
 
-`KNOWN_UPWARD` in the same file lists the upward edges that existed when the map was drawn (28),
-each with the names that cross it and where they belong. It only shrinks:
+`KNOWN_UPWARD` in the same file lists the upward edges that existed when the map was drawn (29),
+each with the names that cross it and where they belong; 4 remain. It only shrinks:
 
 - **A new upward edge** fails with the importer, the target, every import site and the names that
   cross. Move those names down to the importer's layer or lower and let the old module re-import
@@ -558,6 +558,10 @@ each with the names that cross it and where they belong. It only shrinks:
   `monkeypatch.setattr(<old module>, ...)` stops reaching its callers, so grep `tests/` and update
   those patches with the move. Add the edge to `KNOWN_UPWARD`, with a reason, only when it is
   deliberate.
+- **A moved name keeps a read-only alias** in the module it left when a reader still spells it
+  there; the old module's own code reads the owner. `tests/test_layer_moves.py` lists every alias
+  (`MOVED`, and `MOVED_WHOLE` for `finalize_tracking.py`, whose body is `utils/tracking.py`),
+  checks that each reads as the owner's object, and fails any test that writes one: patch the owner.
 - **A stale entry**, whose import is gone or no longer points upward, fails until it is deleted.
 - **A new module** fails until it has a layer; the message gives the range its imports and importers
   allow. Choose by role: moving an existing module to another layer is a design change, reviewed

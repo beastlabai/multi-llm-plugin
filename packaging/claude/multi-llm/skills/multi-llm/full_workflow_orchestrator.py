@@ -968,10 +968,10 @@ class FullWorkflow:
         the plan, and none of the flags its front door synthesises or
         consumes. Every other run keeps ``dispatcher_command`` byte for byte.
         """
-        from utils import next_phase
+        from utils import next_phase_words
         from utils.commit_spelling import spell_command
 
-        view = next_phase.commit_view_for(self.MODE_NAME, str(self.plan_path))
+        view = next_phase_words.commit_view_for(self.MODE_NAME, str(self.plan_path))
         if view is None:
             return dispatcher_command(self.MODE_NAME, self.plan_path, *self.resume_flags())
         return spell_command(self.MODE_NAME, self.plan_path, *self.resume_flags(), view=view)
@@ -997,13 +997,13 @@ class FullWorkflow:
         if plan.startswith("-") or (
                 os.path.realpath(plan) != os.path.realpath(str(self.plan_path))):
             return command
-        from utils import next_phase
+        from utils import next_phase_words
         from utils.commit_spelling import spell_command
 
-        view = next_phase.commit_view_for(mode, plan)
+        view = next_phase_words.commit_view_for(mode, plan)
         if view is None:
             return command
-        return spell_command(next_phase.commit_mode_word(mode, view), plan, *rest, view=view)
+        return spell_command(next_phase_words.commit_mode_word(mode, view), plan, *rest, view=view)
 
     def _phase_failed(self, step: Step, detail: str, code: Optional[int]) -> int:
         """D6 row 14: exit 3, name the phase and the ``--resume`` re-invocation
@@ -1176,7 +1176,7 @@ def consolidation_skip_reason(plan_dir: Union[str, Path]) -> Optional[str]:
     not skippable, so a resumed run re-enters it; without the first check it
     ran the pass again on groups it had already consolidated.
     """
-    from utils.consolidation import consolidation_is_current
+    from utils.output_handler import consolidation_is_current
 
     if consolidation_is_current(str(Path(plan_dir) / "review-plan")):
         return "already ran on these review groups"

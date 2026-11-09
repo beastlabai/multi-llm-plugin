@@ -1209,7 +1209,7 @@ class TestTheFanoutReportsProgressWhileItRuns:
             calls.append(dict(updates))
 
         with patch.object(cro, "run_single_review", new=_answering_review()), \
-             patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0), \
+             patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0), \
              patch.object(base._detach, "report_progress", record):
             results = asyncio.run(cro.run_all_reviews(
                 ["cursor-agent:auto", "claude-code:sonnet", "codex:gpt-5.5"],
@@ -1244,7 +1244,7 @@ class TestTheFanoutReportsProgressWhileItRuns:
             calls.append(dict(updates))
 
         with patch.object(cro, "run_single_review", new=_answering_review()), \
-             patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0), \
+             patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0), \
              patch.object(base._detach, "report_progress", record):
             results = asyncio.run(cro.run_all_reviews(
                 ["cursor-agent:auto", "claude-code:sonnet"],
@@ -1295,7 +1295,7 @@ class TestThisLanesOwnFanoutCarriesTheMapAndTheTicker:
             real_report_progress(phase_dir, **updates)
 
         with patch.object(cro, "run_single_review", new=_answering_review()), \
-             patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0), \
+             patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0), \
              patch.object(base._detach, "report_progress", record):
             asyncio.run(cro.run_all_reviews(specs, plan_path, tmp_path, 30, 3))
 
@@ -1332,7 +1332,7 @@ class TestThisLanesOwnFanoutCarriesTheMapAndTheTicker:
             return True, [], None
 
         with patch.object(cro, "run_single_review", new=fake_review), \
-             patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0), \
+             patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0), \
              patch.object(progress_tracker, "_monotonic", clock.monotonic), \
              patch.object(progress_tracker, "_tick_sleep", clock.sleep), \
              patch.object(progress_tracker, "_emit", emitted.append):
@@ -1363,7 +1363,7 @@ class TestThisLanesOwnFanoutCarriesTheMapAndTheTicker:
             return True, [], None
 
         with patch.object(cro, "run_single_review", new=fake_review), \
-             patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+             patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             asyncio.run(cro.run_all_reviews(
                 ["cursor-agent:auto", "claude-code:sonnet"],
                 plan_path, tmp_path, 30, 2,
@@ -1435,7 +1435,7 @@ class TestASlotWaitingOnTheSemaphoreReadsQueuedOnThisFanout:
             await task
 
         with patch.object(cro, "run_single_review", new=fake_review), \
-             patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+             patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             asyncio.run(drive())
 
         assert seen["head"] == "running", seen
@@ -1485,7 +1485,7 @@ class TestTheStaggeringRowCarriesItsCountdownOnThisFanout:
         # On a virtual clock, so each slot waits for its launch turn exactly once.
         from tests.launch_timeline import run_on_virtual_clock
         with patch.object(cro, "run_single_review", new=fake_review), \
-             patch.object(base, "PROVIDER_STAGGER_DELAY", 0.02), \
+             patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.02), \
              patch.object(progress_tracker.FanoutProgress, "staggering", spy):
             run_on_virtual_clock(cro.run_all_reviews(
                 list(self.MODELS), plan_path, tmp_path, 30, 3,
@@ -1535,7 +1535,7 @@ class TestEveryEndingRetiresEverySlotOnThisFanout:
         # `timeout=0` makes `total_timeout` 0 with the stagger patched out, so
         # `asyncio.wait_for` fires its deadline on the first suspension.
         with patch.object(cro, "run_single_review", new=never_returns), \
-             patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+             patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             results = asyncio.run(
                 cro.run_all_reviews(specs, plan_path, tmp_path, 0, 2)
             )
@@ -1596,7 +1596,7 @@ class TestEveryEndingRetiresEverySlotOnThisFanout:
             return True, issues, None
 
         with patch.object(cro, "run_single_review", new=one_answers_one_straggles), \
-             patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+             patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             results = asyncio.run(
                 cro.run_all_reviews(specs, plan_path, tmp_path, 0.05, 2)
             )
@@ -1648,7 +1648,7 @@ class TestEveryEndingRetiresEverySlotOnThisFanout:
             return True, [], None
 
         with patch.object(cro, "run_single_review", new=one_explodes), \
-             patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+             patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             results = asyncio.run(
                 cro.run_all_reviews(specs, plan_path, tmp_path, 30, 2)
             )
@@ -1698,7 +1698,7 @@ class TestEveryEndingRetiresEverySlotOnThisFanout:
                 await task
 
         with patch.object(cro, "run_single_review", new=hang), \
-             patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+             patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             asyncio.run(scenario())
 
         phase_dir = cro.get_phase_dir(plan_path, "code-review")
@@ -1734,7 +1734,7 @@ class TestAResumedRunDoesNotReportSkippedModelsAsPending:
             raise AssertionError("a resumed slot must not dispatch")
 
         with patch.object(cro, "run_single_review", new=never_dispatched), \
-             patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+             patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             results = asyncio.run(
                 cro.run_all_reviews(specs, plan_path, tmp_path, 30, 2)
             )
@@ -1818,7 +1818,7 @@ class TestThePhaseTickerCoversTheRestOfThePhase:
              patch.object(cro, "validate_git_ref", side_effect=lambda r: r or "HEAD~1"), \
              patch.object(cro, "run_single_review", new=fake_review), \
              patch.object(cro, "run_all_reviews", new=watched_fanout), \
-             patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0), \
+             patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0), \
              patch.object(progress_tracker, "_monotonic", clock.monotonic), \
              patch.object(progress_tracker, "_tick_sleep", clock.sleep), \
              patch.object(progress_tracker, "_emit", emitted.append):
@@ -3674,7 +3674,7 @@ def _run_fanout_capturing_prompts(tmp_path, monkeypatch, args_overrides, *, diff
     subagent_executor._SANDBOX_PROBE_CACHE.clear()
     monkeypatch.setattr(cro, "get_project_root", lambda _p: str(tmp_path))
     monkeypatch.setattr(cro, "invoke_with_file_output", dispatch)
-    monkeypatch.setattr(base, "PROVIDER_STAGGER_DELAY", 0.0)
+    monkeypatch.setattr("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0)
     if stdin is not None:
         import io
 
@@ -4031,7 +4031,7 @@ def _scope_fanout(plan, monkeypatch, models, *, respond=None, capabilities=None,
     from utils import subagent_executor
     subagent_executor._SANDBOX_PROBE_CACHE.clear()
     monkeypatch.setattr(cro, "invoke_with_file_output", dispatch)
-    monkeypatch.setattr(base, "PROVIDER_STAGGER_DELAY", 0.0)
+    monkeypatch.setattr("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0)
     if capabilities is not None:
         # Both readers of the adapter's declarations: the prompt blocks
         # (`prompt_channels`) and the argv measurement (`llm_client`).

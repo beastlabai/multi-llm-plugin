@@ -482,7 +482,8 @@ def lenient_advisory(monkeypatch):
         real(label, exc)
 
     for name in ("advisory", "run_status", "status_views", "status_commands",
-                 "status_native", "status_text", "detach", "next_phase"):
+                 "status_native", "status_text", "detach", "next_phase",
+                 "next_phase_words"):
         monkeypatch.setattr(importlib.import_module(f"utils.{name}"), "note_swallowed", record)
     yield labels
 

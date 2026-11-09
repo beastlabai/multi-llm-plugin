@@ -152,7 +152,7 @@ that is, or starts with, one of the surface's `dispatcher.next_step_markers`, `n
 `modes.NOTICE_PLACEMENT` are on every relay surface, and a stop's `resume_markdown` is the
 `options` report, in place of any list of the host's own.
 
-The manual-task note and lead read in the singular over one task (`next_phase.manual_close_lead(count)`), and a
+The manual-task note and lead read in the singular over one task (`manual_tasks.manual_close_lead(count)`), and a
 single-target apply phase names its file: the mirror's `applied_to`
 (`… items applied to <file>`), the notice's left-out line and the native `--mark-completed` message.
 

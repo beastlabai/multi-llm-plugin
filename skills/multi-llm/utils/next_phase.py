@@ -15,8 +15,8 @@ The contract, briefly:
   is that payload's answer, never a second table's, and the walk over them is
   ``utils/phase_walk``'s, the rule ``suggested_next`` is picked by.
 * It never reads the environment. The route is resolved by the caller, once,
-  with :func:`resolve_route` — the only code here that reads a route signal —
-  and handed in.
+  with :func:`resolve_route` (``utils/routes``, the only code that reads a
+  route signal) and handed in.
 * It holds no prose. The spelling is the host's ``next_command`` template
   (``hosts/capabilities.yaml``, through ``host_capabilities``), the mode word
   comes from ``modes.py``, and an optional entry's ``why`` is its phase row's
@@ -34,20 +34,67 @@ The contract, briefly:
 
 from __future__ import annotations
 
-import importlib
 import os
 import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from . import phase_walk
 from .advisory import note_swallowed
 from .text_clip import plain_line
 
-if TYPE_CHECKING:  # pragma: no cover - annotations only
-    from .commit_spelling import CommitView
+# The route, the plan's spelling, the manual-task words and the phase command
+# live below the CLI, where the write phases and the dispatcher plumbing read
+# them (docs/development/dispatcher.md#import-layers). This module builds with
+# them and re-exports every name for its readers; patch them in their owners.
+from .manual_tasks import (  # noqa: F401 - re-exported
+    AFTER_IDS_SHOWN,
+    GATE_IDS_SHOWN,
+    GATE_TITLE_CHARS,
+    MAX_RECORDED_WHY_CHARS,
+    _TASK_ID,
+    _manual_gate_names,
+    after_code_note,
+    close_command,
+    gate_resume_closes_the_manual_tasks,
+    manual_close_ids,
+    manual_close_lead,
+    manual_close_note,
+    manual_gate_decline_answers,
+    manual_gate_flags,
+    manual_gate_ids,
+    manual_gate_why,
+    manual_note_ids,
+    manual_note_named,
+    manual_waiting_count,
+    waits_on_note,
+)
+from .next_phase_words import (  # noqa: F401 - re-exported
+    brief_view,
+    commit_mode_word,
+    commit_spelled_args,
+    commit_view_for,
+    phase_command,
+    spelled_view,
+)
+from .routes import (  # noqa: F401 - re-exported
+    ARGS_SLOT,
+    RESUME_FLAG,
+    SKILL_ROUTE,
+    _PLACEHOLDER_PREFIXES,
+    _RECORDED_SPELLING,
+    _host_capabilities,
+    _install_tail,
+    _is_skill_install,
+    _path_parts,
+    _skill_module,
+    _steps_back_only_out_of_dirs,
+    quote_plan_arg,
+    recorded_plan_spelling,
+    resolve_route,
+)
 
 #: The four line kinds of the block. The text after a command
 #: marker and one space is the builder's ``command`` byte for byte; an
@@ -84,11 +131,6 @@ NEXT_COMMAND_ANSWERS_MARKER = "[NEXT_COMMAND_ANSWERS]"
 #: unchanged tree (``stop_answers.native_resume_why``), as the
 #: answers' why lines say what each answer does. Not a command marker.
 NEXT_COMMAND_WHY_MARKER = "[NEXT_COMMAND_WHY]"
-
-#: The longest why read back from a run's write mirror
-#: (:func:`stop_resume_why_on_record`): the folder is writable by every
-#: jailed batch, so anything longer, or not one plain line, is not relayed.
-MAX_RECORDED_WHY_CHARS = 600
 
 #: One ``--human-task`` value a stop's recorded answer may carry: the shapes
 #: the executor composes — an implement task's ``done``/``skip``/``retry``
@@ -135,28 +177,6 @@ CARRIED_BLOCK_MARKERS: Tuple[str, ...] = (
     MANUAL_TASK_NOTE_MARKER,
     MANUAL_TASK_COMMAND_MARKER,
 )
-
-#: The one slot every ``next_command`` template ends with (schema pattern
-#: ``^[^{}]+\{args\}$``). Filled with ``str.replace``, never ``str.format``.
-ARGS_SLOT = "{args}"
-
-#: Appended when the phase a command names is recorded ``in_progress``: a bare
-#: re-invocation of a write phase starts it over. Never copied from the finished invocation's argv.
-RESUME_FLAG = "--resume"
-
-#: The route key of a plain-skill install, told apart from the plugin by the
-#: dispatcher's own skill root rather than by any environment variable.
-SKILL_ROUTE = "skill"
-
-#: An implement task id, the whole string (``task_decomposer.TASK_ID_PATTERN``).
-#: The manual tasks and the ids a close command answers are read back from
-#: ``state.json``, which a repo-wide batch can write.
-_TASK_ID = re.compile(r"T[0-9]{3}")
-
-#: Whitespace-free path components in ``install_paths`` that stand for a
-#: variable prefix (``$HOME``, ``%USERPROFILE%``, ``~``); the tail after the
-#: last one is what a skill root is compared against.
-_PLACEHOLDER_PREFIXES = ("$", "%", "~")
 
 
 # ---------------------------------------------------------------------------
@@ -210,28 +230,6 @@ class ManualTask:
         elif self.after:
             text += f" {after_code_note(self.after)}"
         return text
-
-
-#: How many code task ids :func:`after_code_note` names before "and N more".
-AFTER_IDS_SHOWN = 5
-
-
-def after_code_note(task_ids: Sequence[str]) -> str:
-    """What a manual task that comes after code not run yet says after its
-    title: ``(after T001: do it once implement has run that
-    task)``."""
-    ids = [str(task_id) for task_id in task_ids]
-    shown = ids[:AFTER_IDS_SHOWN]
-    named = ", ".join(shown) + (
-        f" and {len(ids) - len(shown)} more" if len(ids) > len(shown) else "")
-    which = "that task" if len(ids) == 1 else "those tasks"
-    return f"(after {named}: do it once implement has run {which})"
-
-
-def waits_on_note(task_id: str) -> str:
-    """What a task skipped with deferred manual task *task_id* is: implement
-    runs it on the resume that records *task_id* done."""
-    return f"(waits on {task_id}: implement runs it once {task_id} is recorded done)"
 
 
 @dataclass(frozen=True)
@@ -407,213 +405,6 @@ def _manual_tasks(
     return manual, note, command
 
 
-def manual_note_ids(implement: Mapping[str, Any]) -> List[str]:
-    """The manual tasks the note under the deferred list records done: while
-    a manual-task gate holds (``manual_gate``), only the gate's
-    (:func:`manual_gate_ids`) — the resume the stop's section leads with —
-    else every one the user can do now (:func:`manual_close_ids`).
-
-    With a free manual task beside the
-    gating one, summary.md's note, ``status``'s trailer and the lookup's note
-    gave ``--human-task T001=done --human-task T002=done`` beside the
-    section's ``--human-task T002=done``: two different record-done commands
-    on one surface. The free task stays listed under the manual tasks left
-    for the user; its command comes once the gate's resume has run."""
-    if implement.get("manual_gate"):
-        ids = manual_gate_ids(implement)
-        if ids:
-            return ids
-    return manual_close_ids(implement)
-
-
-def manual_note_named(
-    implement: Mapping[str, Any], ids: Sequence[str],
-) -> Optional[List[str]]:
-    """*ids*, when the note's command records fewer manual tasks than the
-    deferred list names (a gate beside a free manual task), so
-    its lead names them rather than saying "this manual task"; else
-    ``None``."""
-    if not implement.get("manual_gate"):
-        return None
-    # A deferred entry with no `waits_on` is a manual task itself.
-    manual = {
-        str(entry.get("id")) for entry in implement.get("manual_tasks") or ()
-        if isinstance(entry, Mapping) and entry.get("id")
-        and not entry.get("waits_on")
-    }
-    return list(ids) if manual - set(ids) else None
-
-
-def manual_waiting_count(
-    implement: Mapping[str, Any], ids: Optional[Sequence[str]] = None,
-) -> int:
-    """How many code tasks wait on the manual tasks *ids* (every one the
-    workflow payload's ``implement`` entry names, by default): the
-    ``manual_waiting`` map ``check_workflow_prerequisites`` records, each code task once."""
-    waiting = implement.get("manual_waiting")
-    if not isinstance(waiting, Mapping):
-        return 0
-    wanted = None if ids is None else {str(item) for item in ids}
-    codes = set()
-    for manual, tasks in waiting.items():
-        if wanted is not None and str(manual) not in wanted:
-            continue
-        if isinstance(tasks, (list, tuple)):
-            codes.update(str(item) for item in tasks if _TASK_ID.fullmatch(str(item)))
-    return len(codes)
-
-
-#: How many manual tasks a gate's why names before "and N more".
-GATE_IDS_SHOWN = 3
-#: A manual task's title, cut to this many characters in a gate's why.
-GATE_TITLE_CHARS = 80
-
-
-def manual_gate_ids(implement: Mapping[str, Any]) -> List[str]:
-    """The manual tasks code tasks wait on that the user can do now: the
-    workflow payload's ``manual_close_ids`` that its ``manual_waiting`` map
-    names. Recording them done is what lets implement run
-    the code tasks they hold."""
-    waiting = implement.get("manual_waiting")
-    if not isinstance(waiting, Mapping):
-        return []
-    return [
-        task_id for task_id in manual_close_ids(implement)
-        if isinstance(waiting.get(task_id), (list, tuple)) and waiting.get(task_id)
-    ]
-
-
-def manual_gate_flags(implement: Mapping[str, Any]) -> List[str]:
-    """``--resume --human-task <id>=done …`` for :func:`manual_gate_ids`,
-    or ``[]`` when no code task waits on a manual task the user can do now
-    The one resume that runs them, recording only those
-    manual tasks done, never a later one that comes after code not run."""
-    ids = manual_gate_ids(implement)
-    if not ids:
-        return []
-    flags = [RESUME_FLAG]
-    for task_id in ids:
-        flags += ["--human-task", f"{task_id}=done"]
-    return flags
-
-
-def gate_resume_closes_the_manual_tasks(implement: Mapping[str, Any]) -> bool:
-    """Whether the resume a stopped implement's section leads with
-    (:func:`_resume_flags` under ``manual_gate``) is the very command the
-    note under the deferred list gives: while a
-    gate holds, the note records the gate's manual tasks done and no other
-    (:func:`manual_note_ids`). A stop's notice then names the
-    tasks and leaves that command to the section."""
-    if not implement.get("manual_gate"):
-        return False
-    ids = manual_gate_ids(implement)
-    return bool(ids) and ids == manual_note_ids(implement)
-
-
-def _manual_gate_names(implement: Mapping[str, Any], ids: Sequence[str]) -> str:
-    """``T010 (Provision the checker fixture)``, the ids joined, at most
-    :data:`GATE_IDS_SHOWN`, each with its recorded title cut."""
-    from .text_clip import clip
-
-    titles = {
-        str(entry.get("id")): entry.get("title")
-        for entry in implement.get("manual_tasks") or ()
-        if isinstance(entry, Mapping)
-    }
-    named = []
-    for task_id in ids[:GATE_IDS_SHOWN]:
-        title = titles.get(task_id)
-        named.append(
-            f"{task_id} ({clip(plain_line(title), GATE_TITLE_CHARS)})"
-            if title else task_id)
-    rest = len(ids) - len(named)
-    return ", ".join(named) + (f" and {rest} more" if rest > 0 else "")
-
-
-def manual_gate_why(implement: Mapping[str, Any], *, stopped: bool = True) -> Optional[str]:
-    """What the resume :func:`manual_gate_flags` spells does, one plain line, or ``None``.
-
-    *stopped*: implement is not finished and a plain resume runs nothing
-    (``manual_gate`` on the payload); else it finished with these code tasks
-    left waiting."""
-    ids = manual_gate_ids(implement)
-    if not ids:
-        return None
-    count = manual_waiting_count(implement, ids)
-    tasks = "the code task" if count == 1 else f"the {count} code tasks"
-    that_wait = f"{tasks} that {'waits' if count == 1 else 'wait'}"
-    names = _manual_gate_names(implement, ids)
-    if len(ids) == 1:
-        task_id = ids[0]
-        held = (
-            f"Implement can run no code task until manual task {names} is "
-            f"recorded done, so a plain resume runs nothing."
-            if stopped else
-            f"Implement has not run {that_wait} on manual task {names}."
-        )
-        return (
-            f"{held} Once you have done {task_id} by hand, this command records "
-            f"it done and runs {that_wait} on it."
-        )
-    held = (
-        f"Implement can run no code task until a manual task is recorded done "
-        f"({names}), so a plain resume runs nothing."
-        if stopped else
-        f"Implement has not run {that_wait} on manual tasks {names}."
-    )
-    return (
-        f"{held} Once you have done them by hand, this command records them "
-        f"done and runs {that_wait} on them; leave out the --human-task "
-        f"answer of any you have not done."
-    )
-
-
-def manual_gate_decline_answers(implement: Mapping[str, Any]) -> List[Dict[str, Any]]:
-    """The other ways on from a manual-task gate, as stop answers
-    (``[{"flags", "why"}]``, ``--resume`` first), or ``[]`` (under ``--yes`` the gate
-    re-stopped on every
-    ``--human-task <id>=skip`` and only a false ``=done`` went on).
-
-    For each manual task the gate's resume records done
-    (:func:`manual_gate_ids`), ``--human-task <id>=skip``: the user's call
-    that they will not do it, which skips it and the code tasks that wait
-    on it; the combined answer first when the gate holds on more than one,
-    the order ``stop_answers.compose_stop_answers`` gives a stop's
-    answers. The executor records them on its stop and every reader of a
-    native gate derives them from ``state.json``, so both legs word them
-    alike."""
-    ids = manual_gate_ids(implement)
-    if not ids:
-        return []
-
-    def tasks(count: int, pronoun: str) -> str:
-        if count == 1:
-            return f"the code task that waits on {pronoun}"
-        return f"the {count} code tasks that wait on {pronoun}"
-
-    answers: List[Dict[str, Any]] = []
-    if len(ids) > 1:
-        flags = [RESUME_FLAG]
-        for task_id in ids:
-            flags += ["--human-task", f"{task_id}=skip"]
-        answers.append({
-            "flags": flags,
-            "why": (
-                f"if you will do none of {_manual_gate_names(implement, ids)}, "
-                f"skip them and {tasks(manual_waiting_count(implement, ids), 'them')}, "
-                f"and implement goes on without them"),
-        })
-    for task_id in ids:
-        answers.append({
-            "flags": [RESUME_FLAG, "--human-task", f"{task_id}=skip"],
-            "why": (
-                f"if you will not do {_manual_gate_names(implement, [task_id])}, "
-                f"skip it and {tasks(manual_waiting_count(implement, [task_id]), 'it')}, "
-                f"and implement goes on without them"),
-        })
-    return answers
-
-
 def gate_resume_suggested(workflow: Mapping[str, Any]) -> List[str]:
     """The flags of implement's resume when it, not the payload's
     ``suggested_next``, is the next step, else ``[]``: implement completed with code
@@ -642,22 +433,6 @@ def instead_why(phase: str) -> str:
     return "Or go on with the workflow on the code implement has run so far:"
 
 
-def manual_close_ids(implement: Mapping[str, Any]) -> List[str]:
-    """The deferred ids a ``--human-task <id>=done`` closes, off the workflow
-    payload's ``implement`` entry: ``manual_close_ids`` (the manual tasks
-    themselves, ``StateManager.manual_tasks_to_close``) when present, else
-    every ``manual_tasks`` id (a payload built)."""
-    recorded = implement.get("manual_close_ids")
-    if isinstance(recorded, list):
-        return [str(task_id) for task_id in recorded
-                if task_id and _TASK_ID.fullmatch(str(task_id))]
-    return [
-        str(entry.get("id")) for entry in implement.get("manual_tasks") or ()
-        if isinstance(entry, Mapping) and entry.get("id")
-        and _TASK_ID.fullmatch(str(entry.get("id")))
-    ]
-
-
 def _with_manual_tasks(
     answer: NextPhase,
     phases: Mapping[str, Mapping[str, Any]],
@@ -676,290 +451,9 @@ def _with_manual_tasks(
                     manual_tasks_command=command)
 
 
-def close_command(template: str, plan_arg: str, task_ids: Sequence[str]) -> str:
-    """``--implement <plan> --resume --human-task <id>=done …``, host-spelled.
-
-    How the user records deferred manual tasks done. On
-    implement's resume a ``done`` answer completes a manual task under every
-    strategy, and a resume that only records answers keeps implement's
-    completion date, so the review after it does not go stale.
-    """
-    answers = " ".join(f"--human-task {task_id}=done" for task_id in task_ids)
-    args = f"--implement {quote_plan_arg(plan_arg)} {RESUME_FLAG} {answers}"
-    return template.replace(ARGS_SLOT, args)
-
-
-def manual_close_lead(
-    count: Optional[int] = None, *, waiting: int = 0,
-    named: Optional[Sequence[str]] = None,
-) -> str:
-    """The sentence that leads into the command closing deferred manual
-    tasks (:func:`close_command`), ending with a colon: what
-    ``user_next_step.manual_tasks_note`` and ``[MANUAL_TASK_NOTE]`` say, the
-    command beside it on its own.
-
-    *count* is how many tasks the command records done. For one task the plural sentence
-    ("these manual
-    tasks … keeping a --human-task answer only for each task you did") read
-    wrong, and the host rewrote it, dropping the clause; one task gets the
-    singular sentence, which has nothing to keep or drop.
-
-    *waiting* is how many code tasks wait on them: implement has not run those, and the
-    command that records the manual task done runs them, so the sentence
-    says that instead.
-
-    *named*: the ids the command records, when the list
-    above it names other manual tasks too (a manual-task gate beside a free
-    one): the sentence names them instead of saying "this manual task".
-    """
-    if waiting:
-        tasks = (
-            "the code task that waits" if waiting == 1
-            else f"the {waiting} code tasks that wait"
-        )
-        if count == 1:
-            which = f"manual task {named[0]}" if named else "this manual task"
-            return (
-                f"Implement has not run {tasks} on {which}. Once you "
-                f"have done it by hand, this command records it done and runs "
-                f"{'it' if waiting == 1 else 'them'}:"
-            )
-        which = (
-            f"manual tasks {', '.join(named)}" if named else "these manual tasks")
-        return (
-            f"Implement has not run {tasks} on {which}. Once you "
-            "have done one by hand, this command records it done and runs what "
-            "no longer waits; keep a --human-task answer only for each task you "
-            "did:"
-        )
-    if count == 1:
-        return (
-            "No later phase waits for this manual task. Once you have done it "
-            "by hand, record it done with this command:"
-        )
-    return (
-        "No later phase waits for these manual tasks. Once you have done one "
-        "by hand, record it done with this command, keeping a --human-task "
-        "answer only for each task you did:"
-    )
-
-
-def manual_close_note(
-    command: str, count: Optional[int] = None, *, waiting: int = 0,
-    named: Optional[Sequence[str]] = None,
-) -> str:
-    """The one plain line that says how to close deferred manual tasks, for a
-    surface that is one line of text (a summary, ``status``'s trailer).
-
-    The command ends the line, with nothing after it. *count* and *waiting* as in
-    :func:`manual_close_lead`.
-    """
-    return f"{manual_close_lead(count, waiting=waiting, named=named)} {command}"
-
-
 # ---------------------------------------------------------------------------
-# Imports from the skill root
+# The route a run was started on
 # ---------------------------------------------------------------------------
-
-def _skill_module(name: str):
-    """Import a top-level skill module (``modes``, ``check_workflow_prerequisites``)."""
-    return importlib.import_module(name)
-
-
-def _host_capabilities():
-    # Lazy: host_capabilities imports cli_common, which an emitter living in
-    # cli_common may import this module from.
-    from . import host_capabilities
-
-    return host_capabilities
-
-
-# ---------------------------------------------------------------------------
-# Quoting
-# ---------------------------------------------------------------------------
-
-def quote_plan_arg(plan_arg: str) -> str:
-    """The plan path as it appears in the command: quoted for a model, not a shell.
-
-    * no whitespace and no quote character → bare;
-    * contains ``"`` but not ``'`` → wrapped in single quotes;
-    * contains both → wrapped in double quotes as it is (no unescaped spelling
-      exists, and no route is claimed to round-trip it);
-    * otherwise (whitespace and/or ``'``) → wrapped in double quotes.
-
-    Nothing inside is ever escaped (a Windows path keeps every backslash), and a
-    quote character already in ``plan_arg`` is part of the value — it only
-    decides which wrapping applies.
-    """
-    has_double = '"' in plan_arg
-    has_single = "'" in plan_arg
-    if has_double and not has_single:
-        return f"'{plan_arg}'"
-    if has_double or has_single or any(ch.isspace() for ch in plan_arg):
-        return f'"{plan_arg}"'
-    return plan_arg
-
-
-#: What a plan spelling read back from a file may be made of: the characters
-#: ``shlex.quote`` leaves bare, plus a plain space — which
-#: :func:`quote_plan_arg` wraps in double quotes, inside which none of these is
-#: special. No control character, quote, ``$``, backtick, ``\``, ``;``, ``&``,
-#: ``|``, redirection, glob or ``~``.
-_RECORDED_SPELLING = re.compile(r"[\w@%+=:,./ -]+", re.ASCII)
-
-
-def recorded_plan_spelling(recorded: Any, plan: str) -> Optional[str]:
-    """A typed plan spelling read back from a phase's ``.status.json``, or ``None``.
-
-    The run's output folder is writable by every jailed batch (a standing
-    user decision), so a ``plan_arg`` read from it — a continuation hand-off's
-    (``multi_llm._remember_plan_spelling``) or a detached run record's — is
-    untrusted, and it reaches a printed command verbatim. It is returned only
-    when it
-
-    * is a non-empty string, does not start with ``-``, and is made only of
-      :data:`_RECORDED_SPELLING`'s characters, so a printed command can
-      neither run a substitution nor split into two lines; and
-    * resolves, from this process's cwd and with ``strict=True``, to the same
-      existing file as *plan*. Non-strict ``realpath`` collapses a component
-      that does not exist against a later ``..``, so
-      ``plans/$(touch${IFS}pwned)/../foo.md`` "named" ``plans/foo.md``.
-
-    Otherwise the caller prints the plan as it received it.
-    """
-    if not isinstance(recorded, str) or not recorded or recorded.startswith("-"):
-        return None
-    if not _RECORDED_SPELLING.fullmatch(recorded):
-        return None
-    if not _steps_back_only_out_of_dirs(recorded):
-        return None
-    try:
-        same = os.path.realpath(recorded, strict=True) == os.path.realpath(
-            plan, strict=True
-        )
-    except (OSError, ValueError):
-        return None
-    return recorded if same else None
-
-
-def _steps_back_only_out_of_dirs(spelling: str) -> bool:
-    """Whether every component *spelling* steps back out of with ``..`` is an
-    existing directory. POSIX ``realpath(strict=True)`` already refuses one
-    that is not; Windows' collapses ``missing/..`` before it looks at the disk."""
-    head = spelling
-    while True:
-        head, tail = os.path.split(head)
-        if not tail:
-            return True
-        if tail == os.pardir and head and not os.path.isdir(head):
-            return False
-
-
-# ---------------------------------------------------------------------------
-# The route
-# ---------------------------------------------------------------------------
-
-def _path_parts(path: str) -> Tuple[str, ...]:
-    """Path components split on either separator, so a Windows path compares too."""
-    return tuple(part for part in re.split(r"[\\/]+", path) if part and part != ".")
-
-
-def _install_tail(entry: str) -> Tuple[str, ...]:
-    """An ``install_paths`` entry's components after its last variable prefix."""
-    parts = _path_parts(entry)
-    for index in range(len(parts) - 1, -1, -1):
-        if parts[index].startswith(_PLACEHOLDER_PREFIXES):
-            return parts[index + 1:]
-    return parts
-
-
-def _is_skill_install(host_id: str, skill_root: Union[str, Path]) -> bool:
-    """Whether *skill_root* ends with one of *host_id*'s ``install_paths`` entries.
-
-    Judged by the root's own path, never its ``realpath``: a copy (or a
-    symlink) under ``.claude/skills/multi-llm`` is a plain skill whatever it
-    points at, and the plugin cache (or a dev checkout linked into it) is not.
-    """
-    root = _path_parts(str(skill_root))
-    install_paths = _host_capabilities().entry(host_id).get("install_paths") or {}
-    for entries in install_paths.values():
-        for entry in entries or ():
-            tail = _install_tail(str(entry))
-            if tail and len(root) >= len(tail) and root[-len(tail):] == tail:
-                return True
-    return False
-
-
-def resolve_route(
-    host_id: str,
-    *,
-    environ: Optional[Mapping[str, str]] = None,
-    skill_root: Optional[Union[str, Path]] = None,
-    stderr=None,
-    recorded: Optional[str] = None,
-) -> Optional[str]:
-    """The ``next_command`` route key for this process, or ``None`` for ``default``.
-
-    The only reader of a route signal; every
-    emitter calls it once and passes the result to :func:`next_phase_commands`.
-
-    * A host whose ``next_command`` carries a ``skill`` key (claude-code) is
-      told apart by the dispatcher's own skill root (``cli_common._SKILL_DIR``
-      unless *skill_root* is given): ``skill`` when that root ends with one of
-      the host's ``install_paths`` entries, else ``None`` (the plugin). The
-      route variable is ignored there, and saying so costs one stderr line when
-      it is set.
-    * Any other host reads ``modes.ROUTE_ENV``, which the tool servers set.
-      Unset is ``None``, silently. A value is honoured only when it is a member
-      of ``modes.TOOL_ROUTES`` **and** a key of the host's ``next_command``
-      cell; any other value (empty, a typo, ``skill``, a product name, a tool
-      route this host has no cell for) is ``None`` plus one stderr line naming
-      the ignored value.
-    * *recorded* is the route the run whose commands are printed was started
-      on (:func:`recorded_route`): when the environment names
-      none, it is honoured under the same test, silently. Live run 10: a
-      shell's ``status --host codex`` spelled a run the Codex plugin's tool
-      had started in the file shim's words. The environment still wins, and
-      a host that reads its route from the skill root ignores it.
-
-    *environ* defaults to ``os.environ`` and *stderr* to ``sys.stderr``.
-    """
-    modes = _skill_module("modes")
-    env = os.environ if environ is None else environ
-    stream = sys.stderr if stderr is None else stderr
-    capabilities = _host_capabilities()
-    routes = capabilities.next_command_routes(host_id)
-    value = env.get(modes.ROUTE_ENV)
-
-    if SKILL_ROUTE in routes:
-        if value is not None:
-            print(
-                f"multi-llm: ignoring {modes.ROUTE_ENV}={value!r}: host "
-                f"'{host_id}' takes its next-command route from the skill root, "
-                "not the environment",
-                file=stream,
-            )
-        if skill_root is None:
-            from . import cli_common
-
-            skill_root = cli_common._SKILL_DIR
-        return SKILL_ROUTE if _is_skill_install(host_id, skill_root) else None
-
-    if value is None:
-        if recorded in modes.TOOL_ROUTES and recorded in routes:
-            return recorded
-        return None
-    if value in modes.TOOL_ROUTES and value in routes:
-        return value
-    honoured = [route for route in modes.TOOL_ROUTES if route in routes]
-    print(
-        f"multi-llm: ignoring {modes.ROUTE_ENV}={value!r} for host '{host_id}' "
-        f"(honoured here: {', '.join(honoured) or 'none'}); using the "
-        f"'{capabilities.DEFAULT_ROUTE_KEY}' next-command spelling",
-        file=stream,
-    )
-    return None
-
 
 def recorded_route(
     plan_path: Union[str, Path],
@@ -1036,84 +530,6 @@ COMMIT_REPORTS_WHY = (
     "the apply honours. --improve-commits would skip this reading step: it "
     "applies the validated fixes unattended."
 )
-
-
-def brief_view(
-    plan_arg: Union[str, Path], plan_path: Optional[Union[str, Path]] = None,
-) -> Optional["CommitView"]:
-    """``commit_spelling.commit_view`` of the plan's ``state.json`` (*plan_path*,
-    else *plan_arg* made absolute), the brief spelled as *plan_arg*; ``None``
-    for a plan's run, a direct ``--head-ref`` run, or a state it cannot read."""
-    from .commit_spelling import commit_view
-
-    try:
-        source = plan_arg if plan_path is None else plan_path
-        return commit_view(os.path.abspath(str(source)), plan=str(plan_arg))
-    except Exception as exc:  # noqa: BLE001 - advisory: the plan spelling stands
-        note_swallowed("next phase: commit brief view", exc)
-        return None
-
-
-def spelled_view(mode_word: str, view: Optional["CommitView"]) -> Optional["CommitView"]:
-    """*view* when ``--<mode_word>`` is printed in the commit spelling, else ``None``.
-
-    Only a mode that takes a range reads the pinned spelling: the hook maps
-    ``review-code`` and ``apply-code-fixes`` to the front doors, and
-    ``improve-commits`` is one. A command naming any other mode on a brief
-    (``ask``, a fallback ``review-plan``) keeps the brief path, which that mode
-    takes as its plan.
-    """
-    if view is None:
-        return None
-    from .commit_spelling import spell_mode
-
-    modes = _skill_module("modes")
-    row = modes.resolve(str(mode_word))
-    spelled = modes.resolve(spell_mode(row.name if row is not None else str(mode_word), view))
-    if spelled is None or modes.POS_REVS not in tuple(spelled.positionals):
-        return None
-    return view
-
-
-def commit_view_for(
-    mode_word: str,
-    plan_arg: Union[str, Path],
-    plan_path: Optional[Union[str, Path]] = None,
-) -> Optional["CommitView"]:
-    """The ``CommitView`` a printed ``--<mode_word> <plan_arg> …`` is spelled
-    with, or ``None`` to print it as today.
-
-    Set only when the plan's ``state.json`` holds ``commit_range`` and the
-    mode, through the hook, takes a range (:func:`spelled_view`). A plan's
-    run and a direct ``review-code --head-ref`` run (``head_ref`` only) are
-    never mapped: their commands stay review-code's own and the plan is still
-    a plan.
-    """
-    return spelled_view(mode_word, brief_view(plan_arg, plan_path))
-
-
-def commit_mode_word(mode_word: str, view: Optional["CommitView"]) -> str:
-    """*mode_word* as a command printed for *view* names it (the hook's
-    ``spell_mode``), aliases resolved first; unchanged without a view."""
-    if view is None:
-        return str(mode_word)
-    from .commit_spelling import spell_mode
-
-    row = _skill_module("modes").resolve(str(mode_word))
-    return spell_mode(row.name if row is not None else str(mode_word), view)
-
-
-def commit_spelled_args(
-    mode_word: str, view: "CommitView", flags: Sequence[Any] = (),
-) -> str:
-    """``--<commit mode> <pinned> [flags…]``, the text a route's template
-    wraps: the hook's ``spell_args`` (the pinned range, or the brief path on
-    a root range, and none of the flags a front door synthesises or
-    consumes), each token through :func:`quote_plan_arg`."""
-    from .commit_spelling import spell_args
-
-    word, rest = spell_args(commit_mode_word(mode_word, view), None, flags, view)
-    return " ".join([f"--{word}", *(quote_plan_arg(str(token)) for token in rest)])
 
 
 def fronted_mode_word(mode_word: str) -> str:
@@ -1514,48 +930,6 @@ def _prerequisites_unmet(plan_path: Path, phase: str) -> bool:
     prereq = _skill_module("check_workflow_prerequisites")
     state = StateManager(plan_path, read_only=True)
     return bool(prereq.collect_missing(state, output_dir_path(plan_path), phase))
-
-
-def phase_command(
-    plan_arg: str, host_id: str, route: Optional[str], mode_word: str,
-    *flags: str,
-    plan_path: Optional[Union[str, Path]] = None,
-) -> str:
-    """``<host spelling> --<mode> <plan as typed> [flags…]``, from the same
-    ``next_command`` template and the same quoting as :func:`resume_command`.
-
-    What a write phase's stop message prints as the way forward (racing
-    re-run 3, 2026-10-05): the resume, the review-code / apply-code-fixes pair
-    that fixes what a failed check reported, and the ``--human-task`` variants
-    that accept the failure. No gate: the caller has just stopped the phase
-    it names. Raises ``ValueError`` for a (host, route) pair with no template.
-
-    Every flag token goes through the plan argument's own rule,
-    :func:`quote_plan_arg`: a composite's continuation carries
-    ``--files``/``--files-from`` paths, which may hold a space or a quote.
-    Every token the other callers pass (``--resume``, ``--human-task``,
-    ``T003=done``, ``{task_id}=skip``) has neither and comes back bare.
-
-    On a commit review (the plan's ``state.json``, read at *plan_path* else
-    at *plan_arg*, holds ``commit_range``) the command is spelled as the
-    commit mode with the pinned range and none of the flags a front door
-    synthesises (:func:`commit_spelled_args`):
-    ``[IMPROVE_RERUN]``, an apply stop's ``skip`` answer and the resume
-    answers all come through here.
-    """
-    modes = _skill_module("modes")
-    mode = modes.resolve(mode_word)
-    if mode is None:
-        raise ValueError(f"unknown mode {mode_word!r}")
-    template = _host_capabilities().next_command_template(host_id, route)
-    view = commit_view_for(mode.name, plan_arg, plan_path)
-    if view is not None:
-        return template.replace(ARGS_SLOT, commit_spelled_args(mode.name, view, flags))
-    args = " ".join([
-        f"--{mode.name}", quote_plan_arg(plan_arg),
-        *(quote_plan_arg(str(flag)) for flag in flags),
-    ])
-    return template.replace(ARGS_SLOT, args)
 
 
 def resume_command(

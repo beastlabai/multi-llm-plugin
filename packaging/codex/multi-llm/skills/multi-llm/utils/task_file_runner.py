@@ -36,7 +36,8 @@ from .subagent_tasks import (
     refuse_reason,
     tasks_of,
 )
-from .write_safety import DRY_RUN_FILENAME, redact_argv
+from .redact import redact_argv
+from .write_safety import DRY_RUN_FILENAME
 from . import failure_capture as _failure_capture
 from . import task_outcome as _task_outcome
 from . import task_result as _task_result

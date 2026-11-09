@@ -417,7 +417,7 @@ def reaggregate_consolidation_mode(
         print(f"Warning: {partial_failures['count']} batch(es) had failures "
               f"(indices: {partial_failures['batches']})")
 
-    from utils.consolidation import _compute_file_hash
+    from utils.output_handler import _compute_file_hash
     plan_hash = _compute_file_hash(plan_path)
     grouped_hash = _compute_file_hash(grouped_path)
 

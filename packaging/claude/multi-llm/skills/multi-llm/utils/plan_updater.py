@@ -5,7 +5,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from .tasks_file import (
+from .tasks_marker import (
     TASKS_FILE_MARKER_PATTERN,
     markdown_code_ranges,
     tasks_marker,
@@ -23,7 +23,7 @@ GENERATED_TASKS_START = "<!-- GENERATED_TASKS_START -->"
 GENERATED_TASKS_END = "<!-- GENERATED_TASKS_END -->"
 
 # Marker for external tasks file reference (new - tasks in separate file).
-# The pattern is `tasks_file`'s, the one every phase reads the marker with.
+# The pattern is `tasks_marker`'s, the one every phase reads the marker with.
 TASKS_FILE_REFERENCE_PATTERN = TASKS_FILE_MARKER_PATTERN
 TASKS_FILE_REFERENCE_TEMPLATE = "<!-- TASKS_FILE: {tasks_file} -->"
 
@@ -381,7 +381,7 @@ def _reference_section_start(content: str, marker_start: int, code) -> Optional[
     """Where the ``## Implementation Tasks`` section holding a marker starts.
 
     ``None`` unless the nearest heading before *marker_start* that is not
-    inside code (*code*, ``tasks_file.markdown_code_ranges``) is that heading.
+    inside code (*code*, ``tasks_marker.markdown_code_ranges``) is that heading.
     """
     nearest = None
     for heading in _HEADING_LINE_RE.finditer(content, 0, marker_start):
@@ -412,7 +412,7 @@ See [{tasks_file}]({tasks_file}) for the detailed task breakdown.
 {reference}
 """
 
-    # Every marker that counts (`tasks_file.tasks_marker_spans`: not one quoted
+    # Every marker that counts (`tasks_marker.tasks_marker_spans`: not one quoted
     # as code) now names the new list, so none is left for implement to refuse
     # or follow: the marker of this function's own section is rewritten with
     # its heading and link, any other in place. Spliced, not `re.sub`: a

@@ -2073,7 +2073,7 @@ class TestTheAskLaneQueueWaitIsNotBudgetSpent:
 
         # No stagger, so only the parked wait can make the tail's `queued_s`
         # positive. (The autouse fast-backoff floor is 10 ms, which rounds to 0.)
-        with patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+        with patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             rc = run_ask(["--plan-file", str(plan), "--question", "Q",
                           "--models", self.HEAD, self.TAIL,
                           "--max-parallel", "1"], SlowHead())
@@ -2254,7 +2254,7 @@ class TestTheDeadlineIsNamedOnceOnThisLane:
         # `--timeout 0` with the stagger patched out makes the fan-out's own
         # `total_timeout` 0, so `asyncio.wait_for` fires its deadline before any
         # slot can run: the real deadline path, not a simulated one.
-        with patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+        with patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             rc = run_ask(["--plan-file", str(plan), "--question", "Q",
                           "--timeout", "0", "--models", *specs], FakeInvoker())
         assert rc == 3  # zero answers: nothing to aggregate
@@ -3193,7 +3193,7 @@ class TestAFailedRunIsNeverAnAnswer:
                 return await asyncio.wait_for(aw, timeout)
 
         monkeypatch.setattr(base, "asyncio", HoldsTheDeadlineUntilWritten())
-        monkeypatch.setattr(base, "PROVIDER_STAGGER_DELAY", 1.0)
+        monkeypatch.setattr("utils.concurrency.PROVIDER_STAGGER_DELAY", 1.0)
         rc = run_ask(ask_argv(plan, spec, extra=("--timeout", "0")), WritesThenHangs())
         assert written.is_set()
         assert rc == 3
@@ -3237,7 +3237,7 @@ class TestAFailedRunIsNeverAnAnswer:
                 return {"success": True, "data": "late",
                         "details": {"answer_text": "late"}}
 
-        monkeypatch.setattr(base, "PROVIDER_STAGGER_DELAY", 1.0)
+        monkeypatch.setattr("utils.concurrency.PROVIDER_STAGGER_DELAY", 1.0)
         rc = run_ask(ask_argv(plan, spec, extra=("--timeout", "0")), HangsThenWrites())
         assert rc == 3
         status = read_status(d)
@@ -3267,7 +3267,7 @@ class TestAFailedRunIsNeverAnAnswer:
                     "Written as the CLI was stopped.", encoding="utf-8")
                 return {"success": False, "error": "stopped", "details": {}}
 
-        monkeypatch.setattr(base, "PROVIDER_STAGGER_DELAY", 1.0)
+        monkeypatch.setattr("utils.concurrency.PROVIDER_STAGGER_DELAY", 1.0)
         started = time.monotonic()
         rc = run_ask(ask_argv(plan, spec, extra=("--timeout", "0")), RunsALongCli())
         assert time.monotonic() - started < 30

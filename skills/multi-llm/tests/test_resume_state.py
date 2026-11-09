@@ -369,7 +369,7 @@ def _dispatched(plan: Path, phase: str, models, scope_id: Optional[str]) -> Set[
     out_dir = plan.parent / plan.stem
     mechanics = (
         patch.object(base, "get_provider_max_concurrent", return_value=None),
-        patch.object(base, "plan_launch_limiter", return_value=(None, 0)),
+        patch("utils.concurrency.plan_launch_limiter", return_value=(None, 0)),
         patch.object(base, "slot_launch",
                      side_effect=lambda *a, **k: contextlib.nullcontext()),
     )

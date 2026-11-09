@@ -14,7 +14,7 @@ import pytest
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from finalize_tracking import get_all_modified_files, main
+from utils.tracking import get_all_modified_files, main
 
 
 # --- Fixtures ---
@@ -26,8 +26,8 @@ def _no_ignore_rules(monkeypatch):
     are about the census arithmetic, so the ignore lookup answers "none"; the
     ignore rule itself is covered where a throwaway repo carries one
     (`TestTheSweepLeavesGitignoredPathsOut`)."""
-    import finalize_tracking
-    monkeypatch.setattr(finalize_tracking, "ignored_paths",
+    from utils import tracking
+    monkeypatch.setattr(tracking, "ignored_paths",
                         lambda paths, cwd=None: set())
 
 
@@ -41,8 +41,8 @@ class TestOnlyTouchedWithEveryPathIgnored:
 
     def test_the_refusal_names_the_ignored_paths(self, valid_state, monkeypatch,
                                                  capsys):
-        import finalize_tracking
-        monkeypatch.setattr(finalize_tracking, "ignored_paths",
+        from utils import tracking
+        monkeypatch.setattr(tracking, "ignored_paths",
                             lambda paths, cwd=None: set(paths))
         code = main([
             "--state-file", str(valid_state), "--only-touched",
@@ -136,8 +136,8 @@ def invalid_pre_existing_type_state(temp_dir):
 class TestGetAllModifiedFiles:
     """Tests for get_all_modified_files function."""
 
-    @patch("finalize_tracking.utils_get_modified_files")
-    @patch("finalize_tracking.get_staged_files")
+    @patch("utils.tracking.utils_get_modified_files")
+    @patch("utils.tracking.get_staged_files")
     def test_returns_empty_set_when_no_changes(self, mock_staged, mock_modified):
         """Returns empty set when there are no modified or staged files."""
         mock_modified.return_value = []
@@ -147,8 +147,8 @@ class TestGetAllModifiedFiles:
 
         assert result == set()
 
-    @patch("finalize_tracking.utils_get_modified_files")
-    @patch("finalize_tracking.get_staged_files")
+    @patch("utils.tracking.utils_get_modified_files")
+    @patch("utils.tracking.get_staged_files")
     def test_returns_modified_files_only(self, mock_staged, mock_modified):
         """Returns only modified files when there are no staged files."""
         mock_modified.return_value = ["file1.py", "file2.py"]
@@ -158,8 +158,8 @@ class TestGetAllModifiedFiles:
 
         assert result == {"file1.py", "file2.py"}
 
-    @patch("finalize_tracking.utils_get_modified_files")
-    @patch("finalize_tracking.get_staged_files")
+    @patch("utils.tracking.utils_get_modified_files")
+    @patch("utils.tracking.get_staged_files")
     def test_returns_staged_files_only(self, mock_staged, mock_modified):
         """Returns only staged files when there are no modified files."""
         mock_modified.return_value = []
@@ -169,8 +169,8 @@ class TestGetAllModifiedFiles:
 
         assert result == {"staged1.py", "staged2.py"}
 
-    @patch("finalize_tracking.utils_get_modified_files")
-    @patch("finalize_tracking.get_staged_files")
+    @patch("utils.tracking.utils_get_modified_files")
+    @patch("utils.tracking.get_staged_files")
     def test_returns_union_of_modified_and_staged(self, mock_staged, mock_modified):
         """Returns union of modified and staged files."""
         mock_modified.return_value = ["modified.py", "both.py"]
@@ -180,8 +180,8 @@ class TestGetAllModifiedFiles:
 
         assert result == {"modified.py", "staged.py", "both.py"}
 
-    @patch("finalize_tracking.utils_get_modified_files")
-    @patch("finalize_tracking.get_staged_files")
+    @patch("utils.tracking.utils_get_modified_files")
+    @patch("utils.tracking.get_staged_files")
     def test_filters_empty_strings(self, mock_staged, mock_modified):
         """Filters out empty strings from results."""
         mock_modified.return_value = ["file1.py", "", "file2.py"]
@@ -192,8 +192,8 @@ class TestGetAllModifiedFiles:
         assert result == {"file1.py", "file2.py", "staged.py"}
         assert "" not in result
 
-    @patch("finalize_tracking.utils_get_modified_files")
-    @patch("finalize_tracking.get_staged_files")
+    @patch("utils.tracking.utils_get_modified_files")
+    @patch("utils.tracking.get_staged_files")
     def test_handles_exception_returns_empty_set(self, mock_staged, mock_modified):
         """Handles exceptions gracefully and returns empty set."""
         mock_modified.side_effect = Exception("Git error")
@@ -231,7 +231,7 @@ class TestMainEntryPoint:
 
         assert result == 1
 
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_normal_completion_returns_zero(self, mock_get_files, valid_state):
         """Returns zero on normal completion."""
         mock_get_files.return_value = {"new_file.py", "another.py", "existing_file1.py"}
@@ -241,7 +241,7 @@ class TestMainEntryPoint:
 
         assert result == 0
 
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_dry_run_does_not_modify_state(self, mock_get_files, valid_state):
         """Dry run mode does not modify the state file."""
         mock_get_files.return_value = {"new_file.py", "another.py"}
@@ -256,7 +256,7 @@ class TestMainEntryPoint:
         # State file should not be modified
         assert valid_state.read_text(encoding="utf-8") == original_content
 
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_dry_run_returns_zero(self, mock_get_files, valid_state):
         """Dry run mode returns zero."""
         mock_get_files.return_value = {"new_file.py"}
@@ -272,7 +272,7 @@ class TestMainEntryPoint:
 class TestStateFileUpdates:
     """Tests for state file update functionality."""
 
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_tracked_files_written_correctly(self, mock_get_files, valid_state):
         """tracked_files list is written correctly to state."""
         mock_get_files.return_value = {"new_file.py", "another.py", "existing_file1.py"}
@@ -290,7 +290,7 @@ class TestStateFileUpdates:
         # existing_file1.py was in pre_existing_changes, so should NOT be tracked
         assert "existing_file1.py" not in tracked_paths
 
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_tracked_files_have_correct_structure(
         self, mock_get_files, valid_state, tmp_path, monkeypatch
     ):
@@ -314,7 +314,7 @@ class TestStateFileUpdates:
         assert entry["action"] == "modified"
         assert entry["task_id"] == "implementation"
 
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_updated_at_field_added(self, mock_get_files, valid_state):
         """updated_at field is added to state."""
         mock_get_files.return_value = {"new_file.py"}
@@ -328,7 +328,7 @@ class TestStateFileUpdates:
         # Should be a valid ISO format datetime
         datetime.fromisoformat(state["updated_at"])
 
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_existing_fields_preserved(self, mock_get_files, valid_state):
         """Existing state fields are preserved after update."""
         mock_get_files.return_value = {"new_file.py"}
@@ -343,7 +343,7 @@ class TestStateFileUpdates:
         assert state["plan_path"] == "/path/to/plan.md"
         assert "existing_file1.py" in state["pre_existing_changes"]
 
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_handles_missing_pre_existing_changes(self, mock_get_files, state_without_pre_existing):
         """Handles state file without pre_existing_changes field."""
         mock_get_files.return_value = {"new_file.py"}
@@ -356,7 +356,7 @@ class TestStateFileUpdates:
         tracked_paths = [f["path"] for f in state["tracked_files"]]
         assert "new_file.py" in tracked_paths
 
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_handles_empty_pre_existing_changes(self, mock_get_files, empty_pre_existing_state):
         """Handles state file with empty pre_existing_changes list."""
         mock_get_files.return_value = {"file1.py", "file2.py"}
@@ -370,7 +370,7 @@ class TestStateFileUpdates:
         assert "file1.py" in tracked_paths
         assert "file2.py" in tracked_paths
 
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_handles_invalid_pre_existing_type_with_warning(self, mock_get_files, invalid_pre_existing_type_state, capsys):
         """Handles state where pre_existing_changes is not a list."""
         mock_get_files.return_value = {"new_file.py"}
@@ -384,7 +384,7 @@ class TestStateFileUpdates:
         assert "WARNING" in captured.err
         assert "pre_existing_changes is not a list" in captured.err
 
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_no_new_files_creates_empty_tracked_files(self, mock_get_files, valid_state):
         """When all modified files are pre-existing, tracked_files is empty."""
         # Only return files that are in pre_existing_changes
@@ -397,7 +397,7 @@ class TestStateFileUpdates:
         state = json.loads(valid_state.read_text(encoding="utf-8"))
         assert state["tracked_files"] == []
 
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_tracked_files_sorted_alphabetically(self, mock_get_files, valid_state):
         """Tracked files are sorted alphabetically by path."""
         mock_get_files.return_value = {"zebra.py", "alpha.py", "middle.py"}
@@ -412,7 +412,7 @@ class TestStateFileUpdates:
 
     @pytest.mark.skipif(os.name == "nt", reason="Windows ignores a directory's "
                         "mode bits, so a chmod 0o555 directory still takes the file")
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_write_failure_returns_error(self, mock_get_files, valid_state):
         """Returns error when the state file cannot be written.
 
@@ -438,7 +438,7 @@ class TestStateFileUpdates:
         finally:
             directory.chmod(original)
 
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_an_interrupted_write_never_truncates_the_state_file(
         self, mock_get_files, valid_state
     ):
@@ -468,7 +468,7 @@ class TestStateFileUpdates:
 class TestOutputMessages:
     """Tests for output messages from main function."""
 
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_outputs_file_counts(self, mock_get_files, valid_state, capsys):
         """Outputs correct file counts."""
         mock_get_files.return_value = {"new1.py", "new2.py", "existing_file1.py"}
@@ -481,7 +481,7 @@ class TestOutputMessages:
         assert "Pre-existing changes: 2" in captured.out
         assert "Implementation changes: 2" in captured.out
 
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_outputs_tracked_files_list(self, mock_get_files, valid_state, capsys):
         """Outputs list of tracked files."""
         mock_get_files.return_value = {"new_file.py"}
@@ -493,7 +493,7 @@ class TestOutputMessages:
         assert "Tracked 1 implementation files:" in captured.out
         assert "new_file.py" in captured.out
 
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_dry_run_outputs_would_track_message(self, mock_get_files, valid_state, capsys):
         """Dry run outputs 'would track' message."""
         mock_get_files.return_value = {"new_file.py"}
@@ -537,7 +537,7 @@ class TestOutputMessages:
 class TestEdgeCases:
     """Tests for edge cases and boundary conditions."""
 
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_handles_no_modified_files(self, mock_get_files, valid_state):
         """Handles case when there are no modified files at all."""
         mock_get_files.return_value = set()
@@ -549,7 +549,7 @@ class TestEdgeCases:
         state = json.loads(valid_state.read_text(encoding="utf-8"))
         assert state["tracked_files"] == []
 
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_handles_files_with_special_characters(self, mock_get_files, valid_state):
         """Handles files with special characters in paths."""
         mock_get_files.return_value = {"path/to/file with spaces.py", "file-with-dashes.py"}
@@ -563,7 +563,7 @@ class TestEdgeCases:
         assert "path/to/file with spaces.py" in tracked_paths
         assert "file-with-dashes.py" in tracked_paths
 
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_handles_deeply_nested_paths(self, mock_get_files, valid_state):
         """Handles deeply nested file paths."""
         mock_get_files.return_value = {"a/b/c/d/e/f/deep_file.py"}
@@ -576,7 +576,7 @@ class TestEdgeCases:
         tracked_paths = [f["path"] for f in state["tracked_files"]]
         assert "a/b/c/d/e/f/deep_file.py" in tracked_paths
 
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_handles_large_number_of_files(self, mock_get_files, valid_state):
         """Handles large number of modified files."""
         # Generate many file names
@@ -590,7 +590,7 @@ class TestEdgeCases:
         state = json.loads(valid_state.read_text(encoding="utf-8"))
         assert len(state["tracked_files"]) == 100
 
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_pre_existing_changes_exactly_matches_modified(self, mock_get_files, temp_dir):
         """When pre_existing_changes exactly matches modified files."""
         state = {
@@ -609,7 +609,7 @@ class TestEdgeCases:
         updated_state = json.loads(state_path.read_text(encoding="utf-8"))
         assert updated_state["tracked_files"] == []
 
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_state_with_existing_tracked_files_overwrites(self, mock_get_files, temp_dir):
         """Existing tracked_files in state are overwritten."""
         state = {
@@ -646,7 +646,7 @@ class TestTouchedFilesSurvivePreExistingSubtraction:
         tested."""
         monkeypatch.chdir(tmp_path)
 
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_a_pre_existing_file_the_run_touched_is_tracked(self, mock_get_files, valid_state, capsys):
         mock_get_files.return_value = {"existing_file1.py", "stray.md"}
         result = main(["--state-file", str(valid_state), "--touched", "existing_file1.py"])
@@ -657,7 +657,7 @@ class TestTouchedFilesSurvivePreExistingSubtraction:
         out = capsys.readouterr().out
         assert "Verified by the write executor: 1 (1 kept although modified before the phase started: existing_file1.py)" in out
 
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_touched_is_repeatable_and_deduplicated(self, mock_get_files, valid_state):
         mock_get_files.return_value = {"new.py"}
         result = main([
@@ -669,7 +669,7 @@ class TestTouchedFilesSurvivePreExistingSubtraction:
         state = json.loads(valid_state.read_text(encoding="utf-8"))
         assert [e["path"] for e in state["tracked_files"]] == ["existing_file2.py", "new.py"]
 
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_without_touched_the_subtraction_is_unchanged(self, mock_get_files, valid_state, capsys):
         mock_get_files.return_value = {"existing_file1.py", "new.py"}
         assert main(["--state-file", str(valid_state)]) == 0
@@ -703,7 +703,7 @@ class TestADirectoryBaselineCoversThePathsUnderIt:
         state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
         return state_path
 
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_only_the_verified_files_survive_a_file_granular_census(
         self, mock_get_files, legacy_directory_baseline_state
     ):
@@ -728,7 +728,7 @@ class TestADirectoryBaselineCoversThePathsUnderIt:
             "plans/game/tasks/tasks.md",
         ]
 
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_a_touched_file_under_a_directory_baseline_is_reported_as_kept(
         self, mock_get_files, legacy_directory_baseline_state, capsys
     ):
@@ -744,7 +744,7 @@ class TestADirectoryBaselineCoversThePathsUnderIt:
         out = capsys.readouterr().out
         assert "1 kept although modified before the phase started: plans/game.md" in out
 
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_a_rerun_shrinks_a_bloated_tracked_files_list(
         self, mock_get_files, temp_dir
     ):
@@ -779,8 +779,8 @@ class TestADirectoryThePhaseCreatedIsExpandedToItsFiles:
     silently reviews none of the new module — which is what the native leg
     (no ``--touched``) always gets."""
 
-    @patch("finalize_tracking.list_untracked_files")
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.list_untracked_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_an_uncovered_directory_becomes_the_files_inside_it(
         self, mock_get_files, mock_list, empty_pre_existing_state
     ):
@@ -797,8 +797,8 @@ class TestADirectoryThePhaseCreatedIsExpandedToItsFiles:
         ]
         mock_list.assert_called_once_with("src/physics/")
 
-    @patch("finalize_tracking.list_untracked_files")
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.list_untracked_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_a_baseline_covered_directory_is_never_expanded(
         self, mock_get_files, mock_list, temp_dir
     ):
@@ -820,8 +820,8 @@ class TestADirectoryThePhaseCreatedIsExpandedToItsFiles:
         updated = json.loads(state_path.read_text(encoding="utf-8"))
         assert [e["path"] for e in updated["tracked_files"]] == ["index.html"]
 
-    @patch("finalize_tracking.list_untracked_files")
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.list_untracked_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_a_directory_git_cannot_list_is_kept_rather_than_dropped(
         self, mock_get_files, mock_list, empty_pre_existing_state
     ):
@@ -839,7 +839,7 @@ class TestTheTrackedFileDumpIsTruncated:
     """The run log is the only durable record of a detached run; a 1 500-line
     path dump buries everything else in it (state.json keeps the full list)."""
 
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_only_the_first_twenty_paths_are_printed(
         self, mock_get_files, empty_pre_existing_state, capsys
     ):
@@ -855,7 +855,7 @@ class TestTheTrackedFileDumpIsTruncated:
         state = json.loads(empty_pre_existing_state.read_text(encoding="utf-8"))
         assert len(state["tracked_files"]) == 50
 
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_the_dry_run_branch_is_truncated_too(
         self, mock_get_files, empty_pre_existing_state, capsys
     ):
@@ -868,7 +868,7 @@ class TestTheTrackedFileDumpIsTruncated:
         assert "  - file_020.py" not in out
         assert "  … and 5 more (see state.json.tracked_files)" in out
 
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_a_short_list_is_printed_whole_without_a_tail(
         self, mock_get_files, empty_pre_existing_state, capsys
     ):
@@ -905,7 +905,7 @@ class TestTheSummaryBackReferenceIsNotReadAsAHumanEdit:
         )
         return plan, state_path
 
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_the_stamped_hash_matches_the_plan_as_written(
         self, mock_get_files, plan_and_state
     ):
@@ -927,7 +927,7 @@ class TestTheSummaryBackReferenceIsNotReadAsAHumanEdit:
         # The census this command exists for survives the second write.
         assert [e["path"] for e in state["tracked_files"]] == ["index.html"]
 
-    @patch("finalize_tracking.get_all_modified_files")
+    @patch("utils.tracking.get_all_modified_files")
     def test_a_state_file_that_records_no_hash_does_not_gain_one(
         self, mock_get_files, temp_dir
     ):
@@ -1616,7 +1616,7 @@ class TestMarkCompletedIsTheNativeLegsClosingWrite:
 
     def test_without_the_flag_the_phase_stays_started(self, temp_dir, capsys):
         path = self._state(temp_dir)
-        with patch("finalize_tracking.get_all_modified_files", return_value=[]):
+        with patch("utils.tracking.get_all_modified_files", return_value=[]):
             assert main(["--state-file", str(path)]) == 0
         saved = json.loads(path.read_text(encoding="utf-8"))
         assert "implement" in saved["phases_started"]
@@ -1625,7 +1625,7 @@ class TestMarkCompletedIsTheNativeLegsClosingWrite:
 
     def test_with_the_flag_the_start_becomes_a_completion(self, temp_dir, capsys):
         path = self._state(temp_dir)
-        with patch("finalize_tracking.get_all_modified_files", return_value=[]):
+        with patch("utils.tracking.get_all_modified_files", return_value=[]):
             assert main(["--state-file", str(path), "--mark-completed"]) == 0
         saved = json.loads(path.read_text(encoding="utf-8"))
         assert isinstance(saved["phases_completed"]["implement"], str)
@@ -1643,7 +1643,7 @@ class TestMarkCompletedIsTheNativeLegsClosingWrite:
         state = StateManager(plan)
         state.mark_phase_started("implement")
         state.save()
-        with patch("finalize_tracking.get_all_modified_files", return_value=[]):
+        with patch("utils.tracking.get_all_modified_files", return_value=[]):
             assert main(["--state-file", str(state.state_file), "--mark-completed"]) == 0
         reloaded = StateManager(plan)
         assert reloaded.is_phase_completed("implement")
@@ -1651,7 +1651,7 @@ class TestMarkCompletedIsTheNativeLegsClosingWrite:
 
     def test_a_dry_run_never_marks(self, temp_dir):
         path = self._state(temp_dir)
-        with patch("finalize_tracking.get_all_modified_files", return_value=[]):
+        with patch("utils.tracking.get_all_modified_files", return_value=[]):
             assert main(["--state-file", str(path), "--mark-completed", "--dry-run"]) == 0
         saved = json.loads(path.read_text(encoding="utf-8"))
         assert "implement" not in saved.get("phases_completed", {})

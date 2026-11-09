@@ -280,7 +280,7 @@ def compose_resume_why(
     # reads back from the run's folder (`next_phase.recorded_why`), cut at a
     # word, so the tool routes and status carry the why the native block
     # prints instead of falling back on a large stop.
-    from .next_phase import MAX_RECORDED_WHY_CHARS
+    from .manual_tasks import MAX_RECORDED_WHY_CHARS
     return clip(f"runs the {unit} that can run; " + "; ".join(parts),
                 MAX_RECORDED_WHY_CHARS - len(tail)) + tail
 
@@ -396,7 +396,7 @@ def compose_stop_answers(
     # Each why within the length the tool routes read back
     # from the run's folder (`next_phase.stop_answers_on_record`), cut at a
     # word, so a large stop's answers are not dropped on the way.
-    from .next_phase import MAX_RECORDED_WHY_CHARS
+    from .manual_tasks import MAX_RECORDED_WHY_CHARS
     rest = "; the rest runs"
     answers: List[Dict[str, Any]] = []
     if len(clauses) > 1:
