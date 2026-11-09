@@ -33,7 +33,7 @@ from typing import Any, Callable, Dict, Optional, Sequence
 from . import batch_prompt as _batch_prompt
 from . import write_context as _write_context
 from .providers.base import SANDBOX_RUNG_PLUGIN_LANDLOCK, WRITE_SCOPE_REPO_WIDE
-from .subagent_executor import profile_for_kind
+from .runner_selection import profile_for_kind
 from .subagent_tasks import snapshot_file_set
 from .write_safety import (
     PRE_BATCH_DIRNAME,

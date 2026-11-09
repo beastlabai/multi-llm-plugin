@@ -34,13 +34,13 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from . import batch_prompt as _batch_prompt
 from . import check_records as _check_records
 from . import process_control as _process_control
-from . import subagent_executor as _executor
+from . import dispatch_spawn as _dispatch_spawn
 from . import write_context as _write_context
 from .batch_ledger import touched_files
 from .cli_common import EXIT_NEEDS_HUMAN
 from .provider_registry import get_verify_command, get_verify_settings
 from .batch_reply import WRITE_APPLIED, WRITE_PARTIAL
-from .subagent_executor import _host_env_guards
+from .dispatch_spawn import _host_env_guards
 from .subagent_tasks import PHASE_BY_WRITE_KIND
 
 #: How much of the verification command's output travels in the result payload,
@@ -493,11 +493,11 @@ def _verify_timeout_note(
 ) -> str:
     """The line a timed-out verify command's output ends with, from its kill's
     *verdict* (``kill_tree``). Only ``killed`` and
-    ``gone`` confirm the command stopped (``subagent_executor._unconfirmed_kill``);
+    ``gone`` confirm the command stopped (``dispatch_spawn._unconfirmed_kill``);
     every other verdict, ``None`` for a kill that raised included, names the
     pid and says the command may still be running, never that it was killed
     (docs/development/write-scheduler.md, "When the verify command times out")."""
-    reason = _executor._unconfirmed_kill(verdict)
+    reason = _dispatch_spawn._unconfirmed_kill(verdict)
     if reason is None:
         if verdict == "gone":
             return (f"\n(timed out after {timeout}s: the command had already stopped, "
@@ -614,7 +614,7 @@ class VerifyCommand:
         *job* is the command's Windows Job Object, the group's stand-in there.
 
         Only ``killed`` and ``gone`` confirm the command stopped, the executor's
-        rule for its timed-out runner (``subagent_executor._unconfirmed_kill``):
+        rule for its timed-out runner (``dispatch_spawn._unconfirmed_kill``):
         a ``survived`` that is only the command's own zombie becomes ``killed``
         once its exit is confirmed (``process_control.own_child_stopped``), and
         any other outcome is logged as a warning naming the pid, which a
@@ -642,7 +642,7 @@ class VerifyCommand:
             proc.wait(timeout=VERIFY_REAP_S)
         except subprocess.TimeoutExpired:  # pragma: no cover - survived SIGKILL
             pass
-        reason = _executor._unconfirmed_kill(verdict)
+        reason = _dispatch_spawn._unconfirmed_kill(verdict)
         if reason is not None:
             detach = sys.modules.get(f"{__package__}.detach") if __package__ else None
             kept = detach is not None and detach.note_left_running(proc.pid, pgid, verdict)

@@ -225,7 +225,7 @@ class ProfileUnsupported(Exception):
 # to fix what such a probe found. Two of §5.3's four rows already shipped under
 # their executor-facing names — `auth_check` **is** the status argv (D3c) and
 # `login_cmd` **is** the login command, both already read by
-# `subagent_executor._detect_auth` and by `describe_availability` — so this adds
+# `runner_preflight._detect_auth` and by `describe_availability` — so this adds
 # only the two that were missing (`install_hint`, `auth_hint`) and exposes all
 # four through one record. Declaring `status_args`/`login_args` as second
 # storage would give one fact two owners and let a probe drift from the refusal

@@ -321,13 +321,13 @@ def preflight_workspace_runner(task: Dict[str, Any], *, anchor: Optional[str]) -
             named.
     """
     from utils.provider_registry import SESSION_LAYER, get_provider, parse_model_spec
-    from utils.subagent_executor import (
-        PROFILE_AGENT_READONLY,
-        RunnerRejected,
+    from utils.providers.base import PROFILE_AGENT_READONLY
+    from utils.task_outcome import RunnerRejected
+    from utils.runner_selection import (
         eligible_runners,
-        preflight_runner,
         _resolve_task_source,
     )
+    from utils.runner_preflight import preflight_runner
 
     # The key carries the ladder's layer word (`driver.subagent_runner
     # (session)`), so a refusal or a warning here names the rung that supplied
@@ -384,7 +384,7 @@ def validate_document(data: Any) -> List[str]:
     kind (``task_result.validate_result``), so a document that fails either
     gets the executor lane's schema-repair re-ask and is never persisted.
     """
-    from utils.subagent_executor import validate_result
+    from utils.task_result import validate_result
 
     return list(validate_result(TASK_KIND, data))
 
@@ -398,7 +398,7 @@ def stale_result_problems(result_path: str) -> List[str]:
     """
     import copy
 
-    from utils.subagent_executor import normalize_result, supply_result_version
+    from utils.task_result import normalize_result, supply_result_version
 
     try:
         data = json.loads(Path(result_path).read_text(encoding="utf-8"))
@@ -559,7 +559,7 @@ def consume_document(plan_path: Path, result_path: str) -> int:
     # a later `task_is_complete` re-validates the file, so what was validated
     # and applied is what is on disk.
     from utils.schema_validator import schema_version_supplied
-    from utils.subagent_executor import normalize_result, supply_result_version
+    from utils.task_result import normalize_result, supply_result_version
 
     notes = normalize_result(TASK_KIND, data)
     # Fix round 28 (live run 12, Claude Code racing 03): the host's copy of
@@ -745,7 +745,7 @@ def _contain_phase_outputs(plan_path: Path) -> Optional[int]:
     folder held, so a link planted after this check is refused there.
     """
     import update_plan_tasks
-    from utils.subagent_executor import FAILED_CAPTURE_DIRNAME
+    from utils.failure_capture import FAILED_CAPTURE_DIRNAME
 
     phase_dir = phase_dir_path(plan_path, PHASE_NAME)
     try:
@@ -956,7 +956,7 @@ def run_generate_tasks(
     if exec_subagents_requested(args) and not getattr(
         args, "dry_run_subagents", False
     ):
-        from utils.subagent_executor import ExecutorError
+        from utils.task_outcome import ExecutorError
 
         try:
             preflight_workspace_runner(task, anchor=str(plan_path))

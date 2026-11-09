@@ -26,12 +26,12 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 from . import human_task_plan as _human_task_plan
 from . import write_context as _write_context
 from .provider_registry import parse_model_spec
-from .subagent_executor import (
+from .task_outcome import (
     ExecutorError,
     ResultRejected,
-    _atomic_write_json,
-    profile_for_kind,
 )
+from .failure_capture import _atomic_write_json
+from .runner_selection import profile_for_kind
 from .subagent_tasks import SHARED_ARTIFACT_WRITE_KINDS, declared_file_set, snapshot_file_set
 from .write_safety import (
     DRY_RUN_FILENAME,

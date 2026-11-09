@@ -700,7 +700,7 @@ class LLMProvider(ABC):
         adapter answers ``None`` for ``agent-write`` whatever the config says.
         Every gate that consults this
         (``review_orchestrator_base.sandbox_refusal``,
-        ``subagent_executor._detect_sandbox``) requires *all five* of: the
+        ``sandbox_walk._detect_sandbox``) requires *all five* of: the
         probe verdict ``unavailable`` (never ``unknown`` — a probe that could
         not be read must not widen anything), a rung the walk selected, this
         answer permitting that rung (:func:`sandbox_rung_allowed`: ``auto``
@@ -808,7 +808,7 @@ class LLMProvider(ABC):
     #:
     #: It is spawned only by the human-invoked status path
     #: (``install-host --check`` row 5, through
-    #: :func:`utils.subagent_executor.probe_setup_metadata`), never by a dispatch
+    #: :func:`utils.runner_preflight.probe_setup_metadata`), never by a dispatch
     #: preflight: the facts it carries change nothing about whether a child may
     #: start, so paying a subprocess for them once per phase would be cost
     #: without a decision.
@@ -927,7 +927,7 @@ class LLMProvider(ABC):
         prompt's example block contains the word, and copilot's and vibe's
         successful runs classified ``rate_limited`` because the plan under
         review discusses rate limits. On a *failed* run that verdict is live —
-        ``subagent_executor._classify_failed_run`` forwards exactly
+        ``attempt_classifier._classify_failed_run`` forwards exactly
         ``auth_failed`` and ``rate_limited``, the two classes that change the
         whole batch's fate.
 
@@ -982,7 +982,7 @@ class LLMProvider(ABC):
           fallback notice, whose ``EACCES`` is not a diagnosis) and nothing else.
 
         Applied in exactly two places. :meth:`classify_failure` applies it **to
-        classify**. ``subagent_executor._classify_failed_run`` applies it a
+        classify**. ``attempt_classifier._classify_failed_run`` applies it a
         second time **to quote, never to classify**: once the verdict is in, it
         re-runs :func:`match_streams` over the reduced capture so the failure
         reason quotes the text that decided the verdict rather than a stream
@@ -1054,7 +1054,7 @@ class LLMProvider(ABC):
         from every exit-0 shape the CLI prints. ``None`` means nothing the CLI
         wrote was recognised, one transport retry on both lanes. No adapter
         overrides it: what is read is :meth:`vendor_text`'s, so the failure
-        quote (``subagent_executor._classify_failed_run``) is cut from the
+        quote (``attempt_classifier._classify_failed_run``) is cut from the
         same text on every exit code.
         """
         return self.classify_failure(stdout, stderr, 0)
@@ -1065,7 +1065,7 @@ class LLMProvider(ABC):
         """A structural failure verdict **with its own reason**, or ``None``.
 
         :meth:`classify_failure` returns a category and nothing else, and
-        ``subagent_executor._classify_failed_run`` forwards only the pattern
+        ``attempt_classifier._classify_failed_run`` forwards only the pattern
         verdicts that change a batch's fate (auth, rate limit, invalid model,
         sandbox, context length); a ``runner_error`` from it is dropped and the
         attempt keeps its parse failure's status and text. An adapter that can
@@ -1790,7 +1790,7 @@ class LLMProvider(ABC):
 
         The one composition point, called by both spawn sites
         (``llm_client.call_llm`` for the Lane A fan-out under ``generate``, and
-        ``subagent_executor._spawn`` with the dispatch's own profile), so the git
+        ``dispatch_spawn._spawn`` with the dispatch's own profile), so the git
         block cannot be present on one lane and missing on the other. The
         adapter's own :meth:`get_env` is merged **last** and therefore wins on any
         key it names.

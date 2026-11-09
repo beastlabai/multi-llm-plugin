@@ -703,7 +703,7 @@ def match_streams(
     equals what :func:`classify_streams` returns for the same arguments
     (``tests/test_provider_failure_classification.py::TestMatchStreams`` pins it over every
     ``classify_streams`` case in the suite). What it adds is the pattern that
-    fired and its position, so ``subagent_executor._classify_failed_run`` can
+    fired and its position, so ``attempt_classifier._classify_failed_run`` can
     quote the text that actually decided a verdict instead of a stream tail
     that may not contain it (the b38de8bb run quoted a stderr line with no
     rate limit in it).

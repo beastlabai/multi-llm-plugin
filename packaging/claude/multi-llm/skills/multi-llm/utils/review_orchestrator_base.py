@@ -429,10 +429,10 @@ def _authoritative_validator_runner(
         ``{batch_index: runner_or_None}`` for every batch in ``batch_metadata``.
     """
     try:
-        from .subagent_executor import _recorded_provenance, _recorded_runners
+        from .task_batch import _recorded_provenance, _recorded_runners
         from .subagent_tasks import batch_manifest, file_bytes_sha256
     except ImportError:  # pragma: no cover - direct script runs
-        from subagent_executor import _recorded_provenance, _recorded_runners  # type: ignore
+        from task_batch import _recorded_provenance, _recorded_runners  # type: ignore
         from subagent_tasks import batch_manifest, file_bytes_sha256  # type: ignore
     kind = batch_metadata.get("kind") or "validation"
     batches = batch_metadata.get("batches", [])
@@ -1000,7 +1000,8 @@ def _print_executor_refusal(
     ``{"state": "runner_rejected", "reason_code": …}`` so ``status`` and a
     detached poll describe this run rather than the one before it.
     """
-    from .subagent_executor import _REASON_EXPLANATION, RunnerRejected
+    from .runner_selection import _REASON_EXPLANATION
+    from .task_outcome import RunnerRejected
 
     print(f"ERROR: {failure.message}", file=sys.stderr)
     rejected = isinstance(failure, RunnerRejected)
@@ -1270,7 +1271,7 @@ def materialization_read_refusal(args: Any, plan_path: str) -> Optional[Any]:
     if not exec_subagents_requested(args):
         return _NativeReadAdvisory(plan_path)
     try:
-        from .subagent_executor import resolve_task_runner
+        from .runner_selection import resolve_task_runner
         from .provider_registry import get_provider, parse_model_spec
 
         spec = resolve_task_runner(
@@ -1355,7 +1356,7 @@ def verify_round_context(
         with host_views_lock(phase_dir):
             ensure_prompt_sidecars(document, phase_dir)
             if task_file:
-                from .subagent_executor import _atomic_write_json
+                from .failure_capture import _atomic_write_json
 
                 invalidate_host_index(task_file)
                 try:
@@ -1389,7 +1390,7 @@ def dispatch_subagent_tasks(
     under ``--yes`` — rather than letting the phase reaggregate a short set.
 
     **Synchronous, and it blocks for the whole batch.** ``continue_past_marker``
-    ends in ``subagent_executor._run_sync``, which — inside a running loop —
+    ends in ``task_batch._run_sync``, which — inside a running loop —
     submits ``asyncio.run`` to a worker thread and then *waits on the result*,
     so calling this from a coroutine pins the event loop for the entire
     validation window and starves anything living on it, the phase-scoped
@@ -1417,9 +1418,11 @@ def dispatch_subagent_tasks(
     dry_run = bool(getattr(args, "dry_run_subagents", False))
     if not exec_subagents_requested(args) and not dry_run:
         return False
-    from .subagent_executor import (
+    from .task_outcome import (
         BatchFailed,
         ExecutorError,
+    )
+    from .task_file_runner import (
         continue_past_marker,
         dry_run_report,
     )
@@ -2237,7 +2240,8 @@ def dispatch_salvage_tasks(
         return []
     import glob as glob_module
 
-    from .subagent_executor import ExecutorError, run_task_file
+    from .task_outcome import ExecutorError
+    from .task_file_runner import run_task_file
 
     repaired: List[str] = []
     project_root = get_project_root(plan_path) if plan_path else None
@@ -2853,7 +2857,7 @@ def accumulate_usage(
     into a $2 success reported $2 — understating the slot, the checkpoint's
     ``usage`` block and the report header by exactly the cost of the attempts
     an operator is most likely to be asking about. Lane B has always summed
-    them (``subagent_executor._accumulate_usage``); this is that rule for
+    them (``task_dispatch._accumulate_usage``); this is that rule for
     Lane A.
 
     Numbers add. Anything else — claude-code files ``served_model`` among its
@@ -2995,7 +2999,7 @@ def announce_retired_rungs(
     ``[SANDBOX_BYPASSED]`` line has by then already said what each slot did.
 
     * **Measured retirement** (plan §3.2, 2026-09-24): this process's probe
-      cache (``subagent_executor.recorded_rung_retirements``) recorded the rung
+      cache (``sandbox_walk.recorded_rung_retirements``) recorded the rung
       ``skipped`` because the codex version is at or above its ``removed_at``,
       or ``retired`` because its probe printed the rung's removal panic. The
       line then says the rung has been unavailable since that version,
@@ -3013,7 +3017,7 @@ def announce_retired_rungs(
     Nothing else about the run changes.
     """
     try:
-        from .subagent_executor import recorded_rung_retirements
+        from .sandbox_walk import recorded_rung_retirements
     except Exception:  # noqa: BLE001 - a notice may never end a fan-out
         recorded_rung_retirements = None  # type: ignore[assignment]
 
@@ -3109,11 +3113,11 @@ def _recorded_rung_outcome(
     """``(outcome, probe tail, version)`` this process's probe cache recorded
     for ``rung_id`` of ``provider_name`` this run, or ``None``."""
     try:
-        from . import subagent_executor as _executor
+        from . import probe_state as _probe_state
     except Exception:  # noqa: BLE001 - a notice may never end a fan-out
         return None
-    cache = getattr(_executor, "_SANDBOX_PROBE_CACHE", None)
-    lock = getattr(_executor, "_SANDBOX_PROBE_LOCK", None)
+    cache = getattr(_probe_state, "_SANDBOX_PROBE_CACHE", None)
+    lock = getattr(_probe_state, "_SANDBOX_PROBE_LOCK", None)
     if not isinstance(cache, dict):
         return None
     try:
@@ -3545,7 +3549,7 @@ def exit_when_every_reviewer_failed(
 
 # The fan-out's own sandbox cache (`_FANOUT_SANDBOX_CACHE`, its lock and its
 # per-key probe locks) is gone (plan §3.6, 2026-09-24): the fan-out and the
-# executor share one probe cache, `subagent_executor._SANDBOX_PROBE_CACHE`,
+# executor share one probe cache, `probe_state._SANDBOX_PROBE_CACHE`,
 # keyed by codex version and policy and holding the whole `SandboxProbeResult`.
 
 
@@ -3571,17 +3575,18 @@ def _fanout_sandbox_verdict(provider_name: str, cwd: Optional[str]) -> Any:
     """Run — or recall — this provider's ``generate`` sandbox self-test.
 
     Blocking, so the caller hands it to a thread. The probe and its cache are
-    the executor's (``subagent_executor.cached_sandbox_verdict``, plan §3.6),
+    the executor's (``sandbox_walk.cached_sandbox_verdict``, plan §3.6),
     which is what makes the fan-out, the subagent preflight and ``doctor``
     read the same adapter-declared command the same way — and the fan-out and
     the preflight share one rung probe per codex version. ``cwd`` is the repo
     root the dispatch is pinned to, the same root
-    ``subagent_executor._probe_cwd`` derives from the plan anchor. An adapter
+    ``sandbox_walk._probe_cwd`` derives from the plan anchor. An adapter
     with no probe for this profile answers ``not-required`` without spawning
     anything, so this costs nothing for every adapter that declares no OS
     sandbox — which is all of them but codex.
     """
-    from .subagent_executor import SandboxProbeResult, cached_sandbox_verdict
+    from .probe_state import SandboxProbeResult
+    from .sandbox_walk import cached_sandbox_verdict
 
     try:
         provider = get_provider(provider_name)
@@ -3676,7 +3681,7 @@ def sandbox_bypassed_notice(provider_name: str, probe: Any = None) -> str:
     """
     if probe is None:
         return sandbox_bypassed_notice_text(provider_name)
-    from .subagent_executor import sandbox_bypass_line
+    from .sandbox_walk import sandbox_bypass_line
 
     rungs: Tuple[Any, ...] = ()
     try:
@@ -3788,7 +3793,7 @@ def sandbox_refusal(provider_name: str, cwd: Optional[str]) -> SandboxVerdict:
     rung probe that gave no answer (fail-closed: nothing learned never licenses
     a widening), and for every adapter that declares no fallback.
     """
-    from .subagent_executor import _fallback_rungs, sandbox_fallback_rung, sandbox_walk_note
+    from .sandbox_walk import _fallback_rungs, sandbox_fallback_rung, sandbox_walk_note
 
     probe = _fanout_sandbox_verdict(provider_name, cwd)
     if probe.state != "unavailable":

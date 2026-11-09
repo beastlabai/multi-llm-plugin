@@ -32,7 +32,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import git_utils as _git_utils
 from . import landlock_dispatch as _landlock
-from . import subagent_executor as _executor
+from . import probe_state as _probe_state
+from . import sandbox_walk as _sandbox_walk
 from . import write_context as _write_context
 from .providers.base import (
     SANDBOX_RUNG_PLUGIN_LANDLOCK,
@@ -41,13 +42,13 @@ from .providers.base import (
     WRITE_SCOPES_ON_RUNG,
     JailRequest,
 )
-from .subagent_executor import (
-    STATUS_BATCH_FAILED,
-    WRITE_CLEAN_FAILURE,
+from .task_dispatch import STATUS_BATCH_FAILED
+from .batch_reply import WRITE_CLEAN_FAILURE
+from .task_outcome import (
     ExecutorError,
     TaskOutcome,
-    preflight_runner,
 )
+from .runner_preflight import preflight_runner
 from .subagent_tasks import declared_file_set
 from .write_safety import TaskSnapshot, relative_to_root
 from .write_verdict import (
@@ -299,7 +300,7 @@ class WriteGrant:
         """The fallback rung the preflight recorded for this runner, profile
         and scope, or ``None`` (codex's own sandbox, or another runner)."""
         try:
-            rung = _executor.sandbox_rung(
+            rung = _probe_state.sandbox_rung(
                 runner, profile, write_scope=self.write_scope or None
             )
         except Exception:  # noqa: BLE001 - a lookup must never fail a dispatch
@@ -321,7 +322,7 @@ class WriteGrant:
         if key in self.rung_noticed:
             return
         try:
-            notice = _executor.write_rung_notice(runner, self.jail_request)
+            notice = _sandbox_walk.write_rung_notice(runner, self.jail_request)
         except Exception:  # noqa: BLE001 - a notice must never fail a dispatch
             return
         if notice:

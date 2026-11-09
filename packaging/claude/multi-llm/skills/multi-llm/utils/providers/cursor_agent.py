@@ -977,7 +977,7 @@ def _probe_object(text: str) -> Optional[Dict[str, Any]]:
 def redact_probe_output(text: str) -> str:
     """§4.5's redaction, applied at the probe boundary (§5.2).
 
-    Imported late for the same reason ``subagent_executor._redact`` does it: the
+    Imported late for the same reason ``failure_capture._redact`` does it: the
     redaction module must never become an import-time dependency of an adapter.
     A redactor that cannot be imported must not silently return the raw
     envelope, so the fallback drops the text rather than leaking it.
@@ -1252,7 +1252,7 @@ class CursorAgentProvider(LLMProvider):
     #: with exactly one job this repo has a use for: the **plan tier**, which no
     #: other probe reports. Declaring it here is the whole wiring — the spawn
     #: belongs to the human-invoked status path
-    #: (:func:`utils.subagent_executor.probe_setup_metadata`, reached from
+    #: (:func:`utils.runner_preflight.probe_setup_metadata`, reached from
     #: ``install-host --check`` row 5), so this adapter still spawns nothing and
     #: no dispatch preflight pays for it.
     #:
@@ -1315,7 +1315,7 @@ class CursorAgentProvider(LLMProvider):
         """The shared env delta, plus this run's own cursor profile (Q11).
 
         ``resolve_env`` is the composition point *both* spawn sites call
-        (``llm_client`` for the Lane A fan-out and ``subagent_executor._spawn``
+        (``llm_client`` for the Lane A fan-out and ``dispatch_spawn._spawn``
         for a dispatch), and it runs immediately before the child starts — which
         makes it the only hook an adapter owns that is guaranteed to see every
         real spawn and no argv-only caller. :meth:`build_command` deliberately

@@ -126,7 +126,7 @@ class GooseProvider(LLMProvider):
     #: refusing older installs buys nothing; the release that would actually hurt
     #: is a newer one that restyles the prefix, and that is precisely the case
     #: ``verified_version`` warns on. ``min_version`` is a hard exit-3 refusal in
-    #: ``subagent_executor._detect_version``; ``verified_version`` is a one-line
+    #: ``runner_preflight._detect_version``; ``verified_version`` is a one-line
     #: warning, and only the warning is earned.
     #:
     #: ``version_cmd`` stays, because it is the only thing that can ever make

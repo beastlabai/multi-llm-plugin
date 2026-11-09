@@ -758,7 +758,7 @@ def build_child_env(
     Both spawn sites call exactly this: ``llm_client.call_llm`` for the Lane A
     fan-out (which passes no host guards, because a fan-out slot is a child of
     this process and not of the host's shell tool) and
-    ``subagent_executor._spawn_in_context`` for the agent-profile lane (which
+    ``dispatch_spawn._spawn_in_context`` for the agent-profile lane (which
     passes the running host's ``env_guards``). A slot must never strip on one
     lane and inherit on the other, and after this function exists there is no
     ordering in which it can: the credential verdict, the removals and the

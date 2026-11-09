@@ -279,8 +279,9 @@ KNOWN_UPWARD: Dict[Tuple[str, str], str] = {
         "get_tasks_file_path: belongs in output_handler itself",
     ("utils.result_files", "utils.progress_tracker"):
         "STATE_DONE, TERMINAL_STATES: belong in status_file (L1)",
-    ("utils.llm_client", "utils.subagent_executor"):
-        "_VERSION_CACHE, _PROBE_VERSION_CACHE: belong in providers.base; "
+    ("utils.llm_client", "utils.probe_state"):
+        "_VERSION_CACHE, _PROBE_VERSION_CACHE: belong in providers.base",
+    ("utils.llm_client", "utils.dispatch_spawn"):
         "_unconfirmed_kill: belongs in process_control, beside kill_tree's verdicts",
     ("utils.providers.result_envelope", "utils.providers.base"):
         "STATUS_* are defined in retry_ladder (L0); the two CATEGORY_* constants belong there too",

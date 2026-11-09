@@ -649,7 +649,7 @@ def _list_models(
 ) -> Optional["subprocess.CompletedProcess"]:
     """Run the listing subcommand with the executor's own probe pins (D3 step 4).
 
-    Mirrors ``subagent_executor._run_probe`` exactly — ``timeout=30``,
+    Mirrors ``runner_preflight._run_probe`` exactly — ``timeout=30``,
     ``stdin=DEVNULL``, captured text streams, ``None`` on any ``OSError`` /
     ``SubprocessError`` — because that ceiling is the one that matters: a
     ``subprocess.TimeoutExpired`` **is** a ``SubprocessError``, so a listing
@@ -784,7 +784,7 @@ def _user_config_paths() -> List[str]:
 #: global config loading (the isolation is the hermetic redirect's).
 DEBUG_CONFIG_ARGV: Tuple[str, ...] = ("opencode", "debug", "config")
 
-#: The executor's probe ceiling (`subagent_executor._run_probe`), unchanged.
+#: The executor's probe ceiling (`runner_preflight._run_probe`), unchanged.
 DEBUG_CONFIG_TIMEOUT_S = 30.0
 
 #: The three permission actions opencode accepts.
@@ -2775,7 +2775,7 @@ class OpenCodeProvider(LLMProvider):
             return stdout, stderr
 
     #: The pattern verdicts that outrank a denied turn: the ones
-    #: ``subagent_executor._classify_failed_run`` forwards. A stream that carries
+    #: ``attempt_classifier._classify_failed_run`` forwards. A stream that carries
     #: a rejected ``tool_use`` *and* a genuine vendor 429 / auth / model error is
     #: that error — reporting it as ``runner_error`` would hide it from
     #: backpressure and the ladder.

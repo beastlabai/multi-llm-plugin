@@ -439,8 +439,8 @@ def _callee(func):
 #: of it, :data:`_EXECUTOR_MODULES`) allowed to be handed
 #: an unredacted stream, keyed by ``(enclosing function, ``ast.unparse``
 #: rendering)`` and valued by how many times that exact site occurs. It builds
-#: ``outcome.reason`` in ``dispatch_task``, which is written through §4.5.3's
-#: redacting sinks — ``BatchReport.write``'s ``_redact_json`` and
+#: ``outcome.reason`` in ``task_dispatch.finish_ok``, which is written through
+#: §4.5.3's redacting sinks — ``BatchReport.write``'s ``_redact_json`` and
 #: ``failure_summary``'s ``_redact`` — never straight to a terminal, which is
 #: what separates it from the three refusals above. An entry earns its place by
 #: naming the sink that redacts it; a new bare tail with no such sink is the
@@ -459,7 +459,7 @@ def _callee(func):
 #: message — with no test change at all, and the enclosing name alone would
 #: wave through a different tail added to the same function.
 _TAIL_WITHOUT_REDACTION_ALLOWLIST = {
-    ("dispatch_task", "_failure_capture._tail(capture.stderr, 2000)"): 1,
+    ("finish_ok", "_failure_capture._tail(capture.stderr, 2000)"): 1,
 }
 
 

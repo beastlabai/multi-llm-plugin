@@ -1618,7 +1618,7 @@ class ClaudeCodeProvider(LLMProvider):
         ladder or the status rung exactly as before.
 
         The exclusion itself lives in :meth:`vendor_text`, so the failure
-        reason's quote (``subagent_executor._classify_failed_run``) is cut from
+        reason's quote (``attempt_classifier._classify_failed_run``) is cut from
         the same reduced capture the verdict was decided on; the status rung
         above still reads the raw stdout.
         """

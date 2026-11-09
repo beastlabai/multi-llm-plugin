@@ -462,7 +462,7 @@ MAX_LOGGED_PROMPT_LENGTH = 5000
 
 #: A salvage request's record of *how* the run it came from was lost, and the
 #: one value it takes today. Only a run cut by a deadline carries it: a salvaged
-#: ``[]`` from such a run is refused (``subagent_executor._salvage_gave_up``),
+#: ``[]`` from such a run is refused (``task_result._salvage_gave_up``),
 #: because a reviewer killed mid-review never said "I found nothing", while a
 #: ``[]`` from a run that finished and then exited non-zero is still a genuine
 #: empty review (plan: review-run-scope-salvage-and-failure-visibility D4.5,
@@ -755,7 +755,7 @@ def _sweep_confirmed(sweep: Optional[process_control.TreeSweep]) -> bool:
 
     The CLI was seen to exit, its Windows job (if any) ended, and every process
     group the sweep met has a kill verdict that confirms a stop under the
-    executor's rule (``subagent_executor._unconfirmed_kill``). A sweep that
+    executor's rule (``dispatch_spawn._unconfirmed_kill``). A sweep that
     raised (``None``), or a rule that cannot be read, confirms nothing.
     """
     if sweep is None or sweep.cli not in _CLI_SEEN_TO_EXIT:
@@ -765,9 +765,9 @@ def _sweep_confirmed(sweep: Optional[process_control.TreeSweep]) -> bool:
     if not sweep.groups:
         return True
     try:
-        from . import subagent_executor as _executor
+        from . import dispatch_spawn as _dispatch_spawn
 
-        return all(_executor._unconfirmed_kill(verdict) is None
+        return all(_dispatch_spawn._unconfirmed_kill(verdict) is None
                    for verdict in sweep.groups.values())
     except Exception:  # noqa: BLE001 - unknown is unconfirmed
         return False
@@ -1007,11 +1007,11 @@ def _cached_cli_version(provider_name: str) -> str:
     normally there.
     """
     try:
-        from . import subagent_executor as _executor
+        from . import probe_state as _probe_state
     except Exception:  # noqa: BLE001 - a diagnostic never ends a slot
         return ""
     for name in ("_VERSION_CACHE", "_PROBE_VERSION_CACHE"):
-        cache = getattr(_executor, name, None)
+        cache = getattr(_probe_state, name, None)
         if isinstance(cache, dict):
             value = cache.get(provider_name)
             if value and value != "unknown":

@@ -28,6 +28,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     from .retry_ladder import (
         STATUS_AUTH_FAILED,
         STATUS_BUDGET_EXHAUSTED,
+        STATUS_CONTEXT_LENGTH_EXCEEDED,
         STATUS_INVALID_MODEL,
         STATUS_OK,
         STATUS_RATE_LIMITED,
@@ -51,6 +52,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
     from utils.retry_ladder import (
         STATUS_AUTH_FAILED,
         STATUS_BUDGET_EXHAUSTED,
+        STATUS_CONTEXT_LENGTH_EXCEEDED,
         STATUS_INVALID_MODEL,
         STATUS_OK,
         STATUS_RATE_LIMITED,
@@ -499,15 +501,6 @@ def _classify_failed_run(
     The forwarded pattern verdicts quote the text that decided them
     (:func:`_quote_verdict`), not ``stderr or stdout``.
     """
-    # §7.6(a)'s terminal status is the ladder's, imported here rather than
-    # redeclared: `retry_ladder` owns the status vocabulary and this module
-    # re-exports it. Function-local because the constants block above is being
-    # converted to re-exports in the same window.
-    try:  # pragma: no cover - import shim mirrors the rest of utils/
-        from .retry_ladder import STATUS_CONTEXT_LENGTH_EXCEEDED
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.retry_ladder import STATUS_CONTEXT_LENGTH_EXCEEDED
-
     if capture.exit_code:
         try:
             classified = provider.classify_failure(
@@ -532,7 +525,7 @@ def _classify_failed_run(
     # name that makes it matchable.
     if classified == STATUS_CONTEXT_LENGTH_EXCEEDED:
         # Terminal, and NOT a rung: it is in none of RETRYABLE/BACKOFF/FATAL, so
-        # the dispatch loop below falls through to its final `break` and the slot
+        # the ladder grants `dispatch_task` no further attempt and the slot
         # ends after exactly one attempt. §7.6(a) is explicit that this is the
         # shipping behaviour until open question 13 designs a prompt splitter —
         # re-sending an unchanged oversized prompt is the one retry guaranteed to

@@ -297,7 +297,7 @@ class MuseProvider(LLMProvider):
         this adapter's ``auth_error_patterns`` already carry ``api error 401``
         and its ``rate_limit_patterns`` carry ``api error 402`` /
         ``billing verification failed``, and both classes are forwarded by
-        ``subagent_executor._classify_failed_run`` to fail or back off the whole
+        ``attempt_classifier._classify_failed_run`` to fail or back off the whole
         batch. It is also why C1 lands before the auth-pattern widening: a wider
         table on an echoing adapter matches more of *our* wordings, not more of
         the vendor's.

@@ -150,7 +150,7 @@ def dispatch_homes() -> Iterator[None]:
     as the dispatch that made it and the CLI it lent the home to. The block
     holds a :func:`process_control.child_ledger`: the CLI ends there when it
     was seen to exit, or when its spawner confirmed the stop of the CLI and
-    every process group it reached (``subagent_executor._unconfirmed_kill``'s
+    every process group it reached (``dispatch_spawn._unconfirmed_kill``'s
     rule). Anything else, a stop that left a process running or could not be
     confirmed, keeps the roots, private and tracked, for
     :meth:`PrivateHomes.cleanup` at exit or, after a crash, the sweep of a dead

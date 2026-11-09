@@ -31,7 +31,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from . import commit_write_guard as _commit_write_guard
 from . import write_context as _write_context
-from .subagent_executor import TaskOutcome
+from .task_outcome import TaskOutcome
 from .write_safety import CONTEXT_PLAN_RULE, TaskSnapshot
 from .write_verdict import PolicyRestore
 

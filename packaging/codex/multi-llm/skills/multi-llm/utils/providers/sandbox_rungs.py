@@ -259,7 +259,7 @@ class SandboxRung:
     """One rung of an adapter's sandbox-fallback ladder (landlock rung, 2026-09-22).
 
     Declared by the adapter through :meth:`LLMProvider.sandbox_fallback_rungs`,
-    walked in order by ``subagent_executor.sandbox_verdict`` only after the
+    walked in order by ``sandbox_walk.sandbox_verdict`` only after the
     profile's own probe answered ``unavailable``, and rendered by
     :meth:`LLMProvider.apply_sandbox_fallback` from its ``name``.
 
@@ -770,7 +770,7 @@ def sandbox_incidental_notice_text(
     ``incidental``-grade rung (plan §7, "Step 2 subtask: messaging and markers").
 
     One builder for both lanes — ``review_orchestrator_base.sandbox_refusal``
-    and ``subagent_executor._detect_sandbox`` pick it by grade — so the reader
+    and ``sandbox_walk._detect_sandbox`` pick it by grade — so the reader
     greps one sentence across a run. Its clauses, in order: the marker and the
     runner; the standard probe's failure line and the walk clause (the legacy
     rung skipped by version); the rung id, the key in force and the phase; what

@@ -529,7 +529,7 @@ class PiProvider(LLMProvider):
     #: (every release before 0.87.1 silently ignored an invalid one) is read by
     #: :meth:`parse_output`'s back-compat leg rather than refused.
     #: ``min_version`` is a hard exit-3 refusal in
-    #: ``subagent_executor._detect_version``; ``verified_version`` is a one-line
+    #: ``runner_preflight._detect_version``; ``verified_version`` is a one-line
     #: warning, and only the warning is earned.
     #:
     #: ``version_cmd`` stays, because it is the only thing that can ever make

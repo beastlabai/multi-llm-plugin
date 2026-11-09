@@ -381,7 +381,7 @@ def apply_tasks_document(
 
     *data* is a parsed task-generation document. It is read the way every lane
     reads one — an omitted empty list, ``subagent_type`` or ``schema_version``
-    is supplied in place (``subagent_executor.normalize_result``,
+    is supplied in place (``task_result.normalize_result``,
     ``supply_result_version``) — then validated with the executor's own verdict
     for the kind, so nothing reaches the plan that the executor would have
     refused. Raises :class:`TasksDocumentError` (or an ``OSError`` from a
@@ -391,7 +391,7 @@ def apply_tasks_document(
     if not plan_path.exists():
         raise TasksDocumentError(f"Plan file not found: {plan_path}")
 
-    from utils.subagent_executor import (
+    from utils.task_result import (
         normalize_result,
         supply_result_version,
         validate_result,

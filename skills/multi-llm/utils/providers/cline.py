@@ -226,7 +226,7 @@ class ClineProvider(LLMProvider):
     #: exit code is. cline is a **pre-existing** adapter, so a floor here refuses
     #: installs that were working yesterday to protect against nothing.
     #: ``min_version`` is a hard exit-3 refusal in
-    #: ``subagent_executor._detect_version`` and ``verified_version`` is a
+    #: ``runner_preflight._detect_version`` and ``verified_version`` is a
     #: one-line warning; the evidence supports the warning only.
     #:
     #: ``version_cmd`` stays, because it is the only thing that can ever make

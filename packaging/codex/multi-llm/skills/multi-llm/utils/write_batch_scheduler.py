@@ -76,7 +76,8 @@ from . import known_checks as _known_checks
 from . import landlock_dispatch as _landlock
 from . import metrics as _metrics
 from . import prior_changes as _prior_changes
-from . import subagent_executor as _executor
+from . import batch_reply as _batch_reply
+from . import runner_selection as _runner_selection
 from . import commit_write_guard as _commit_write_guard  # noqa: F401 - `_MOVED` reads it
 from . import check_records as _check_records
 from . import verification_lines as _verification_lines
@@ -122,20 +123,15 @@ from .provider_registry import (
     load_config_snapshot,
     parse_model_spec,
 )
-from .subagent_executor import (
+from .retry_ladder import (
     STATUS_OK,
     STATUS_REJECTED,
+)
+from .batch_reply import (
     WRITE_APPLIED,
     WRITE_CLEAN_FAILURE,
     WRITE_NO_OP,
     WRITE_POLICY_VIOLATION,
-    ExecutorError,
-    ResultRejected,
-    TaskOutcome,
-    _host_ceiling,
-    dispatch_task,
-    profile_for_kind,
-    resolve_task_runner,
     batch_check_findings,
     batch_check_note,
     batch_check_words,
@@ -148,6 +144,17 @@ from .subagent_executor import (
     row_batch_check_note,
     row_batch_check_repeats,
     row_check_findings,
+)
+from .task_outcome import (
+    ExecutorError,
+    ResultRejected,
+    TaskOutcome,
+)
+from .task_batch import _host_ceiling
+from .task_dispatch import dispatch_task
+from .runner_selection import (
+    profile_for_kind,
+    resolve_task_runner,
 )
 from .subagent_tasks import (
     PHASE_BY_WRITE_KIND,
@@ -569,12 +576,12 @@ def write_scope_for_kind(kind: str) -> Optional[str]:
     ``plan-file`` for apply-suggestions, ``tasks`` for apply-task-suggestions,
     ``repo-wide`` for apply-code-fixes and implement (on the rung since plan
     step 3b, 2026-10-02), read from the executor's one table
-    (``subagent_executor.WRITE_SCOPE_BY_KIND``). The scope comes from the
+    (``runner_selection.WRITE_SCOPE_BY_KIND``). The scope comes from the
     phase's kind, never from the task JSON (F1 "How a dispatch receives its
     grant"). An unmapped kind gets ``None``, which the executor refuses on the
     rung rather than widening it.
     """
-    return _executor.WRITE_SCOPE_BY_KIND.get(kind)
+    return _runner_selection.WRITE_SCOPE_BY_KIND.get(kind)
 
 
 def _tighter_cap(first: Optional[int], second: Optional[int]) -> Optional[int]:
@@ -859,7 +866,7 @@ class SchedulerOptions:
     #: The host's ``max_concurrent_subagents``. ``None`` means "look it
     #: up from ``hosts/capabilities.yaml`` for the host this invocation
     #: declared" (D5b) — the same seam, with the same meaning, as
-    #: ``subagent_executor.effective_ceiling``'s parameter of the same name.
+    #: ``task_batch.effective_ceiling``'s parameter of the same name.
     #: No orchestrator passes it; a caller that already knows the number
     #: still may.
     host_max: Optional[int] = None
@@ -959,7 +966,7 @@ class WriteBatchScheduler:
         self.summary_file = options.summary_file
         self.summary_file_relative = options.summary_file_relative
         # `host_max=None` means *look it up*, exactly as it does for the read
-        # path's `subagent_executor.effective_ceiling` — never "this phase has no
+        # path's `task_batch.effective_ceiling` — never "this phase has no
         # host leg". Reading it as the latter cost the write half its host leg
         # outright: no orchestrator passes `host_max` (both construction sites are
         # keyword-complete without it), so `write_ceiling`'s host branch never
@@ -1557,7 +1564,7 @@ class WriteBatchScheduler:
     @staticmethod
     def _jail_line_count() -> int:
         try:
-            from .subagent_executor import jail_summary_count
+            from .probe_state import jail_summary_count
         except Exception:  # noqa: BLE001 - an older executor has no summary
             return 0
         return jail_summary_count()
@@ -1569,7 +1576,7 @@ class WriteBatchScheduler:
         so ``run_tasks``' own closing summary never runs for them, and a change
         to ``$CODEX_HOME`` outlives the run."""
         try:
-            from .subagent_executor import jail_summary_lines
+            from .probe_state import jail_summary_lines
         except Exception:  # noqa: BLE001 - an older executor has no summary
             return
         for line in jail_summary_lines(before):
@@ -2517,7 +2524,7 @@ class WriteBatchScheduler:
         def after_result(context: Dict[str, Any]) -> None:
             # The executor's own record of the rung this attempt ran on wins
             # over the preflight's: every `after_result` context carries it,
-            # `None` included (`subagent_executor._jail_hook_context`).
+            # `None` included (`dispatch_spawn._jail_hook_context`).
             seen = context["sandbox_rung"]
             self._dispatch_rungs[task_id] = seen
             self._classify(task, context["outcome"], snapshot, context["result"],
@@ -2783,7 +2790,7 @@ class WriteBatchScheduler:
                 note = jail_note(facts.jail) if guard(facts) is None else None
                 if note:
                     self._grant.jail_notes[task_id] = note
-        reply_check: Optional[_executor.CheckReply] = None
+        reply_check: Optional[_batch_reply.CheckReply] = None
         if guard(facts) is None:
             reply_check = read_check_reply(result)
             facts = replace(

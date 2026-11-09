@@ -666,7 +666,7 @@ class CopilotProvider(LLMProvider):
         of it, so a green copilot run classified ``rate_limited`` — the plan
         under review says "rate-limit patterns … declared per adapter" — and
         ``rate_limited`` is one of the two classes
-        ``subagent_executor._classify_failed_run`` forwards to the retry ladder.
+        ``attempt_classifier._classify_failed_run`` forwards to the retry ladder.
         Nothing pinned that until this defect was written up: copilot shipped
         with no manifest.
 

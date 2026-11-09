@@ -437,7 +437,7 @@ it.** Lowest first, each imports only the ones before it, and none imports the e
 | `utils/dispatch_spawn.py` | One attempt's spawn (`_spawn`, returning a `_Capture`): the schema leg, the child environment (`dispatch_child_env`, which the auth probe reads too) and cached version, the process tree, the jail and what it reported (`jail_denied_line`), the timeout kill (`_kill_timed_out`, `_unconfirmed_kill`), and the grant a write dispatch gets (`_dispatch_grant`). |
 | `utils/attempt_classifier.py` | Which D3k rung an attempt lands on: `_classify_pre_parse` (rungs 1 and 2), `_parse_and_validate` and `_parse_with_schema_policy` (rungs 3 to 6), and `_classify_failed_run` with its redacted quote (`_quote_verdict`). Not `providers/failure_classifier.py`, the adapter-free stream rule it applies. |
 | `utils/runner_preflight.py` | `preflight_runner` and its version, auth, model and nested-exec legs (`_probe_nested_exec` spawns one dispatch and classifies it), and `probe_setup_metadata`. |
-| `utils/task_dispatch.py` | `dispatch_task`: its retry loop, the re-asks and write hooks around it, the prompt budget, each attempt's record, the kind tables it reads (`SCHEMA_PHASE_BY_KIND`, `SCHEMA_REPAIRS_BY_KIND`, `RESENDS_BY_KIND`, `RECLASSIFIABLE_STATUSES`) and the D3g verification statuses (`STATUS_PARTIAL`, `STATUS_POLICY_VIOLATION`, `STATUS_BATCH_FAILED`). |
+| `utils/task_dispatch.py` | `dispatch_task` and its typed steps (below): the attempt loop, the state it carries (`AttemptState`), each hook's context (`hook_context`, `HOOK_CONTEXT_KEYS`), the re-asks and write hooks, the prompt budget, each attempt's record, the kind tables it reads (`SCHEMA_PHASE_BY_KIND`, `SCHEMA_REPAIRS_BY_KIND`, `RESENDS_BY_KIND`, `RECLASSIFIABLE_STATUSES`) and the D3g verification statuses (`STATUS_PARTIAL`, `STATUS_POLICY_VIOLATION`, `STATUS_BATCH_FAILED`). |
 | `utils/task_batch.py` | `run_tasks`: the batch preflight, the D3i ceiling (`effective_ceiling`), the dispatch order, the concurrent fan-out (`_gather`) with provider backpressure and the judge audit, the recorded runners and provenance, and the `.status.json` mirror. |
 | `utils/task_file_runner.py` | The entry points: `run_task_file`, the dry run (`dry_run_report`, D3l) and the continuation (`continue_past_marker`, D3b). |
 
@@ -455,6 +455,19 @@ import from elsewhere (`get_provider`, `_resolve_executable`) is bound in each m
 so a test patching one patches it in the module whose code it drives, or in each of them.
 `tests/test_import_layers.py` puts all thirteen at L3. New code imports from the owner, not the
 facade.
+
+**`dispatch_task` is a loop over typed steps.** `plan_dispatch` resolves once what every attempt
+sends (`DispatchPlan`), or refuses with nothing spawned (`Refusal`). Each attempt is admitted
+(`admit_attempt`: the provider's launch turn and the ladder's admission), passes the write path's
+`before_attempt`, is spawned (`spawn_attempt`) and read onto its rung (`read_attempt`, returning an
+`AttemptReading`). A schema-valid reply is persisted and asked about (`ask_about_reply`: rule 9's
+re-send, rule 7's report re-asks), then accepted (`finish_ok`); any other is checked for moved bytes
+on the write path (`check_moved_before_retry`), recorded with its `failed/` capture
+(`record_failed_attempt`) and decided (`decide_next`: the ladder's one `record` call, the
+schema-repair prompt, the backoff sleep), returning a `Next`; a stop ends in `close_outcome`. What one
+attempt carries into the next is `AttemptState`, changed only by its `start_*` methods; every hook's
+context comes from one table, `HOOK_CONTEXT_KEYS`. A step is tested alone from a hand-built
+`_Capture` in `tests/test_dispatch_steps.py`.
 
 ## Read and analyze executor
 

@@ -602,7 +602,7 @@ class AiderProvider(LLMProvider):
     #: **pre-existing** adapter — unlike copilot, kimi, qwen-code and vibe, which
     #: landed together with their probes and have no older users to refuse — and
     #: nothing measured says 0.85 fails. ``min_version`` is a hard exit-3 refusal
-    #: in ``subagent_executor._detect_version``; ``verified_version`` is a
+    #: in ``runner_preflight._detect_version``; ``verified_version`` is a
     #: one-line warning. The capture supports the warning and not the refusal, so
     #: only the warning is declared. ``muse``, ``cursor-agent`` and ``agy``
     #: already leave the floor empty for the mirror-image reason.
