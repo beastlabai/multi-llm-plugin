@@ -1483,9 +1483,12 @@ def dispatch_subagent_tasks(
 #: describes an answer that no longer exists; ``unrecoverable`` — the executor
 #: read the subagent's ``{"salvage_failed": true, …}`` sentinel and filed the
 #: dispatch ``salvage_unrecoverable``, a verdict that is in none of the ladder's
-#: retry sets and will therefore never change.
+#: retry sets and will therefore never change; ``rejected`` — the slot failed
+#: its safety checks, so nothing of its answer may be repaired
+#: (``review_lane.reject_slot_answer``).
 RETIRE_SUPERSEDED = "superseded"
 RETIRE_UNRECOVERABLE = "unrecoverable"
+RETIRE_REJECTED = "rejected"
 
 
 def retired_salvage_name(name: str, reason: str, stamp: str) -> str:
@@ -2224,6 +2227,13 @@ def dispatch_salvage_tasks(
     failed status keeps its request: a timeout or a rate limit is re-runnable,
     and the documented salvage-then-reaggregate flow is how it gets re-run.
 
+    **A task of a model the phase withholds is never dispatched**
+    (``result_files.withheld_models``: a slot that failed its safety checks or
+    ended before they passed, and no checked attempt since): its request can
+    only hold that answer. A rejected model's pair is retired again
+    (:data:`RETIRE_REJECTED`; docs/development/review-results.md, "Withheld
+    slot answers").
+
     Returns:
         The output paths successfully repaired, in dispatch order.
     """
@@ -2245,9 +2255,21 @@ def dispatch_salvage_tasks(
 
     repaired: List[str] = []
     project_root = get_project_root(plan_path) if plan_path else None
+    withheld = _result_files.withheld_models(phase_dir)
     for task_file in sorted(
         glob_module.glob(os.path.join(phase_dir, "salvage_task_*.json"))
     ):
+        stem = os.path.basename(task_file)[len("salvage_task_"): -len(".json")]
+        owner = withheld.owner(stem)
+        if owner is not None:
+            print(
+                f"[SALVAGE_WITHHELD] {stem}: not dispatched: {owner}'s slot "
+                f"{withheld[owner].phrase} and no checked attempt has "
+                f"superseded it"
+            )
+            if withheld[owner].rejected:
+                retire_salvage_artifacts(phase_dir, stem, reason=RETIRE_REJECTED)
+            continue
         print(f"\n[exec-subagents] dispatching salvage task from {task_file}")
         try:
             report = run_task_file(
@@ -5247,6 +5269,8 @@ def base_slot_steps() -> "_review_lane.SlotSteps":
         invoke_with_file_output=invoke_with_file_output,
         dispatch_with_ladder=dispatch_with_ladder,
         sandbox_fallback_kwargs=sandbox_fallback_kwargs,
+        retire_salvage_artifacts=retire_salvage_artifacts,
+        retire_rejected=RETIRE_REJECTED,
     )
 
 
@@ -5332,6 +5356,19 @@ class BaseSlot:
 
     def _ending(self, record: Dict[str, Any]) -> "_review_lane.SlotResult":
         return _review_lane.SlotResult.from_record(self.model_spec, record)
+
+    def _rejected(
+        self, ending: "_review_lane.SlotResult", violation: str,
+    ) -> "_review_lane.SlotResult":
+        """The stdout lane's rejection sites, through the disposition
+        ``run_slot`` applies to the ladder's (``review_lane.reject_slot_answer``):
+        this lane asks for no file, but the model may have written its
+        ``<stem>.json`` anyway."""
+        phase_dir = get_phase_dir(Path(self.anchor), self.phase_name)
+        return _review_lane.reject_slot_answer(
+            self.slot_steps(), ending, reason=violation,
+            result_path=Path(phase_dir) / f"{sanitize_model_name(self.model_spec)}.json",
+        )
 
     def refused(self, reason: str) -> "_review_lane.SlotResult":
         return self._ending({
@@ -5444,12 +5481,14 @@ class BaseSlot:
         # The guard's checks failed the slot (`run_slot` ran them once, after
         # the last attempt): failed with that reason whatever its last attempt
         # reported, and the `output` is dropped so `save_model_result` never
-        # parses it.
+        # parses it. `run_slot` then refuses the answer for good
+        # (`review_lane.reject_slot_answer`); `stdout` is kept for the error log.
+        # `run_slot` passes its own reason here too, for an answer it does not
+        # accept (`review_lane.UNSHOWN_ANSWER_REASON`), which rejects nothing.
         if violation is not None:
             return self._ending({
                 "success": False, "output": None, "error": violation,
                 "prompt": prompt, "stdout": details.get("stdout_excerpt", ""),
-                **salvage_text_fields(details),
                 "stderr": stderr_text,
                 "duration_seconds": duration, "model_spec": model_spec,
                 "source": "exception" if run.exception is not None else source,
@@ -5658,7 +5697,7 @@ class BaseSlot:
                     [None], lambda: raised_attempt_home_records(armed),
                     summary_key=summary_key,
                 )
-                return self._ending({
+                ending = self._ending({
                     "success": False, "output": None,
                     "error": (
                         violation if violation is not None
@@ -5668,6 +5707,7 @@ class BaseSlot:
                     "duration_seconds": time.time() - start_time,
                     "model_spec": model_spec, "source": "stdout",
                 })
+                return ending if violation is None else self._rejected(ending, violation)
             duration = time.time() - start_time
             details = result.get("details", {})
             stderr_text = details.get("stderr", "")
@@ -5678,10 +5718,9 @@ class BaseSlot:
                 summary_key=summary_key,
             )
             if violation is not None:
-                return self._ending({
+                return self._rejected(self._ending({
                     "success": False, "output": None, "error": violation,
                     "prompt": prompt, "stdout": details.get("stdout_excerpt", ""),
-                    **salvage_text_fields(details),
                     "stderr": stderr_text, "duration_seconds": duration,
                     "model_spec": model_spec, "source": "stdout",
                     # The slot ran — bypassed, which is why it was checked at
@@ -5691,7 +5730,7 @@ class BaseSlot:
                     # them. Every failure below that ran a child does the same.
                     **served_model_fields(details),
                     **usage_fields(details),
-                })
+                }), violation)
 
             if result["success"]:
                 output_str = _answer_text(result.get("data"))
@@ -6266,10 +6305,18 @@ async def run_all_models(
         provider_name, model_name = parse_model_spec(model_spec, anchor=plan_path)
         display_name = f"{provider_name}:{model_name}"
         sanitized = sanitize_model_name(model_spec)
-        existing_path = os.path.join(
-            str(get_phase_dir(Path(plan_path), phase_name)),
-            f"{sanitized}.json"
-        )
+        phase_dir = str(get_phase_dir(Path(plan_path), phase_name))
+        existing_path = os.path.join(phase_dir, f"{sanitized}.json")
+        withheld = _result_files.withheld_models(phase_dir).get(model_spec)
+        if withheld is not None:
+            # No checked attempt has superseded a slot that failed its safety
+            # checks or ended before they passed: a file still there may be
+            # that answer, never reused (docs/development/review-results.md,
+            # "Withheld slot answers").
+            if os.path.exists(existing_path):
+                print(f"[{display_name}] Result file is from a slot that "
+                      f"{withheld.phrase}; re-running...")
+            return None
         if os.path.exists(existing_path) and os.path.getsize(existing_path) > 0:
             try:
                 with open(existing_path, 'r', encoding='utf-8') as f:
@@ -6692,6 +6739,7 @@ def save_model_result(
     *,
     failure_output: Optional[str] = None,
     failure: Optional[str] = None,
+    rejected: Optional[str] = None,
 ) -> bool:
     """Save model result to appropriate file.
 
@@ -6733,6 +6781,11 @@ def save_model_result(
             the hard-failure branch's salvage request only, so a salvaged ``[]``
             from a timed-out run is refused; a completed run's parse failure
             never carries one.
+        rejected: Keyword-only, the guard's reason when the slot failed its
+            safety checks (``SlotResult.rejected``). Such a run is never
+            salvaged: no request is written whatever ``failure_output`` holds,
+            which the error log keeps under its own heading
+            (docs/development/review-results.md, "Withheld slot answers").
 
     Returns:
         True if result was saved successfully, False otherwise. A salvage request
@@ -6742,7 +6795,7 @@ def save_model_result(
     """
     sanitized_model = sanitize_model_name(model)
 
-    if not success or not output:
+    if rejected is not None or not success or not output:
         # The hard-failure branch, and until residual item 5 was paid it was a
         # dead end: it short-circuited on the condition above, wrote the log and
         # returned, which made the salvage block in the `except` below not merely
@@ -6766,8 +6819,9 @@ def save_model_result(
         #
         # Unsalvageable is not fatal, exactly as in the parse branch: the model
         # was already failed on arrival here, so the error log is written on both
-        # paths and only its wording moves.
-        salvageable = has_salvageable_json(failure_output or "")
+        # paths and only its wording moves. A slot its safety checks rejected is
+        # never salvageable, whatever its text holds.
+        salvageable = rejected is None and has_salvageable_json(failure_output or "")
         if salvageable:
             _write_salvage_request(
                 model=model,
@@ -6792,7 +6846,14 @@ def save_model_result(
                     "Salvage: requested \u2014 the run failed, but the output it "
                     "left behind still holds an answer to repair.\n"
                 )
-            if output:
+            if rejected is not None:
+                f.write(
+                    "Rejected: the slot failed its safety checks, so nothing it "
+                    "returned is salvaged or read as a review.\n"
+                )
+                if failure_output:
+                    f.write(f"\nRaw output (rejected run, never salvaged):\n{failure_output}\n")
+            elif output:
                 f.write(f"\nRaw output:\n{output}\n")
             elif failure_output:
                 # Under its own heading, because it is not the model's answer:
@@ -7847,11 +7908,17 @@ class BaseReviewLane:
     def save_slot(self, slot: "_review_lane.SlotResult") -> bool:
         # The stdout-then-stderr precedence a losing run's salvage text takes
         # is `failure_output_from_result`'s, the rule review-code applies too.
+        # A rejected slot's record says `salvage_text: ""`, so that rule finds
+        # nothing; its excerpt goes to the error log only, never to salvage.
+        if slot.rejected is not None:
+            failure_output = slot.details.get("stdout") or slot.details.get("stderr") or ""
+        else:
+            failure_output = failure_output_from_result(slot.details)
         return save_model_result(
             self.prefix, slot.model_spec, slot.success, slot.payload, slot.error,
             self.out_dir, self.phase_dir, self.salvage_phase_name,
-            failure_output=failure_output_from_result(slot.details),
-            failure=slot.failure,
+            failure_output=failure_output,
+            failure=slot.failure, rejected=slot.rejected,
         )
 
     def adopt_salvaged(

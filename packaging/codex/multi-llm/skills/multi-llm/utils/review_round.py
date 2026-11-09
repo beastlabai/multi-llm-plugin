@@ -135,7 +135,11 @@ def start_round(phase_dir: PathLike) -> "Claim":
     The stamp and its read-back are one step under the checkpoint mutex, and
     the claim is established only when the id read back is its own: a mutex
     that cannot be taken, or a stamp that did not land, stops the run at exit
-    3 before any model is called.
+    3 before any model is called. So does a checkpoint that cannot be read
+    (``status_file.load_status``, read up to
+    ``status_file.CHECKPOINT_READ_ATTEMPTS`` times), which the stamp never
+    writes over: it may record answers the phase withholds
+    (docs/development/review-results.md, "Withheld slot answers").
     """
     round_id = new_round_id()
     # The dir the round is recorded in exists before the stamp (the phase-dir
@@ -143,6 +147,12 @@ def start_round(phase_dir: PathLike) -> "Claim":
     Path(phase_dir).mkdir(parents=True, exist_ok=True)
     claim = Claim(str(phase_dir), round_id, started=True)
     with claim._mutex("start its fan-out"):
+        try:
+            status_file.load_status(
+                str(phase_dir), attempts=status_file.CHECKPOINT_READ_ATTEMPTS,
+            )
+        except status_file.CheckpointUnreadable:
+            raise _unreadable(claim, "start its fan-out") from None
         status_file.update_status(str(phase_dir), {ROUND_KEY: round_id, "state": FANOUT_STATE})
         recorded = current_round(phase_dir)
     if recorded != round_id:
@@ -303,6 +313,18 @@ def _taken_over(claim: Claim, recorded: Optional[str], doing: str) -> RoundTaken
           "with --force: it keeps each reusable model result ([SKIP]), regroups "
           "and validates again.")
     return RoundTakenOver(EXIT_NEEDS_HUMAN)
+
+
+def _unreadable(claim: Claim, doing: str) -> RoundTakenOver:
+    from .unattended import fail_closed
+
+    return RoundTakenOver(fail_closed(
+        f"ERROR: this run {claim.describe()} in {claim.phase_dir}, and "
+        f"{status_file.status_path(claim.phase_dir)} cannot be read. This run "
+        f"stops without going on to {doing}: the checkpoint may record answers "
+        f"this phase withholds, and nothing is written over it. "
+        f"{status_file.unreadable_checkpoint_advice(claim.phase_dir)}"
+    ))
 
 
 def _unlocked(claim: Claim, doing: str) -> RoundTakenOver:

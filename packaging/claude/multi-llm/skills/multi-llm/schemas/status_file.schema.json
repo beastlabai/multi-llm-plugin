@@ -65,6 +65,16 @@
       "additionalProperties": { "type": "string" },
       "description": "Failed specs and why: {spec: reason}."
     },
+    "models_rejected": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "description": "{spec: reason}: models whose slot failed its safety checks and that no checked attempt has superseded since; a file of theirs is never salvaged, reused or reaggregated (review_lane.reject_slot_answer)."
+    },
+    "models_unchecked": {
+      "type": "object",
+      "additionalProperties": { "type": "string" },
+      "description": "{spec: reason}: models a slot was dispatched for whose safety checks have not passed since: recorded before the dispatch, cleared when the checks pass; left by a slot the deadline, an interrupt or an exception ended first. A file of theirs is never salvaged, reused or reaggregated (review_lane.run_slot)."
+    },
     "models_served": {
       "type": "object",
       "description": "{spec: {served_model, fallback, sandbox, ...}}, present only when an adapter attributed something."

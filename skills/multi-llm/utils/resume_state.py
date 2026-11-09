@@ -348,7 +348,9 @@ def _kept_on_rerun(phase_dir: Path, phase: str, spec: str) -> bool:
     holding a JSON list. review-code also needs the scope ledger to tie it to
     the scope the re-run reviews (``existing_result_reuse``, the predicate
     ``run_all_reviews`` calls); the re-run always computes one, so with no
-    review set on disk nothing counts as kept.
+    review set on disk nothing counts as kept. Neither keeps the file of a
+    model the phase withholds (``result_files.withheld_models``: a slot that
+    failed its safety checks or ended before they passed).
     """
     stem = sanitize_model_name(spec)
     if phase == "code-review":
@@ -358,6 +360,8 @@ def _kept_on_rerun(phase_dir: Path, phase: str, spec: str) -> bool:
         if scope_id is None:
             return False
         return review_code.existing_result_reuse(phase_dir, stem, scope_id).verdict == "reuse"
+    if spec in result_files.withheld_models(phase_dir):
+        return False
     path = phase_dir / f"{stem}.json"
     try:
         if not path.is_file() or path.stat().st_size == 0:

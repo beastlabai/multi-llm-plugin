@@ -33,7 +33,7 @@ import stat
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, NamedTuple, Optional, Sequence, Tuple
 
 from . import progress_tracker as _progress
 from . import status_file as _status_file
@@ -72,8 +72,30 @@ STALE_RESULT_SUFFIX = "stale-earlier-run"
 #: phase dir's results, as :data:`STALE_RESULT_SUFFIX` is.
 REJECTED_RESULT_SUFFIX = "rejected"
 
+#: Suffix a model's ``<stem>.json`` is renamed with when its slot ended before
+#: its safety checks passed (:func:`set_aside_unchecked_result`).
+UNCHECKED_RESULT_SUFFIX = "unchecked"
+
 #: ``.status.json`` key holding the phase's notes about its result files.
 RESULT_NOTES_KEY = "result_notes"
+
+#: ``.status.json`` key holding ``{model_spec: reason}``: the models whose slot
+#: failed its safety checks and that no checked attempt has superseded since
+#: (:func:`record_rejected_model`; docs/development/review-results.md,
+#: "Withheld slot answers"). A file of theirs is never read as a result.
+REJECTED_MODELS_KEY = "models_rejected"
+
+#: ``.status.json`` key holding ``{model_spec: reason}``: the models a slot was
+#: dispatched for whose safety checks have not passed since. Recorded before
+#: the dispatch and cleared the moment the checks pass, so a slot that a
+#: deadline, an interrupt or an exception ends in between, or whose verdict
+#: could not be recorded, leaves it (:func:`record_unchecked_model`; same
+#: section). A file of theirs is never read as a result either.
+UNCHECKED_MODELS_KEY = "models_unchecked"
+
+#: Both keys, in the order a model's disposition is named by: a failed check
+#: outranks checks that never finished.
+WITHHELD_KEYS = (REJECTED_MODELS_KEY, UNCHECKED_MODELS_KEY)
 
 #: ``{name: (mtime_ns, size)}`` of a phase dir's candidate files.
 Snapshot = Dict[str, Tuple[int, int]]
@@ -233,10 +255,20 @@ def set_aside_rejected_result(path: os.PathLike | str, *, reason: str) -> Option
     (``**Result files:**``). No file to rename returns ``None`` quietly; a
     failed rename warns on stderr and returns ``None``.
     """
+    return _set_aside_refused(path, REJECTED_RESULT_SUFFIX, reason)
+
+
+def set_aside_unchecked_result(path: os.PathLike | str, *, reason: str) -> Optional[Path]:
+    """:func:`set_aside_rejected_result` for the file of a slot that ended
+    before its safety checks passed: renamed ``<stem>.json.unchecked``."""
+    return _set_aside_refused(path, UNCHECKED_RESULT_SUFFIX, reason)
+
+
+def _set_aside_refused(path: os.PathLike | str, suffix: str, reason: str) -> Optional[Path]:
     source = Path(path)
     if not os.path.lexists(source):
         return None
-    target = source.with_name(f"{source.name}.{REJECTED_RESULT_SUFFIX}")
+    target = source.with_name(f"{source.name}.{suffix}")
     if os.path.lexists(target):
         target = target.with_name(
             f"{target.name}.{datetime.now().strftime('%Y%m%dT%H%M%S%f')}"
@@ -254,6 +286,271 @@ def set_aside_rejected_result(path: os.PathLike | str, *, reason: str) -> Option
     print(note)
     append_result_note(source.parent, note)
     return target
+
+
+#: :attr:`Withheld.key` of every model while ``.status.json`` exists but
+#: cannot be read (:func:`withheld_models`): not a checkpoint key.
+UNREADABLE_CHECKPOINT = "unreadable"
+
+#: Its reason.
+UNREADABLE_CHECKPOINT_REASON = ".status.json could not be read"
+
+CheckpointUnreadable = _status_file.CheckpointUnreadable
+
+
+def _recorded_in(status: Optional[Dict[str, object]], key: str) -> Dict[str, str]:
+    recorded = (status or {}).get(key)
+    if not isinstance(recorded, dict):
+        return {}
+    return {str(spec): str(reason) for spec, reason in recorded.items()}
+
+
+def recorded_models(phase_dir: Optional[os.PathLike | str], key: str) -> Dict[str, str]:
+    """The phase's recorded ``{model_spec: reason}`` under *key*: ``{}`` when
+    there is no checkpoint, or one without the key (an older one).
+
+    Raises :class:`CheckpointUnreadable` when the checkpoint exists but cannot
+    be read: the caller writes these maps back, or decides on them, and an
+    empty map in place of an unread one would drop every record in it.
+    """
+    if not phase_dir:
+        return {}
+    return _recorded_in(_status_file.load_status(str(phase_dir)), key)
+
+
+def recorded_withheld(
+    phase_dir: os.PathLike | str, *, attempts: int = 1,
+) -> Dict[str, Dict[str, str]]:
+    """Both withheld maps, ``{key: {model_spec: reason}}`` for each of
+    :data:`WITHHELD_KEYS`, from one read of the checkpoint (``{}`` for each
+    with no checkpoint, or an older one). Raises :class:`CheckpointUnreadable`
+    when the checkpoint cannot be read on any of *attempts* reads
+    (``status_file.load_status``): a writer that carries the maps over writes
+    them whole or not at all."""
+    status = _status_file.load_status(str(phase_dir), attempts=attempts)
+    return {key: _recorded_in(status, key) for key in WITHHELD_KEYS}
+
+
+def rejected_models(phase_dir: Optional[os.PathLike | str]) -> Dict[str, str]:
+    """The phase's recorded ``{model_spec: reason}`` of rejected slots
+    (:func:`recorded_models`)."""
+    return recorded_models(phase_dir, REJECTED_MODELS_KEY)
+
+
+def unchecked_models(phase_dir: Optional[os.PathLike | str]) -> Dict[str, str]:
+    """The phase's recorded ``{model_spec: reason}`` of unchecked slots
+    (:func:`recorded_models`)."""
+    return recorded_models(phase_dir, UNCHECKED_MODELS_KEY)
+
+
+class Withheld(NamedTuple):
+    """Why a model's answer is withheld: the ``.status.json`` *key* that
+    records it (one of :data:`WITHHELD_KEYS`, or :data:`UNREADABLE_CHECKPOINT`
+    when no record can be read) and the *reason*."""
+
+    key: str
+    reason: str
+
+    @property
+    def rejected(self) -> bool:
+        return self.key == REJECTED_MODELS_KEY
+
+    @property
+    def phrase(self) -> str:
+        """What the model's slot did, after "a slot that"."""
+        if self.rejected:
+            return "failed its safety checks"
+        if self.key == UNCHECKED_MODELS_KEY:
+            return "ended before its safety checks passed"
+        return "cannot be shown to have passed its safety checks"
+
+    def note(self, model_spec: str) -> str:
+        """The clause after one of the model's files' names in its note."""
+        return (
+            f"is not {model_spec}'s result: its slot {self.phrase} "
+            f"({plain_line(self.reason)})"
+        )
+
+    def set_aside(self, path: os.PathLike | str, model_spec: str) -> Optional[Path]:
+        """*path* renamed ``.json.rejected`` or ``.json.unchecked`` and noted.
+        Under :data:`UNREADABLE_CHECKPOINT` nothing is renamed (``None``):
+        the file is only left unread while the checkpoint cannot be read."""
+        if self.rejected:
+            return set_aside_rejected_result(path, reason=self.note(model_spec))
+        if self.key == UNCHECKED_MODELS_KEY:
+            return set_aside_unchecked_result(path, reason=self.note(model_spec))
+        return None
+
+
+#: :meth:`WithheldModels.get`'s answer for every model while the checkpoint
+#: cannot be read.
+UNREADABLE = Withheld(UNREADABLE_CHECKPOINT, UNREADABLE_CHECKPOINT_REASON)
+
+
+class WithheldModels:
+    """:func:`withheld_models`' answer: the models the phase withholds.
+
+    Read like a mapping of ``{model_spec: Withheld}`` (``in``, ``get``,
+    ``[]``, truth). When the checkpoint exists but could not be read
+    (``unreadable``) every model is withheld, by :data:`UNREADABLE`: a read
+    failure never passes for a checkpoint that records nothing, which is what
+    lets a model's answer through. :meth:`recorded` is the narrower question
+    a writer asks: whether a readable checkpoint records the model.
+    """
+
+    def __init__(self, models: Optional[Dict[str, Withheld]] = None, *,
+                 unreadable: bool = False) -> None:
+        self.models: Dict[str, Withheld] = dict(models or {})
+        self.unreadable = unreadable
+
+    def get(self, model_spec: str) -> Optional[Withheld]:
+        return UNREADABLE if self.unreadable else self.models.get(model_spec)
+
+    def __contains__(self, model_spec: object) -> bool:
+        return self.unreadable or model_spec in self.models
+
+    def __getitem__(self, model_spec: str) -> Withheld:
+        withheld = self.get(model_spec)
+        if withheld is None:
+            raise KeyError(model_spec)
+        return withheld
+
+    def __bool__(self) -> bool:
+        return self.unreadable or bool(self.models)
+
+    def recorded(self, model_spec: str) -> bool:
+        """Whether the checkpoint, read, records *model_spec* as withheld."""
+        return not self.unreadable and model_spec in self.models
+
+    def owner(self, stem: str) -> Optional[str]:
+        """The withheld spec a result file named *stem* would be read as, if
+        any (its anchored or pre-anchor stem, as
+        :func:`set_aside_unrecorded_results` matches them); *stem* itself
+        while the checkpoint cannot be read."""
+        if self.unreadable:
+            return stem
+        return next(
+            (spec for spec in self.models if stem in _claimed_stems([spec])), None,
+        )
+
+
+def withheld_models(phase_dir: Optional[os.PathLike | str]) -> WithheldModels:
+    """Every model whose answer the phase withholds, from one read of
+    ``.status.json``: ``models_rejected`` and ``models_unchecked``, a model in
+    both named by its rejection. A checkpoint that records neither (an older
+    one, or a phase that never dispatched) withholds nothing, and so does no
+    checkpoint; one that exists but cannot be read withholds every model
+    (:class:`WithheldModels`)."""
+    if not phase_dir:
+        return WithheldModels()
+    try:
+        status = _status_file.load_status(str(phase_dir))
+    except CheckpointUnreadable:
+        return WithheldModels(unreadable=True)
+    withheld: Dict[str, Withheld] = {}
+    for key in reversed(WITHHELD_KEYS):
+        withheld.update(
+            {spec: Withheld(key, reason) for spec, reason in _recorded_in(status, key).items()}
+        )
+    return WithheldModels(withheld)
+
+
+def _record_model(phase_dir: os.PathLike | str, key: str, model_spec: str, reason: str) -> bool:
+    # Into the checkpoint a fan-out's round opened only, never into a folder
+    # no round opened (a direct call of a slot function); and never over a
+    # checkpoint this cannot read, whose records the write would drop.
+    phase_dir = str(phase_dir)
+    with _status_file.checkpoint_lock(phase_dir):
+        try:
+            status = _status_file.load_status(phase_dir)
+        except CheckpointUnreadable:
+            return False
+        if status is None:
+            return False
+        recorded = _recorded_in(status, key)
+        if recorded.get(model_spec) != reason:
+            recorded[model_spec] = reason
+            if key == REJECTED_MODELS_KEY:
+                _status_file.update_status(phase_dir, {REJECTED_MODELS_KEY: recorded})
+            else:
+                _status_file.update_status(phase_dir, {UNCHECKED_MODELS_KEY: recorded})
+    try:
+        return recorded_models(phase_dir, key).get(model_spec) == reason
+    except CheckpointUnreadable:
+        return False
+
+
+def record_rejected_model(phase_dir: os.PathLike | str, model_spec: str, reason: str) -> bool:
+    """Add *model_spec* to ``.status.json``'s ``models_rejected``; whether it is there now.
+
+    One read-modify-write under the checkpoint lock, as :func:`append_result_note`.
+    The status writers are best-effort, so the record is read back: ``False``
+    means this write did not land, and the caller looks for another record
+    (:meth:`WithheldModels.recorded`) before it warns. A *phase_dir* without
+    a ``.status.json`` (no round opened there), or with one that cannot be
+    read, is ``False`` too, and nothing is written.
+    """
+    return _record_model(phase_dir, REJECTED_MODELS_KEY, model_spec, reason)
+
+
+def record_unchecked_model(phase_dir: os.PathLike | str, model_spec: str, reason: str) -> bool:
+    """:func:`record_rejected_model` for ``models_unchecked``."""
+    return _record_model(phase_dir, UNCHECKED_MODELS_KEY, model_spec, reason)
+
+
+def clear_unchecked_model(phase_dir: os.PathLike | str, model_spec: str) -> bool:
+    """Take *model_spec* out of ``models_unchecked``; whether it is out now
+    (read back, as :func:`record_rejected_model`). ``True`` with no
+    checkpoint; ``False``, writing nothing, over one that cannot be read."""
+    phase_dir = str(phase_dir)
+    with _status_file.checkpoint_lock(phase_dir):
+        try:
+            status = _status_file.load_status(phase_dir)
+        except CheckpointUnreadable:
+            return False
+        if status is None:
+            return True
+        recorded = _recorded_in(status, UNCHECKED_MODELS_KEY)
+        if model_spec in recorded:
+            del recorded[model_spec]
+            _status_file.update_status(phase_dir, {UNCHECKED_MODELS_KEY: recorded})
+    try:
+        return model_spec not in unchecked_models(phase_dir)
+    except CheckpointUnreadable:
+        return False
+
+
+def rejected_result_note(model_spec: str, reason: str) -> str:
+    """The clause after a rejected slot's file name in its set-aside note."""
+    return Withheld(REJECTED_MODELS_KEY, reason).note(model_spec)
+
+
+def withhold_results(
+    phase_dir: os.PathLike | str, result_files: Sequence[str]
+) -> List[str]:
+    """The files of *result_files* no withheld model owns; the rest are never read.
+
+    A file a model of :func:`withheld_models` would be read from is set aside
+    again (``.json.rejected`` or ``.json.unchecked``) and left out whether or
+    not the rename works: the record is what keeps it out, so a set-aside that
+    failed when the slot ended fails closed here. While the checkpoint cannot
+    be read, every file is left out and none is renamed.
+    """
+    phase_dir = str(phase_dir)
+    withheld = withheld_models(phase_dir)
+    if not withheld:
+        return list(result_files)
+    kept: List[str] = []
+    for path in result_files:
+        name = os.path.basename(path)
+        stem = name[: -len(".json")] if name.endswith(".json") else name
+        owner = withheld.owner(stem)
+        if owner is None:
+            kept.append(path)
+            continue
+        if withheld[owner].set_aside(path, owner) is None:
+            print(f"{name} {withheld[owner].note(owner)}; left in place and not read")
+    return kept
 
 
 def misnamed_result_note(model_spec: str, wrote: str, expected: str) -> str:

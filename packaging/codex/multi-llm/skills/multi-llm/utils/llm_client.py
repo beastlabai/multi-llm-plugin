@@ -2262,14 +2262,19 @@ def misnamed_result_baseline(
 
 
 #: ``(st_dev, st_ino, st_size, st_mtime_ns)`` of a slot's requested result file
-#: when the slot started, or ``()`` when there was none.
+#: when the slot started, or ``()`` when there was none. Where one is
+#: ``Optional``, ``None`` is a stamp that could not be read.
 ResultFileStamp = Tuple[int, ...]
 
 
-def _result_file_stamp(path: Union[str, Path]) -> ResultFileStamp:
+def _result_file_stamp(path: Union[str, Path]) -> Optional[ResultFileStamp]:
     """What moves when anything writes *path*: its identity, size and mtime.
 
-    ``()`` when there is no file. Followed through a link, as
+    ``()`` only when the file is shown absent; ``None`` when its metadata
+    cannot be read, which says nothing about whether it is there, nor whether
+    it moved: every comparison of stamps keeps that open, and so never takes
+    an earlier answer for gone or for this call's (docs/development/
+    review-results.md, "Withheld slot answers"). Followed through a link, as
     :func:`read_json_from_file` follows one when it reads the file. The inode is
     in it so a file renamed over the old one is a change whatever its size and
     mtime say. No content hash, on purpose: a model that writes the same bytes
@@ -2280,8 +2285,10 @@ def _result_file_stamp(path: Union[str, Path]) -> ResultFileStamp:
     """
     try:
         st = os.stat(path)
-    except OSError:
+    except FileNotFoundError:
         return ()
+    except OSError:
+        return None
     return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
 
 
@@ -2289,8 +2296,17 @@ def requested_result_baseline(
     output_dir: Union[str, Path],
     phase: str,
     model_spec: str,
-) -> ResultFileStamp:
+) -> Optional[ResultFileStamp]:
     """The stamp of the file :func:`invoke_with_file_output` asks *model_spec* for, now.
+
+    ``()`` only when the file is shown absent; ``None`` when its metadata
+    cannot be read, which says nothing about whether it is there
+    (:func:`_result_file_stamp`). A slot that compares two of these to decide
+    an earlier answer is gone keeps it withheld on ``None``
+    (docs/development/review-results.md, "Withheld slot answers"); handed to
+    :func:`invoke_with_file_output` as ``requested_baseline``, ``None`` makes
+    each attempt take its own, and one it cannot take reads no file at the
+    requested name.
 
     A slot takes this once, before its first attempt, and hands it to every
     attempt as ``requested_baseline``, for the reason
@@ -2315,7 +2331,17 @@ def requested_result_baseline(
     )
 
 
-def _set_aside_unchanged_result(path: Path, baseline: ResultFileStamp) -> bool:
+#: :func:`_set_aside_unchanged_result`: the file is the earlier round's, unchanged.
+_RESULT_FILE_STALE = "stale"
+
+#: :func:`_set_aside_unchanged_result`: a stamp could not be read, so nothing
+#: shows the file was written after the slot started.
+_RESULT_FILE_UNVERIFIED = "unverified"
+
+
+def _set_aside_unchanged_result(
+    path: Path, baseline: Optional[ResultFileStamp],
+) -> Optional[str]:
     """Set *path* aside when it is still exactly the file the slot started beside.
 
     The one place every file-output lane reaches (review-plan and review-tasks
@@ -2334,14 +2360,29 @@ def _set_aside_unchanged_result(path: Path, baseline: ResultFileStamp) -> bool:
     requested name, where the old file would have been overwritten. ``()`` (no
     file when the slot started) and a file that moved since are never touched.
 
-    Returns whether *path* was that earlier round's file — ``True`` even when
-    the rename failed (which warns on stderr), because the caller's question is
-    whether to read it, and the answer is no either way.
+    Returns why *path* is not to be read, or ``None`` when it is this call's to
+    read: it was absent when the slot started, is absent now (the read then
+    reports it missing), or has changed since. :data:`_RESULT_FILE_STALE` when
+    it is that earlier round's file, even when the rename failed (which warns
+    on stderr), because the caller's question is whether to read it, and the
+    answer is no either way. :data:`_RESULT_FILE_UNVERIFIED` when either stamp
+    could not be read (*baseline* ``None``, or this one): nothing shows the
+    file was written since the slot started, so it may still be an earlier
+    answer, one whose safety checks failed among them; it is left in place,
+    neither read nor renamed (docs/development/review-results.md, "Withheld
+    slot answers").
     """
-    if not baseline or _result_file_stamp(path) != baseline:
-        return False
+    if baseline == ():
+        return None
+    now = _result_file_stamp(path)
+    if now == ():
+        return None
+    if baseline is None or now is None:
+        return _RESULT_FILE_UNVERIFIED
+    if now != baseline:
+        return None
     _result_files.set_aside_stale_result(path)
-    return True
+    return _RESULT_FILE_STALE
 
 
 def _adopt_misnamed_result(
@@ -2423,7 +2464,10 @@ def invoke_with_file_output(
        a previous round's answer, not this call's: it is not read, it is
        renamed ``<name>.stale-earlier-run`` so nothing after this call reads
        it either (:func:`_set_aside_unchanged_result`), and the steps below
-       run as if it were missing
+       run as if it were missing. One that a stamp which could not be read
+       leaves unproven (the baseline's or the one after the call) is not read
+       either, and is left in place (``source: unverified``): it may be an
+       earlier answer, one whose safety checks failed among them
     1b. With ``run_model_specs``, when the output file is missing: the one JSON
         array this model's provider prefix wrote elsewhere in the phase dir
         during the call (``utils/result_files.find_misnamed_result``), renamed
@@ -2462,7 +2506,9 @@ def invoke_with_file_output(
         requested_baseline: Step 1's baseline, from
             :func:`requested_result_baseline` taken once at the slot's start
             (``()`` when the file was not there), for the same reason. ``None``
-            takes it here, at the start of this call (a slot of one attempt).
+            takes it here, at the start of this call (a slot of one attempt);
+            when that stamp cannot be read either, no file at the requested
+            name is read on this call.
 
     Returns:
         Dict with keys:
@@ -2472,7 +2518,7 @@ def invoke_with_file_output(
         - 'output_file': Path to the output file (if generated)
         - 'error': Error message (if failed)
         - 'file_error': File-specific error (if file read failed, or the file
-          was left unread as older than the slot)
+          was left unread as older than the slot, or as not shown newer)
         - 'details': Provider execution details, forwarded verbatim on every
           return path — including §3.6's ``served_model`` /
           ``served_model_is_fallback``, so the JSON's origin travels with it
@@ -2574,9 +2620,12 @@ def invoke_with_file_output(
     # anything after it — the salvage recovery loop, `--reaggregate`, a slot
     # failed after this returns — can take it for this round's (Fable review
     # 2026-10-09), and every step below runs exactly as if it were missing. A
-    # stdout answer is then saved to the requested name as before.
-    stale_file = _set_aside_unchanged_result(output_json_path, requested_baseline)
-    if stale_file:
+    # stdout answer is then saved to the requested name as before. One no
+    # readable stamp shows to be newer than the slot is not read either, but
+    # stays where it is: it may be the earlier answer, or this call's.
+    refused_file = _set_aside_unchanged_result(output_json_path, requested_baseline)
+    stale_file = refused_file is not None
+    if refused_file == _RESULT_FILE_STALE:
         file_result = {
             "success": False,
             "error": (
@@ -2584,6 +2633,17 @@ def invoke_with_file_output(
                 f"an earlier run's answer, not read"
             ),
             "source": "stale",
+            "data": None,
+        }
+    elif refused_file == _RESULT_FILE_UNVERIFIED:
+        file_result = {
+            "success": False,
+            "error": (
+                f"{output_json_path.name} could not be shown to have been written "
+                f"since this slot started (its metadata could not be read): it "
+                f"may be an earlier answer, not read"
+            ),
+            "source": "unverified",
             "data": None,
         }
     else:
@@ -2606,7 +2666,7 @@ def invoke_with_file_output(
     # Step 1b: the requested file is missing (or only the previous round's), but
     # the model may have written its answer under another name. Before stdout,
     # because a file the model wrote is its deliberate answer and stdout is a
-    # scrape.
+    # scrape. Never over an unverified one, which the rename would overwrite.
     if phase_files_before is not None and file_result.get("source") in ("missing", "stale"):
         adopted = _adopt_misnamed_result(
             output_json_path, phase_files_before, model_spec, run_model_specs,

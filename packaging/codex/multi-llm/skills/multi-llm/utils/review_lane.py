@@ -24,7 +24,10 @@ the other (docs/development/review-results.md, "The shared review lane"):
   validation round beside its grouping: reuse the verdicts bound to it, merge
   or hand out a round on disk, or build a new one;
 * :func:`run_slot`, one model slot: the guard, the ladder and the checks,
-  over each lane's :class:`ReviewSlot`;
+  over each lane's :class:`ReviewSlot`, and :func:`reject_slot_answer`, what
+  every slot the checks failed leaves behind (an answer that failed its checks
+  or never finished them is withheld: docs/development/review-results.md,
+  "Withheld slot answers");
 * :func:`hand_back_report`, a published report's files handed back on both
   channels;
 * :func:`record_phase_complete` and :func:`complete_reaggregate`, the
@@ -36,6 +39,7 @@ lanes and fails on any behaviour that differs between them.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -54,7 +58,9 @@ from . import scope_round as _scope_round
 from . import status_file as _status_file
 from . import subagent_tasks as _subagent_tasks
 from . import unattended as _unattended
-from .progress_tracker import PhaseProgress
+from .json_extractor import generate_output_path
+from .progress_tracker import DEADLINE_ERROR, PhaseProgress
+from .provider_outcome import SALVAGE_TEXT_KEY
 from .llm_client import SALVAGE_FAILURE_KEY
 from .schema_validator import drop_non_record_entries
 from .state_manager import CURRENT_FORMAT_VERSION, load_groups_payload, save_groups_payload
@@ -199,19 +205,50 @@ def open_round(
     Under ``--yes`` the auto-selected models (D6 row 2) and an untyped scope
     policy (row 16) are recorded as resolutions; then the fan-out's step is
     published.
+
+    The withheld models (``models_rejected``, ``models_unchecked``) survive
+    the write, every model's, selected or not: both maps are read whole under
+    the same lock as the write, and carried over as read. The resume skip
+    that follows reads them, and refuses to reuse their files;
+    :func:`close_fanout` writes both maps again. A checkpoint that cannot be
+    read, even after ``status_file.CHECKPOINT_READ_ATTEMPTS`` reads, may hold
+    either map, and maps rebuilt without it would drop every earlier refusal:
+    the run stops there at exit 3, ``needs-human``, before anything is
+    written or dispatched (docs/development/review-results.md, "Withheld slot
+    answers").
     """
     prior_usage = steps.recorded_usage(phase_dir) or {}
     prior_served = steps.recorded_served_models(phase_dir) or {}
+    withheld: Optional[Dict[str, Dict[str, str]]] = None
     with claim.opening():
-        steps.write_status(phase_dir, {
-            "phase": phase_name,
-            "state": "models_running",
-            "started_at": datetime.now().isoformat(),
-            "models_requested": list(model_specs),
-            "error": None,
-            _review_round.ROUND_KEY: claim.round_id,
-            "progress": None,
-        })
+        try:
+            withheld = _result_files.recorded_withheld(
+                phase_dir, attempts=_status_file.CHECKPOINT_READ_ATTEMPTS,
+            )
+        except _status_file.CheckpointUnreadable:
+            pass
+        else:
+            rejected = withheld[_result_files.REJECTED_MODELS_KEY]
+            unchecked = withheld[_result_files.UNCHECKED_MODELS_KEY]
+            steps.write_status(phase_dir, {
+                "phase": phase_name,
+                "state": "models_running",
+                "started_at": datetime.now().isoformat(),
+                "models_requested": list(model_specs),
+                "error": None,
+                _review_round.ROUND_KEY: claim.round_id,
+                "progress": None,
+                **({_result_files.REJECTED_MODELS_KEY: rejected} if rejected else {}),
+                **({_result_files.UNCHECKED_MODELS_KEY: unchecked} if unchecked else {}),
+            })
+    if withheld is None:
+        sys.exit(_unattended.fail_closed(
+            f"ERROR: {_status_file.status_path(phase_dir)} could not be read "
+            f"while this run opened its round, so the records of the answers "
+            f"this phase withholds (models whose safety checks failed or never "
+            f"finished) could not be carried over; nothing was dispatched. "
+            f"{_status_file.unreadable_checkpoint_advice(phase_dir)}"
+        ))
     if after_opening is not None:
         after_opening()
     # Recorded rather than merely applied: an auto-selection nobody can see
@@ -250,7 +287,12 @@ class SlotResult:
     (``failure_output_from_result`` is the text salvage reads instead).
     ``details`` is the lane's whole record (review-plan's result dict, with the
     served model, sandbox word and usage the checkpoint records); ``failure``
-    is the salvage failure kind the slot recorded.
+    is the salvage failure kind the slot recorded. ``rejected`` is the guard's
+    reason when the slot's safety checks failed it (:func:`reject_slot_answer`):
+    such a slot is never salvaged, adopted or read back. ``checked`` says the
+    slot's checks passed with nothing of an earlier answer left in place
+    (:func:`run_slot`): only such an attempt supersedes the model's withheld
+    answer (:func:`withheld_record`).
 
     :func:`run_slot` returns one, and so does review-code's slot wrapper in
     ``run_all_reviews``; the slot functions over :func:`run_slot` keep their
@@ -266,6 +308,8 @@ class SlotResult:
     source: Optional[str] = None
     details: Mapping[str, Any] = field(default_factory=dict)
     failure: Optional[str] = None
+    rejected: Optional[str] = None
+    checked: bool = False
 
     @classmethod
     def from_record(cls, model_spec: str, record: Mapping[str, Any]) -> "SlotResult":
@@ -278,6 +322,8 @@ class SlotResult:
             source=record.get("source"),
             details=record,
             failure=record.get(SALVAGE_FAILURE_KEY),
+            rejected=record.get(REJECTED_KEY),
+            checked=record.get(CHECKED_KEY) is True,
         )
 
     @classmethod
@@ -285,7 +331,8 @@ class SlotResult:
         """review-code's slot triple (``run_single_review``'s return)."""
         success, issues, error = value
         return cls(model_spec=model_spec, success=bool(success), payload=issues,
-                   error=error)
+                   error=error, rejected=getattr(value, "rejected", None),
+                   checked=getattr(value, "checked", False) is True)
 
     @classmethod
     def coerce(cls, model_spec: str, value: Any) -> "SlotResult":
@@ -297,8 +344,49 @@ class SlotResult:
         return cls.from_review(model_spec, value)
 
     def as_review(self) -> tuple:
-        """The ``(success, issues, error)`` triple review-code's report reads."""
-        return (self.success, self.payload, self.error)
+        """The ``(success, issues, error)`` triple review-code's report reads;
+        a :class:`SlotReview` for a rejected or a checked slot."""
+        triple = (self.success, self.payload, self.error)
+        if self.rejected is not None or self.checked:
+            return SlotReview(triple, rejected=self.rejected, checked=self.checked)
+        return triple
+
+    def marked_checked(self) -> "SlotResult":
+        """This outcome with ``checked`` set, on the record too (review-plan's
+        slot function returns the record)."""
+        return replace(self, checked=True, details={**self.details, CHECKED_KEY: True})
+
+
+#: The key a review-plan record carries :attr:`SlotResult.rejected` under.
+REJECTED_KEY = "rejected"
+
+#: The key a review-plan record carries :attr:`SlotResult.checked` under.
+CHECKED_KEY = "checks_passed"
+
+
+class SlotReview(tuple):
+    """review-code's ``(success, issues, error)`` triple, with the slot's
+    ``rejected`` reason and ``checked`` flag.
+
+    A plain triple to every caller that destructures or compares it;
+    :meth:`SlotResult.from_review` reads both back, so the fan-out that
+    receives the triple from ``run_all_reviews`` still knows whether the slot
+    may be salvaged and whether it supersedes a withheld answer.
+    """
+
+    rejected: Optional[str]
+    checked: bool
+
+    def __new__(cls, triple: tuple, *, rejected: Optional[str] = None,
+                checked: bool = False) -> "SlotReview":
+        value = super().__new__(cls, triple)
+        value.rejected = rejected
+        value.checked = checked
+        return value
+
+    def __getnewargs_ex__(self) -> Tuple[tuple, Dict[str, Any]]:
+        # copy and pickle rebuild it whole
+        return (tuple(self),), {"rejected": self.rejected, "checked": self.checked}
 
 
 def slot_results(results: Mapping[str, Any]) -> Dict[str, SlotResult]:
@@ -327,6 +415,10 @@ class SlotSteps:
     invoke_with_file_output: Callable[..., Any]
     dispatch_with_ladder: Callable[..., Any]
     sandbox_fallback_kwargs: Callable[..., Dict[str, Any]]
+    retire_salvage_artifacts: Callable[..., Any]
+    #: ``review_orchestrator_base.RETIRE_REJECTED``, the word a rejected
+    #: slot's retired salvage pair is named with.
+    retire_rejected: str
 
 
 @dataclass(frozen=True)
@@ -384,7 +476,9 @@ class ReviewSlot(Protocol):
     * ``after_ladder(run)``: what the lane reads off the last attempt before
       the checks run (its provenance, the output-file line).
     * ``outcome(run, violation, duration)``: the slot's ending, with the
-      checks' reason when they failed it.
+      reason it is failed before its answer is parsed: the checks', or
+      :data:`UNSHOWN_ANSWER_REASON` for an answer :func:`run_slot` does not
+      accept.
     * ``raised(exc)``: a :class:`SlotResult` for an exception raised between
       the deadline and the ending, or ``None`` to let it propagate to the
       fan-out's wrapper (``raised_slot_record``).
@@ -437,8 +531,25 @@ async def run_slot(slot: ReviewSlot, *, start_time: float) -> SlotResult:
     The guard's checks run once, after the last attempt, over every attempt
     (ANDed: a clean retry cannot excuse an earlier attempt that wrote), and
     ahead of the lane's ending: a slot they fail is failed with their reason
-    whatever its last attempt reported, and nothing it returned is parsed as
-    a review. *start_time* is the slot's start, for its duration.
+    whatever its last attempt reported, nothing it returned is parsed as a
+    review, and its answer is refused for good (:func:`reject_slot_answer`,
+    with no await between the verdict and it, so the deadline cannot cancel
+    the slot in between). *start_time* is the slot's start, for its duration.
+
+    The answer is withheld until the checks pass (docs/development/
+    review-results.md, "Withheld slot answers"): the model is recorded under
+    ``models_unchecked`` before anything is dispatched, and taken out the
+    moment the checks pass with nothing of an earlier answer left in place,
+    which also marks the outcome ``checked``. A slot whose record cannot be
+    written, or read back, is failed before its dispatch. A slot that ends in
+    between (the fan-out's deadline, an interrupt, an exception) keeps the
+    record and sets its file aside on the way out. A slot whose checks pass
+    while the ``<stem>.json`` it started beside may still be in place (a
+    set-aside that failed, a stamp that could not be read) keeps the record
+    too, and an answer it read from that file is failed rather than accepted
+    (:data:`UNSHOWN_ANSWER_REASON`): nothing shows it is not the earlier
+    answer. An answer on stdout, or in a misnamed file adopted by name, is
+    this slot's whatever the old file does.
     """
     import time
 
@@ -459,6 +570,9 @@ async def run_slot(slot: ReviewSlot, *, start_time: float) -> SlotResult:
     if isinstance(prepared, SingleShot):
         return await prepared.run(guard)
     dispatch: SlotDispatch = prepared
+    result_path = generate_output_path(
+        Path(dispatch.output_dir), "output", dispatch.invoke_phase, slot.model_spec,
+    )
 
     try:
         ladder = steps.slot_ladder(slot.provider_name, dispatch.timeout, anchor=slot.anchor)
@@ -499,35 +613,298 @@ async def run_slot(slot: ReviewSlot, *, start_time: float) -> SlotResult:
                 **steps.sandbox_fallback_kwargs(sandbox),
             )
 
-        run = await steps.dispatch_with_ladder(
-            _dispatch,
-            ladder=ladder,
-            model_spec=slot.model_spec,
-            display_name=slot.display_name,
-            timeout=dispatch.timeout,
-            start_line=dispatch.start_line,
-            jail_summary_key=dispatch.jail_summary_key,
-            tracker=slot.tracker,
+        armed = _arm_slot(slot.model_spec, result_path)
+        if armed is False:
+            # Nothing would tell a later reader this answer was never checked.
+            print(f"[{slot.display_name}] {UNRECORDED_REASON}")
+            return slot.ladder_refused(UNRECORDED_REASON, time.time() - start_time)
+        try:
+            run = await steps.dispatch_with_ladder(
+                _dispatch,
+                ladder=ladder,
+                model_spec=slot.model_spec,
+                display_name=slot.display_name,
+                timeout=dispatch.timeout,
+                start_line=dispatch.start_line,
+                jail_summary_key=dispatch.jail_summary_key,
+                tracker=slot.tracker,
+            )
+            duration = time.time() - start_time
+            if run.refused:
+                # §7.5 rule 4: what is left of the slot cannot hold one worst-case
+                # attempt of the adapter's declared envelope, so nothing was
+                # spawned; recorded as its own outcome rather than dispatched to be
+                # killed part-way through a retry chain the harness cannot see.
+                reason = run.refusal_reason(slot.display_name)
+                print(f"[{slot.display_name}] {reason}")
+                return slot.ladder_refused(reason, duration)
+            slot.after_ladder(run)
+            violation = await guard.finish(
+                run.audits, run.home_checks, summary_key=dispatch.jail_summary_key,
+            )
+        except asyncio.CancelledError:
+            _withhold_unfinished_slot(slot.model_spec, result_path, CANCELLED_REASON)
+            raise
+        except Exception:
+            _withhold_unfinished_slot(slot.model_spec, result_path, RAISED_REASON)
+            raise
+        # No await from here on: the verdict and its disposition are one step.
+        file_left = violation is None and _earlier_file_left(
+            steps, dispatch, slot.model_spec, requested_baseline,
         )
-        duration = time.time() - start_time
-        if run.refused:
-            # §7.5 rule 4: what is left of the slot cannot hold one worst-case
-            # attempt of the adapter's declared envelope, so nothing was
-            # spawned; recorded as its own outcome rather than dispatched to be
-            # killed part-way through a retry chain the harness cannot see.
-            reason = run.refusal_reason(slot.display_name)
-            print(f"[{slot.display_name}] {reason}")
-            return slot.ladder_refused(reason, duration)
-        slot.after_ladder(run)
-        violation = await guard.finish(
-            run.audits, run.home_checks, summary_key=dispatch.jail_summary_key,
-        )
-        return slot.outcome(run, violation, duration)
+        # Read before the lane's ending, which may write this attempt's own
+        # salvage request (review-code's does).
+        checked = violation is None and not file_left and not _salvage_pair_left(result_path)
+        if checked:
+            _clear_unchecked(slot.model_spec, result_path)
+        if file_left and _answer_read_from_result_file(run.result):
+            # Nothing shows the answer is not the earlier one, which may be
+            # withheld: failed before the lane parses it, and still withheld.
+            print(f"[{slot.display_name}] {UNSHOWN_ANSWER_REASON}")
+            return _unshown_answer(slot.outcome(run, UNSHOWN_ANSWER_REASON, duration))
+        ending = slot.outcome(run, violation, duration)
+        if violation is None:
+            return ending.marked_checked() if checked else ending
+        return reject_slot_answer(steps, ending, reason=violation, result_path=result_path)
     except Exception as exc:
         caught = slot.raised(exc)
         if caught is None:
             raise
         return caught
+
+
+#: ``models_unchecked``'s reason for a slot recorded before its dispatch.
+ARMED_REASON = "its slot was dispatched and its checks have not passed"
+
+#: ... for one cancelled before its checks finished,
+CANCELLED_REASON = "its slot was cancelled before its checks finished"
+
+#: ... and for one an exception ended before its checks finished.
+RAISED_REASON = "its slot raised an exception before its checks finished"
+
+#: The error of a slot whose checks passed but whose answer was read from
+#: its ``<stem>.json`` while the file the slot started beside may still be in
+#: place (:func:`run_slot`): nothing shows the answer is this slot's.
+UNSHOWN_ANSWER_REASON = (
+    "[RESULT_NOT_SHOWN_NEW] answer not accepted: it was read from the model's "
+    "result file, and nothing shows that file was written after this slot "
+    "started (the earlier answer it started beside may still be there)"
+)
+
+#: The error of a slot failed before its dispatch because its
+#: ``models_unchecked`` record could not be written or read back.
+UNRECORDED_REASON = (
+    "[WITHHOLD_NOT_RECORDED] not dispatched: .status.json could not record "
+    "that this model's answer is withheld until its safety checks pass"
+)
+
+
+def _arm_slot(model_spec: str, result_path: Path) -> Optional[bool]:
+    """Record *model_spec* under ``models_unchecked`` before its dispatch.
+
+    ``True`` when the record is there now (read back); ``False`` when the
+    phase has a checkpoint and the record could not be written or read back,
+    which fails the slot before its dispatch (:func:`run_slot`): nothing would
+    tell a later ``--reaggregate`` or resume that an answer it left was never
+    checked. ``None`` when the folder has no checkpoint at all: only a direct
+    call of a slot function, which no round opened, gets there (a fan-out's
+    :func:`open_round` writes it, and its round stamp is read back first), and
+    such a call keeps no record."""
+    phase_dir = str(result_path.parent)
+    try:
+        if _status_file.load_status(phase_dir) is None:
+            return None
+    except _status_file.CheckpointUnreadable:
+        return False
+    try:
+        return _result_files.record_unchecked_model(phase_dir, model_spec, ARMED_REASON)
+    except Exception:  # noqa: BLE001 - the slot is failed instead
+        return False
+
+
+def _earlier_file_left(
+    steps: SlotSteps, dispatch: SlotDispatch, model_spec: str, baseline: Any,
+) -> bool:
+    """Whether the ``<stem>.json`` this slot started beside may still be in
+    place: an earlier answer, one whose checks failed among them, whose
+    set-aside failed. Such an attempt passes its checks but supersedes
+    nothing (:func:`run_slot`), and an answer it read from that file is not
+    accepted either.
+
+    The two stamps (``requested_result_baseline``) show the file gone only
+    when it was absent at the start, is absent now, or has changed since. A
+    stamp that could not be read (``None``) shows nothing, so an earlier file
+    counts as still there."""
+    if baseline == ():
+        return False
+    now = steps.requested_result_baseline(
+        dispatch.output_dir, dispatch.invoke_phase, model_spec,
+    )
+    if now == ():
+        return False
+    return baseline is None or now is None or now == baseline
+
+
+def _salvage_pair_left(result_path: Path) -> bool:
+    """Whether a salvage pair of the model is in place before the lane's
+    ending writes this attempt's own: an earlier attempt's, whose retirement
+    at the attempt's start failed. Such an attempt supersedes nothing."""
+    stem = result_path.stem
+    return any(
+        os.path.lexists(result_path.parent / name)
+        for name in (f"salvage_{stem}.json", f"salvage_task_{stem}.json")
+    )
+
+
+#: The ``source`` values of an answer ``invoke_with_file_output`` read from
+#: the requested ``<stem>.json`` itself (a misnamed file it adopted carries
+#: ``misnamed_from`` as well).
+_RESULT_FILE_SOURCES = frozenset({"file", "file_extracted"})
+
+
+def _answer_read_from_result_file(result: Optional[Mapping[str, Any]]) -> bool:
+    """Whether the last attempt answered from the requested ``<stem>.json``,
+    rather than on stdout or from a misnamed file it adopted by name, whose
+    snapshot shows it written during the slot."""
+    return bool(
+        result
+        and result.get("success")
+        and result.get("source") in _RESULT_FILE_SOURCES
+        and not result.get("misnamed_from")
+    )
+
+
+def _unshown_answer(ending: SlotResult) -> SlotResult:
+    """The failed ending of a slot whose answer :func:`run_slot` did not
+    accept, with ``salvage_text`` ``""`` on review-plan's record, as on a
+    rejection's: the model stays withheld, so a salvage request of it could
+    only be refused."""
+    return replace(ending, details={**ending.details, SALVAGE_TEXT_KEY: ""})
+
+
+def _clear_unchecked(model_spec: str, result_path: Path) -> None:
+    """Take a slot whose checks passed out of ``models_unchecked`` now, so a
+    run that stops before its fan-out closes still reuses its answer;
+    :func:`close_fanout` tries again for one this write misses."""
+    try:
+        cleared = _result_files.clear_unchecked_model(result_path.parent, model_spec)
+    except Exception:  # noqa: BLE001 - warned below
+        cleared = False
+    if not cleared:
+        print(
+            f"Warning: {model_spec}: its safety checks passed, but "
+            f"models_unchecked in {result_path.parent}/.status.json could not be "
+            f"cleared yet; the fan-out's close tries again",
+            file=sys.stderr,
+        )
+
+
+def _withhold_unfinished_slot(model_spec: str, result_path: Path, reason: str) -> None:
+    """A dispatched slot that ended before its verdict (cancelled, or an
+    exception): its answer was never checked. Recorded with *reason* (the
+    record :func:`_arm_slot` wrote stays when this write fails), and its file
+    set aside as ``.json.unchecked``. Synchronous, so nothing cancels it
+    part-way; the fan-out's close stops a cancelled slot's provider thread and
+    sets aside what it wrote later. Never raises: the slot's own ending
+    follows."""
+    try:
+        _result_files.record_unchecked_model(result_path.parent, model_spec, reason)
+    except Exception:  # noqa: BLE001 - the armed record stays
+        pass
+    try:
+        _result_files.set_aside_unchecked_result(
+            result_path,
+            reason=_result_files.Withheld(
+                _result_files.UNCHECKED_MODELS_KEY, reason,
+            ).note(model_spec),
+        )
+    except Exception:  # noqa: BLE001 - the record keeps it out; the close looks again
+        pass
+
+
+def reject_slot_answer(
+    steps: SlotSteps,
+    ending: SlotResult,
+    *,
+    reason: str,
+    result_path: Path,
+) -> SlotResult:
+    """A slot the guard's checks failed: its answer refused for good, on every lane.
+
+    The one disposition of every rejection site (:func:`run_slot` for both
+    lanes' ladder, the review base's stdout lane twice). Only a reason the
+    guard's checks returned counts: a ``[SANDBOX_BYPASSED]`` fallback notice,
+    or a change the slot's own audited stream cleared, fails nothing and never
+    reaches here. In order:
+
+    1. the rejection is recorded in ``.status.json`` (``models_rejected``,
+       :func:`~utils.result_files.record_rejected_model`) first, so whatever
+       fails below, ``--reaggregate`` and a resume's skip still refuse the
+       model's file;
+    2. the model's outstanding salvage pair is retired (``.rejected.`` in its
+       new name), and
+    3. the ``<stem>.json`` the slot asked for, or a model wrote there, is set
+       aside as ``.json.rejected``, outside every result glob.
+
+    Returned as *ending* marked ``rejected``, with ``salvage_text`` set to
+    ``""`` on its record: that, not a cleared ``stdout``, is what stops
+    ``failure_output_from_result`` falling back to stdout or stderr, so no
+    reader of the record can ask for a salvage of it. ``stdout`` stays, for the
+    error log; the provenance and spend on the record stay too.
+
+    Fail closed: when the rename or the retirement fails the model stays
+    failed anyway (the fan-out never salvages or adopts a rejected slot, and
+    the record refuses the file later); a warning names what is left. When
+    this record cannot be written either, the one :func:`run_slot` wrote
+    before the dispatch (``models_unchecked``) still withholds the files; with
+    neither, :func:`close_fanout` stops the phase before anything reads them.
+    No step raises: an exception here would reach ``run_slot``'s handler and
+    end the slot as a plain exception, without its rejection.
+    """
+    model_spec = ending.model_spec
+    phase_dir = result_path.parent
+    stem = result_path.stem
+    recorded = False
+    try:
+        recorded = _result_files.record_rejected_model(phase_dir, model_spec, reason)
+    except Exception:  # noqa: BLE001 - another record, or the warning below
+        pass
+    try:
+        steps.retire_salvage_artifacts(str(phase_dir), stem, reason=steps.retire_rejected)
+    except Exception:  # noqa: BLE001 - what is left is named below
+        pass
+    try:
+        _result_files.set_aside_rejected_result(
+            result_path, reason=_result_files.rejected_result_note(model_spec, reason),
+        )
+    except Exception:  # noqa: BLE001 - what is left is named below
+        pass
+    left = [
+        name for name in (result_path.name, f"salvage_{stem}.json", f"salvage_task_{stem}.json")
+        if os.path.lexists(phase_dir / name)
+    ]
+    if left:
+        if not recorded:
+            try:
+                recorded = _result_files.withheld_models(phase_dir).recorded(model_spec)
+            except Exception:  # noqa: BLE001 - nothing durable, said below
+                recorded = False
+        kept_out = (
+            ".status.json keeps them out of --reaggregate and a resume" if recorded else
+            "nothing durable records the rejection either, so the phase stops "
+            "before grouping"
+        )
+        print(
+            f"Warning: {model_spec} failed its safety checks, and "
+            f"{', '.join(left)} could not be set aside in {phase_dir}; the model "
+            f"stays failed, and {kept_out}",
+            file=sys.stderr,
+        )
+    details = {**ending.details, REJECTED_KEY: reason, SALVAGE_TEXT_KEY: ""}
+    return replace(
+        ending, success=False, payload=None, error=ending.error or reason,
+        details=details, failure=None, rejected=reason,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -594,6 +971,14 @@ async def close_fanout(
     naming the ``--force`` retry; otherwise the partial results are reported
     and ``models_complete`` is recorded with the served models and usage.
 
+    Before the salvage, what a slot left unchecked or rejected is withheld
+    (docs/development/review-results.md, "Withheld slot answers"): the
+    deadline's losses have their provider threads stopped and joined and
+    their files set aside (:func:`_withhold_lost_slots`), both withheld maps
+    are written (:func:`withheld_record`), and a model whose refused files are
+    still readable while nothing durable withholds them stops the phase
+    (:func:`_stop_unless_withheld`).
+
     *served_models* and *usage* are the slots' provenance (``models_served``,
     ``usage``), recorded as given; *prior_served* is what the previous run
     recorded, for the retired-rung notice.
@@ -632,6 +1017,19 @@ async def close_fanout(
     steps.record_sandbox_bypassed(phase_dir, served_models)
     steps.announce_retired_rungs(prior_served, served_models, anchor=str(lane.plan_path))
 
+    # What a later `--reaggregate`, resume or salvage refuses, written before
+    # this run's salvage reads it: the deadline's losses withheld first.
+    lost = [spec for spec in model_specs if spec not in slots]
+    settled = _withhold_lost_slots(phase_dir, steps, lost)
+    # `None`: the checkpoint cannot be read, so the maps on it stay as they are.
+    withheld = withheld_record(phase_dir, slots) or {}
+    if withheld:
+        _status_file.update_status(phase_dir, withheld)
+    _stop_unless_withheld(
+        phase_dir, steps, slots, lost, settled=settled, failed_models=failed_models,
+        served_models=served_models, withheld=withheld,
+    )
+
     salvaged: List[str] = []
     if failed_models and steps.exec_subagents_requested(args):
         salvaged = await _salvage_in_process(
@@ -649,6 +1047,7 @@ async def close_fanout(
         _status_file.update_status(phase_dir, {
             "models_completed": [],
             "models_failed": failed_models,
+            **withheld,
             **({"models_served": served_models} if served_models else {}),
         })
         print("\nERROR: All models failed")
@@ -674,6 +1073,7 @@ async def close_fanout(
         "state": "models_complete",
         "models_completed": completed_models,
         "models_failed": failed_models,
+        **withheld,
         # Added only when something was attributed or reported: no key means
         # nothing was, never that the run was free.
         **({"models_served": served_models} if served_models else {}),
@@ -694,6 +1094,156 @@ async def close_fanout(
     )
 
 
+def withheld_record(
+    phase_dir: str, slots: Mapping[str, SlotResult],
+) -> Optional[Dict[str, Dict[str, str]]]:
+    """The ``models_rejected`` and ``models_unchecked`` maps a fan-out leaves.
+
+    Every recorded entry stays until a checked attempt of its model supersedes
+    it: a slot this run whose checks passed with nothing of an earlier answer
+    left in place (:attr:`SlotResult.checked`), succeeded or not, since what
+    it leaves (its answer, its salvage request) is its own, checked. A refused
+    or budget-refused slot, one the preparation ended, one that raised or was
+    cancelled, and a model this run did not select supersede nothing. This
+    run's rejections are added, and a rejected slot's own ``models_unchecked``
+    entry gives way to its rejection in the same write. ``None`` when the
+    checkpoint cannot be read: maps rebuilt without the recorded entries would
+    drop them, so the caller writes none.
+    """
+    try:
+        recorded_rejected = _result_files.rejected_models(phase_dir)
+        recorded_unchecked = _result_files.unchecked_models(phase_dir)
+    except _status_file.CheckpointUnreadable:
+        return None
+    superseded = {
+        spec for spec, slot in slots.items() if slot.checked and slot.rejected is None
+    }
+    rejected_now = {
+        spec: slot.rejected for spec, slot in slots.items() if slot.rejected is not None
+    }
+    rejected = {
+        spec: reason for spec, reason in recorded_rejected.items() if spec not in superseded
+    }
+    rejected.update(rejected_now)
+    unchecked = {
+        spec: reason
+        for spec, reason in recorded_unchecked.items()
+        if spec not in superseded and spec not in rejected_now
+    }
+    return {
+        _result_files.REJECTED_MODELS_KEY: rejected,
+        _result_files.UNCHECKED_MODELS_KEY: unchecked,
+    }
+
+
+def _withhold_lost_slots(phase_dir: str, steps: FanoutSteps, lost: Sequence[str]) -> bool:
+    """The deadline's losses: no slot result, and checks that never finished.
+
+    Their provider threads are stopped and joined first
+    (``detach.stop_phase_work``, on this thread: the join waits for every
+    phase thread, so it cannot be one). Then every lost model is withheld as
+    unchecked, whether or not its ``<stem>.json`` exists yet (the record its
+    slot wrote before dispatching it, or one written now), and a file that is
+    there is set aside. A model the deadline lost before dispatching it has
+    nothing of this round in that file either, so it is withheld the same way.
+
+    Whether the join finished: when it did not, a provider may still write a
+    lost model's file after this, and only the record refuses it
+    (:func:`_stop_unless_withheld` stops the phase when there is none).
+    """
+    if not lost:
+        return True
+    settled = _detach.stop_phase_work("DEADLINE_SWEEP")
+    if not settled:
+        print(
+            "Warning: a provider call the fan-out's deadline cancelled is still "
+            "running; what it writes later is withheld by models_unchecked",
+            file=sys.stderr,
+        )
+    for spec in lost:
+        withheld = _result_files.withheld_models(phase_dir)
+        disposition = withheld.get(spec) if withheld.recorded(spec) else None
+        if disposition is None:
+            disposition = _result_files.Withheld(
+                _result_files.UNCHECKED_MODELS_KEY, DEADLINE_ERROR,
+            )
+            _result_files.record_unchecked_model(phase_dir, spec, DEADLINE_ERROR)
+        path = Path(phase_dir) / f"{steps.sanitize_model_name(spec)}.json"
+        if os.path.lexists(path):
+            disposition.set_aside(path, spec)
+    return settled
+
+
+def _stop_unless_withheld(
+    phase_dir: str,
+    steps: FanoutSteps,
+    slots: Mapping[str, SlotResult],
+    lost: Sequence[str],
+    *,
+    settled: bool,
+    failed_models: Dict[str, str],
+    served_models: Mapping[str, Any],
+    withheld: Mapping[str, Any],
+) -> None:
+    """The last resort, for a record that vanished after :func:`run_slot`
+    wrote and read it back before the dispatch: stop the phase when an answer
+    this run refused (a rejected slot) or never checked (a deadline loss) may
+    still be read and ``.status.json`` records neither verdict, even after one
+    more try to record it here.
+
+    "May still be read": one of its files is still in place, or, for a
+    deadline loss whose provider thread the join did not stop (*settled*
+    false), it may write one later. Exit 3, ``needs-human``, before any
+    salvage or grouping, naming the files to move; the slot stays failed."""
+    durable = _result_files.withheld_models(phase_dir)
+    left: Dict[str, List[str]] = {}
+    for spec in [s for s, slot in slots.items() if slot.rejected is not None] + list(lost):
+        if durable.recorded(spec):
+            continue
+        rejected = slots[spec].rejected if spec in slots else None
+        try:
+            if rejected is not None:
+                again = _result_files.record_rejected_model(phase_dir, spec, rejected)
+            else:
+                again = _result_files.record_unchecked_model(phase_dir, spec, DEADLINE_ERROR)
+        except Exception:  # noqa: BLE001 - stopped below
+            again = False
+        if again:
+            continue
+        stem = steps.sanitize_model_name(spec)
+        names = [f"{stem}.json"]
+        if spec in slots:
+            names += [f"salvage_{stem}.json", f"salvage_task_{stem}.json"]
+        found = [name for name in names if os.path.lexists(Path(phase_dir) / name)]
+        if spec not in slots and not settled and not found:
+            found = [f"{stem}.json (its provider may still write it)"]
+        if found:
+            left[spec] = found
+    if not left:
+        return
+    _status_file.update_status(phase_dir, {
+        "models_failed": failed_models,
+        **withheld,
+        **({"models_served": served_models} if served_models else {}),
+    })
+    lines = "\n".join(f"  - {spec}: {', '.join(names)}" for spec, names in left.items())
+    advice = (
+        f"{_status_file.status_path(phase_dir)} cannot be read. "
+        f"{_status_file.unreadable_checkpoint_advice(phase_dir)}"
+        if durable.unreadable else
+        "Move these files out of the folder before any --reaggregate or resume "
+        "reads them."
+    )
+    message = (
+        f"ERROR: answers this run refused, or never finished checking, may still "
+        f"be read in {phase_dir}, and .status.json could not record that they "
+        f"are withheld:\n{lines}\n"
+        f"The phase stops before grouping. {advice}"
+    )
+    steps.print_closing_summary(phase_dir)
+    sys.exit(_unattended.fail_closed(message))
+
+
 async def _salvage_in_process(
     lane: ReviewLane,
     claim: _review_round.Claim,
@@ -709,7 +1259,10 @@ async def _salvage_in_process(
     off the loop (``dispatch_in_round``), as the validation window does. Only a
     file this dispatch names as repaired is a recovery: a previous round's
     ``{model}.json`` still beside a failed slot under ``--rerun-all`` is never
-    adopted. The per-model map moves with ``failed_models``
+    adopted, and neither is anything of a model the phase withholds (its
+    durable record, or this run's rejection: :func:`reject_slot_answer`),
+    whatever a leftover salvage task repaired; the dispatch skips their tasks.
+    The per-model map moves with ``failed_models``
     (``record_models_salvaged``), since terminal transitions are idempotent.
     """
     phase_dir = str(lane.phase_dir)
@@ -731,6 +1284,13 @@ async def _salvage_in_process(
     for model_spec in list(failed_models):
         recovered = Path(phase_dir) / f"{steps.sanitize_model_name(model_spec)}.json"
         if os.path.abspath(str(recovered)) not in repaired_paths:
+            continue
+        withheld = _result_files.withheld_models(phase_dir).get(model_spec)
+        rejected = slots[model_spec].rejected if model_spec in slots else None
+        if withheld is None and rejected is not None:
+            withheld = _result_files.Withheld(_result_files.REJECTED_MODELS_KEY, rejected)
+        if withheld is not None:
+            withheld.set_aside(recovered, model_spec)
             continue
         adopted = lane.adopt_salvaged(model_spec, recovered)
         if adopted is None:
@@ -1462,12 +2022,25 @@ def reaggregate_result_files(
     executor's and write scheduler's reports) is left out by the one shared
     rule, sorted so the round is reproducible; only the models this phase
     records are read, so a misnamed result file is never loaded as another
-    reviewer: any other result file is named and set aside. With
+    reviewer: any other result file is named and set aside. Nor is a file of a
+    model the phase withholds (``models_rejected``, ``models_unchecked``:
+    a slot that failed its safety checks or ended before they passed): it
+    stays failed. A checkpoint that cannot be read may record any model so,
+    and stops the reaggregate at exit 3 with every file left unread. With
     no file left, every requested reviewer having failed is the fan-out's
     exit 3 naming them (decision 11.11), and otherwise exit 0.
     """
     result_files = _result_files.model_result_paths(phase_dir)
     result_files = _result_files.set_aside_unrecorded_results(phase_dir, result_files)
+    if result_files and _result_files.withheld_models(phase_dir).unreadable:
+        names = ", ".join(os.path.basename(path) for path in result_files)
+        sys.exit(_unattended.fail_closed(
+            f"ERROR: {_status_file.status_path(phase_dir)} cannot be read, so "
+            f"nothing shows which result files come from slots whose safety "
+            f"checks passed; none is read ({names}). "
+            f"{_status_file.unreadable_checkpoint_advice(phase_dir)}"
+        ))
+    result_files = _result_files.withhold_results(phase_dir, result_files)
     _result_files.publish_result_notes(phase_dir)
     if result_files:
         return result_files

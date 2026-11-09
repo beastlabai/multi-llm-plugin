@@ -101,13 +101,58 @@ class TestUpdateStatus:
         assert data["output_files"]["a.json"] is True
         assert data["output_files"]["b.json"] is True
 
-    def test_no_crash_on_corrupted_file(self, tmp_path):
-        """Test that corrupted .status.json doesn't crash — falls back to fresh write."""
+    @pytest.mark.parametrize("content", ["not valid json{{{", "[1, 2]", "null", ""])
+    def test_an_unreadable_checkpoint_is_kept_not_replaced(self, tmp_path, content):
+        """A checkpoint that cannot be parsed, or is not a JSON object, is kept
+        as it is and the update skipped, without raising: the update written
+        alone over it would drop every key it does not name."""
         status_path = tmp_path / ".status.json"
-        status_path.write_text("not valid json{{{", encoding="utf-8")
+        status_path.write_text(content, encoding="utf-8")
         _update_status(str(tmp_path), {"state": "recovered"})
-        data = json.loads(status_path.read_text(encoding="utf-8"))
-        assert data["state"] == "recovered"
+        assert status_path.read_text(encoding="utf-8") == content
+
+    def test_a_failed_read_keeps_every_key_the_update_does_not_name(self, tmp_path, monkeypatch):
+        """One open of the checkpoint fails: the progress update is skipped,
+        and the withheld-answer records survive it."""
+        import builtins
+        import errno
+
+        _write_status(str(tmp_path), {
+            "state": "models_complete", "models_requested": ["a:one"],
+            "models_rejected": {"a:one": "[CODEX_HOME_CHECK] changed"},
+            "models_unchecked": {"b:two": "armed"},
+        })
+        before = json.loads((tmp_path / ".status.json").read_text(encoding="utf-8"))
+        real_open = builtins.open
+        failed = []
+
+        def flaky(file, mode="r", *args, **kwargs):
+            if not failed and "r" in mode and os.fspath(file).endswith(".status.json"):
+                failed.append(file)
+                raise OSError(errno.EIO, "simulated", os.fspath(file))
+            return real_open(file, mode, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", flaky)
+        status_file.update_progress(str(tmp_path), {"step": "fanout"})
+        assert failed
+        after = json.loads((tmp_path / ".status.json").read_text(encoding="utf-8"))
+        assert after == before
+
+    def test_load_status_tells_absence_from_an_unreadable_checkpoint(self, tmp_path):
+        assert status_file.load_status(str(tmp_path)) is None
+        (tmp_path / ".status.json").write_text("[]", encoding="utf-8")
+        with pytest.raises(status_file.CheckpointUnreadable):
+            status_file.load_status(str(tmp_path))
+        (tmp_path / ".status.json").write_text("{", encoding="utf-8")
+        with pytest.raises(status_file.CheckpointUnreadable):
+            status_file.load_status(str(tmp_path))
+        (tmp_path / ".status.json").unlink()
+        (tmp_path / ".status.json").mkdir()
+        with pytest.raises(status_file.CheckpointUnreadable):
+            status_file.load_status(str(tmp_path))
+        (tmp_path / ".status.json").rmdir()
+        _write_status(str(tmp_path), {"state": "x"})
+        assert status_file.load_status(str(tmp_path))["state"] == "x"
 
     def test_no_crash_on_invalid_dir(self):
         """Test that update to non-existent directory doesn't raise."""

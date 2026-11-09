@@ -16,6 +16,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [Consolidation batches](#consolidation-batches)
 - [The shared review lane](#the-shared-review-lane)
 - [Reaggregation and result identity](#reaggregation-and-result-identity)
+- [Withheld slot answers](#withheld-slot-answers)
 - [Round identity](#round-identity)
 - [Malformed result entries](#malformed-result-entries)
 - [Report payload](#report-payload)
@@ -307,7 +308,8 @@ model slots stubbed). A scenario that passes on one lane and fails on the other 
   `run_models_concurrent`, has its salvage request written when the record is saved,
   records an exception past its deadline itself (with the prompt), and, on a direct call
   without an output folder, makes one stdout dispatch without the ladder
-  (`SingleShot`) under the same guard.
+  (`SingleShot`) under the same guard. A slot the checks fail goes through
+  `reject_slot_answer` ([Withheld slot answers](#withheld-slot-answers)).
 - **The fan-out's mechanics** are `run_models_concurrent` on both lanes (review-code's
   `run_all_reviews` stays the entry point and still returns its triples): the semaphores,
   the launch spacing, the seeded map, the deadline that harvests finished slots before
@@ -317,7 +319,8 @@ model slots stubbed). A scenario that passes on one lane and fails on the other 
 - **`close_fanout`** is what follows the fan-out up to grouping: each slot saved, the
   deadline's losses named in `failed_models` and the map, the round checked, the slots
   that ran unsandboxed mirrored for the poller, salvage run in-process under
-  `--exec-subagents` (only a file the dispatch names as repaired is adopted), then either
+  `--exec-subagents` (only a file the dispatch names as repaired is adopted, never a
+  withheld model's), then either
   the exit 3 of a run where no model answered, which still records `models_failed` and
   `models_served`, or the partial results and `models_complete` with the served models
   and usage.
@@ -484,6 +487,123 @@ The moment the slot finds it so, the file is renamed `<stem>.json.stale-earlier-
 `exists()`, and the review base's salvage recovery adopts only a file this attempt's
 `dispatch_salvage_tasks` repaired (Fable review 2026-10-09: left in place, `--exec-subagents`'
 salvage loop and `--reaggregate` both read it back as this round's).
+
+## Withheld slot answers
+
+A model's answer re-enters the review only from an attempt whose safety checks passed. Two
+`.status.json` maps withhold the rest, and every reader honours both
+(`result_files.withheld_models`): `models_rejected`, a slot the checks failed, and
+`models_unchecked`, a slot whose checks never passed.
+
+**Rejected.** A slot whose guard checks fail (the working-tree check on the uncontained rung,
+the mode or home check on the plugin's jail: whatever `SlotGuard.finish` returns a reason for)
+is failed with that reason, and one disposition, `review_lane.reject_slot_answer`, which every
+rejection site calls (`run_slot` for both lanes' ladder, the review base's stdout lane twice),
+refuses its answer. In order: the model is recorded under `models_rejected`
+(`result_files.record_rejected_model`, read back); its outstanding salvage pair is retired
+(`retired_salvage_<stem>.rejected.<stamp>.json`); its `<stem>.json`, the file the slot asked for
+or the model wrote there, is renamed `<stem>.json.rejected` (noted in `result_notes`). The record
+keeps `salvage_text: ""`, which (not a cleared `stdout`) stops `failure_output_from_result`
+falling back to stdout or stderr; `stdout`, provenance and spend stay, and the base's
+`error_<model>.log` keeps the text under "Raw output (rejected run, never salvaged)".
+`SlotResult.rejected` carries the reason; review-code's triple carries it as a `SlotReview` (a
+plain tuple to every reader).
+
+**Unchecked.** `run_slot` records the model under `models_unchecked` before it dispatches
+anything, into the checkpoint the round opened, and reads the record back. A slot whose record
+cannot be written or read back is failed before its dispatch (`[WITHHOLD_NOT_RECORDED]`, a
+not-dispatched ending): nothing would tell a later `--reaggregate` or resume that an answer it
+left was never checked. Only a folder with no checkpoint at all (a direct call of a slot
+function, which no round opened) dispatches with no record. The record is taken out the moment
+the checks pass with nothing of an earlier answer left in place (see below); that attempt is
+marked `SlotResult.checked` (`checks_passed` on review-plan's record, `SlotReview.checked` on
+review-code's triple). A slot that a deadline, an interrupt or an exception ends between the two
+keeps the record, with a reason naming how it ended, and sets its file aside as
+`<stem>.json.unchecked` on its way out. `close_fanout` then handles the deadline's losses before
+anything reads their files: it stops the provider CLIs still live and joins their threads
+(`detach.stop_phase_work`), records every lost model unchecked whether or not its `<stem>.json`
+exists yet (a model the deadline lost before dispatching it too: that file is not this round's),
+and sets aside the files that are there. A join that times out settles nothing: the records
+stay, and refuse whatever a provider still running writes later.
+
+**Nothing of an earlier answer left.** The slot compares the stamp of its `<stem>.json` taken
+before its first attempt with one taken after the checks (`llm_client.requested_result_baseline`:
+`()` only when the file is shown absent, `None` when its metadata cannot be read). The earlier
+file is gone when it was absent at the start, is absent now, or has changed since; a stamp that
+could not be read shows none of these, so the attempt supersedes nothing. A salvage pair still
+in place (its retirement at the attempt's start failed) leaves the attempt unsuperseding too.
+The file reader keeps the same rule: `invoke_with_file_output` reads the requested file only
+when its stamps show it absent at the start or changed since; when either stamp cannot be read
+it leaves the file in place unread (`source: unverified`), and never adopts a misnamed file over
+it. Behind that, `run_slot` accepts no answer read from the requested file while its own stamps
+leave the earlier file possibly in place: the slot fails with `[RESULT_NOT_SHOWN_NEW]` and no
+salvage request, its record kept. An answer on stdout, or in a misnamed file adopted by name
+(its snapshot shows it written during the slot), is the slot's whatever the old file does.
+
+**Supersession.** Both entries of a model stay until a checked attempt of that model supersedes
+them (`review_lane.withheld_record`): a slot this run with `checked` set and no rejection,
+succeeded or not, since what it leaves (its answer, its own salvage request) is checked. A slot
+refused at the sandbox gate, ended by its preparation, refused by the budget, one that raised or
+was cancelled, and a model this run did not select supersede nothing. This run's rejections are
+added, replacing the model's own unchecked entry. `close_fanout` writes both maps before its
+in-process salvage and again with `models_failed`; `open_round` carries both across its opening
+write.
+
+**A checkpoint that cannot be read.** Absence and a read failure are different answers
+(`status_file.load_status`). No `.status.json`, or a readable one without the maps (an older
+one), withholds nothing. One that exists but cannot be opened or parsed, or is not a JSON object,
+may hold either map, so: `update_status` skips its update rather than writing the update alone
+over it (every best-effort merge, a progress write included); the record writers write nothing
+and say so; `withheld_models` withholds every model (`WithheldModels.unreadable`), so both resume
+skips re-run, the salvage dispatch and adoption take nothing, and a `--reaggregate` stops at exit
+3 with every file left unread and none renamed; `close_fanout` leaves the maps on disk as they
+are. A run never opens a round over one: `start_round` and `open_round` read it up to
+`status_file.CHECKPOINT_READ_ATTEMPTS` times (a read failure that passes is not damage), and
+`open_round` reads both maps whole, every model's, under the lock its opening write holds;
+when it still cannot be read the run stops at exit 3, `needs-human`, before anything is written
+or dispatched, rather than rebuild the maps from what it selected. The stops at a round's start,
+its map opening, a `--reaggregate` and the last-resort check give one advice
+(`status_file.unreadable_checkpoint_advice`); a checkpoint damaged after the round started still
+stops through the round-ownership check (`review_round.Claim.held`), whose advice is `--force`
+(U90c routes it here too). The advice: if the failure has
+passed, run again; if the file is damaged, once no run of the phase is live, move the whole
+phase folder aside (or delete it) and run the phase again. Never move `.status.json` aside
+alone: the result files left beside it would then be read as results, rejected answers among
+them.
+
+**Readers.** `save_model_result(rejected=...)` writes no salvage request. The salvage dispatch
+never runs a withheld model's task (`[SALVAGE_WITHHELD]`; a rejected model's pair is retired
+again), and `close_fanout`'s adoption sets a withheld model's repaired file aside. Both resume
+skips refuse a withheld model's file (`existing_result_reuse`'s `withheld` verdict on
+review-code, and `util resume-state` agrees). Both reaggregates pass their files through
+`result_files.withhold_results`, which sets them aside again and leaves them out whether or not
+the rename works.
+
+**Fail closed.** When the rename or the retirement fails, the model stays failed this run, a
+warning names the files left, and the record refuses them later. Because every dispatched slot's
+record was read back before its dispatch and only a checked attempt removes it, a later
+invocation always finds it; the one remaining gap is a record removed from outside the plugin.
+For that, `_stop_unless_withheld` is the last resort: when a refused or unchecked answer may
+still be read (a file in place, or a lost slot's provider the join did not stop) and neither
+record is on the checkpoint even after one more try, the phase stops before salvage and
+grouping: exit 3, `needs-human`, naming the files to move out of the folder before any
+`--reaggregate` or resume (over a checkpoint that cannot be read, the advice above). A checkpoint written before these records existed withholds nothing,
+so an older phase resumes as it did.
+
+**Why negative records, not an allow-list.** Requiring a recorded successful guard disposition
+before reuse (an allow-list of checked models) would refuse every older checkpoint, every
+out-of-band file and every repair the documented salvage-then-reaggregate flow writes, unless
+each were special-cased, and an entry would have to be bound to the file's bytes or an old
+entry would vouch for a later rejected answer at the same path. Recording `models_unchecked`
+before the dispatch, and refusing the dispatch when it cannot be recorded, gives the same
+guarantee for this run's answers (nothing the checks did not pass is eligible, and a lost
+verdict leaves it ineligible) while an absent record stays permissive.
+
+Not rejected: a `[SANDBOX_BYPASSED]` fallback notice, or a tree change the slot's own audited
+stream cleared (`not attributed`): neither fails the slot. The apply phases read `grouped.json`
+and `validation.json` without re-checking a slot's verdict; the grouping is the choke point, and
+neither the fan-out nor a reaggregate lets a withheld answer into it.
+`tests/test_rejected_slot_answers.py` holds both lanes.
 
 ## Round identity
 

@@ -2368,6 +2368,31 @@ def _pending_phase_work() -> List[_PhaseWork]:
         return list(_PHASE_WORK)
 
 
+def stop_phase_work(tag: str) -> bool:
+    """Stop the provider CLIs still live and wait, at most
+    :data:`PHASE_WORK_JOIN_S`, for the phase work still running on threads
+    (:func:`run_phase_work`); whether none is left. What a review fan-out
+    whose deadline cancelled slots does before it sets their files aside, so
+    no cancelled slot's thread writes after that (docs/development/
+    review-results.md, "Withheld slot answers"). Every slot of the fan-out
+    has ended by then, so every CLI still live is a cancelled slot's; the
+    sweep is repeated every :data:`PHASE_WORK_RESWEEP_S` as on an interrupt."""
+    pending = _pending_phase_work()
+    if not pending:
+        return True
+    process_control.sweep_live_clis(tag)
+    deadline = time.monotonic() + PHASE_WORK_JOIN_S
+    while pending:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            break
+        pending[0].done.wait(min(left, PHASE_WORK_RESWEEP_S))
+        pending = _pending_phase_work()
+        if pending:
+            process_control.sweep_live_clis(tag)
+    return not pending
+
+
 def _is_interrupt(exc_type: Any) -> bool:
     if exc_type is None:
         return False

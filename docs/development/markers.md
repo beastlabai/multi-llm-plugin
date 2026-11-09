@@ -50,9 +50,9 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 
 ## Counts
 
-- Emitted markers: 185
+- Emitted markers: 188
 - Cited by an instruction, reference, `SKILL.md` or shim template: 113
-- Declared not-for-the-host: 72
+- Declared not-for-the-host: 75
 - Neither (must be zero): 0
 
 ## Registry
@@ -102,7 +102,7 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 | `[CORE_PAGE]` | `multi_llm.py` `CORE_PAGE_MARKER` | `hosts/codex/shim.md.tmpl` | Opens every page: `[CORE_PAGE] mode=<m> page=<i>/<n> sha=<sha12> bytes=<n>` |
 | `[CORE_PAGE_END]` | `multi_llm.py` `CORE_PAGE_END_MARKER` | `hosts/codex/shim.md.tmpl` | Closes every page: `[CORE_PAGE_END] mode=<m> page=<i>/<n> sha=<sha12>` |
 | `[DEADLINE]` | `ask_orchestrator.py` | not for the host: phase-progress | — |
-| `[DEADLINE_SWEEP]` | `ask_orchestrator.py` `sweep_live_clis()` | not for the host: runner-diagnostic | — |
+| `[DEADLINE_SWEEP]` | `ask_orchestrator.py` `sweep_live_clis()`<br>`utils/review_lane.py` `stop_phase_work()` | not for the host: runner-diagnostic | — |
 | `[DEPRECATED]` | `utils/apply_orchestrator_base.py` | `instructions/apply-code-fixes.md`<br>`instructions/apply-suggestions.md` | — |
 | `[DETACHED_RUN]` | `utils/detach.py` | not for the host: unnamed-handler | — |
 | `[DIFF_FAILED]` | `utils/review_diff.py` | `instructions/review-code.md` | — |
@@ -169,6 +169,7 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 | `[REPLY_OK]` | `utils/check_reply.py` | not for the host: phase-progress | — |
 | `[RESULT_FILE_MISNAMED]` | `utils/review_orchestrator_base.py` | `instructions/improve-code.md`<br>`instructions/improve-commits.md`<br>`instructions/improve-plan.md`<br>`instructions/review-code.md`<br>`instructions/review-commits.md`<br>`instructions/review-plan.md`<br>+1 more | — |
 | `[RESULT_NOT_READ]` | `utils/result_files.py` | not for the host: run-notice | — |
+| `[RESULT_NOT_SHOWN_NEW]` | `utils/review_lane.py` `UNSHOWN_ANSWER_REASON` | not for the host: run-notice | The error of a slot whose checks passed but whose answer was read from its `<stem>.json` while the file the slot started beside may still… |
 | `[RESULT_SET_ASIDE]` | `utils/result_files.py` | `instructions/improve-code.md`<br>`instructions/improve-commits.md`<br>`instructions/improve-plan.md`<br>`instructions/review-code.md`<br>`instructions/review-commits.md`<br>`instructions/review-plan.md`<br>+1 more | — |
 | `[RESULT_STALE]` | `utils/result_files.py` | not for the host: run-notice | — |
 | `[RESUME_COMMAND]` | `utils/next_phase.py` `RESUME_COMMAND_MARKER` | `instructions/apply-commit-fixes.md` | The one line `emit_resume` prints: the command that resumes a stopped write phase, and nothing else on the line (same rule as… |
@@ -183,6 +184,7 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 | `[SALVAGE_RETIRED]` | `utils/review_orchestrator_base.py` | not for the host: run-notice | — |
 | `[SALVAGE_TASK]` | `code_review_orchestrator.py`<br>`utils/review_orchestrator_base.py` | `references/salvage-handling.md` | — |
 | `[SALVAGE_UNRECOVERABLE]` | `utils/review_orchestrator_base.py` | `references/salvage-handling.md` | — |
+| `[SALVAGE_WITHHELD]` | `utils/review_orchestrator_base.py` | not for the host: run-notice | — |
 | `[SANDBOX_BYPASSED]` | `utils/providers/sandbox_rungs.py` `SANDBOX_BYPASSED_MARKER` | not for the host: runner-diagnostic | What every artifact of a bypassed slot says, verbatim — the fan-out's stdout line, the executor's preflight line, `models_served` in… |
 | `[SANDBOX_FALLBACK]` | `utils/providers/sandbox_rungs.py` `SANDBOX_FALLBACK_MARKER` | not for the host: runner-diagnostic | The marker for a slot that ran on a **contained** fallback rung — a real OS boundary that is not the adapter's default one |
 | `[SANDBOX_INCIDENTAL]` | `utils/providers/sandbox_rungs.py` `SANDBOX_INCIDENTAL_MARKER` | not for the host: runner-diagnostic | The marker for a slot on an `incidental`-grade rung |
@@ -233,6 +235,7 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 | `[VALIDATION_RETIRED]` | `utils/review_orchestrator_base.py` | not for the host: run-notice | — |
 | `[VALIDATION_TASKS_OVERSIZE]` | `utils/validation.py` | not for the host: run-notice | — |
 | `[WARN]` | `ask_orchestrator.py`<br>`utils/attempt_classifier.py`<br>`utils/provider_outcome.py`<br>`utils/providers/claude_code.py` `warn_gate_once()`<br>+2 more | `instructions/ask.md`<br>`references/summary-format.md` | — |
+| `[WITHHOLD_NOT_RECORDED]` | `utils/review_lane.py` `UNRECORDED_REASON` | not for the host: run-notice | The error of a slot failed before its dispatch because its `models_unchecked` record could not be written or read back |
 | `[WORKFLOW_COMPLETE]` | `utils/next_phase.py` `WORKFLOW_COMPLETE_MARKER` | `SKILL.md`<br>`references/summary-format.md` | — |
 | `[WRITE_ARTIFACT]` | `utils/write_prompt.py` `MARKER_ARTIFACT` | `instructions/apply-suggestions.md`<br>`instructions/apply-task-suggestions.md` | — |
 | `[WRITE_PHASE_NOT_EXECUTED]` | `full_workflow_orchestrator.py` | not for the host: phase-progress | — |

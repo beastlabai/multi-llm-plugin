@@ -431,6 +431,9 @@ PASS_THROUGH: Dict[Tuple[str, str], str] = {
         "writers wrote, and re-stores the _MERGED_OBJECTS keys the caller's dict "
         "already carries; every update_status call is itself a writer scanned "
         "here, and test_the_status_file checks _MERGED_OBJECTS are declared",
+    ("utils/status_file.py", "load_status"):
+        "returns the document read from disk (json.load) for update_status to "
+        "merge into; its keys are the earlier writers', each scanned here",
     ("utils/status_file.py", "write_status"):
         "copies the _RESERVED_OBJECTS (`run`, `progress`) over from disk; "
         "test_the_status_file checks they are declared",

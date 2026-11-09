@@ -86,6 +86,7 @@ from utils import review_round as _review_round
 from utils import scope_policy as _sp
 from utils import scope_round as _scope_round
 from utils.review_orchestrator_base import (
+    RETIRE_REJECTED,
     RETIRE_SUPERSEDED,
     raised_slot_record,
     run_models_concurrent,
@@ -2977,7 +2978,10 @@ class ExistingResult(NamedTuple):
     """What the fan-out does with a model's existing ``<stem>.json``.
 
     ``verdict`` is ``reuse`` (answered from disk, ``[SKIP]``; ``issues`` holds
-    the list), ``absent`` (no non-empty file), ``corrupt`` (unreadable, or not
+    the list), ``absent`` (no non-empty file), ``withheld`` (no checked
+    attempt of the model has superseded one that failed its safety checks or
+    ended before they passed, so the file may be that answer; ``withheld``
+    says which: ``result_files.Withheld``), ``corrupt`` (unreadable, or not
     JSON), ``not_a_list`` (JSON of another shape) or ``scope_changed`` (the
     ledger ties it to ``reviewed_scope``, another scope, or to none). Every
     verdict but ``reuse`` re-runs the model.
@@ -2986,6 +2990,7 @@ class ExistingResult(NamedTuple):
     verdict: str
     issues: Optional[List[Any]] = None
     reviewed_scope: Optional[str] = None
+    withheld: Optional[Any] = None
 
 
 def existing_result_reuse(
@@ -2997,7 +3002,8 @@ def existing_result_reuse(
     resume-state`` (``utils/resume_state``): a non-empty ``<stem>.json``
     holding a JSON list and, when ``scope_id`` is given, a scope ledger entry
     recording that id for ``stem`` (D2.2). ``scope_id`` ``None`` reuses every
-    list. Read-only.
+    list. A model ``result_files.withheld_models`` names is never reused.
+    Read-only.
     """
     path = Path(phase_dir) / f"{stem}.json"
     try:
@@ -3006,6 +3012,10 @@ def existing_result_reuse(
         present = False
     if not present:
         return ExistingResult("absent")
+    withheld = _result_files.withheld_models(phase_dir)
+    owner = withheld.owner(stem)
+    if owner is not None:
+        return ExistingResult("withheld", withheld=withheld[owner])
     try:
         with open(path, "r", encoding="utf-8") as handle:
             data = json.load(handle)
@@ -3462,6 +3472,8 @@ def code_slot_steps() -> "_review_lane.SlotSteps":
         invoke_with_file_output=invoke_with_file_output,
         dispatch_with_ladder=dispatch_with_ladder,
         sandbox_fallback_kwargs=sandbox_fallback_kwargs,
+        retire_salvage_artifacts=retire_salvage_artifacts,
+        retire_rejected=RETIRE_REJECTED,
     )
 
 
@@ -3873,7 +3885,9 @@ class CodeSlot:
         # count the ladder loop printed per attempt). Failed whatever the
         # invocation reported — nothing is restored, and nothing it returned is
         # parsed as a review: `source` records which channel the rejected answer
-        # arrived on, `error` why nothing of it is parsed.
+        # arrived on, `error` why nothing of it is parsed. `run_slot` passes its
+        # own reason here too, for an answer it does not accept
+        # (`review_lane.UNSHOWN_ANSWER_REASON`), which rejects nothing.
         if violated is not None:
             return self._failed(violated, source=source)
 
@@ -4244,6 +4258,9 @@ async def run_all_reviews(
         existing = existing_result_reuse(phase_dir, sanitized, scope_id)
         if existing.verdict == "corrupt":
             print(f"[{display_name}] Existing result file corrupt, re-running...")
+        elif existing.verdict == "withheld":
+            print(f"[{display_name}] Result file is from a slot that "
+                  f"{existing.withheld.phrase}; re-running...")
         elif existing.verdict == "scope_changed":
             print(
                 f"[SCOPE_CHANGED] {display_name}: result reviewed "

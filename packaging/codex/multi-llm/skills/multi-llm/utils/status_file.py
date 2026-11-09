@@ -9,7 +9,10 @@ module of their own for one reason: ``status`` has to be a *sub-second* command
 and importing the review orchestration base pulls in the provider client, the
 HTML report generator and the validation stack. Nothing about the write path
 changed in the move — same atomic temp+rename, same best-effort swallow, same
-merge semantics — so every existing consumer and test keeps its meaning.
+merge semantics — so every existing consumer and test keeps its meaning. One
+rule was added since: a merge that cannot read the checkpoint skips its update
+rather than writing the update alone over it (:func:`update_status`,
+:func:`load_status`).
 
 **The schema is additive, never forked.** ``{phase}/.status.json`` is the
 orchestrator checkpoint: ``ask_orchestrator`` reads ``question`` byte-for-byte as
@@ -142,6 +145,7 @@ import json
 import os
 import sys
 import threading
+import time
 from typing import Any, Dict, Iterable, Iterator, Optional, Tuple
 
 from . import process_control
@@ -350,16 +354,20 @@ def update_status(phase_dir: str, updates: dict) -> None:
     section — held against other processes as well as other threads — so a
     concurrent writer's document can neither be read stale nor be reverted by
     the rename that follows.
+
+    No checkpoint yet: the update is the whole new document. A checkpoint that
+    exists but cannot be read now, or holds something other than a JSON object
+    (:func:`load_status`), is kept as it is and the update is skipped: written
+    over it, the update alone would replace every key it does not name, the
+    records of withheld slot answers among them
+    (docs/development/review-results.md, "Withheld slot answers").
     """
-    path = status_path(phase_dir)
     with checkpoint_lock(phase_dir):
         try:
-            existing = {}
-            if os.path.exists(path):
-                with open(path, 'r', encoding='utf-8') as f:
-                    existing = json.load(f)
-            if not isinstance(existing, dict):
-                existing = {}
+            existing = load_status(phase_dir) or {}
+        except CheckpointUnreadable:
+            return
+        try:
             for key in _MERGED_OBJECTS:
                 incoming = updates.get(key)
                 current = existing.get(key)
@@ -371,10 +379,7 @@ def update_status(phase_dir: str, updates: dict) -> None:
             existing.update(updates)
             write_status(phase_dir, existing)
         except Exception:
-            try:
-                write_status(phase_dir, updates)
-            except Exception:
-                pass
+            pass
 
 
 def remove_status_keys(phase_dir: str, keys: Iterable[str]) -> None:
@@ -421,6 +426,65 @@ def read_status(phase_dir: str) -> Dict[str, Any]:
         return data if isinstance(data, dict) else {}
     except (OSError, IOError, ValueError):
         return {}
+
+
+class CheckpointUnreadable(Exception):
+    """:func:`load_status`: the checkpoint exists, but could not be read or
+    is not a JSON object."""
+
+
+#: How often a reader that stops the run over an unreadable checkpoint reads
+#: it before it gives up (:func:`load_status`'s *attempts*): a read failure
+#: that passes (a descriptor limit, a flaky mount) is not damage.
+CHECKPOINT_READ_ATTEMPTS = 3
+
+#: The pause before the second read, doubled before each one after it.
+_CHECKPOINT_RETRY_DELAY = 0.05
+
+
+def load_status(phase_dir: str, *, attempts: int = 1) -> Optional[Dict[str, Any]]:
+    """A phase dir's checkpoint for a reader that decides something on it.
+
+    ``None`` when there is none; raises :class:`CheckpointUnreadable` when one
+    exists but cannot be opened or parsed, or holds something other than a
+    JSON object, on each of *attempts* reads. :func:`read_status` folds both
+    into ``{}``, which is right for a view but not for a merge, nor for a
+    reader that would take a missing key for permission
+    (docs/development/review-results.md, "Withheld slot answers").
+    """
+    path = status_path(phase_dir)
+    for attempt in range(max(1, attempts)):
+        if attempt:
+            time.sleep(_CHECKPOINT_RETRY_DELAY * 2 ** (attempt - 1))
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError) as exc:
+            failure: BaseException = exc
+            continue
+        if isinstance(data, dict):
+            return data
+        failure = CheckpointUnreadable(path)
+    raise CheckpointUnreadable(path) from failure
+
+
+def unreadable_checkpoint_advice(phase_dir: str) -> str:
+    """What every stop over a phase checkpoint that cannot be read tells the
+    user to do, the same everywhere (docs/development/review-results.md,
+    "Withheld slot answers"). The checkpoint is what withholds answers whose
+    safety checks failed or never finished: moved aside alone, it would leave
+    their files beside a phase that no longer records them, and they would
+    be read as results."""
+    return (
+        f"If the read failure has passed, running again is enough. If the file "
+        f"is damaged: once no run of this phase is live (`status`), move the "
+        f"whole phase folder {phase_dir} aside, or delete it, and run the phase "
+        f"again, so that no earlier result in it can be reused. Never move "
+        f".status.json aside on its own: the result files left beside it would "
+        f"then be read as results, answers whose safety checks failed among them."
+    )
 
 
 def read_run(phase_dir: str) -> Dict[str, Any]:

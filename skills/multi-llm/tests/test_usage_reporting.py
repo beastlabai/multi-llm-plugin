@@ -448,6 +448,8 @@ class TestFanOutResultRecords:
         assert set(results[NONE_SPEC]) == {
             "success", "output", "error", "prompt", "stdout", "stderr",
             "duration_seconds", "model_spec", "source",
+            # The slot's checks passed (review_lane.run_slot).
+            "checks_passed",
         }
 
 
