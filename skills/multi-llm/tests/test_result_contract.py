@@ -442,6 +442,15 @@ PASS_THROUGH: Dict[Tuple[str, str], str] = {
     ("utils/detach.py", "progress"):
         "RunHandle.progress forwards its `**updates`; progress_keys inventories "
         "the keywords of every .progress() call and flags a `**` spread at one",
+    ("utils/review_orchestrator_base.py", "base_round_steps"):
+        "hands write_status, update_status and report_progress to the shared "
+        "review lane as RoundSteps fields; every call through them is an "
+        "attribute call (`steps.update_status(...)`, utils/review_lane.py), "
+        "which callers() follows by attribute name, so its dict and keywords "
+        "are inventoried here like any other writer's",
+    ("code_review_orchestrator.py", "code_round_steps"):
+        "review-code's RoundSteps, the same hand-over as base_round_steps: its "
+        "calls are the shared lane's `steps.<writer>(...)` attribute calls",
 }
 
 

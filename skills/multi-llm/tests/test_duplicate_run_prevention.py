@@ -694,14 +694,19 @@ class TestPartialCompletionGuard:
     def _round_files(phase_dir, round_id=None):
         """A task file, validation.json and report.md, each recording
         *round_id* when one is given (none: files from before round ids), the
-        report sealed to that validation.json as its writer seals it."""
+        report sealed to that validation.json as its writer seals it, and the
+        grouped.json both bind by digest, as their writers bind it."""
         from utils import review_round
         from utils.report_markdown import ESCAPED_TEXT_MARKER
+        from utils.subagent_tasks import file_content_hash
 
+        grouped_path = phase_dir / "grouped.json"
+        grouped_path.write_text(json.dumps({"groups": []}), encoding="utf-8")
+        grouped_sha256 = file_content_hash(str(grouped_path))
         tasks = {"tasks_schema_version": 2, "kind": "validation",
-                 "inputs": {"plan_sha256": "", "grouped_sha256": ""},
+                 "inputs": {"plan_sha256": "", "grouped_sha256": grouped_sha256},
                  "batches": []}
-        validation = {"groups": [], "metadata": {}}
+        validation = {"groups": [], "metadata": {"grouped_sha256": grouped_sha256}}
         report = "# Report\n\nNo issues found."
         if round_id:
             tasks["round_id"] = round_id

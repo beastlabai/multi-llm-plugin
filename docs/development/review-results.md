@@ -263,16 +263,26 @@ lanes offline (real phase dirs, fan-out mechanics, grouping, rounds and reports;
 model slots stubbed). A scenario that passes on one lane and fails on the other is drift.
 
 - **`ReviewLane`** is what a lane supplies where the lanes legitimately differ:
-  `retry_command` (review-code spells a commit review's command in its commit mode),
-  `save_slot` (the base writes a losing slot's salvage request there; review-code's slot
-  already did), `adopt_salvaged` (review-code folds a repaired model's issues back into
-  the round it aggregates from its slots), `fanout_steps`, and `reuse_checks_inputs`
-  (whether reused verdicts are held to the task file's inputs, below). The base's lane is
-  `BaseReviewLane`, configured by the review-plan and review-tasks orchestrators;
-  review-code's is `CodeLane`. The review base's own functions reach the shared stages as
-  `FanoutSteps` and `RoundSteps`, built by each lane from the names its module binds, so a
-  test that patches one there reaches the shared code, and `review_lane` never imports
-  the base.
+  `retry_command` and `round_follow_up` (review-code spells a commit review's commands in
+  its commit mode; the base resolves the task file's durable mode and plan),
+  `orchestrator_script` (what the durable follow-up fields name), `save_slot` (the base
+  writes a losing slot's salvage request there; review-code's slot already did),
+  `adopt_salvaged` (review-code folds a repaired model's issues back into the round it
+  aggregates from its slots), and `reuse_checks_inputs` (whether reused verdicts are held
+  to the task file's inputs, below). The base's lane is `BaseReviewLane`, configured by
+  the review-plan and review-tasks orchestrators; review-code's is `CodeLane`. The review
+  base's own functions reach the shared stages as `FanoutSteps` and `RoundSteps`
+  (`fanout_steps`, `round_steps`), built by each lane from the names its module binds
+  (`base_round_steps`, `code_round_steps`), so a test that patches one there reaches the
+  shared code, and `review_lane` never imports the base.
+- **`select_review_models` and `open_round`** start a fan-out. The selection refuses
+  `--quick` with `--interactive` (exit 1) and stops at `defaults.models` under `--yes`
+  (D6 row 2, exit 3 when nothing resolves). The round's opening checkpoint reads the
+  previous attempt's `usage` and sandbox words before its write erases them, records the
+  requested specs (the only record a reaggregate inverts a result-file stem with) and the
+  round id, drops the previous `progress`, records the `--yes` resolutions (rows 2 and
+  16) and publishes the `fanout` step. review-code reads `models_requested` straight back
+  (`after_opening`) and warns when the best-effort write lost it.
 - **`SlotResult`** is one model slot's outcome: `model_spec`, `success`, `payload`,
   `error`, `source`, `details` and the salvage `failure` kind. `payload` is only ever the
   answer of a completed run; a losing run's text stays in `details` for salvage.
@@ -292,6 +302,32 @@ model slots stubbed). A scenario that passes on one lane and fails on the other 
   the exit 3 of a run where no model answered, which still records `models_failed` and
   `models_served`, or the partial results and `models_complete` with the served models
   and usage.
+- **`group_findings`** is the fan-out's grouping: the findings of every model that
+  answered (review-plan's read from their files, review-code's from its slots) grouped,
+  given their stable ids and passed to the lane's `annotate` (review-code's commit
+  attribution) before `grouped.json` is written, with the previous verdicts retired in the
+  same step (`retire_validation_for_regroup`: the whole round when the grouping changed,
+  `validation.json` alone for the same hashes), and the size recorded as
+  `grouping_complete` (`total_groups`, `total_suggestions`). Zero findings retire the
+  whole previous round and write the empty `grouped.json` and `validation.json`.
+- **`materialize_fanout_round`** is the round the fan-out builds over those groups: the
+  plan bound at load, the lane's round (`build_round`) materialized under
+  `host_views_lock`, stamped with `format_version` and published with `state:
+  validation_pending` while the round is this run's, the hand-off's lines (the marker, the
+  batches and their efficiency gain, the group counts), then the dispatch and merge under
+  `--exec-subagents`, or the host hand-off: the follow-up printed and put on the result
+  line, and `stdout_markers`, `validation_tasks_path` and the follow-up's durable fields
+  (`reaggregate_mode`, `plan_file`, `replay_flags`) recorded, so `status` names the
+  `--reaggregate` that advances the phase.
+- **`reaggregate_result_files` and `load_reaggregate_results`** are a reaggregate's
+  loading half. The result files are the shared rule's (`result_files`), with any file of
+  an unrecorded model set aside; none at all is exit 3 when every requested reviewer
+  failed, else exit 0. Each model's findings are read once per logical model (W3),
+  non-record entries dropped before the lane's `stamp` (review-code stamps `model` before
+  `source_model`, since `grouped_sha256` hashes bytes), a model with a file reconciled as
+  completed and the failures left named. No readable result at all clears the recorded
+  `validation_counts` (no report rebuild reaches them there) and the lane's own recount
+  (review-plan's consolidation recommendation), then ends like the empty-dir case.
 - **`bind_grouping`** is the grouping a `--reaggregate` reports. A `grouped.json` that a
   `validation_tasks.json` beside it binds (whatever the flags), or a `validation.json`
   this run will use, is reused rather than rewritten, since the task file hashes its
@@ -324,6 +360,14 @@ model slots stubbed). A scenario that passes on one lane and fails on the other 
   published, the phase reopened and `progress.subagents` cleared before the dispatch or
   the hand-off. Each lane passes what is its own: the task file's current inputs
   (`current_inputs`) and its round builder (`build_round`).
+- **`record_phase_complete` and `complete_reaggregate`** are the completion every ending
+  that records the phase runs: the round checked (`claim.check`), the phase marked in
+  `state.json`, the phase machine's `state: complete` and the last `progress.step`; a
+  reaggregate first reports `[PARTIAL_RESULTS]` for the models still missing
+  (`unattended=False`, no `next`). The report before it is the lane's own
+  (`aggregate_results` records the HIGH groups and verdict counts on the base;
+  review-code's `generate_review_report`, `publish_report` and `finish_code_review`, whose
+  `--fail-on-high` gate follows the completion).
 
 Both lanes also record these the same way:
 
@@ -337,15 +381,25 @@ Both lanes also record these the same way:
   refused at the boundary leaves them as it found them, and the worker runs the same
   pre-flight and writes them.
 
+**A plain re-run over a round on disk** never records the phase complete on a round that
+did not finish, and records it complete only through the completion above. The lanes get
+there differently, by decision (code health REVIEW-7): review-code's partial-completion
+guard refuses with exit 3, naming `--reaggregate` (validation on disk) or `--force` (files
+of another round), and when the round's verdicts and a whole report sealed with them are on
+disk and only the record is missing, it finishes that completion
+(`heal_unrecorded_completion`, which records the HIGH groups and applies `--fail-on-high`,
+or refuses with exit 3 when `grouped.json` is not the grouping the sealed verdicts bind);
+the base has no guard and runs the review again, which builds a new round. The parity test
+holds both to the shared rule (`TestAPlainRerunOverARoundOnDisk`).
+
 What stays different between the lanes, as the lane's own code: the code-review scope,
 diff set and pinned ranges; commit templates; the scope-ledger resume rule (review-code's
 skip predicate); the `model` then `source_model` stamp order on reaggregated issues
 (`grouped_sha256` hashes the file's bytes); the per-issue report with its numbering
-footer, and `issues.json`; the stale-implement guard; consolidation (review-plan) and the
-tasks document (review-tasks). review-code's partial-completion guard has no base
-counterpart. Still written once per lane: the slot functions (`run_single_model`,
-`run_single_review`), the fan-out's grouping-to-report stretch, round opening and model
-selection, and the loading half of a reaggregate.
+footer, and `issues.json`; the stale-implement guard; the partial-completion guard above;
+consolidation (review-plan) and the tasks document (review-tasks). Still written once per
+lane: the slot functions (`run_single_model`, `run_single_review`) and the report each
+lane renders from its groups.
 
 ## Reaggregation and result identity
 
@@ -456,7 +510,13 @@ read as `\n`. `review_round.report_seal` checks both against the disk.
 
 Two readers decide on it. review-code's partial-completion guard records the phase complete from
 the files only when `validation.json` and `report.md` both record the round on record and the
-report's seal holds (the whole report, built from this very `validation.json`); a stale task
+report's seal holds (the whole report, built from this very `validation.json`), and then finishes
+the completion that run stopped short of (`heal_unrecorded_completion`): the artifacts handed back,
+the HIGH groups recorded from `grouped.json` and `--fail-on-high` applied, so a healed review
+never passes a gate that did not run. The groups are counted only from the `grouped.json` the
+sealed `validation.json` binds (its `metadata.grouped_sha256`): a grouping that is missing,
+unreadable or of other bytes is never counted as zero groups, and the guard records nothing and
+sends the run to `--force` (exit 3); a stale task
 file or `validation.json`, or a task file with no id that no `validation_pending` checkpoint ties
 to the run (`review_round.tasks_file_is_this_rounds`), sends the run to `--force`, which keeps
 every reusable result and validates again, and this round's verdicts beside another round's

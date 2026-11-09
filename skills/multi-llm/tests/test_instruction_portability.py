@@ -2832,10 +2832,11 @@ class TestLayerTwoPollLoop:
             "tense discriminator cannot tell the two runs apart"
         )
         assert "complete" in run_status.CHECKPOINT_TERMINAL_STEPS
+        # The review lanes open their round through the shared lane
+        # (`review_lane.open_round`); the ask lane opens its own.
         for src in (
-            "utils/review_orchestrator_base.py",
+            "utils/review_lane.py",
             "ask_orchestrator.py",
-            "code_review_orchestrator.py",
         ):
             body = (SKILL_ROOT / src).read_text(encoding="utf-8")
             assert 'step="fanout"' in body, (

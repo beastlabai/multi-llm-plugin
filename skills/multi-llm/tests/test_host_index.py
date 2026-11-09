@@ -400,6 +400,20 @@ class TestRetirementRemovesTheIndexFirst:
         assert not list(tmp_path.glob("*.stale*"))
 
 
+def _called_name(node):
+    """The function a call node names, bare (`f(...)`) or as an attribute
+    (`steps.f(...)`); ``None`` for anything else."""
+    import ast
+
+    if not isinstance(node, ast.Call):
+        return None
+    if isinstance(node.func, ast.Name):
+        return node.func.id
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr
+    return None
+
+
 class TestTheViewsLock:
     """One mutex per phase dir orders every invalidate → change → publish sequence."""
 
@@ -470,12 +484,16 @@ class TestTheViewsLock:
         assert not index.exists() or _describes(_index(phase_dir), full)
 
     @pytest.mark.parametrize("module", [
-        "code_review_orchestrator.py", "utils/review_orchestrator_base.py",
+        "utils/review_orchestrator_base.py",
         "utils/review_lane.py", "utils/apply_orchestrator_base.py",
     ])
     def test_every_caller_that_changes_a_round_holds_the_lock(self, module):
         """A materialization with its caller's write of the task file, a repair
-        with its commit: each call sits inside `with host_views_lock(...)`."""
+        with its commit: each call sits inside `with host_views_lock(...)`,
+        whether it names the function or reaches it through a lane's steps
+        (`steps.materialize_validation_round`). review-code materializes
+        through the shared lane (utils/review_lane.py) and has no site of its
+        own (`test_review_code_changes_no_round_itself`)."""
         import ast
 
         guarded = {"materialize_validation_round", "prepare_batched_revalidation_tasks",
@@ -494,16 +512,29 @@ class TestTheViewsLock:
             nonlocal seen
             if isinstance(node, (ast.With, ast.AsyncWith)) and holds_lock(node):
                 held = True
-            if isinstance(node, ast.Call) and getattr(node.func, "id", None) in guarded:
+            name = _called_name(node)
+            if name in guarded:
                 seen += 1
                 if not held:
-                    unguarded.append(f"{module}:{node.lineno} {node.func.id}")
+                    unguarded.append(f"{module}:{node.lineno} {name}")
             for child in ast.iter_child_nodes(node):
                 walk(child, held)
 
         walk(tree, False)
         assert seen, f"no round-changing call found in {module}"
         assert unguarded == []
+
+    def test_review_code_changes_no_round_itself(self):
+        """review-code's round writes are the shared lane's, which the test
+        above holds to the lock: a call of its own would need the lock too."""
+        import ast
+
+        guarded = {"materialize_validation_round", "prepare_batched_revalidation_tasks",
+                   "ensure_prompt_sidecars"}
+        tree = ast.parse((SKILL_DIR / "code_review_orchestrator.py").read_text(
+            encoding="utf-8"))
+        calls = [node.lineno for node in ast.walk(tree) if _called_name(node) in guarded]
+        assert calls == []
 
     def test_a_refresh_waits_for_another_holder_of_the_lock_file(self, tmp_path):
         """The interprocess half: a second open file description stands in for a

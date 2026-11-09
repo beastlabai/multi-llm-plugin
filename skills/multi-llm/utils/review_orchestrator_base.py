@@ -28,7 +28,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, ClassVar, Dict, FrozenSet, List, NamedTuple, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, ClassVar, Dict, FrozenSet, List, Mapping, NamedTuple, Optional, Sequence, Tuple, Union
 
 from . import detach as _detach
 from . import status_file as _status_file
@@ -44,7 +44,6 @@ from . import scope_round as _scope_round
 from .progress_tracker import DEADLINE_ERROR, FanoutProgress, PhaseProgress
 from .cli_common import (
     dispatcher_command,
-    durable_reaggregate_fields,
     invocation,
     modes_table as _modes,
     record_artifacts,
@@ -52,7 +51,6 @@ from .cli_common import (
 )
 from .output_handler import sanitize_prefix, get_phase_dir
 from .prompt_loader import load_prompt
-from .interactive import ModelSelectionError, select_models
 from . import unattended as _unattended
 from .provider_registry import (
     parse_model_spec,
@@ -146,8 +144,7 @@ from .state_manager import (
     get_or_create_state,
     stamp_stable_ids,
     load_groups_payload,
-    save_groups_payload,
-    CURRENT_FORMAT_VERSION,
+    save_groups_payload,  # noqa: F401 - the module's name for grouped.json's writer
 )
 from .validation import (
     PLAN_SNAPSHOT_NAME,
@@ -7522,28 +7519,18 @@ async def reaggregate_from_existing_files(
         flags=cli_common.current_replay_flags(mode=reaggregate_mode),
     ))
 
-    # Every phase-dir artifact (the executor's batch report and dry run, the
-    # write scheduler's reports, grouped and validation files) is left out by
-    # the one shared rule; parsed as a suggestion list, any of them would crash
-    # the regroup.
-    result_files = _result_files.model_result_paths(phase_dir)
-    # Only the models this phase records are read (live run 10: a reviewer's
-    # misnamed file was loaded as a third reviewer by its stem). Any other
-    # result file is named and set aside; a dir with no recorded models keeps
-    # the stem-as-identity reading below.
-    result_files = _result_files.set_aside_unrecorded_results(phase_dir, result_files)
-    _result_files.publish_result_notes(phase_dir)
-
-    if not result_files:
-        print(f"No model result files found in: {phase_dir}")
-        # Decision 11.11 (T5.4c): nothing to aggregate because every requested
-        # reviewer failed is the fan-out's exit 3 naming them, not a quiet
-        # exit 0; with no recorded failure it stays exit 0.
-        no_results, _requested = remaining_failed_models(phase_dir, [])
-        announce_remaining_failures(phase_dir, no_results)
-        exit_when_every_reviewer_failed(
-            phase_dir, no_results, mode=reaggregate_mode, plan_path=plan_path,
-        )
+    # The result files a reaggregate reads, one rule for every review lane;
+    # none at all is exit 3 when every requested reviewer failed, else exit 0.
+    lane = BaseReviewLane(
+        mode=reaggregate_mode, phase_name=phase_name, phase_dir=str(phase_dir),
+        plan_path=plan_path, prefix=prefix, out_dir=out_dir,
+        orchestrator_script=orchestrator_script,
+    )
+    steps = lane.round_steps()
+    result_files = _review_lane.reaggregate_result_files(
+        steps, mode=reaggregate_mode, phase_dir=str(phase_dir), plan_path=plan_path,
+    )
+    if result_files is None:
         return
 
     # T5, the lane with no fan-out at all: a `--reaggregate` invocation's whole
@@ -7570,97 +7557,37 @@ async def reaggregate_from_existing_files(
     # own reason instead.
     concluded = False
     try:
-        # Collect all suggestions
-        all_suggestions = []
-        models_found = set()
-        results_by_model: Dict[str, List[Dict[str, Any]]] = {}
-
-        # Restore original model specs (with colons) from .status.json
-        unsanitize = build_unsanitize_map(phase_dir)
-
-        for model, _chosen_path, suggestions in resolve_result_files_by_model(
-            phase_dir, result_files, unsanitize
-        ):
-            models_found.add(model)
-            # `s["source_model"] = model` is an item assignment, so one non-dict
-            # element in one file used to raise TypeError and lose every model's
-            # suggestions — the same defect code-review's reaggregate carried.
-            suggestions = drop_non_record_entries(
-                suggestions, model, noun="suggestions"
-            )
+        # Every model's suggestions read back, one rule for every review lane
+        # (utils/review_lane.py): the canonical specs from the checkpoint, one
+        # file per logical model, non-record entries dropped before anything
+        # is stamped, a model with a file reconciled as completed and the
+        # failures left named. No readable result at all ends here (§7.2a:
+        # zero groups recount the consolidation recommendation too); results
+        # that hold no findings are a finished review with zero groups.
+        def stamp(suggestions: List[Dict[str, Any]], model: str) -> None:
             for s in suggestions:
                 s["source_model"] = model
-            all_suggestions.extend(suggestions)
-            results_by_model[model] = suggestions
-            print(f"  Loaded {len(suggestions)} suggestions from {model}")
 
-        print(f"\nRe-aggregating {len(all_suggestions)} suggestions from {len(models_found)} models")
-
-        # Same reconciliation as code-review's reaggregate: a result file on disk
-        # is a completed model, whatever the fan-out recorded before the salvage
-        # (or the out-of-band result) that produced it.
-        for model in record_models_present(phase_dir, sorted(models_found)):
-            print(f"[{model}] result file present; recorded as completed (was failed)")
-
-        # Plan §5 (T5.1/T5.4a): read back only now, after the reconciliation
-        # above moved every model with a file out of `models_failed`. What is
-        # left — plus any requested model with neither a file nor a recorded
-        # failure — is named here, on every ending below, and in the report.
-        failed_models_map, requested_set = remaining_failed_models(
-            phase_dir, sorted(models_found)
-        )
-        announce_remaining_failures(phase_dir, failed_models_map)
-
-        # No readable result at all (no result file on disk could be read). Only
-        # this case returns early; `all_suggestions` is necessarily empty here.
-        if not models_found:
-            print("No suggestions to aggregate.")
-            # §7.2a: zero groups is a recount too — clear what an earlier
-            # round recommended.
-            recompute_consolidation_recommendation(
+        loaded = _review_lane.load_reaggregate_results(
+            steps, result_files, mode=reaggregate_mode, phase_dir=str(phase_dir),
+            plan_path=plan_path, noun="suggestions", stamp=stamp,
+            on_nothing_readable=lambda: recompute_consolidation_recommendation(
                 str(phase_dir), [], args, supports_consolidation,
-            )
-            # §6 T6.1: and the verdict counts, which no report rebuild will
-            # reach on this early return.
-            record_validation_counts(str(phase_dir), [])
-            # T5.4c: no readable result at all, and reviewers recorded failed:
-            # exit 3 like the fan-out; with no recorded failure, exit 0.
-            exit_when_every_reviewer_failed(
-                phase_dir, failed_models_map,
-                mode=reaggregate_mode, plan_path=plan_path,
-            )
+            ),
+        )
+        if loaded is None:
             return
-        # Readable results that hold no findings (`[]` from every model that
-        # answered) are a finished review with zero groups, not "nothing to
-        # aggregate": they go through the same report rebuild, partial-results
-        # report and completion below as any other reaggregate. Returning here
-        # used to leave a reviewer that failed beside a clean `[]` out of
-        # report.md, off `[PARTIAL_RESULTS]`, and the phase unrecorded, while
-        # the invocation still ended `done`.
+        all_suggestions = loaded.records
+        failed_models_map, requested_set = loaded.failed_models, loaded.requested
 
         grouped_path = os.path.join(phase_dir, "grouped.json")
         validation_path = os.path.join(phase_dir, "validation.json")
-        # The review base's steps the shared stages call, from this module's
-        # names (utils/review_lane.py).
-        steps = _review_lane.RoundSteps(
-            group_similar_suggestions=group_similar_suggestions,
-            stamp_stable_ids=stamp_stable_ids,
-            grouped_coverage_gap=grouped_coverage_gap,
-            verify_round_context=verify_round_context,
-            bind_plan_for_validation=bind_plan_for_validation,
-            reopen_phase_for_validation=reopen_phase_for_validation,
-            retire_stale_validation=retire_stale_validation,
-            retire_stale_validation_round=retire_stale_validation_round,
-            dispatch_in_round=dispatch_in_round,
-            dispatch_subagent_tasks=dispatch_subagent_tasks,
-            merge_validation_batches=merge_validation_batches,
-        )
         # The bound grouped.json reused, or the suggestions regrouped: one
         # rule for every review lane.
         grouped = _review_lane.bind_grouping(
             claim, steps, phase_dir=phase_dir, grouped_path=grouped_path,
             validation_path=validation_path, records=all_suggestions,
-            records_by_model=results_by_model,
+            records_by_model=loaded.by_model,
             skip_validation=bool(args.skip_validation), noun="suggestions",
         ).groups
 
@@ -7712,10 +7639,10 @@ async def reaggregate_from_existing_files(
         # The validation.json bytes the report's verdicts come from, when they do.
         verdicts: Optional[_review_round.Verdicts] = outcome.verdicts
 
-        # Build list of successful models. The failure map is the one read back
-        # above (after `record_models_present`) — this used to hard-code `{}`,
-        # so a reaggregated report never named a model that produced nothing.
-        successful_models = list(models_found)
+        # The models with a result, and the failure map read back after the
+        # reconciliation, so a reaggregated report names a model that produced
+        # nothing.
+        successful_models = loaded.models
 
         # Generate report. `served_models` is what the fan-out recorded in the
         # checkpoint (§3.6's attribution and the D6 override's `sandbox: bypassed`,
@@ -7762,29 +7689,13 @@ async def reaggregate_from_existing_files(
                 str(phase_dir), validated_groups_for_report, args, supports_consolidation,
             )
 
-        # T5.4b (decision 11.11): a reaggregate that still lacks some models
-        # reports `[PARTIAL_RESULTS: …]` and `state: "partial"` (exit 0), as
-        # the fan-out does — the host's cue to name them from
-        # `progress.models`. `unattended=False`: the `[AUTO_RESOLVED]` record
-        # that call writes names the fan-out's in-process continuation, never a
-        # separate `--reaggregate`. The phase is still recorded completed below
-        # and no `next` is recorded, so the result line keeps `next: null`.
-        _unattended.report_partial_results(
-            completed=sorted(models_found),
-            failed=list(failed_models_map),
-            phase_dir=str(phase_dir),
-            unattended=False,
+        # `[PARTIAL_RESULTS]` for the models still missing, then the phase
+        # recorded complete while the round on record is still this one's, as
+        # every review lane's reaggregate ends (utils/review_lane.py).
+        _review_lane.complete_reaggregate(
+            claim, steps, loaded, state=get_or_create_state(Path(plan_path)),
+            phase_name=phase_name, phase_dir=str(phase_dir),
         )
-
-        # Mark phase complete, while the round on record is still this one's.
-        claim.check("record the phase complete")
-        state = get_or_create_state(Path(plan_path))
-        state.mark_phase_completed(phase_name)
-        state.save()
-        # The in-phase machine reaches its terminal word here too: a re-aggregated
-        # phase is as finished as a freshly run one, and `status` reads this field.
-        update_status(str(phase_dir), {"state": "complete"})
-        _detach.report_progress(str(phase_dir), step="complete")
         concluded = True
     finally:
         # Cancelled and awaited past the terminal `progress.step`, exactly as on
@@ -7854,6 +7765,39 @@ def report_already_completed(
     return cli_common.EXIT_NOTHING_TO_DO
 
 
+def base_round_steps() -> "_review_lane.RoundSteps":
+    """The review base's :class:`~utils.review_lane.RoundSteps`, from this
+    module's names as they are bound when it is called."""
+    return _review_lane.RoundSteps(
+        group_similar_suggestions=group_similar_suggestions,
+        stamp_stable_ids=stamp_stable_ids,
+        grouped_coverage_gap=grouped_coverage_gap,
+        verify_round_context=verify_round_context,
+        bind_plan_for_validation=bind_plan_for_validation,
+        reopen_phase_for_validation=reopen_phase_for_validation,
+        retire_stale_validation=retire_stale_validation,
+        retire_stale_validation_round=retire_stale_validation_round,
+        retire_validation_for_regroup=retire_validation_for_regroup,
+        materialize_validation_round=materialize_validation_round,
+        dispatch_in_round=dispatch_in_round,
+        dispatch_subagent_tasks=dispatch_subagent_tasks,
+        merge_validation_batches=merge_validation_batches,
+        write_status=write_status,
+        update_status=update_status,
+        report_progress=_detach.report_progress,
+        record_next=record_next,
+        recorded_usage=recorded_usage,
+        recorded_served_models=recorded_served_models,
+        build_unsanitize_map=build_unsanitize_map,
+        resolve_result_files_by_model=resolve_result_files_by_model,
+        record_models_present=record_models_present,
+        remaining_failed_models=remaining_failed_models,
+        announce_remaining_failures=announce_remaining_failures,
+        exit_when_every_reviewer_failed=exit_when_every_reviewer_failed,
+        record_validation_counts=record_validation_counts,
+    )
+
+
 @dataclass(frozen=True)
 class BaseReviewLane:
     """The review base's :class:`~utils.review_lane.ReviewLane`: review-plan and
@@ -7866,7 +7810,10 @@ class BaseReviewLane:
     plan_path: str
     prefix: str
     out_dir: str
-    salvage_phase_name: str
+    orchestrator_script: str
+    # The phase a losing slot's salvage request names (the fan-out's; a
+    # reaggregate saves no slot).
+    salvage_phase_name: str = ""
     # Reused verdicts are bound by their round's snapshots alone
     # (`ReviewLane.reuse_checks_inputs`).
     reuse_checks_inputs: ClassVar[bool] = False
@@ -7876,6 +7823,16 @@ class BaseReviewLane:
             self.mode, self.plan_path, *flags,
             flags=cli_common.current_replay_flags(mode=self.mode),
         )
+
+    def round_follow_up(
+        self, document: Mapping[str, Any], *, typed: bool = False,
+    ) -> Optional[str]:
+        # The task file's durable mode and plan, resolved from the running
+        # skill dir (D1c).
+        return resolved_reaggregate_command(dict(document), typed_plan=typed)
+
+    def round_steps(self) -> "_review_lane.RoundSteps":
+        return base_round_steps()
 
     def save_slot(self, slot: "_review_lane.SlotResult") -> bool:
         # The stdout-then-stderr precedence a losing run's salvage text takes
@@ -8120,24 +8077,10 @@ async def _review_orchestration(
             state_guard.save()
         print("NOTE: Cleared previous phase completion (--force mode)")
 
-    # Mutual exclusivity check
-    if args.quick and args.interactive:
-        print("ERROR: --quick and --interactive are mutually exclusive.")
-        sys.exit(1)
-
-    # Model selection (`interactive.select_models`; D6 row 2: auto-select
-    # `defaults.models` when nothing was named; fail closed with exit 3 when
-    # nothing resolves).
-    unattended = bool(getattr(args, "yes", False))
-    try:
-        model_specs = select_models(
-            args,
-            mode=phase_name,
-            anchor=plan_path,  # per-project config discovery follows the plan-derived root
-            unattended=unattended,
-        )
-    except ModelSelectionError as e:
-        sys.exit(e.exit_code)
+    # Model selection, one rule for every review lane (D6 row 2).
+    model_specs, unattended = _review_lane.select_review_models(
+        args, mode=phase_name, anchor=plan_path,
+    )
 
     # Run pre-run hook (e.g., validate tasks file existence)
     if pre_run_hook:
@@ -8284,68 +8227,17 @@ async def _review_orchestration(
         ),
     )
 
-    # Stage U: what an earlier attempt of this phase recorded, read *before*
-    # the write below — `write_status` replaces every key but the two reserved
-    # objects, so the `usage` the last attempt wrote is gone the instant it
-    # lands, and a resume's skipped models (which invoke no adapter) never
-    # refill it. Without this the regenerated report and every `--reaggregate`
-    # after it lost the numbers the first attempt paid for. Handed to the
-    # fan-out rather than merged into `collect_usage`'s result wholesale, so
-    # only a REUSED slot is restored: a model that really re-ran is reported on
-    # what this attempt spent.
-    prior_usage = recorded_usage(phase_dir) or {}
-    # Landlock rung (2026-09-22): the previous run's sandbox words, read before
-    # the same write erases them, so a contained rung this run can no longer
-    # take is named once (`announce_retired_rungs`).
-    prior_served = recorded_served_models(phase_dir) or {}
-    # The opening checkpoint, written while the round is this run's
-    # (`claim.opening`), which puts the id back if the write lost it.
-    with claim.opening():
-        write_status(phase_dir, {
-            "phase": phase_name,
-            "state": "models_running",
-            "started_at": datetime.now().isoformat(),
-            "models_requested": list(model_specs),
-            "error": None,
-            _review_round.ROUND_KEY: claim.round_id,
-            # A re-used phase dir keeps its predecessor's `progress` unless someone
-            # drops it, and on the FOREGROUND lane nobody did: `claim_run` is the
-            # only writer of `progress: None` and only the detached worker calls it,
-            # while `write_status` carries the reserved objects over from disk by
-            # design. So a re-review of the same plan opened with the last run's
-            # per-model map on screen — every slot `done`, `2 ok` — and the
-            # `just finished:` line, whose baseline is "what this map already calls
-            # terminal", could never announce a model whose predecessor row was
-            # already terminal: it was in the baseline before this run seeded it
-            # queued, and in every later poll's baseline after it really finished
-            # (F1, 2026-09-20). Dropping it here is the same move `claim_run` makes,
-            # at the same moment — the write that claims the dir for this fan-out.
-            # `report_progress` below rebuilds it two statements later.
-            "progress": None,
-        })
-    # D6 row 2, recorded rather than merely applied: an auto-selection nobody can
-    # see afterwards is indistinguishable from a silent degradation. Only under
-    # `--yes`, where it replaced a question — with `--yes` unset nothing about a
-    # run changes.
-    if unattended and not args.models and not args.quick:
-        _unattended.record_resolution(
-            phase_dir,
-            _unattended.row(2).site_id,
-            "defaults.models: " + ", ".join(model_specs),
-        )
-    # D6 row 16: a scope policy nobody typed, recorded the same way (only
-    # under `--yes`; a typed value is the flag's answer, not a resolution).
-    if unattended:
-        from . import scope_policy_runs as _scope_policy_runs
-
-        _scope_policy_runs.announce(
-            phase_dir, scope_round_policy.policy, scope_round_policy.source,
-            unattended=True,
-        )
-    _detach.report_progress(
-        phase_dir, step="fanout", models_total=len(model_specs),
-        models_done=0, models_succeeded=0,
+    # The round's opening checkpoint, one rule for every review lane
+    # (utils/review_lane.py): what the previous attempt recorded (its `usage`
+    # for reused slots, Stage U; its sandbox words for the retired-rung
+    # notice) read before the write erases it, the requested specs, the
+    # previous `progress` dropped, the `--yes` resolutions recorded.
+    opening = _review_lane.open_round(
+        claim, base_round_steps(), args,
+        phase_name=phase_name, phase_dir=phase_dir, model_specs=model_specs,
+        scope_round_policy=scope_round_policy, unattended=unattended,
     )
+    prior_usage, prior_served = opening.prior_usage, opening.prior_served
 
     # The caller constructs the tracker because the caller is the one that
     # already knows all three of its inputs — the phase dir, the requested
@@ -8387,12 +8279,14 @@ async def _review_orchestration(
     # suggestion list, so the checkpoint carries both for `--reaggregate`.
     served_models = collect_served_models(results)
     usage = collect_usage(results)
+    lane = BaseReviewLane(
+        mode=_modes().mode_for_script(orchestrator_script) or phase_name,
+        phase_name=phase_name, phase_dir=phase_dir, plan_path=plan_path,
+        prefix=prefix, out_dir=out_dir, salvage_phase_name=salvage_phase_name,
+        orchestrator_script=orchestrator_script,
+    )
     closed = await _review_lane.close_fanout(
-        BaseReviewLane(
-            mode=_modes().mode_for_script(orchestrator_script) or phase_name,
-            phase_name=phase_name, phase_dir=phase_dir, plan_path=plan_path,
-            prefix=prefix, out_dir=out_dir, salvage_phase_name=salvage_phase_name,
-        ),
+        lane,
         claim, args,
         model_specs=model_specs, results=results,
         served_models=served_models, usage=usage, prior_served=prior_served,
@@ -8462,160 +8356,44 @@ async def _review_orchestration(
         # The validation.json bytes the report's verdicts come from, when they do.
         verdicts: Optional[_review_round.Verdicts] = None
 
-        if all_suggestions:
-            raw_grouped = group_similar_suggestions(all_suggestions)
-            grouped = [g.to_dict() if hasattr(g, 'to_dict') else g for g in raw_grouped]
-            stamp_stable_ids(grouped)
-            grouped_path = os.path.join(phase_dir, "grouped.json")
-            # D7: the previous run's verdicts belong to the grouping this write
-            # replaces; retired in the same step so no later reaggregate finds them.
-            # Round-wide when the grouping changed: a surviving
-            # `validation_batch_<n>.json` of the previous grouping would be skipped
-            # as "already complete" by the executor and then discarded by the merge
-            # as a foreign group_hash (#25). `validation.json` alone when the hashes
-            # are the same grouping, so a resume that skipped every model does not
-            # re-run its completed batches (adversarial review, 2026-10-02).
-            # The retirement and the new grouped.json (replaced whole: a
-            # reaggregate reads it back) are one step of this run's round.
-            with claim.held("retire the previous validation and regroup"):
-                retire_validation_for_regroup(phase_dir, grouped, reason="grouped.json rewritten by a re-run")
-                _review_round.replace_file(
-                    grouped_path, json.dumps(save_groups_payload(grouped), indent=2))
-            print(f"Grouped suggestions saved to: {grouped_path}")
+        # The grouping and its round, one rule for every review lane
+        # (utils/review_lane.py): grouped.json replaced with the previous
+        # verdicts retired in the same step, or, for zero findings, a finished
+        # review with zero groups whose whole previous round retires, so
+        # neither the report nor apply-suggestions reads its groups (and
+        # review-tasks' prerequisite check reads `skipped (no findings)`).
+        steps = base_round_steps()
+        grouped_path = os.path.join(phase_dir, "grouped.json")
+        validation_path = os.path.join(phase_dir, "validation.json")
+        grouped = _review_lane.group_findings(
+            claim, steps, phase_dir=phase_dir, grouped_path=grouped_path,
+            validation_path=validation_path, records=all_suggestions,
+            noun="suggestions",
+        ).groups
 
-            update_status(phase_dir, {
-                "state": "grouping_complete",
-                "total_groups": len(grouped),
-                "total_suggestions": len(all_suggestions),
-            })
-
-            # Validate grouped suggestions
-            if not args.skip_validation:
-                # Host-neutral: this print runs on every host that dispatches
-                # subagent validation (opencode, codex, claude-code, ...), and
-                # naming Claude Code here contradicted the runner the log
-                # names a few lines later (measured 2026-09-16: an
-                # opencode-driven run printed this beside 11 lines correctly
-                # naming opencode).
-                print("\nPreparing batched validation for subagent execution...")
-                with host_views_lock(phase_dir):
-                    batched_tasks = materialize_validation_round(review_validation_round(
-                        grouped, args=args, phase_name=phase_name, phase_dir=phase_dir,
-                        plan_path=plan_path, plan_content=plan_content,
-                        plan_document=plan_document, orchestrator_script=orchestrator_script,
-                        extra_validation_metadata=extra_validation_metadata,
-                        scope_round_policy=scope_round_policy, scope_state=scope_state,
-                        scope_recorded_baseline=scope_recorded_baseline,
-                        round_id=claim.round_id,
-                    ))
-                    batched_tasks["format_version"] = CURRENT_FORMAT_VERSION
-
-                    validation_tasks_path = os.path.join(phase_dir, "validation_tasks.json")
-                    # The task file and the phase machine's own word for this
-                    # stretch (the shared reaggregate writes it too, utils/review_lane.py),
-                    # published together while the round is this run's.
-                    with claim.held("write validation_tasks.json"):
-                        _review_round.replace_file(
-                            validation_tasks_path, json.dumps(batched_tasks, indent=2)
-                        )
-                        update_status(phase_dir, {"state": "validation_pending"})
-
-                total_batches = batched_tasks["total_batches"]
-                stats = batched_tasks.get("batching_stats", {})
-
-                if total_batches == 1:
-                    print(f"\n[VALIDATION_PENDING] {validation_tasks_path}")
-                else:
-                    print(f"\n[VALIDATION_BATCHES_PENDING] {validation_tasks_path}")
-                    print(f"Batches: {total_batches}")
-                    if stats.get("efficiency_gain_percent", 0) > 0:
-                        print(f"Efficiency gain: {stats['efficiency_gain_percent']}%")
-
-                print(f"\nValidation prepared for subagent execution.")
-                print(f"Groups to validate: {stats.get('total_groups', len(grouped))}")
-                print(f"HIGH priority groups: {stats.get('high_count', 0)}")
-                print(f"Normal priority groups: {stats.get('normal_count', 0)}")
-
-                # Resolved here, from the running skill dir, because the task
-                # file stores only the durable mode + plan pair (D1c).
-                reaggregate_cmd = resolved_reaggregate_command(batched_tasks)
-
-                # D3b: self-contained mode continues past the marker in this same
-                # process — dispatch, merge, and finish the phase in one
-                # invocation. Host-driven mode (the default) is unchanged below.
-                if await dispatch_in_round(
-                    claim, dispatch_subagent_tasks,
-                    args,
-                    task_file=validation_tasks_path,
-                    phase_dir=phase_dir,
-                    phase=phase_name,
-                    document=batched_tasks,
-                    plan_path=str(plan_path),
-                    label="validation",
-                    retry_command=reaggregate_cmd,
-                ):
-                    validation_path = os.path.join(phase_dir, "validation.json")
-                    validated_groups_for_report = merge_validation_batches(
-                        phase_dir, batched_tasks, grouped, validation_path,
-                        claim=claim,
-                    )
-                    verdicts = claim.verdicts
-                else:
-                    # The plan as the user typed it (fix round 14).
-                    reaggregate_cmd = resolved_reaggregate_command(
-                        batched_tasks, typed_plan=True,
-                    )
-                    print("\nAfter validation completes, run:")
-                    print(f"  {reaggregate_cmd or ''}")
-                    record_next(reaggregate_cmd or None)
-
-                    # The follow-up command is persisted in its **durable,
-                    # rebindable** form (mode word + plan path) — in the task
-                    # file above and here alike — never as the
-                    # resolved skill-dir-absolute string the same run prints: the
-                    # Claude plugin cache is keyed by commit hash, so a stored
-                    # absolute command points at a directory that no longer
-                    # exists after any plugin update. `status` (and
-                    # utils/detach.resolved_reaggregate_command) rebuild it at
-                    # read time from the *running* skill dir.
-                    update_status(phase_dir, {
-                        "state": "validation_pending",
-                        "stdout_markers": ["VALIDATION_BATCHES_PENDING"] if total_batches > 1 else ["VALIDATION_PENDING"],
-                        "validation_tasks_path": validation_tasks_path,
-                        **durable_reaggregate_fields(orchestrator_script, plan_path),
-                    })
-                    _detach.report_progress(phase_dir, step="validation_pending")
-
-                    return  # Exit early - Claude Code handles validation
-            else:
-                print("\nSkipping validation (--skip-validation flag set)")
-        else:
-            # Zero findings from every model that answered: a finished review
-            # with zero groups, and it replaces the previous findings, as
-            # code-review's own empty branch does (the `else` of its `if
-            # all_issues:`). This block used to have no `else`, so the round
-            # wrote neither file: apply-suggestions' `load_data` then exited 1
-            # on the missing `validation.json` (measured 2026-10-08), stopping
-            # `full` at exit 3 on a clean plan, and an empty `--force` round
-            # left the previous round's two files in place, so the report
-            # below listed its groups and apply-suggestions handed its valid
-            # ones out again (plan improve-plan-and-improve-code §2.3, *Empty
-            # apply outcomes*). The whole round retires, not only
-            # `validation.json`: an empty grouping has no batch of its own to
-            # keep. review-tasks shares this branch, and its zero-group
-            # `grouped.json` is what `check_apply_task_suggestions_prerequisite`
-            # reads as `skipped (no findings)`.
+        if not grouped:
             validated_groups_for_report = []
-            grouped_path = os.path.join(phase_dir, "grouped.json")
-            with claim.held("retire the previous validation and regroup"):
-                retire_stale_validation_round(
-                    phase_dir, reason="review returned no suggestions"
-                )
-                _review_round.replace_file(
-                    grouped_path, json.dumps(save_groups_payload([]), indent=2))
-            print(f"Grouped suggestions saved to: {grouped_path} (no suggestions)")
-            claim.publish(os.path.join(phase_dir, "validation.json"), "[]\n",
-                          "write validation.json")
+        elif args.skip_validation:
+            print("\nSkipping validation (--skip-validation flag set)")
+        else:
+            outcome = await _review_lane.materialize_fanout_round(
+                lane, claim, args, steps,
+                grouped=grouped, validation_path=validation_path,
+                plan_document=lambda: plan_document,
+                build_round=lambda document: review_validation_round(
+                    grouped, args=args, phase_name=phase_name, phase_dir=phase_dir,
+                    plan_path=plan_path, plan_content=plan_content,
+                    plan_document=document, orchestrator_script=orchestrator_script,
+                    extra_validation_metadata=extra_validation_metadata,
+                    scope_round_policy=scope_round_policy, scope_state=scope_state,
+                    scope_recorded_baseline=scope_recorded_baseline,
+                    round_id=claim.round_id,
+                ),
+            )
+            if outcome.handed_off:
+                return  # the host runs the round and comes back with --reaggregate
+            validated_groups_for_report = outcome.groups
+            verdicts = outcome.verdicts
 
         # Aggregate results
         report_path = aggregate_results(
@@ -8642,28 +8420,13 @@ async def _review_orchestration(
             phase_dir, validated_groups_for_report, args, supports_consolidation,
         )
 
-        # Mark phase as completed, while the round on record is still this run's.
-        claim.check("record the phase complete")
-        state = get_or_create_state(Path(plan_path))
-        state.mark_phase_completed(phase_name)
-        state.save()
-
-        # §Fix2: the phase machine's own terminal value. status_file.py's module
-        # docstring names the sequence ``models_running`` →
-        # ``models_complete``/``grouping_complete`` → ``validation_pending`` →
-        # ``complete``, but nothing wrote the last link — the most recent `state`
-        # this run recorded was whichever intermediate step it last passed
-        # through (``grouping_complete``, or ``models_complete`` when there was
-        # nothing to group), even on a run that reaches here, past a written
-        # report and a completed phase. `run.state`/`progress.step` are the
-        # *process*/*display* views this same module docstring distinguishes from
-        # the phase machine; this is the third and last of the three. Nothing
-        # gates resume or ``--reaggregate`` on this field (both key off artifact
-        # existence and ``run.state`` — see ``reaggregate_from_existing_files`` and
-        # AGENTS.md's D7 notes), so recording it here only fixes what a reader
-        # (``status``, ``check_workflow_prerequisites``) reports for a finished run.
-        update_status(phase_dir, {"state": "complete"})
-        _detach.report_progress(phase_dir, step="complete")
+        # The phase recorded complete while the round on record is still this
+        # run's, then the phase machine's terminal word (`status` renders it;
+        # nothing gates a resume on it) and the last `progress.step`.
+        _review_lane.record_phase_complete(
+            claim, steps, state=get_or_create_state(Path(plan_path)),
+            phase_name=phase_name, phase_dir=phase_dir,
+        )
     finally:
         # Cancelled AND awaited, so the last `[PROGRESS]` line lands before the
         # phase's own report rather than into the middle of it. It is stopped

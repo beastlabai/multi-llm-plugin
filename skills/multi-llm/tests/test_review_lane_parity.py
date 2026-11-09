@@ -66,6 +66,10 @@ class Lane:
     #: reviewed line moves.
     reuse_checks_inputs: bool
     reviewed_input: str
+    #: Whether a plain re-run over files a round left on disk is judged by a
+    #: partial-completion guard (review-code's: refused, or its completion
+    #: finished) rather than run again (the base's).
+    guards_partial_rounds: bool
 
     def __init__(self, root: Path, monkeypatch: pytest.MonkeyPatch):
         self.repo = init_repo(root / "repo", commits=[
@@ -186,6 +190,7 @@ class Lane:
 class PlanLane(Lane):
     mode, phase, module, boundary = "review-plan", "review-plan", rpo, rob
     reuse_checks_inputs, reviewed_input = False, "plan_sha256"
+    guards_partial_rounds = False
 
     def edit_a_reviewed_line(self):
         self.plan.write_text("# Plan\n\n## Step 1\n\nChange the handler to 999.\n",
@@ -242,6 +247,7 @@ class PlanLane(Lane):
 class CodeLane(Lane):
     mode, phase, module, boundary = "review-code", "code-review", cro, cro
     reuse_checks_inputs, reviewed_input = True, "reviewed_code_sha256"
+    guards_partial_rounds = True
 
     def edit_a_reviewed_line(self):
         (self.repo / "src/app.py").write_text("def handler():\n    return 999\n",
@@ -325,9 +331,9 @@ def _round_handed_to_the_host(lane: Lane, **kwargs) -> Dict[str, Any]:
     return lane.json("validation_tasks.json")
 
 
-def _validated(lane: Lane, *flags: str) -> Dict[str, Any]:
+def _validated(lane: Lane, *flags: str, high: Sequence[str] = ()) -> Dict[str, Any]:
     """A round validated whole and merged by a first reaggregate; its task file."""
-    assert lane.fanout(_two_models(lane), *flags) == 0
+    assert lane.fanout(_two_models(lane, high=high), *flags) == 0
     tasks = lane.json("validation_tasks.json")
     for batch in tasks["batches"]:
         _write_batch(lane, batch)
@@ -348,6 +354,21 @@ def _write_batch(lane: Lane, batch: Dict[str, Any], status: str = "valid") -> No
     ]
     (lane.phase_dir / f"validation_batch_{batch['batch_index']}.json").write_text(
         json.dumps({"groups": verdicts}), encoding="utf-8")
+
+
+#: A ``grouped.json`` that is not the grouping its verdicts bind: deleted, cut
+#: short, or replaced with an empty grouping.
+UNCHECKED_GROUPINGS = ["missing", "malformed", "empty"]
+
+
+def _unchecked_grouping(lane: Lane, grouping: str) -> None:
+    path = lane.phase_dir / "grouped.json"
+    if grouping == "missing":
+        path.unlink()
+    elif grouping == "malformed":
+        path.write_text("{", encoding="utf-8")
+    else:
+        path.write_text("[]", encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -481,6 +502,22 @@ class TestReaggregate:
         assert lane.json("validation_tasks.json")["batches"] != tasks["batches"]
         assert not lane.phase_completed()
 
+    @pytest.mark.parametrize("grouping", ["missing", "empty"])
+    def test_a_lost_grouping_is_regrouped_never_counted_as_zero(self, lane, grouping):
+        """A reaggregate over a validated round whose completion was lost and
+        whose ``grouped.json`` was then deleted or emptied regroups the results
+        on disk: the phase is either completed with its HIGH group recorded or
+        left open, never completed with none."""
+        _validated(lane, high=["Alpha"])
+        TestAPlainRerunOverARoundOnDisk._lose_the_completion(lane)
+        _unchecked_grouping(lane, grouping)
+
+        assert lane.reaggregate() == 0
+
+        assert lane.groups("grouped.json")
+        if lane.phase_completed():
+            assert lane.status()["high_priority_groups"] == {"count": 1}
+
     def test_skip_validation_reports_the_groups_on_disk(self, lane):
         """Row 3: ``--reaggregate --skip-validation`` puts the grouped findings
         in the report's data, not an empty list."""
@@ -521,6 +558,37 @@ class TestReaggregate:
         progress = lane.status()["progress"]
         assert not progress.get("subagents")
         assert progress["step"] == "validation_pending"
+
+
+    def test_unreadable_results_clear_the_verdict_counts(self, lane, capsys):
+        """A reaggregate that can read no result file ends before any report
+        is rebuilt, so the verdict counts an earlier round recorded are
+        cleared there (§6 T6.1), and the ending is named alike."""
+        _validated(lane)
+        assert lane.status().get("validation_counts")
+        for spec in MODELS:
+            stem = rob.sanitize_model_name(spec)
+            (lane.phase_dir / f"{stem}.json").write_text("not json", encoding="utf-8")
+        capsys.readouterr()
+
+        assert lane.reaggregate() == 0
+
+        out = capsys.readouterr().out
+        assert "No readable model results to aggregate." in out
+        assert "validation_counts" not in lane.status()
+
+    def test_no_result_files_are_named_alike(self, lane, capsys):
+        """A reaggregate over a phase dir with no result file at all names
+        the dir it looked in, on both lanes."""
+        _round_handed_to_the_host(lane)
+        for spec in MODELS:
+            (lane.phase_dir / f"{rob.sanitize_model_name(spec)}.json").unlink()
+        capsys.readouterr()
+
+        assert lane.reaggregate() == 0
+
+        out = capsys.readouterr().out
+        assert f"No model result files found in: {lane.phase_dir}" in out
 
 
 class TestReusedVerdicts:
@@ -668,6 +736,40 @@ class TestFanout:
         command = detach.resolved_reaggregate_command(status)
         assert f" {lane.mode} " in command and "--reaggregate" in command
 
+    def test_the_grouping_is_recorded(self, lane):
+        """The fan-out records its grouping's size where ``status`` reads it
+        (``grouping_complete``): every model's findings, and the groups."""
+        _round_handed_to_the_host(lane)
+
+        status = lane.status()
+        assert status["total_groups"] == len(lane.groups("grouped.json"))
+        assert status["total_suggestions"] == len(NAMES) + 1
+
+    def test_the_hand_off_describes_the_round_alike(self, lane, capsys):
+        """The lines a host reads before it runs the batches are the same on
+        both lanes, from the task file's own batching stats."""
+        tasks = _round_handed_to_the_host(lane)
+
+        out = capsys.readouterr().out
+        stats = tasks["batching_stats"]
+        assert f"Batches: {tasks['total_batches']}" in out
+        assert stats["efficiency_gain_percent"] > 0
+        assert f"Efficiency gain: {stats['efficiency_gain_percent']}%" in out
+        assert f"Groups to validate: {stats['total_groups']}" in out
+        assert f"HIGH priority groups: {stats['high_count']}" in out
+        assert f"Normal priority groups: {stats['normal_count']}" in out
+
+    def test_zero_findings_say_so(self, lane, capsys):
+        """A fan-out whose models found nothing writes the empty grouping and
+        says it did."""
+        assert lane.fanout({spec: [] for spec in MODELS}) == 0
+
+        out = capsys.readouterr().out
+        assert "saved to: " in out and " (no " in out
+        assert lane.groups("grouped.json") == []
+        assert lane.json("validation.json") == []
+        assert lane.phase_completed()
+
     def test_every_slot_failing_still_records_the_bypassed_sandbox(self, lane):
         """Row 5: a run whose every slot failed still records which slots ran
         without a sandbox, durably and for the poller."""
@@ -682,6 +784,125 @@ class TestFanout:
         assert set(status["models_failed"]) == set(MODELS)
         assert status["models_served"][MODELS[0]]["sandbox"] == "bypassed"
         assert status["progress"]["sandbox_bypassed"] == [MODELS[0]]
+
+
+class TestAPlainRerunOverARoundOnDisk:
+    """A plain re-run (no ``--force``) over the files an earlier round left
+    never records the phase complete on a round that did not finish, and a
+    phase it does record complete went through the completion every other
+    ending runs (the HIGH groups recorded, ``--fail-on-high`` applied).
+
+    The lanes reach that differently, on purpose: review-code's
+    partial-completion guard refuses (exit 3, naming ``--reaggregate``) or,
+    when the round's report is whole and sealed and only its record is
+    missing, finishes that completion; the base runs the review again
+    (docs/development/review-results.md, "The shared review lane")."""
+
+    def test_a_round_handed_to_the_host_stays_open(self, lane):
+        _round_handed_to_the_host(lane)
+
+        code = lane.fanout(_two_models(lane))
+
+        assert code == (3 if lane.guards_partial_rounds else 0)
+        assert not lane.phase_completed()
+        assert lane.status()["state"] != "complete"
+
+    def test_a_round_with_some_verdicts_stays_open(self, lane):
+        tasks = _round_handed_to_the_host(lane)
+        _write_batch(lane, tasks["batches"][0])
+
+        code = lane.fanout(_two_models(lane))
+
+        assert code == (3 if lane.guards_partial_rounds else 0)
+        assert not lane.phase_completed()
+        assert lane.status()["state"] != "complete"
+
+    @staticmethod
+    def _lose_the_completion(lane: Lane) -> None:
+        """The shape a run leaves when it stops after publishing its report
+        and before recording the phase: no completion, no HIGH record."""
+        state = get_or_create_state(lane.plan)
+        state.state["phases_completed"].pop(lane.phase)
+        state.save()
+        status_file.remove_status_keys(str(lane.phase_dir), ["high_priority_groups"])
+
+    def test_a_report_whose_completion_was_lost(self, lane, capsys):
+        _validated(lane, high=["Alpha"])
+        self._lose_the_completion(lane)
+        capsys.readouterr()
+
+        assert lane.fanout(_two_models(lane, high=["Alpha"])) == 0
+
+        out = capsys.readouterr().out
+        if lane.guards_partial_rounds:
+            assert "Auto-healed" in out
+            assert lane.phase_completed()
+        else:
+            assert not lane.phase_completed()
+            assert lane.status()["state"] == "validation_pending"
+        if lane.phase_completed():
+            assert lane.status()["high_priority_groups"] == {"count": 1}
+            assert "[HIGH_PRIORITY_ISSUES] 1" in out
+
+    def test_a_healed_review_keeps_its_gate(self, code_lane):
+        """``--fail-on-high`` holds on a review whose completion the guard
+        finished: exit 3, ``modes.REVIEW_GATE``, with the phase recorded."""
+        _validated(code_lane, high=["Alpha"])
+        self._lose_the_completion(code_lane)
+
+        assert code_lane.fanout(_two_models(code_lane, high=["Alpha"]),
+                                "--fail-on-high") == 3
+
+        assert code_lane.phase_completed()
+        assert code_lane.status()["state"] == "complete"
+        assert code_lane.status()["high_priority_groups"] == {"count": 1}
+
+    @pytest.mark.parametrize("grouping", UNCHECKED_GROUPINGS)
+    def test_a_lost_completion_over_a_grouping_that_does_not_check_out(
+        self, lane, grouping, capsys,
+    ):
+        """A sealed report and its verdicts beside a ``grouped.json`` that is
+        not the grouping those verdicts bind never complete the phase: the
+        grouping is never read as zero groups. review-code's guard refuses
+        (exit 3, naming the file and ``--force``) and records nothing; the
+        base runs the review again."""
+        _validated(lane, high=["Alpha"])
+        self._lose_the_completion(lane)
+        _unchecked_grouping(lane, grouping)
+        before = lane.status()
+        capsys.readouterr()
+
+        code = lane.fanout(_two_models(lane, high=["Alpha"]))
+
+        out = capsys.readouterr().out
+        assert not lane.phase_completed()
+        assert "Auto-healed" not in out
+        assert "high_priority_groups" not in lane.status()
+        if lane.guards_partial_rounds:
+            assert code == 3
+            assert "grouped.json" in out and "--force" in out
+            assert lane.status() == before
+        else:
+            assert code == 0
+            assert lane.status()["state"] == "validation_pending"
+
+    @pytest.mark.parametrize("grouping", UNCHECKED_GROUPINGS)
+    def test_a_healed_gate_never_counts_an_unchecked_grouping_as_zero(
+        self, code_lane, grouping,
+    ):
+        """``--fail-on-high`` over a lost completion whose ``grouped.json``
+        was deleted, cut or replaced with ``[]``: exit 3 from the refusal, the
+        phase not recorded, no HIGH count recorded (the intact grouping is
+        ``test_a_healed_review_keeps_its_gate``)."""
+        _validated(code_lane, high=["Alpha"])
+        self._lose_the_completion(code_lane)
+        _unchecked_grouping(code_lane, grouping)
+
+        assert code_lane.fanout(_two_models(code_lane, high=["Alpha"]),
+                                "--fail-on-high") == 3
+
+        assert not code_lane.phase_completed()
+        assert "high_priority_groups" not in code_lane.status()
 
 
 class TestFanoutSlots:
