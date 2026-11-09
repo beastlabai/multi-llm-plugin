@@ -625,7 +625,7 @@ class TestBuildTaskPromptAcceptanceCriteria:
         `killall` reaches the orchestrator that dispatched it.
 
         N3, 2026-09-16: the rule moved out of this template's own
-        `## Constraints` (it now duplicated `_with_result_contract`'s shared
+        `## Constraints` (it now duplicated `BatchPromptBuilder.with_result_contract`'s shared
         seam, and stranded the template's terminal "Proceed with the
         implementation." in the middle of the prompt). Every write kind's
         *dispatched* prompt still carries it — through the scheduler, not the
@@ -638,7 +638,7 @@ class TestBuildTaskPromptAcceptanceCriteria:
         prompt = build_task_prompt(task)
 
         scheduler = make_scheduler(tmp_path, kind="implement")
-        dispatched = scheduler._with_result_contract({"expected_ids": ["T001"]}, prompt)
+        dispatched = scheduler._prompts.with_result_contract({"expected_ids": ["T001"]}, prompt)
 
         for forbidden in ("`kill`", "`pkill`", "`killall`"):
             assert forbidden in dispatched, forbidden
@@ -651,7 +651,7 @@ class TestBuildTaskPromptAcceptanceCriteria:
 
     def test_the_raw_template_no_longer_duplicates_the_shared_seam(self):
         """The template itself should carry neither the process-safety rule
-        (it now lives once, in `_with_result_contract`) nor a stranded
+        (it now lives once, in `BatchPromptBuilder.with_result_contract`) nor a stranded
         "Proceed with the implementation." ahead of sections the scheduler
         still has to append."""
         from utils.prompt_loader import load_prompt

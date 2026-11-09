@@ -129,7 +129,7 @@ The mirror's finished tasks are its `tasks` rows; its dispatch counter used to c
 `dispatched`, so a single-task batch running minutes read `dispatched: 0` the whole
 time, indistinguishable from a stall. The tasks still running are `in_flight` (`{task_id, dispatched_at}`,
 patched by `_begin_sweep` at dispatch time so it is visible before the task finishes),
-rendered as `in flight: <task_id> (since <duration>)` (F10, 2026-09-16). And `write_batch_scheduler._mirror_status` writes the
+rendered as `in flight: <task_id> (since <duration>)` (F10, 2026-09-16). And `write_reports.WriteReports.mirror_status` writes the
 phase-level `state` (`complete` / `subagents_failed` /
 `running`) beside the run record, as the read phases do, instead of leaving
 `phase state: (none)`.
@@ -603,6 +603,6 @@ stamps `write_tasks.json` with `inputs.tasks_sha256` for the plan's external
 
 Its `subagent_batch_report.json`'s own `task_file` field used to read `null` on
 the write path — `run_task_file` fills it from the argument the read path is handed, and
-`WriteBatchScheduler` takes no such argument — so `_write_report` now names it directly:
+`WriteBatchScheduler` takes no such argument — so `WriteReports.write_report` now names it directly:
 `write_task_file_for_phase` always persists the same materialized list at `{phase_dir}/write_tasks.json`, which
 every write orchestrator passes as the scheduler's own `phase_dir` too (N9). 2026-09-16.

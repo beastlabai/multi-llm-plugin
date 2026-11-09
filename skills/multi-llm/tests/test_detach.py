@@ -2306,7 +2306,7 @@ class TestStatusSurface:
         """F10: the mirror's `dispatched` counter used to count FINISHED
         tasks — for an 11-minute single-task batch it read `dispatched: 0`
         the whole time, indistinguishable from a stall. `in_flight`
-        (`write_batch_scheduler._begin_sweep`/`_mirror_status`) names the
+        (`write_batch_scheduler._begin_sweep`/`WriteReports.mirror_status`) names the
         task that is still running and how long it has been running for."""
         import re
         from datetime import datetime, timedelta

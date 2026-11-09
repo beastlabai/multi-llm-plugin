@@ -1855,5 +1855,5 @@ class TestTheNativeImplementEmitMaterializesTheWriteTaskFile:
         )
         for task in document["batches"]:
             text, _task, _info = write_prompt.render_write_prompt(phase_dir, task["task_id"])
-            assert text == scheduler._with_result_contract(
-                task, scheduler.dispatched_prompt(task))
+            assert text == scheduler._prompts.with_result_contract(
+                task, scheduler._prompts.dispatched_prompt(task))

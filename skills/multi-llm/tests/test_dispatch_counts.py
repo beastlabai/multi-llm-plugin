@@ -700,7 +700,7 @@ def _status_progress(repo, capsys) -> tuple:
 
 class TestEverySurfaceCountsTheSameTasks:
     """Fix round 19 (review of round 18, #1): the executor's `[ETA]` line left
-    out a task a check holds (`_eta_total`) while the run mirror kept it, so
+    out a task a check holds (`EtaLines.total`) while the run mirror kept it, so
     one run read "batch 6/6 … ALL BATCHES COMPLETE" in its log and
     "implement 6/7 batches ok, 5/7 items applied" on `status --view run` and
     the OpenCode poll line."""

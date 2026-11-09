@@ -1411,10 +1411,10 @@ def test_a_kept_file_a_first_census_saw_is_no_batch_write(env, staging, monkeypa
     monkeypatch.setattr(os, "replace", real)
     _kept_for_the_user(state)
     scheduler, b_snapshot = opened["B"]
-    assert relative in scheduler._census_before["T-B"]  # seen before its record
+    assert relative in scheduler._sweep._census_before["T-B"]  # seen before its record
     c_scheduler, c_snapshot = _batch(env, "T-C", ["plans/p.md", "src/a.py"])
 
-    assert relative not in scheduler._moved_since_dispatch("T-B", b_snapshot)
+    assert relative not in scheduler._sweep.moved_since_dispatch("T-B", b_snapshot)
     observed = scheduler._undeclared_writes("T-B", b_snapshot)
     assert observed.observed
     assert relative not in observed.paths and relative not in observed.restorable

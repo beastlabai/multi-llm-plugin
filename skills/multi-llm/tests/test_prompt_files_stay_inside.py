@@ -54,7 +54,7 @@ def _swap_for_link(path: Path, target: Path) -> Path:
 
 
 # ===========================================================================
-# The executor leg: WriteBatchScheduler._keep_dispatched_prompt
+# The executor leg: BatchPromptBuilder.keep_dispatched_prompt
 # ===========================================================================
 
 class TestTheExecutorLeg:
@@ -70,7 +70,7 @@ class TestTheExecutorLeg:
         scheduler = env.scheduler([env.apply_task(0)], log=lines.append)
         _swap_for_link(env.phase_dir, outside)
 
-        scheduler._keep_dispatched_prompt("apply-batch-0", 1, "PROMPT", "PROMPT")
+        scheduler._prompts.keep_dispatched_prompt("apply-batch-0", 1, "PROMPT", "PROMPT")
 
         assert list(outside.iterdir()) == []
         assert any("could not keep apply-batch-0's dispatched prompt" in line
@@ -87,7 +87,7 @@ class TestTheExecutorLeg:
         lines = []
         scheduler = env.scheduler([env.apply_task(0)], log=lines.append)
 
-        scheduler._keep_dispatched_prompt("apply-batch-0", 1, "PROMPT", "PROMPT")
+        scheduler._prompts.keep_dispatched_prompt("apply-batch-0", 1, "PROMPT", "PROMPT")
 
         assert list(outside.iterdir()) == []
         assert any("not inside the repository" in line for line in lines), lines
@@ -100,7 +100,7 @@ class TestTheExecutorLeg:
         os.rename(env.phase_dir, env.phase_dir.with_name("aside"))
         env.phase_dir.mkdir()
 
-        scheduler._keep_dispatched_prompt("apply-batch-0", 1, "PROMPT", "PROMPT")
+        scheduler._prompts.keep_dispatched_prompt("apply-batch-0", 1, "PROMPT", "PROMPT")
 
         assert not (env.phase_dir / "prompts").exists()
         assert any("no longer the folder this run started with" in line
@@ -125,7 +125,7 @@ class TestTheExecutorLeg:
         lines = []
         scheduler = env.scheduler([env.apply_task(0)], log=lines.append)
         monkeypatch.setattr(os, "open", swap_then_open)
-        scheduler._keep_dispatched_prompt("apply-batch-0", 1, "PROMPT", "PROMPT")
+        scheduler._prompts.keep_dispatched_prompt("apply-batch-0", 1, "PROMPT", "PROMPT")
         monkeypatch.undo()
 
         assert swapped, "the swap ran"
@@ -146,8 +146,8 @@ class TestTheExecutorLeg:
         os.link(victim, prompts / "apply-batch-1.prompt.txt")
         scheduler = env.scheduler([env.apply_task(0)])
 
-        scheduler._keep_dispatched_prompt("apply-batch-0", 1, "P0", "P0")
-        scheduler._keep_dispatched_prompt("apply-batch-1", 1, "P1", "P1")
+        scheduler._prompts.keep_dispatched_prompt("apply-batch-0", 1, "P0", "P0")
+        scheduler._prompts.keep_dispatched_prompt("apply-batch-1", 1, "P1", "P1")
 
         assert victim.read_text() == "secret"
         assert not (prompts / "apply-batch-0.prompt.txt").is_symlink()
@@ -470,8 +470,8 @@ class TestOneTaskPerWarning:
         scheduler = env.scheduler([env.apply_task(0)], log=lines.append)
 
         for task_id in ("T003", "T004", "T005"):
-            scheduler._keep_dispatched_prompt(task_id, 1, f"P-{task_id}", f"P-{task_id}")
-        scheduler._keep_dispatched_prompt("T005", 1, "P-T005", "P-T005")
+            scheduler._prompts.keep_dispatched_prompt(task_id, 1, f"P-{task_id}", f"P-{task_id}")
+        scheduler._prompts.keep_dispatched_prompt("T005", 1, "P-T005", "P-T005")
 
         assert (prompts / "T003.prompt.txt").read_text() == "P-T003"
         assert (prompts / "T004.prompt.txt").read_text() == "P-T004"

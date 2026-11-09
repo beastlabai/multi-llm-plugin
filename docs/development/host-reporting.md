@@ -162,7 +162,7 @@ single-target apply phase names its file: the mirror's `applied_to`
 is one rule** (fix round 28, live run 12 #5/#7/#10/#11).
 
 The executor records beside a stop's `headline` the same line without its
-`--human-task` answers and bare resume (`stop.headline_beside_section`, `WriteBatchScheduler._set_stop_headline`; only
+`--human-task` answers and bare resume (`stop.headline_beside_section`, `StopAccount.set_stop_headline`; only
 when every answer it leaves out is one of the stop's `answers` or its own
 `resume_flags`, `answers_cover`; a manual-gate stop's is what stopped and why, handed
 back only while the section's resume is those flags, and the native `[MANUAL_GATE]` line says

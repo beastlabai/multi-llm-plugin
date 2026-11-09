@@ -55,7 +55,7 @@ through `StateManager.implementation_check_findings`.
 
 Fix round 11: its transitive dependents are not run (`SchedulerResult.blocked_by_check`, each
 `pending` with `blocked_by_check_reason`), and once every other task ran implement ends
-needs-human with a `check-findings` stop record (`_record_check_block`, summary.md's
+needs-human with a `check-findings` stop record (`StopAccount.record_check_block`, summary.md's
 `## Not Run: Upstream Check Reported Problems`, `blocked_by_check` in the report and mirror); a check with findings on
 record, completed and not accepted (`rerunnable_checks`), is materialized again on
 `--resume`, answered with `--human-task <id>=done|skip|retry`, and re-dispatched on retry or when the
@@ -95,7 +95,7 @@ and "allow it" resumed into the same refusal, an allow miss says to add the file
 `allow`, and a file outside the repository, named as the task declared it, gets the
 skip alone, `policy_outside_note`), and every stop that leaves tasks held by a check with findings
 appends that check's `done|skip|retry` answers and one combined resume command
-(`_held_by_checks_lines`, `user_commands["answers"]`; `stop.blocked`/`check_task_ids` and
+(`StopAccount.held_by_checks_lines`, `user_commands["answers"]`; `stop.blocked`/`check_task_ids` and
 the headline).
 
 On the native leg `util write-prompt` refuses a task the policy denies (`[WRITE_PROMPT_REFUSED]`,
@@ -280,7 +280,7 @@ batch can edit `tasks.md`), and only a plain check command, `is_check_command`'s
 strict allowlist: no shell operator, substitution or redirection, a known runner form, no
 deploy/migrate/seed/release/watch/serve/`--fix`-style word; `go test ./...` is
 kept) and both legs bind `known_checks_section` after the code batch's `## Checks you ran` at
-dispatch (`with_result_contract(checks_section=…)`: the scheduler's `_known_checks_section`, `util write-prompt`),
+dispatch (`with_result_contract(checks_section=…)`: the scheduler's `BatchPromptBuilder.known_checks_section`, `util write-prompt`),
 apply-code-fixes only, nothing when none is known: run each after the edits in its own sandbox,
 never as root, skipping one it judges unsafe as `not run`, report each in
 `check.listed` as `passed`/`failed`/`not run` (with

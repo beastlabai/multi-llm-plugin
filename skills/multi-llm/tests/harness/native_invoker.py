@@ -178,7 +178,7 @@ def native_dispatcher(
                 snapshot_dir=snapshot.directory,
                 snapshot_before={e.relative: e.sha256 for e in snapshot.entries},
             )
-            scheduler._keep_dispatched_prompt(task_id, attempt, sent, prompt)
+            scheduler._prompts.keep_dispatched_prompt(task_id, attempt, sent, prompt)
             data = respond(task, sent)
             if isinstance(data, str):
                 extracted = extract_json_from_text(data, prefer_arrays=False)

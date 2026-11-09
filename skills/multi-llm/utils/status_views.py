@@ -38,7 +38,7 @@ from .output_handler import (
 #: owns the first pair and names them in its own docstring: ``complete``, and
 #: the host-driven ``validation_pending`` early return where the process exits
 #: and the agent's own subagents take over. ``stopped`` is the write
-#: scheduler's mirror on a stop (``_mirror_status``), which a foreground
+#: scheduler's mirror on a stop (``WriteReports.mirror_status``), which a foreground
 #: executor run that stopped read as "running in foreground" (fix round 22).
 #: Anything else means the phase is still working.
 CHECKPOINT_TERMINAL_STEPS = frozenset({"complete", "validation_pending", "stopped"})

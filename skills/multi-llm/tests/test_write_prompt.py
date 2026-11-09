@@ -55,9 +55,9 @@ def _recorded(out, phase_dir, task_id, capsys):
 
 def _executor_rendering(kind, out, phase, task):
     """What `WriteBatchScheduler` dispatches for *task*: the two seams, as its
-    dispatch site composes them (`_with_result_contract(dispatched_prompt)`)."""
+    dispatch site composes them (`BatchPromptBuilder.with_result_contract(dispatched_prompt)`)."""
     scheduler = make_scheduler(out, kind=kind, phase=phase)
-    return scheduler._with_result_contract(task, scheduler.dispatched_prompt(task))
+    return scheduler._prompts.with_result_contract(task, scheduler._prompts.dispatched_prompt(task))
 
 
 class TestTheTwoInvokersRenderTheSameBytes:
@@ -567,7 +567,7 @@ class TestAnAcceptedCheckIsNamedOnBothLegs:
     def _executor(self, out, task, tasks, state):
         scheduler = make_scheduler(
             out, kind="implement", phase="implement", state=state, tasks=tasks)
-        return scheduler._with_result_contract(task, scheduler.dispatched_prompt(task))
+        return scheduler._prompts.with_result_contract(task, scheduler._prompts.dispatched_prompt(task))
 
     ACCEPTED = (
         "accepted — you answered --human-task T002=done after its check "

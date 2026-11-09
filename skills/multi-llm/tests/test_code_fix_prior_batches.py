@@ -207,8 +207,8 @@ def test_both_legs_bind_the_same_section(tmp_path):
         out, kind="apply_code_fixes", phase="apply-code-fixes", phase_dir=phase_dir,
         state=json.loads((out / "state.json").read_text()), tasks=tasks, plan_file=plan,
     )
-    executor = scheduler._with_result_contract(
-        tasks[1], scheduler.dispatched_prompt(tasks[1]))
+    executor = scheduler._prompts.with_result_contract(
+        tasks[1], scheduler._prompts.dispatched_prompt(tasks[1]))
     assert native == executor
     block = _block(native)
     assert "Cycle 2: camera aspect." in block and "Cycle 1" not in block
@@ -378,8 +378,8 @@ def test_both_legs_keep_this_runs_batches_after_a_phase_closed_over_a_failure(tm
         out, kind="apply_code_fixes", phase="apply-code-fixes", phase_dir=phase_dir,
         state=json.loads((out / "state.json").read_text()), tasks=tasks, plan_file=plan,
     )
-    executor = scheduler._with_result_contract(
-        tasks[2], scheduler.dispatched_prompt(tasks[2]))
+    executor = scheduler._prompts.with_result_contract(
+        tasks[2], scheduler._prompts.dispatched_prompt(tasks[2]))
     assert native == executor
     block = _block(native)
     assert "Fix batch 0 applied (run 1)." in block and "Fix batch 1 applied (run 1)." in block

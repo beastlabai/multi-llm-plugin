@@ -493,7 +493,7 @@ def _build_acceptance_criteria_section(criteria: List[str]) -> str:
 #: whole job *is* the browser/manual work the framing forbids — a materialized
 #: T014 once read both in the same file. (The process-safety rules the
 #: template's ``## Constraints`` block once carried live only in
-#: ``_with_result_contract`` now, appended per dispatch and never rendered
+#: ``BatchPromptBuilder.with_result_contract`` now, appended per dispatch and never rendered
 #: for a human task.)
 #: Nothing dispatches a human task (``executor_role == "human"`` routes
 #: around every invoker), so there is no runner to instruct: the rendered

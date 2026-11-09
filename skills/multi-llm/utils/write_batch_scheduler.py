@@ -34,10 +34,13 @@ modules below it, lowest first: ``commit_write_guard``, ``check_records``,
 ``verification_lines``, ``human_task_plan``, ``stop_answers``, ``batch_prompt``
 and ``write_outcomes`` (docs/development/write-scheduler.md#where-the-schedulers-helpers-live).
 A batch's records are read together, and its verdict stamped, through
-``batch_ledger``. The scheduler composes two collaborators over one
+``batch_ledger``. The scheduler composes five collaborators over one
 ``write_context.RunContext``: ``write_verify.VerifyStep`` (the repository's own
-check and the tracked-files census) and ``write_sweep.ContainmentSweep`` (the
-post-run containment sweep and its rollback store).
+check and the tracked-files census), ``write_sweep.ContainmentSweep`` (the
+post-run containment sweep and its rollback store), ``write_eta.EtaLines`` (the
+``[ETA]`` lines), ``write_reports.WriteReports`` (the mirror, the report, the
+summary) and ``write_stop.StopAccount`` (how a stop is worded and recorded).
+What a run refused before dispatch is on its result (``result.refusals``).
 Every name that moved there is still readable here (:data:`_MOVED`), **for
 reading only**: ``write_batch_scheduler.X`` and ``from .write_batch_scheduler
 import X`` return the owner's current object, but a patch or assignment here
@@ -62,13 +65,12 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from . import git_utils as _git_utils
 from . import known_checks as _known_checks
 from . import landlock_dispatch as _landlock
 from . import metrics as _metrics
-from . import prompt_files as _prompt_files
 from . import prior_changes as _prior_changes
 from . import process_control as _process_control
 from . import subagent_executor as _executor
@@ -76,12 +78,17 @@ from . import commit_write_guard as _commit_write_guard
 from . import check_records as _check_records
 from . import verification_lines as _verification_lines
 from . import human_task_plan as _human_task_plan
-from . import stop_answers as _stop_answers
+from . import stop_answers as _stop_answers  # noqa: F401 - `_MOVED` reads it
 from . import batch_prompt as _batch_prompt
 from . import write_outcomes as _write_outcomes
 from . import write_context as _write_context
 from . import write_verify as _write_verify
 from . import write_sweep as _write_sweep
+from . import write_eta as _write_eta
+from . import write_reports as _write_reports
+from . import write_stop as _write_stop
+from . import batch_prompt_builder as _batch_prompt_builder
+from .cli_common import EXIT_NEEDS_HUMAN, EXIT_OK
 from .batch_ledger import (
     outcome_from_verdict,
     read_verdict_checks,
@@ -91,11 +98,9 @@ from .task_ledger import (
     ACCEPTED_REASON_PREFIX,
     ACCEPTED_WITH_FINDINGS_MARK,
     ANSWERED_SKIP_PREFIX,
-    COMPLETED_BY_HAND_LABEL,
     COMPLETED_MANUAL_REASON,
     KEPT_WITH_FINDINGS_LABEL,
     USER_DECLINED_REASON,
-    is_declined_reason,
 )
 from .text_clip import (
     clip, with_closing_mark,
@@ -118,14 +123,11 @@ from .subagent_executor import (
     OUTPUT_NAME_PATTERN_BY_KIND,
     STATUS_BATCH_FAILED,
     STATUS_OK,
-    STATUS_PARTIAL,
     STATUS_REJECTED,
     WRITE_APPLIED,
     WRITE_CLEAN_FAILURE,
     WRITE_NO_OP,
-    WRITE_PARTIAL,
     WRITE_POLICY_VIOLATION,
-    BatchReport,
     ExecutorError,
     ResultRejected,
     RunnerRejected,
@@ -138,8 +140,6 @@ from .subagent_executor import (
     profile_for_kind,
     resolve_output_target,
     resolve_task_runner,
-    row_outcome_label,
-    batch_check_could_not_run,
     batch_check_findings,
     batch_check_note,
     batch_check_words,
@@ -171,13 +171,9 @@ from .state_manager import (
     predates_review,
     stamp_or_mtime,
 )
-from .write_phase_bridge import WRITE_TASK_FILENAME
 from .write_safety import (
     CONTEXT_PLAN_RULE,
     PRE_BATCH_DIRNAME,
-    policy_allow_clause,
-    policy_outside_note,
-    policy_skip_clause,
     DRY_RUN_FILENAME,
     AuditLog,
     PolicyViolation,
@@ -470,8 +466,10 @@ _MOVED: Dict[str, Tuple[str, ...]] = {
         "resume_why",
     ),
     "write_context": (
+        "Refusals",
         "RunContext",
         "_ID_KEYED_WRITE_KINDS",
+        "refusals_of",
     ),
     "write_verify": (
         "VERIFY_TAIL_CHARS",
@@ -487,6 +485,19 @@ _MOVED: Dict[str, Tuple[str, ...]] = {
         "SWEEP_PRUNED_DIR_NAMES",
         "SWEEP_RETAIN_MAX_BYTES",
         "UndeclaredWrites",
+    ),
+    "write_eta": (
+        "EtaLines",
+    ),
+    "write_reports": (
+        "WRITE_BATCH_REPORT_FILENAME",
+        "WriteReports",
+    ),
+    "write_stop": (
+        "StopAccount",
+    ),
+    "batch_prompt_builder": (
+        "BatchPromptBuilder",
     ),
 }
 _MOVED_TO: Dict[str, str] = {
@@ -508,11 +519,6 @@ def __getattr__(name: str) -> Any:
 def __dir__() -> List[str]:
     """This module's own names and the moved ones it re-exports."""
     return sorted({*globals(), *_MOVED_TO})
-
-#: The scheduler's own report, beside the executor's per-dispatch one. A separate
-#: file because it records the *loop*: batch order, the stopping batch, the skip
-#: set, the override records and whether finalization ran.
-WRITE_BATCH_REPORT_FILENAME = "write_batch_report.json"
 
 #: The D2g inputs binding for the results already on disk, kept beside them.
 #: A **leading dot** on purpose: reaggregation globs ``{phase_dir}/*.json`` and
@@ -570,9 +576,6 @@ def _verify_timeout_note(
             f"({who}) could not be confirmed stopped: {reason}, so it may still be "
             f"running — verdict {verdict})")
 
-
-EXIT_OK = 0
-EXIT_NEEDS_HUMAN = 3
 
 #: The review each apply kind applies — the first entry of
 #: ``check_workflow_prerequisites.PHASE_PREREQUISITES`` for that phase, which
@@ -734,7 +737,7 @@ class SchedulerResult:
     #: ``task_id -> reason`` for every task of this run that was never
     #: dispatched because the loop stopped first (racing re-run 3, 2026-10-05:
     #: two such tasks were absent from the summary, the counts and the
-    #: message). Set by ``_record_stop``; empty on a run that did not stop.
+    #: message). Set by ``StopAccount.record_stop``; empty on a run that did not stop.
     not_run: Dict[str, str] = field(default_factory=dict)
     #: The stop, as one record: which task, what failed, who was not run and
     #: the way forward — what the summary, the status mirror and the result
@@ -750,6 +753,10 @@ class SchedulerResult:
     #: They must still explain a hold, even after switching from the native
     #: leg, which writes no executor report rows.
     recorded_check_findings: Dict[str, List[str]] = field(default_factory=dict)
+    #: The tasks this run refused before any runner started, and why
+    #: (``write_context.Refusals``): read by the stop, the ``[ETA]`` lines,
+    #: the summary and the mirror. Never in the report (``to_dict``).
+    refusals: _write_context.Refusals = field(default_factory=_write_context.Refusals)
     #: Fix round 14: the line saying nothing ran the repository's tests,
     #: when a code phase finished with no ``driver.verify_command`` set
     #: (:func:`unverified_line`); ``None`` when one ran, or none was owed.
@@ -1079,14 +1086,23 @@ class WriteBatchScheduler:
             policy=self.policy, audit=self.audit, log=self._late("log"),
             summary_file=self.summary_file, dry_run=self.dry_run,
         )
-        #: Fix round 17: the phase dir the dispatched prompts are kept in,
-        #: pinned (``prompt_files.pin_phase_dir``) before any batch of this
-        #: run can replace it — a jailed repo-wide batch can write the phase
-        #: dir, and this process is not jailed. ``None`` until it exists.
-        self._prompt_pin: Optional[_prompt_files.PhasePin] = None
-        self._prompt_pin_lock = threading.Lock()
+        #: ``task id -> the known check commands its prompt listed``
+        #: (`BatchPromptBuilder.known_checks_section`), which its reply's
+        #: ``listed`` is read against (``_listed_outcomes``).
+        self._told_checks: Dict[str, List[str]] = {}
+        #: The prompt each dispatch is sent and the copy kept of it
+        #: (`batch_prompt_builder.BatchPromptBuilder`). The phase dir the
+        #: copies go in is pinned now, before any batch of this run can
+        #: replace it (fix round 17).
+        self._prompts = _batch_prompt_builder.BatchPromptBuilder(
+            self._ctx,
+            plan_file=self.plan_file,
+            scope_policy=self.scope_policy,
+            scope_baseline_id=self.scope_baseline_id,
+            told_checks=self._told_checks,
+        )
         try:
-            self._pinned_phase_dir()
+            self._prompts.pinned_phase_dir()
         except OSError:
             pass  # named on the first prompt kept, with that task's id
         #: Whether `_decide_rollback_storage` ran for the admitted group.
@@ -1121,57 +1137,32 @@ class WriteBatchScheduler:
             finalize=self.finalize,
             task_by_id=self._late("_task_by_id"),
             unverified_text=self._late("_unverified_text"),
-            set_stop_headline=self._late("_set_stop_headline"),
+            set_stop_headline=self._late("_stop.set_stop_headline"),
             run_verify_command=self._late("_run_verify_command"),
         )
-        #: Dispatched-or-skipped tasks finished so far, the `[ETA]` line's
-        #: numerator (F3, 2026-09-17). It counts TASKS because the denominator
-        #: beside it does — `len(self.tasks) - human skips`, the same total
-        #: `_mirror_status` publishes — and because an `implement` batch is a
-        #: dependency level with k tasks in it: `len(batches_dispatched) + 1`
-        #: repeated the same ordinal for every member of such a batch, so a
-        #: parallelizable plan could never reach `N/N` or print
-        #: `ALL BATCHES COMPLETE`. Read and incremented under `_effects_lock`
-        #: because a disjoint group finishes on several threads. A set of
-        #: task ids since fix round 20: the numerator is the finished tasks
-        #: the total counts (:meth:`_eta_progress`).
-        self._eta_finished: set = set()
-        #: Implement only: the tasks this run will dispatch, from the walk
-        #: the `Organized into …` line prints (:meth:`_dispatch_walk`, fix
-        #: round 20, live run 8 #1: the first run's `[ETA]` total still
-        #: counted T005, refused before dispatch, and T006 after it, so the
-        #: lines read 1/7 … 4/6 under "5 task(s) to dispatch"). `None`: no
-        #: walk (an apply phase), and the total counts every task.
-        self._eta_scope: Optional[set] = None
-        #: Whether this run stamped an `[ETA]` baseline (`_metrics_start`).
-        self._eta_started = False
-        #: Fix round 21 (review of round 20, #1): whether this run printed an
-        #: `[ETA]` line, and whether its one closing line is out
-        #: (:meth:`_eta_close`, or `phase complete` from `_metrics_finish`).
-        self._eta_printed = False
-        self._eta_closed = False
-        #: The tasks a check this run recorded with findings holds back, out
-        #: of the `[ETA]` total from that check's own line on (fix round 21),
-        #: before `_block_dependents_of_checks` holds them for the loop. Fix
-        #: round 22: each with its check, which the closing line names.
-        self._eta_held: Dict[str, str] = {}
-        #: Fix round 22 (live run 9 #1): the tasks this run dispatched that
-        #: failed, and the tasks the dispatch walk foresaw it would not run
-        #: (`{task id: how}`, `metrics.left_out_tail`'s words) — a task the
-        #: write policy refuses, the tasks after a stop, a task a check on
-        #: record holds. Together with what the run met on the way, they say
-        #: whether the last `[ETA]` line may read "complete", and what the
-        #: closing line names (:meth:`_eta_left_out`).
-        self._eta_failed: set = set()
-        self._eta_unrun: set = set()
-        self._eta_walk_left: Dict[str, str] = {}
-        #: Fix round 24 (live run 10 #7): the tasks the last `[ETA]` line
-        #: counted, so the next line whose total dropped names what left it
-        #: (:meth:`_eta_dropped`). `None` before the baseline.
-        self._eta_line_ids: Optional[set] = None
-        #: The result the `[ETA]` lines count over, for an ending that has no
-        #: other hold on it (an exception out of `_run`, an abort's signal).
-        self._eta_result: Optional["SchedulerResult"] = None
+        #: How a stop is worded and recorded on the result
+        #: (`write_stop.StopAccount`), stateless; its one `state.json` write
+        #: takes `_effects_lock` above.
+        self._stop = _write_stop.StopAccount(
+            self._ctx,
+            effects_lock=self._effects_lock,
+            user_commands=self.user_commands,
+            task_by_id=self._late("_task_by_id"),
+            dependents_of=self._late("_dependents_of"),
+            keep_partial_clause=self._late("_keep_partial_clause"),
+            unapplied_words=self._late("_unapplied_words"),
+            restamp_check_trees=self._late("_restamp_check_trees"),
+            tree_fingerprint=self._late("_tree_fingerprint"),
+            started_a_runner=self._late("_started_a_runner"),
+        )
+        #: The run's `[ETA]` counts and lines (`write_eta.EtaLines`): the
+        #: dispatch walk sets what it will count, the batch bookkeeping marks
+        #: each task under `_effects_lock`, and every ending closes them once.
+        self._eta = _write_eta.EtaLines(
+            self._ctx,
+            ran_out_of_time=self._late("_stop.ran_out_of_time"),
+            started_a_runner=self._late("_started_a_runner"),
+        )
         #: Task ids for which a terminal (`completed`) audit line has been
         #: written, so `_audit_terminal` can close out a dispatch that never
         #: reached `_classify` without ever double-recording one that did.
@@ -1216,33 +1207,51 @@ class WriteBatchScheduler:
         self._replaced_targets: set = set()
         #: Batch indexes whose stray-writes-only line was already printed.
         self._rung_noticed: set = set()
-        #: Tasks this run refused before any runner started (the write
-        #: policy, the grant, the snapshot or the census refused them), so
-        #: the stop says nothing was dispatched (fix round 13).
-        self._refused_before_dispatch: set = set()
-        #: The paths ``driver.write_paths`` refused, per task refused for it
-        #: before dispatch: what its way forward names (fix round 20).
-        self._refused_policy_paths: Dict[str, List[str]] = {}
-        #: Each one's rule (``write_safety.PolicyHit``), which its way forward
-        #: is worded from (fix round 21: a deny hit names the deny rule).
-        self._refused_policy_hits: Dict[str, List[Any]] = {}
-        #: ``task id -> the known check commands its prompt listed``
-        #: (:meth:`_known_checks_section`), which its reply's ``listed`` is
-        #: read against, and what that reading gave (``_listed_outcomes``).
-        self._told_checks: Dict[str, List[str]] = {}
+        #: What reading each reply's ``listed`` against ``_told_checks`` gave.
         self._listed_outcomes: Dict[str, Any] = {}
         #: ``task id -> its outcomes so far`` (:meth:`_remember_outcome`).
         self._recorded_outcomes: Dict[str, List[TaskOutcome]] = {}
-        #: The ``(task id, leftover entry)`` pairs already warned about
-        #: (:meth:`_warn_prompt_keep`).
-        self._prompt_keep_warnings: Set[Tuple[str, Optional[str]]] = set()
         #: Whether this run stamped implement's start (:meth:`_mark_implement_started`).
         self._implement_started_marked = False
+        #: The run's mirror, report, summary and plan reference
+        #: (`write_reports.WriteReports`), read-only over the result; built
+        #: last, over the records above that it reads.
+        self._reports = _write_reports.WriteReports(
+            self._ctx,
+            plan_file=self.plan_file,
+            summary_file_relative=self.summary_file_relative,
+            write_target=self.write_target,
+            invoker=self.invoker,
+            host_max=self.host_max,
+            user_commands=self.user_commands,
+            sweep=self._sweep,
+            eta=self._eta,
+            runner_versions=self._runner_versions,
+            dispatch_rungs=self._dispatch_rungs,
+            resume_answered_ids=self._late("_resume_answered_ids"),
+            resume_kept_rows=self._late("_resume_kept_rows"),
+            ceiling_record=self._late("_ceiling_record"),
+            check_findings_fate=self._late("_check_findings_fate"),
+            task_by_id=self._late("_task_by_id"),
+            started_a_runner=self._late("_started_a_runner"),
+            accounting=self._late("_stop.accounting"),
+            manual_gates=self._late("_stop.manual_gates"),
+        )
 
     def _late(self, name: str) -> Callable[..., Any]:
         """``self.<name>(...)`` as it is bound when called, for a collaborator
-        to call back: an instance patch of *name* applies to it too."""
-        return lambda *args, **kwargs: getattr(self, name)(*args, **kwargs)
+        to call back: an instance patch of *name* applies to it too. A dotted
+        *name* (``"_stop.accounting"``) reaches a collaborator's method the
+        same way, each part looked up at each call."""
+        parts = name.split(".")
+
+        def call(*args: Any, **kwargs: Any) -> Any:
+            target: Any = self
+            for part in parts:
+                target = getattr(target, part)
+            return target(*args, **kwargs)
+
+        return call
 
     # -- the write grant (plan step 3, 2026-09-30) ----------------------
 
@@ -1731,59 +1740,6 @@ class WriteBatchScheduler:
 
     # -- late prior-changes binding (D3n) -------------------------------
 
-    def dispatched_prompt(self, task: Dict[str, Any]) -> str:
-        """The prompt that actually goes to the runner, bound *now*.
-
-        :func:`bind_prior_changes` over this phase's log; see it for the
-        contract. Kept as a method so the dispatch site reads as before.
-        An implement task gets the note about the checks upstream of it
-        whose findings the user accepted (fix round 14), read from the
-        state as it is at dispatch, as ``util write-prompt`` reads it.
-        """
-        accepted: List[Tuple[str, str, List[str]]] = []
-        state = self.state
-        if self.kind == "implement" and state is not None:
-            accepted = _check_records.accepted_upstream_checks(
-                self.tasks, str(task.get("task_id") or ""), state,
-            )
-        return _batch_prompt.bind_prior_changes(
-            task, output_dir=self.output_dir, phase=self.phase,
-            accepted_checks=accepted, state=state,
-        )
-
-    def _scope_refusal(self, task: Dict[str, Any]) -> Optional[str]:
-        """Why an apply task must not dispatch under the effective scope
-        policy (``scope_apply.stale_task_refusal``), else ``None``."""
-        if self.kind not in APPLY_WRITE_KINDS:
-            return None
-        scope = _batch_prompt._scope_apply()
-        if self.scope_policy is not None:
-            policy, baseline = self.scope_policy, self.scope_baseline_id
-        else:
-            state = getattr(self.state, "state", None)
-            if not isinstance(state, dict):
-                state = _batch_prompt._state_on_disk(self.output_dir)
-            policy, baseline = scope.effective_from_state(
-                state if isinstance(state, dict) else {}, self.phase)
-        return scope.stale_task_refusal(task, policy, baseline)
-
-    def _with_result_contract(self, task: Dict[str, Any], prompt: str) -> str:
-        """Append the write-batch result contract (:func:`with_result_contract`),
-        with an apply-code-fixes batch's known checks (fix round 20)."""
-        return _batch_prompt.with_result_contract(
-            self.kind, task, prompt, checks_section=self._known_checks_section(task),
-        )
-
-    def _known_checks(self) -> List[Tuple[str, str]]:
-        """The repository's known check commands
-        (:func:`known_checks.known_check_commands`), read now from the state
-        this run holds (else the plan dir's ``state.json``), as ``util
-        write-prompt`` reads them on the native leg. Never run here."""
-        return _known_checks.known_check_commands(
-            self.output_dir, plan_file=self.plan_file,
-            repo_root=self.repo_root, state=self.state,
-        )
-
     def _known_checks_report(
         self, max_chars: Optional[int] = None,
     ) -> Optional[Tuple[str, bool]]:
@@ -1798,7 +1754,7 @@ class WriteBatchScheduler:
             if state is None:
                 state = _known_checks.read_state(self.output_dir)
             return _known_checks.checks_report(
-                self._known_checks(), state, self.tasks,
+                self._prompts.known_checks(), state, self.tasks,
                 **({} if max_chars is None else {"max_chars": max_chars}),
             )
         except Exception:  # noqa: BLE001 - advisory
@@ -1839,129 +1795,6 @@ class WriteBatchScheduler:
         except Exception:  # noqa: BLE001 - advisory: the line still stands
             return None
 
-    def _known_checks_section(self, task: Dict[str, Any]) -> str:
-        """Fix round 20 (live run 8, Codex racing 08): an apply-code-fixes
-        batch is told the repository's known check commands, to run after its
-        edits, and which earlier batch of the run reported a failing check.
-        ``""`` for every other kind. The commands told to each batch are kept
-        (``_told_checks``), so its reply's ``listed`` is read against them."""
-        if self.kind != "apply_code_fixes":
-            return ""
-        task_id = str(task.get("task_id") or "")
-        try:
-            checks = self._known_checks()
-            state = self.state
-            earlier = _known_checks.earlier_batch_check_failures(
-                state if state is not None else _known_checks.read_state(self.output_dir),
-                self.tasks, task_id,
-            )
-        except Exception:  # noqa: BLE001 - advisory: the batch is still dispatched
-            checks, earlier = [], []
-        self._told_checks[task_id] = [command for command, _where in checks]
-        return _known_checks.known_checks_section(checks, earlier)
-
-    def _pinned_phase_dir(self) -> "_prompt_files.PhasePin":
-        """The phase dir as pinned for the prompt files (fix round 17): its
-        ``realpath`` inside the repository root and its identity, taken once
-        — at construction, or on the first prompt kept when the phase dir did
-        not exist yet. Raises ``OSError`` naming why it cannot be pinned."""
-        with self._prompt_pin_lock:
-            pin = self._prompt_pin
-            if pin is None:
-                pin = _prompt_files.pin_phase_dir(self.phase_dir, self.repo_root)
-                self._prompt_pin = pin
-            return pin
-
-    def _keep_dispatched_prompt(
-        self, task_id: str, attempt: int, sent: str, batch_prompt: str
-    ) -> None:
-        """Keep the prompt this attempt sends, beside the native leg's.
-
-        Run 6 (#10b): on the executor leg the prompt a task was dispatched
-        with was in no plan artifact — the audit line keeps its sha256 and
-        length only — so T007's prompt with "## Check findings the user
-        accepted" could not be audited on Codex at all, and on OpenCode only
-        from the host's session database. The native leg's ``util
-        write-prompt`` always wrote ``{phase}/prompts/<id>.prompt.txt``; this
-        writes the same file, the same bytes, just before the child starts.
-
-        * The batch's prompt **overwrites** the file on every dispatch, as a
-          ``--resume`` rebinds the native one: it is what the task was last
-          told, and the audit log's ``prompt_sha256`` on that ``dispatched``
-          line verifies it.
-        * An attempt that sends something else (a report re-ask, rule 9's
-          re-send) goes to ``<id>.attempt-<n>.prompt.txt`` instead, so the
-          batch's file is never replaced by a re-ask; the task's next first
-          attempt clears those, so none outlives the dispatch it belongs to.
-        * Never for a task refused before dispatch: the policy check and the
-          snapshot run first, so a task declaring a denied path leaves no
-          file. The text is the native file's, unredacted — plan and task
-          text, the prior-changes summaries, accepted check findings, all
-          already on disk in the phase and plan dirs — and it lies inside the
-          phase dir, which the containment sweep never attributes to a runner.
-
-        A jailed repo-wide batch can write the phase dir and this process is
-        not jailed, so nothing here follows a link (fix round 17: round 16
-        checked ``prompts`` once by path, which a phase dir replaced by a link
-        or a ``prompts`` swapped after the check still redirected outside the
-        repository): the phase dir is the one pinned before any batch ran,
-        reached from the repository root without following a link, and every
-        file is created, renamed and unlinked relative to the folder's own
-        descriptor (:mod:`utils.prompt_files`).
-
-        Best-effort: a write that fails never fails the dispatch, and warns
-        once for that task, naming it (fix round 17: one warning for the
-        whole run let a directory planted under one task's file name silence
-        every later task's failure). An earlier re-ask file that cannot be
-        removed is named and left; the batch's own prompt is still kept.
-        """
-        where = os.path.join(self.phase_dir, _batch_prompt.DISPATCHED_PROMPTS_SUBDIR)
-        try:
-            if not task_id or os.path.basename(task_id) != task_id or task_id in (
-                    ".", ".."):
-                raise OSError(f"{task_id!r} is not a file name")
-            with _prompt_files.PromptFolder.open(self._pinned_phase_dir()) as folder:
-                if sent == batch_prompt:
-                    name = _batch_prompt.dispatched_prompt_name(task_id)
-                    if attempt <= 1:
-                        head, tail = f"{task_id}.attempt-", ".prompt.txt"
-                        for entry in folder.names():
-                            if not (entry.startswith(head) and entry.endswith(tail)
-                                    and entry[len(head):-len(tail)].isdigit()):
-                                continue
-                            try:
-                                folder.remove(entry)
-                            except OSError as exc:
-                                self._warn_prompt_keep(
-                                    task_id, entry,
-                                    f"[write-subagents] could not remove "
-                                    f"{task_id}'s earlier re-ask prompt {entry} "
-                                    f"under {where}: {exc}. It is not this "
-                                    f"dispatch's prompt; {task_id}'s own prompt "
-                                    f"is kept beside it.",
-                                )
-                else:
-                    name = _batch_prompt.dispatched_prompt_name(task_id, attempt)
-                folder.write(name, sent)
-        except (OSError, ValueError) as exc:
-            self._warn_prompt_keep(
-                task_id, None,
-                f"[write-subagents] could not keep {task_id}'s dispatched "
-                f"prompt under {where}: {exc}. The dispatch goes ahead; the "
-                f"audit log keeps its sha256.",
-            )
-
-    def _warn_prompt_keep(
-        self, task_id: str, entry: Optional[str], line: str
-    ) -> None:
-        """Log ``line`` once per task (and per leftover ``entry`` it names):
-        a retried dispatch that meets the same problem says nothing new,
-        another task always does."""
-        if (task_id, entry) in self._prompt_keep_warnings:
-            return
-        self._prompt_keep_warnings.add((task_id, entry))
-        self.log(line)
-
     # -- the loop -------------------------------------------------------
 
     def run(self) -> SchedulerResult:
@@ -1983,7 +1816,7 @@ class WriteBatchScheduler:
             # discovery refuses it; report a human-needed stop without reading
             # or writing through that replacement to produce more artifacts.
             # Fix round 21: an ending too, so the `[ETA]` lines say it.
-            self._eta_close(self._eta_result)
+            self._eta.close(self._eta.run_result)
             return SchedulerResult(
                 kind=self.kind, phase=self.phase, exit_code=EXIT_NEEDS_HUMAN,
                 messages=[f"Rollback safety refusal: {exc.message} The phase was not completed."],
@@ -1991,14 +1824,14 @@ class WriteBatchScheduler:
         except KeyboardInterrupt:
             # A foreground run's Ctrl-C (a detached worker's signal goes
             # through `metrics.aborted_eta_line` instead, fix round 21).
-            self._eta_close(self._eta_result, verb="interrupted")
+            self._eta.close(self._eta.run_result, verb="interrupted")
             raise
         except Exception:
-            self._eta_close(self._eta_result)
+            self._eta.close(self._eta.run_result)
             raise
         finally:
             # Whatever the ending, no abort may close lines a later run owns.
-            _metrics.close_eta_run(self._eta_abort_line)
+            _metrics.close_eta_run(self._eta.abort_line)
             try:
                 self._sweep.report_store_utilization()
                 self._sweep.discard_store()
@@ -2035,7 +1868,7 @@ class WriteBatchScheduler:
         # 14: the stop fixture's 01b counted the refused T005 as dispatched).
         refused = [
             o for o in result.outcomes
-            if not o.skipped and o.task_id in self._refused_before_dispatch
+            if not o.skipped and o.task_id in result.refusals.before_dispatch
         ]
         not_rerun = [o for o in result.outcomes if not o.skipped and o.not_rerun]
         dispatched = [
@@ -2122,8 +1955,8 @@ class WriteBatchScheduler:
         if not self.resume or self.dry_run:
             return []
         this_run = {o.task_id for o in outcomes if not o.skipped}
-        if self._eta_scope is not None:
-            this_run |= set(self._eta_scope)
+        if self._eta.scope is not None:
+            this_run |= set(self._eta.scope)
         answered = set(result.human_plan.accepted) | set(result.human_plan.completed)
         kept: List[Dict[str, Any]] = []
         seen: set = set()
@@ -2340,8 +2173,8 @@ class WriteBatchScheduler:
         # `applying` for the whole stretch rather than only from the first
         # *finished* task — the in-batch mirror runs after a dispatch returns,
         # and a long first batch is exactly when the step matters (F4).
-        self._metrics_start(result)
-        self._mirror_status(result)
+        self._eta.start(result)
+        self._reports.mirror_status(result)
         for batch_index, batch_tasks in ordered:
             self._hold_on_recorded_checks(batch_tasks, result)
             runnable = [
@@ -2367,14 +2200,14 @@ class WriteBatchScheduler:
                 # `failure.exit_code` since D3b.
                 result.stopped_at_batch = batch_index
                 result.exit_code = int(exc.exit_code or EXIT_NEEDS_HUMAN)
-                self._record_stop(result, batch_index, [], refusal=exc.message)
+                self._stop.record_stop(result, batch_index, [], refusal=exc.message)
                 # The partial summary only when an earlier batch really
                 # applied something: it is that run's account (D3n), and an
                 # empty one for a refusal on the first dispatch would claim a
                 # run that never started.
                 self._end_run(
                     result,
-                    lambda: self._refusal_message(exc, batch_index, result),
+                    lambda: self._stop.refusal_message(exc, batch_index, result),
                     stopped=True,
                     summary=PARTIAL_SUMMARY_LINE if result.outcomes else None,
                 )
@@ -2387,7 +2220,7 @@ class WriteBatchScheduler:
             # it go on.
             self._block_dependents_of_checks(outcomes, result)
             self._verify.record_batch_tracking(result)
-            self._mirror_status(result)
+            self._reports.mirror_status(result)
             # plans/review-commits.md §2.7: a batch the commit re-check
             # stopped was never dispatched and the loop goes on past it.
             stale = self._commit_stale
@@ -2397,7 +2230,7 @@ class WriteBatchScheduler:
             ):
                 result.stopped_at_batch = batch_index
                 result.exit_code = EXIT_NEEDS_HUMAN
-                self._record_stop(
+                self._stop.record_stop(
                     result, batch_index, [o for o in stopping if not o.ok],
                 )
                 # The partial summary is the cancellation's own record (D3n,
@@ -2408,7 +2241,7 @@ class WriteBatchScheduler:
                 # plan-side reference is still NOT inserted.
                 return self._end_run(
                     result,
-                    lambda: self._stop_message(batch_index, outcomes, result),
+                    lambda: self._stop.stop_message(batch_index, outcomes, result),
                     stopped=True, summary=PARTIAL_SUMMARY_LINE,
                 )
 
@@ -2418,9 +2251,9 @@ class WriteBatchScheduler:
         # with no finalization (no verify command, no completion record).
         if result.blocked_by_check:
             result.exit_code = EXIT_NEEDS_HUMAN
-            self._record_check_block(result)
+            self._stop.record_check_block(result)
             return self._end_run(
-                result, lambda: self._check_block_message(result),
+                result, lambda: self._stop.check_block_message(result),
                 summary=PARTIAL_SUMMARY_LINE,
             )
 
@@ -2428,7 +2261,7 @@ class WriteBatchScheduler:
         # dispatched nothing because every code task left waits on a manual
         # task not recorded done is not a finished implement. It stops for
         # the user, naming the manual task and the resume that records it.
-        gates = self._manual_gate(result)
+        gates = self._stop.manual_gate(result)
         if gates is not None:
             return self._stop_on_manual_gate(result, gates)
 
@@ -2471,10 +2304,10 @@ class WriteBatchScheduler:
         A dry run never reaches here: its record is ``subagent_dry_run.json``.
         """
         if close_eta:
-            self._eta_close(result, why=eta_why)
+            self._eta.close(result, why=eta_why)
         unverified_lines = self._verify.note_unverified_on_stop(result) if unverified else []
         if summary and self.summary_file:
-            result.summary_file = self._write_summary(result)
+            result.summary_file = self._reports.write_summary(result)
         if check_lines:
             result.messages.extend(self._check_findings_lines(result, stopped=stopped))
             result.messages.extend(self._batch_check_lines(result))
@@ -2483,8 +2316,8 @@ class WriteBatchScheduler:
             result.messages.extend(ending())
         if summary and result.summary_file:
             result.messages.append(f"{summary}: {result.summary_file}")
-        result.report_path = self._write_report(result)
-        self._mirror_status(result)
+        result.report_path = self._reports.write_report(result)
+        self._reports.mirror_status(result)
         return result
 
     def _dispatch_preview(
@@ -2493,18 +2326,18 @@ class WriteBatchScheduler:
     ) -> str:
         """The ``Organized into …`` line for what this run will dispatch
         (:meth:`_dispatch_walk`), which also sets the ``[ETA]`` line's task
-        set (``_eta_scope``, fix round 20): the tasks the line counts. A walk
+        set (``EtaLines.scope``, fix round 20): the tasks the line counts. A walk
         that fails counts every task, and the ``[ETA]`` total with it."""
         walk = self._dispatch_walk(ordered, result)
         if walk is None:
-            self._eta_scope = None
-            self._eta_walk_left = {}
+            self._eta.scope = None
+            self._eta.walk_left = {}
             return _batch_prompt.dispatch_line(
                 len([1 for _i, b in ordered if b]),
                 sum(len(b) for _i, b in ordered),
             )
         batches, picked_ids, waiting = walk
-        self._eta_scope = set(picked_ids)
+        self._eta.scope = set(picked_ids)
         return _batch_prompt.dispatch_line(batches, len(picked_ids), waiting=waiting)
 
     def _dispatch_walk(
@@ -2553,7 +2386,7 @@ class WriteBatchScheduler:
         picked_batches = 0
         picked_ids: List[str] = []
         # Fix round 22: what the walk foresees this run leaves (refused, held
-        # by a check on record, not reached) and keeps, for `_eta_left_out`.
+        # by a check on record, not reached) and keeps, for `EtaLines.left_out`.
         left: Dict[str, str] = {}
         kept_ids: set = set()
         candidates: List[str] = []
@@ -2655,7 +2488,7 @@ class WriteBatchScheduler:
             if task_id not in left and task_id not in kept_ids and task_id not in picked_ids:
                 # After the stop: not reached.
                 left[task_id] = _metrics.LEFT_NOT_RUN
-        self._eta_walk_left = left
+        self._eta.walk_left = left
         return picked_batches, picked_ids, list(waiting)
 
     def _check_findings_lines(
@@ -2907,10 +2740,10 @@ class WriteBatchScheduler:
                 # implement run counts only what it dispatches (fix round 20),
                 # so there the skip leaves both halves.
                 with self._effects_lock:
-                    self._eta_mark(outcome.task_id, ran=False)
+                    self._eta.mark(outcome.task_id, ran=False)
             with mirror_lock:
                 outcomes_so_far.append(outcome)
-                self._mirror_status(result, finished_in_batch=outcomes_so_far)
+                self._reports.mirror_status(result, finished_in_batch=outcomes_so_far)
             return outcome
 
         for group in groups:
@@ -3031,11 +2864,11 @@ class WriteBatchScheduler:
         # under another policy, baseline or binding is never sent with the
         # wrong policy's prompt. Never blocks an `expand` task without scope
         # metadata.
-        scope_refusal = self._scope_refusal(task)
+        scope_refusal = self._prompts.scope_refusal(task)
         if scope_refusal is not None:
             return self._refused(task, scope_refusal, batch_index, result)
         try:
-            prompt = self._with_result_contract(task, self.dispatched_prompt(task))
+            prompt = self._prompts.with_result_contract(task, self._prompts.dispatched_prompt(task))
         except ResultRejected as exc:
             return self._refused(
                 task, exc.message, batch_index, result, status=exc.status)
@@ -3067,8 +2900,8 @@ class WriteBatchScheduler:
             # named as the task wrote it, never by its resolved absolute path.
             self.policy.check(declared_file_set(task), when="pre-dispatch")
         except PolicyViolation as exc:
-            self._refused_policy_paths[task_id] = list(exc.paths)
-            self._refused_policy_hits[task_id] = list(exc.hits)
+            result.refusals.policy_paths[task_id] = list(exc.paths)
+            result.refusals.policy_hits[task_id] = list(exc.hits)
             return self._refused(
                 task, exc.message, batch_index, result,
                 write_outcome=WRITE_POLICY_VIOLATION,
@@ -3133,7 +2966,7 @@ class WriteBatchScheduler:
             # 2026-09-30): that case is also a batch refused before any child
             # started (`preflight_runner` raising `RunnerRejected` at batch 0),
             # and `_begin_sweep` had already published it in flight. Left
-            # registered, the refusal's own `_mirror_status` re-published it,
+            # registered, the refusal's own `WriteReports.mirror_status` re-published it,
             # so `.status.json` read `in flight: apply-batch-0 (since 0m 9s)`
             # for the rest of the dir's life. The dispatch is over either way.
             self._sweep.abandon(task_id)
@@ -3172,7 +3005,7 @@ class WriteBatchScheduler:
         earlier run's, untouched: this run dispatched nothing.
         """
         refused = dict(self._refused_skips)
-        earlier = self._mirror_snapshot()
+        earlier = self._reports.mirror_snapshot()
         before = earlier.get("stop") if isinstance(earlier.get("stop"), dict) else {}
         refused_flags = {f"{task_id}=skip" for task_id in refused}
         kept = [
@@ -3197,10 +3030,10 @@ class WriteBatchScheduler:
             "not_rerun": False,
             **({"answers": kept} if kept else {}),
         }
-        self._set_stop_headline(result.stop)
+        self._stop.set_stop_headline(result.stop)
         if not earlier:
             # No earlier run left a mirror to patch: this run's own.
-            self._mirror_status(result)
+            self._reports.mirror_status(result)
             return
         from . import status_file as _status_file
         try:
@@ -3357,7 +3190,7 @@ class WriteBatchScheduler:
         policy the user widened lets it run, and ``--human-task
         <id>=done|skip|retry`` answers it like any failed task.
         """
-        self._refused_before_dispatch.add(outcome.task_id)
+        result.refusals.before_dispatch.add(outcome.task_id)
         self._record_batch_effects(
             task, outcome, batch_index, result, dispatched=False,
         )
@@ -3854,7 +3687,7 @@ class WriteBatchScheduler:
         """
         self._sweep.begin(task_id, declared, verification_only=verification_only)
         # F10: the mirror's own writes only happen at a batch's boundaries
-        # (`_mirror_status`), which says nothing while a single-task batch is
+        # (`WriteReports.mirror_status`), which says nothing while a single-task batch is
         # still running — measured 2026-09-16, T001 ran 659s as one batch and
         # `.status.json` read `dispatched: 0` the entire time. This is the one
         # place a dispatch's start time is known, so it patches the mirror's
@@ -3862,7 +3695,7 @@ class WriteBatchScheduler:
         # recompute; that next call (whenever it lands) replaces the whole
         # `write_subagents` object, `in_flight` included, from
         # the sweep's in-flight entries afresh, so a stale patch here never lingers.
-        self._publish_in_flight()
+        self._reports.publish_in_flight()
 
     def _undeclared_writes(
         self, task_id: str, snapshot: TaskSnapshot
@@ -3871,65 +3704,6 @@ class WriteBatchScheduler:
         The seam ``_classify`` and ``_audit_terminal`` call, so a test can
         stand in for the sweep on a scheduler it built by hand."""
         return self._sweep.undeclared_writes(task_id, snapshot)
-
-    # Kept for the tests that drive the sweep through the scheduler: each
-    # reads the sweep, and a patch belongs on ``self._sweep``.
-
-    def _census(
-        self, kept: Optional["set[str]"] = None,
-    ) -> Optional[Dict[str, Tuple[int, int]]]:
-        return self._sweep.census(kept)
-
-    def _retain(self, census: Optional[Dict[str, Tuple[int, int]]]) -> Dict[str, str]:
-        return self._sweep.retain(census)
-
-    def _blob_path(self, digest: str) -> str:
-        return self._sweep.blob_path(digest)
-
-    def _moved_since_dispatch(self, task_id: str, snapshot: TaskSnapshot) -> List[str]:
-        return self._sweep.moved_since_dispatch(task_id, snapshot)
-
-    def _discard_rollback_store(self) -> None:
-        self._sweep.discard_store()
-
-    @property
-    def _retained(self) -> Dict[str, Tuple[Tuple[int, int], Optional[str]]]:
-        return self._sweep._retained
-
-    @property
-    def _retained_bytes(self) -> int:
-        return self._sweep._retained_bytes
-
-    @property
-    def _census_before(self) -> Dict[str, Optional[Dict[str, Tuple[int, int]]]]:
-        return self._sweep._census_before
-
-    def _publish_in_flight(self) -> None:
-        """Patch ``progress.write_subagents.in_flight`` alone. Best-effort.
-
-        Reads back whatever :meth:`_mirror_status` last wrote and patches only
-        the one key this owns, so a dispatch starting mid-batch can never race
-        that fuller write for the other fields — at worst this reads a
-        `write_subagents` object one write stale, and the next real
-        :meth:`_mirror_status` call (or the next dispatch's own call here)
-        corrects it.
-        """
-        from . import status_file as _status_file
-        try:
-            existing = _status_file.read_status(self.phase_dir)
-            mirror = dict(
-                ((existing.get("progress") or {}).get("write_subagents")) or {}
-            )
-            in_flight = self._sweep.in_flight()
-            mirror["in_flight"] = [
-                {"task_id": task_id, "dispatched_at": started}
-                for task_id, started in in_flight
-            ]
-            _status_file.update_status(self.phase_dir, {
-                "progress": {"write_subagents": mirror}
-            })
-        except Exception:  # noqa: BLE001 - observability must not fail a phase
-            pass
 
     def _observed_with_undeclared(
         self, snapshot: TaskSnapshot, undeclared: _write_sweep.UndeclaredWrites
@@ -4013,7 +3787,7 @@ class WriteBatchScheduler:
                     entry.relative: entry.sha256 for entry in snapshot.entries
                 },
             )
-            self._keep_dispatched_prompt(
+            self._prompts.keep_dispatched_prompt(
                 task_id, int(context["attempt"]), sent, prompt
             )
 
@@ -5125,7 +4899,9 @@ class WriteBatchScheduler:
             # with its real entry, and a task answered `--human-task <id>=skip`
             # keeps it on both legs, which tells the tasks after it that the
             # work is not there.
-            summary = self._failed_entry(outcome) if dispatched else None
+            summary = (
+                self._failed_entry(outcome, result.refusals) if dispatched else None
+            )
 
         # Plan step 3 (2026-09-30): the rung the batch ran on, named on its
         # line and in the report whatever the outcome (a timeout included).
@@ -5151,7 +4927,7 @@ class WriteBatchScheduler:
             # own 1-based position in the run (F3). No metric for a check that
             # was not run again: no child ran, and a zero would average in.
             ran = bool(not outcome.not_rerun and dispatched)
-            self._eta_mark(task_id, ran=ran, ok=outcome.ok)
+            self._eta.mark(task_id, ran=ran, ok=outcome.ok)
             # Fix round 21 (review of round 20, #1): a check that reported
             # findings holds its dependents only once its batch returns
             # (`_block_dependents_of_checks`), so its own line and the lines
@@ -5160,11 +4936,11 @@ class WriteBatchScheduler:
             # remaining". They leave the `[ETA]` total now, as the native
             # leg's `util batch-done` takes them out before `util metrics
             # record`.
-            self._eta_held.update({
+            self._eta.held.update({
                 held: outcome.task_id for held in self._check_holds(outcome, result)
             })
             if ran:
-                self._record_metrics(task, outcome, result)
+                self._eta.record(task, outcome, result)
 
             self._remember_outcome(outcome)
             if self.state is not None:
@@ -5278,7 +5054,9 @@ class WriteBatchScheduler:
                 # current, which is half of how resume skipped it (F1).
                 self._record_fingerprint(task)
 
-    def _failed_entry(self, outcome: TaskOutcome) -> Optional[str]:
+    def _failed_entry(
+        self, outcome: TaskOutcome, refusals: _write_context.Refusals,
+    ) -> Optional[str]:
         """The prior-changes line a failed batch leaves, in the native leg's
         words (``instructions/implement.md``, the three ``apply-*.md`` cores):
         ``(task failed — …)`` for an implement task, ``(batch failed — …,
@@ -5312,111 +5090,12 @@ class WriteBatchScheduler:
             if not outcome.bytes_moved and self.kind == "implement":
                 what += ", no file changed"
         else:
-            what = " ".join(self._failure_sentence(outcome).split())
+            what = " ".join(self._stop.failure_sentence(outcome, refusals).split())
         if self.kind == "implement":
             return f"(task failed — {what})"
         if outcome.bytes_moved:
             return None
         return f"(batch failed — {what}, verified no file changes)"
-
-    def _record_metrics(
-        self, task: Dict[str, Any], outcome: TaskOutcome, result: SchedulerResult
-    ) -> None:
-        """The metric for one batch, with the values the runner reported (D3g).
-
-        Duration is the executor's own wall clock. Tokens and tool uses come from
-        the adapter's normalized usage where the provider reports them and are
-        simply **omitted** where it does not — ``record_metric`` treats all three as
-        optional, and a fabricated zero would average into per-phase totals and read
-        as a free run.
-
-        Recorded **through the ``StateManager``**, not through ``metrics.py``'s own
-        file-level read/modify/write: the caller's ``state.save()`` follows
-        immediately and dumps this object's dict wholesale, so a second writer's
-        entry was erased the moment it landed — three audited runs finished with
-        no ``metrics`` key at all after every batch had recorded one (F4).
-
-        The ``[ETA]`` line's own ``batch_index``/``total_batches`` are this run's
-        own progress and dispatchable count — never ``task["batch_index"]``
-        (the plan's global decomposition index, which starts wherever a resumed
-        run's first undone task sits) and never bare ``len(self.tasks)`` (which
-        still counts a deferred human task). Passing those two straight through
-        made every line on a resumed run read `batch 7/6 done in 0m 51s ...
-        WARNING: batch_index > total_batches` (N1, 2026-09-16).
-
-        **Both halves count tasks** (F3, 2026-09-17). ``len(result.batches_
-        dispatched) + 1`` was the numerator, and it is a *batch* ordinal against
-        a *task* denominator: for the three apply kinds one task is one batch and
-        the two agree, but an ``implement`` dependency level with k independent
-        tasks is one batch of k — every one of those k metric entries recorded
-        the same ordinal, so a 14-task plan in 9 batches ended at
-        ``batch 9/14 · ~Nm remaining``, never reached ``N/N`` and never printed
-        ``ALL BATCHES COMPLETE``. Both come from :meth:`_eta_progress`: the
-        finished tasks among the ones :meth:`_eta_total` counts (fix round
-        18: not an accepted task, a manual one, or one a check holds; fix
-        round 20: on implement, only what the run dispatches).
-        """
-        if self.state is None or not hasattr(self.state, "record_metric"):
-            return
-        usage = outcome.usage or {}
-        label = (
-            f"{task.get('task_id')}: "
-            f"{task.get('task_title') or self.kind} "
-            f"[{outcome.write_outcome or outcome.status}]"
-        ).strip()
-        run_batch_index, total_batches = self._eta_progress(result)
-        # Fix round 22 (live run 9 #1): the line that reaches N/N said "ALL
-        # BATCHES COMPLETE" before the run stopped on T005.
-        ends_short = (
-            run_batch_index >= total_batches and self._eta_ends_short(result)
-        )
-        # Fix round 24 (live run 10): a failed task's line says what
-        # happened (#5), the line whose total dropped says why (#7), and a
-        # complete run's N/N line names the tasks the plan set aside
-        # (Claude Code racing #6).
-        failed = not outcome.ok
-        failure, half_applied = self._eta_failure(outcome) if failed else ("", False)
-        dropped = self._eta_dropped(result)
-        set_aside = ""
-        if self.kind == "implement" and not failed and run_batch_index >= total_batches:
-            set_aside = _metrics.set_aside_tail(_human_task_plan.set_aside_by_plan(
-                result.human_plan, self._manual_task_ids()))
-        try:
-            # The stored baseline follows the line it is printed beside (N1).
-            self.state.set_metrics_total(self.phase, total_batches)
-            eta_line = self.state.record_metric(
-                self.phase,
-                label,
-                subagent_type=outcome.runner,
-                token_count=(
-                    int(usage["total_tokens"]) if isinstance(
-                        usage.get("total_tokens"), (int, float)
-                    ) else None
-                ),
-                tool_uses=(
-                    int(usage["tool_uses"]) if isinstance(
-                        usage.get("tool_uses"), (int, float)
-                    ) else None
-                ),
-                duration_ms=int(outcome.duration_seconds * 1000),
-                total_batches=total_batches or None,
-                batch_index=run_batch_index,
-                ends_short=ends_short,
-                failed=failed,
-                failure=failure,
-                half_applied=half_applied,
-                dropped=dropped,
-                set_aside=set_aside,
-            )
-        except Exception as exc:  # noqa: BLE001 - metrics must not fail a phase
-            self.log(f"[write-subagents] warning: metrics record failed: {exc}")
-            return
-        if eta_line:
-            # The `[ETA]` line `instructions/implement.md` step 5 describes. It
-            # goes through `self.log` rather than stderr so it lands in the
-            # phase log `status` points at, beside the batch line above it.
-            self._eta_printed = True
-            self.log(eta_line)
 
     # -- snapshots ------------------------------------------------------
 
@@ -6037,480 +5716,6 @@ class WriteBatchScheduler:
 
     # -- stop / finalize ------------------------------------------------
 
-    def _stop_message(
-        self, batch_index: int, outcomes: Sequence[TaskOutcome],
-        result: Optional[SchedulerResult] = None,
-    ) -> List[str]:
-        """The exit-3 block after a failed batch, in plain words.
-
-        Names the task that failed and what it reported, every task the stop
-        left unrun, the tasks that ran, and a way forward that works (racing
-        re-run 3, 2026-10-05: a failed read-only check stopped implement, the
-        message named only the deferred manual tasks, and ``--resume`` re-ran
-        the same check on unchanged code). The commands are the host's own
-        spelling when the orchestrator supplied them (``user_commands``), the
-        bare flags otherwise.
-        """
-        failed = [o for o in outcomes if not o.ok]
-        stop = (result.stop if result is not None else None) or {}
-        lines = [""]
-        for outcome in failed:
-            what = self._failure_sentence(outcome)
-            lines.append(
-                f"ERROR: {self.phase} stopped at {outcome.task_id}"
-                f"{self._task_label(outcome.task_id)}: {what}"
-            )
-            if outcome.runner_notes:
-                lines.append(f"      what it reported: {outcome.runner_notes}")
-            lines.append(f"      details: {outcome.reason or outcome.status}")
-            if outcome.snapshot_dir and outcome.files_touched:
-                lines.append(
-                    f"      restore: multi_llm.py util restore-batch --phase-dir "
-                    f'"{self.phase_dir}" --task-id {outcome.task_id}'
-                )
-            if outcome.unrestorable:
-                # Fix round 15: moved, and outside every rollback point.
-                lines.append(
-                    f"      no rollback point: {', '.join(outcome.unrestorable[:5])}"
-                    f"{', …' if len(outcome.unrestorable) > 5 else ''} changed "
-                    f"and util restore-batch cannot undo "
-                    f"{'it' if len(outcome.unrestorable) == 1 else 'them'} (no "
-                    f"pre-run copy was kept); inspect "
-                    f"{'it' if len(outcome.unrestorable) == 1 else 'them'} by hand"
-                )
-        if not failed:
-            lines.append(
-                f"ERROR: the write loop stopped at batch {batch_index}; no later "
-                f"batch was dispatched and the {self.phase} phase is NOT marked "
-                f"completed."
-            )
-        lines.extend(self._account_lines(result))
-        lines.extend(self._way_forward_lines(
-            failed, stop, plan=result.human_plan if result is not None else None,
-        ))
-        lines.extend(self._held_by_checks_lines(result, failed))
-        lines += [
-            f"Audit log: {self.audit.path}",
-            f"Snapshots: {os.path.join(self.safety_dir, 'pre_batch')}/",
-        ]
-        if failed and all(
-            o.task_id in self._refused_before_dispatch for o in failed
-        ):
-            lines.append(
-                "Nothing was half-applied: the stopped task never started, and "
-                "the tasks before it keep what they changed."
-            )
-        elif failed and not any(o.bytes_moved for o in failed):
-            # Fix round 14 (stop fixture, accept 02): a clean failure, a
-            # timeout or a prose reply that moved no byte left nothing
-            # half-applied either. Fix round 15: "moved" is what the sweep
-            # observed, a file with no rollback point included.
-            lines.append(
-                "Nothing was half-applied: the stopped task changed no file, "
-                "and the tasks before it keep what they changed."
-            )
-        else:
-            lines.append(
-                "The half-applied state is deliberately left in place: what the "
-                "stop left on disk stays until you restore the batch or resume."
-            )
-        return lines
-
-    def _task_label(self, task_id: str) -> str:
-        """`` (check: <title>)`` for a verification-only task, `` (<title>)`` otherwise."""
-        task = self._task_by_id(task_id) or {}
-        title = str(task.get("task_title") or "").strip()
-        check = self.kind == "implement" and not declared_file_set(task)
-        if check and title:
-            return f" (check: {title})"
-        if check:
-            return " (a check)"
-        return f" ({title})" if title else ""
-
-    def _failure_sentence(self, outcome: TaskOutcome) -> str:
-        """What failed, in one clause: the runner's own summary when it gave one."""
-        summary = (outcome.summary or "").strip()
-        if outcome.not_rerun:
-            return (
-                "not run again — nothing in the repository changed since this "
-                "check failed, so it would fail the same way"
-                + (f" ({summary})" if summary else "")
-            )
-        if outcome.task_id in self._refused_before_dispatch:
-            return "refused before it was dispatched" + (
-                " — the write policy (driver.write_paths) does not allow a "
-                "file it declares"
-                if outcome.write_outcome == WRITE_POLICY_VIOLATION else ""
-            )
-        if outcome.applied_without_changes:
-            return (
-                "its change did not land — the reply said it was applied, but "
-                + ("none of the files it declares changed" if outcome.bytes_moved
-                   else "no file changed")
-            )
-        check = self._task_by_id(outcome.task_id) or {}
-        is_check = self.kind == "implement" and not declared_file_set(check)
-        label = outcome.outcome_label or outcome.write_outcome or outcome.status
-        if is_check and outcome.write_outcome == WRITE_CLEAN_FAILURE:
-            return f"the check failed" + (f" — {summary}" if summary else "")
-        if outcome.write_outcome == WRITE_PARTIAL:
-            return (
-                f"partial application (bytes moved, the batch did not finish)"
-                + (
-                    ": its runner ran past its time limit and was stopped, and "
-                    "what it changed is kept in place"
-                    if self._ran_out_of_time(outcome) else ""
-                )
-                + (f" — {summary}" if summary else "")
-            )
-        return f"{label}" + (f" — {summary}" if summary else "")
-
-    @staticmethod
-    def _ran_out_of_time(outcome: TaskOutcome) -> bool:
-        """Whether the batch was killed at its time limit after its edits
-        landed (``TaskOutcome.ran_out_of_time``, fix round 16)."""
-        return bool(getattr(outcome, "ran_out_of_time", False))
-
-    def _account_lines(self, result: Optional[SchedulerResult]) -> List[str]:
-        """Every task of the decomposition, by what became of it."""
-        if result is None:
-            return []
-        account = self._accounting(result)
-        lines = []
-        done = account["done"]
-        if done:
-            lines.append(
-                f"Done and kept: {len(done)} task(s) ({_check_records._id_range(done)})."
-            )
-        if account.get("check_findings"):
-            lines.append(
-                f"Of those, checks that reported problems (listed in the "
-                f"implementation summary): {', '.join(account['check_findings'])}."
-            )
-        if account["not_run"]:
-            blocked = account.get("blocked") or {}
-            for check_id in sorted(set(blocked.values())):
-                waiting = [t for t in account["not_run"] if blocked.get(t) == check_id]
-                lines.append(
-                    f"Not run (they depend on check {check_id}, which reported "
-                    f"problems): {', '.join(waiting)}."
-                )
-            stopped = [t for t in account["not_run"] if t not in blocked]
-            if stopped:
-                lines.append(
-                    f"Not run (the stop came before they were dispatched): "
-                    f"{', '.join(stopped)}."
-                )
-        with_findings = account.get("accepted_with_findings") or []
-        after_failing = [t for t in account["accepted"] if t not in with_findings]
-        if after_failing:
-            lines.append(
-                f"Accepted after failing (--human-task <id>=done): "
-                f"{', '.join(after_failing)}."
-            )
-        if with_findings:
-            lines.append(
-                f"Accepted with their check findings (--human-task <id>=done): "
-                f"{', '.join(with_findings)}."
-            )
-        if account["completed_manual"]:
-            lines.append(
-                f"Completed by hand (--human-task <id>=done): "
-                f"{', '.join(account['completed_manual'])}."
-            )
-        if account["declined"]:
-            lines.append(
-                f"Skipped at your request (--human-task <id>=skip): "
-                f"{', '.join(account['declined'])}."
-            )
-        if account["skipped_dependents"]:
-            lines.append(
-                f"Skipped (depend on a skipped task): "
-                f"{', '.join(account['skipped_dependents'])}."
-            )
-        if account["deferred"]:
-            lines.append(f"Deferred manual: {', '.join(account['deferred'])}.")
-        lines.append(
-            f"That is every one of the {account['total']} task(s) in this "
-            f"decomposition; the {self.phase} phase is NOT marked completed."
-        )
-        return lines
-
-    def _way_forward_lines(
-        self, failed: Sequence[TaskOutcome], stop: Dict[str, Any],
-        plan: Optional[_human_task_plan.HumanTaskPlan] = None,
-    ) -> List[str]:
-        """The remedy, with the host's own command spellings when known.
-
-        The dependents a ``skip`` answer would leave undone are the ones a
-        skip can still change: a manual task (never dispatched) and a task
-        the run already skipped are not listed, so the sentence does not name
-        a deferred manual task as if the answer decided it.
-        """
-        cmds = self.user_commands
-        already = set(plan.skipped) if plan is not None else set()
-        manual = {
-            str(t.get("task_id", "")) for t in self.tasks
-            if t.get("executor_role") == "human" or t.get("is_human")
-        }
-        resume = cmds.get("resume") or "re-invoke this phase with --resume"
-        lines = ["To go on:"]
-        acceptable = [
-            o for o in failed
-            if o.write_outcome == WRITE_CLEAN_FAILURE and not o.bytes_moved
-        ]
-        checks = [
-            o for o in acceptable
-            if self.kind == "implement"
-            and not declared_file_set(self._task_by_id(o.task_id) or {})
-        ]
-        refused = [o for o in failed if o.task_id in self._refused_before_dispatch]
-        if refused and not acceptable:
-            policy = any(o.write_outcome == WRITE_POLICY_VIOLATION for o in refused)
-            # Fix round 18 (live run 7): that nothing is half-applied is the
-            # block's closing line, said once; the bullet is the remedy. Fix
-            # round 20: the policy's, worded as the user's own call. Fix
-            # round 21: per rule (a deny hit names the deny rule), and none
-            # for a file outside the repository, which no rule can allow.
-            def hits_of(outcome: TaskOutcome) -> List[Any]:
-                return list(
-                    self._refused_policy_hits.get(outcome.task_id)
-                    or self._refused_policy_paths.get(outcome.task_id) or []
-                )
-
-            outside = [
-                o for o in refused
-                if any(getattr(hit, "outside", False) for hit in hits_of(o))
-            ]
-            fixable = [o for o in refused if o not in outside]
-            if outside:
-                lines[0] = (
-                    f"To go on ({policy_outside_note([h for o in outside for h in hits_of(o)])}):"
-                )
-            clause = policy_allow_clause(
-                [hit for o in fixable for hit in hits_of(o)]
-            ) if policy and fixable else None
-            offered = bool(fixable or self.kind != "implement")
-            if offered:
-                lines.append(
-                    f"  - "
-                    + (f"your call: {clause}" if clause else "fix what the details name")
-                    + ", then resume this phase; it is checked again before it is "
-                    "dispatched, and the tasks after it follow:"
-                )
-                lines.append(f"        {resume}")
-            for outcome in (refused if self.kind == "implement" else ()):
-                task_id = outcome.task_id
-                dependents = [
-                    dep for dep in self._dependents_of(task_id)
-                    if dep not in already and dep not in manual
-                    and self._task_by_id(dep) is not None
-                ]
-                accept = cmds.get("accept", "").replace("{task_id}", task_id) or (
-                    f"add --human-task {task_id}=done to the resume command"
-                )
-                skip = cmds.get("skip", "").replace("{task_id}", task_id) or (
-                    f"add --human-task {task_id}=skip to the resume command"
-                )
-                lines.append(
-                    f"  - {'or go on without it' if offered else f'go on without {task_id}'}"
-                    f": {skip} ({task_id}"
-                    + (f" and the tasks that depend on it, {', '.join(dependents)},"
-                       if dependents else "")
-                    + f" stay undone), or, once you have made its change "
-                    f"yourself, {accept} ({task_id} is treated as done and the "
-                    f"tasks after it run)."
-                )
-            return lines
-        if checks:
-            lines.append(
-                "  - fix what the check reported in the code — by hand, or run "
-                "the review-code phase and then apply-code-fixes"
-                + (":" if cmds.get("review") and cmds.get("fix") else "")
-            )
-            if cmds.get("review") and cmds.get("fix"):
-                lines.append(f"        {cmds['review']}")
-                lines.append(f"        {cmds['fix']}")
-            lines.append(
-                "    then resume this phase; the check runs again and the "
-                "tasks after it follow:"
-            )
-            lines.append(f"        {resume}")
-        elif acceptable and all(o.applied_without_changes for o in acceptable):
-            lines.append(
-                "  - resume this phase and it is dispatched again, then the "
-                "tasks after it (if its runner again says it made the change "
-                "without making it, run the phase on another model, or make "
-                "the change yourself and answer as below):"
-            )
-            lines.append(f"        {resume}")
-        elif acceptable:
-            lines.append(
-                "  - fix what the task reported, then resume this phase; it is "
-                "dispatched again and the tasks after it follow:"
-            )
-            lines.append(f"        {resume}")
-        elif stop.get("timed_out") and any(o.files_touched for o in failed):
-            lines.append(
-                "  - its edits are kept in place: resume this phase and it is "
-                "dispatched again on top of them to finish what is left, then "
-                "the ones never reached follow (or restore the batch with the "
-                "command above first, to start it over; if it runs out of time "
-                "again, raise driver.subagent_timeout_s or run it on a faster "
-                "model):"
-            )
-            lines.append(f"        {resume}")
-        elif any(o.files_touched for o in failed):
-            lines.append(
-                "  - inspect the half-applied state (restore the batch with the "
-                "command above, or keep it), fix the cause, then resume this "
-                "phase; the failed batch is dispatched again and the ones never "
-                "reached follow:"
-            )
-            lines.append(f"        {resume}")
-        elif any(o.bytes_moved for o in failed):
-            # Fix round 15: it moved only files with no rollback point, so
-            # there is no restore command to name.
-            lines.append(
-                "  - inspect the files it changed that cannot be restored "
-                "automatically (named above) and put them right by hand, fix "
-                "the cause, then resume this phase; the failed batch is "
-                "dispatched again and the ones never reached follow:"
-            )
-            lines.append(f"        {resume}")
-        else:
-            # Fix round 14: no byte moved (a timeout, a prose reply, a
-            # refused runner), so there is nothing half-applied to inspect —
-            # which the block's closing line says (fix round 18: once).
-            lines.append(
-                "  - fix the cause the details name, then resume this phase; "
-                "the failed batch is dispatched again and the ones never "
-                "reached follow:"
-            )
-            lines.append(f"        {resume}")
-        if self.kind != "implement":
-            # `--human-task` is implement's flag (fix round 15), save the one
-            # answer an apply phase's partial application takes when its
-            # report left items out (fix round 18): keep it and go on.
-            for outcome in failed:
-                if self.kind in APPLY_WRITE_KINDS and outcome.unapplied_ids:
-                    skip = cmds.get("skip", "").replace(
-                        "{task_id}", outcome.task_id
-                    ) or (
-                        f"add --human-task {outcome.task_id}=skip to the "
-                        f"resume command"
-                    )
-                    lines.append(
-                        f"  - or {self._keep_partial_clause(outcome)}: {skip}"
-                    )
-            return lines
-        for outcome in acceptable:
-            task_id = outcome.task_id
-            dependents = [
-                dep for dep in self._dependents_of(task_id)
-                if dep not in already and dep not in manual
-                and self._task_by_id(dep) is not None
-            ]
-            after = sorted(stop.get("not_run") or [])
-            accept = cmds.get("accept", "").replace("{task_id}", task_id) or (
-                f"add --human-task {task_id}=done to the resume command"
-            )
-            skip = cmds.get("skip", "").replace("{task_id}", task_id) or (
-                f"add --human-task {task_id}=skip to the resume command"
-            )
-            undone = (
-                f" and the tasks that depend on it, {', '.join(dependents)}, "
-                f"stay undone)." if dependents else " stays undone)."
-            )
-            if outcome.applied_without_changes:
-                # Fix round 15: going on without it first, as the recorded
-                # answers order them (`_stop_answers`).
-                lines.append(
-                    f"  - or go on without it: {skip} ({task_id}"
-                    + undone[:-1]
-                    + f", or, once you have made its change yourself: {accept} "
-                    f"({task_id} is treated as done"
-                    + (f"; {', '.join(after)} then run" if after else "")
-                    + ")."
-                )
-            else:
-                lines.append(
-                    f"  - or accept the failure and go on without it: {accept} "
-                    f"({task_id} is treated as satisfied"
-                    + (f"; {', '.join(after)} then run" if after else "")
-                    + f"), or {skip} ({task_id}" + undone
-                )
-            if outcome.not_rerun:
-                retry = cmds.get("retry", "").replace("{task_id}", task_id) or (
-                    f"add --human-task {task_id}=retry to the resume command"
-                )
-                lines.append(
-                    f"  - or run the check again anyway (after installing a tool "
-                    f"it needs, say): {retry}."
-                )
-        return lines
-
-    def _held_by_checks_lines(
-        self, result: Optional[SchedulerResult], failed: Sequence[TaskOutcome],
-    ) -> List[str]:
-        """The answers of each check with findings that holds tasks back, for
-        any stop's way forward (fix round 13).
-
-        A stop is not where those tasks wait: a ``--resume`` that changes no
-        file leaves the check's findings standing and the tasks held, so a
-        stop that offered only ``--resume`` left the user one stop away from
-        the next. Each check gets the three answers the end-of-run check
-        hold names (:meth:`_check_block_message`), and when the stop leaves
-        more than one task to answer, one resume command carrying them all.
-        """
-        if result is None or not result.blocked_by_check:
-            return []
-        cmds = self.user_commands
-        found = result.check_findings()
-        blocked = result.blocked_by_check
-        checks = self._blocking_checks(result)
-        lines: List[str] = []
-        for check_id in checks:
-            waiting = sorted(tid for tid, cid in blocked.items() if cid == check_id)
-            findings = found.get(check_id) or []
-            accept = cmds.get("accept", "").replace("{task_id}", check_id) or (
-                f"add --human-task {check_id}=done to the resume command"
-            )
-            skip = cmds.get("skip", "").replace("{task_id}", check_id) or (
-                f"add --human-task {check_id}=skip to the resume command"
-            )
-            retry = cmds.get("retry", "").replace("{task_id}", check_id) or (
-                f"add --human-task {check_id}=retry to the resume command"
-            )
-            lines.append(
-                f"  - {check_id}'s check reported problems and holds back "
-                f"{', '.join(waiting)}"
-                + (f" ({clip('; '.join(findings), 300)})" if findings else "")
-                + ": a resume runs it again only once the files changed, so "
-                f"fix what it reported (by hand, or review-code then "
-                f"apply-code-fixes) and resume; or accept its findings: "
-                f"{accept} ({', '.join(waiting)} then run, told that you "
-                f"accepted the findings, which stay listed for review-code), "
-                f"or {skip} ({check_id} and "
-                f"{', '.join(waiting)} stay undone), or run its check again on "
-                f"unchanged files: {retry}."
-            )
-        answers = [f"--human-task {check_id}=done" for check_id in checks] + [
-            f"--human-task {o.task_id}=skip" for o in failed
-            if o.task_id in self._refused_before_dispatch
-            or (o.write_outcome == WRITE_CLEAN_FAILURE and not o.bytes_moved)
-        ]
-        if len(answers) > 1:
-            combined = " ".join(answers)
-            example = cmds.get("answers", "").replace("{answers}", combined) or (
-                f"the resume command with {combined}"
-            )
-            lines.append(
-                f"  - one resume command takes several answers, for example: "
-                f"{example}"
-            )
-        return lines
-
     def _dependents_of(self, task_id: str) -> List[str]:
         """Every task that depends on *task_id*, transitively, in id order.
 
@@ -6524,353 +5729,6 @@ class WriteBatchScheduler:
         return _check_records.transitive_dependents(
             _check_records.decomposition_graph(self.tasks, self.state), task_id,
         )
-
-    def _accounting(self, result: SchedulerResult) -> Dict[str, Any]:
-        """Every task of the decomposition in exactly one bucket.
-
-        ``done`` is this run's ``ok`` outcomes (resume skips included) plus the
-        earlier runs' ``ok`` rows; ``failed`` this run's failed outcomes;
-        ``not_run`` the tasks the stop left undispatched; ``accepted`` the
-        failed tasks answered ``done``; ``completed_manual`` the human tasks
-        answered ``done`` (fix round 8: they counted in ``total`` and sat in
-        no bucket, so a five-task line summed to four); ``deferred`` the human
-        tasks the strategy skipped and ``skipped_dependents`` the tasks
-        skipped with a skipped one. The buckets add up to ``total``, which is
-        the test ``summary.md``'s accounting line is written to. ``accepted``
-        and ``completed_manual`` include the answers an earlier run recorded
-        for tasks this resume did not materialize (``answered_done_on_record``,
-        fix round 9).
-        """
-        rows = result.report_rows()
-        plan = result.human_plan
-        by_id = {str(t.get("task_id", "")): t for t in self.tasks}
-        failed = sorted({o.task_id for o in result.outcomes if not o.ok})
-        answered = set(plan.accepted) | set(plan.completed)
-        done = sorted({
-            str(row.get("task_id"))
-            for row in rows
-            if row.get("status") == STATUS_OK and str(row.get("task_id")) not in failed
-            and str(row.get("task_id")) not in answered
-        })
-        # A skip the user chose (a pause-and-ask "Skip", `--human-task
-        # <id>=skip` on a failed task) is its own bucket: the seed is neither
-        # deferred work nor "skipped with a skipped task".
-        declined = sorted(
-            tid for tid, reason in plan.skipped.items() if is_declined_reason(reason)
-        )
-        deferred = sorted(
-            tid for tid in plan.skipped
-            if tid not in declined
-            and ((by_id.get(tid) or {}).get("executor_role") == "human"
-                 or (by_id.get(tid) or {}).get("is_human"))
-        )
-        skipped_dependents = sorted(
-            tid for tid in plan.skipped if tid not in deferred and tid not in declined
-        )
-        accepted = sorted(plan.accepted)
-        completed_manual = sorted(plan.completed)
-        not_run = sorted(result.not_run)
-        ids = set(done) | set(failed) | set(deferred) | set(skipped_dependents) \
-            | set(declined) | set(accepted) | set(completed_manual) | set(not_run) \
-            | set(by_id)
-        check_findings = sorted({
-            str(row.get("task_id"))
-            for row in rows
-            if str(row.get("task_id")) in done and row_check_findings(row)
-        })
-        return {
-            "total": len(ids),
-            "done": done,
-            "check_findings": check_findings,
-            "failed": failed,
-            "not_run": not_run,
-            "blocked": {
-                tid: cid for tid, cid in result.blocked_by_check.items()
-                if tid in result.not_run
-            },
-            "accepted_with_findings": sorted(
-                tid for tid in accepted
-                if ACCEPTED_WITH_FINDINGS_MARK in str(plan.accepted.get(tid) or "")
-            ),
-            "accepted": accepted,
-            "completed_manual": completed_manual,
-            "declined": declined,
-            "deferred": deferred,
-            "skipped_dependents": skipped_dependents,
-        }
-
-    def _record_stop(
-        self, result: SchedulerResult, batch_index: int,
-        failed: Sequence[TaskOutcome], *, refusal: Optional[str] = None,
-    ) -> None:
-        """Account for every task the stop left unrun, and keep the stop record.
-
-        Called on both stop paths before the message is built: every
-        materialized task that is not human, not skipped, not accepted and has
-        no outcome in this run was never dispatched. Each gets a reason on its
-        ``pending`` status (``task_status_reasons``), so the implementation
-        record review-code reads says why it is pending rather than leaving it
-        indistinguishable from a task nobody has looked at.
-        """
-        failed_ids = [o.task_id for o in failed]
-        seen = {o.task_id for o in result.outcomes}
-        plan = result.human_plan
-        cause = (
-            f"{', '.join(failed_ids)} failed" if failed_ids
-            else (f"batch {batch_index} was refused" if refusal else
-                  f"the loop stopped at batch {batch_index}")
-        )
-        # A task a check with findings already kept from running keeps that
-        # reason: the stop is not why it did not run (fix round 11).
-        for task_id, check_id in result.blocked_by_check.items():
-            result.not_run[task_id] = _check_records.blocked_by_check_reason(check_id)
-        for task in self.tasks:
-            task_id = str(task.get("task_id", ""))
-            if (not task_id or task_id in seen or plan.is_skipped(task_id)
-                    or task_id in plan.accepted
-                    or task_id in result.not_run
-                    or task.get("executor_role") == "human"):
-                continue
-            result.not_run[task_id] = (
-                f"not run — {self.phase} stopped at batch {batch_index} "
-                f"({cause}) before this task was dispatched"
-            )
-        self._record_not_run_in_state(result)
-        self._restamp_check_trees(result)
-        first = failed[0] if failed else None
-        is_check = bool(
-            first is not None and self.kind == "implement"
-            and not declared_file_set(self._task_by_id(first.task_id) or {})
-        )
-        acceptable = bool(
-            first is not None and first.write_outcome == WRITE_CLEAN_FAILURE
-            and not first.bytes_moved
-        )
-        result.stop = {
-            "batch_index": batch_index,
-            "failed_task_ids": failed_ids,
-            "task_id": first.task_id if first else None,
-            "kind": "check" if is_check else ("task" if first else "refusal"),
-            "what": (
-                self._failure_sentence(first) if first else (refusal or "")
-            ),
-            "reported": (first.runner_notes if first else None),
-            "not_run": sorted(result.not_run),
-            "acceptable": acceptable,
-            "not_rerun": bool(first is not None and first.not_rerun),
-        }
-        if first is not None and first.task_id in self._refused_before_dispatch:
-            # Fix round 13: nothing was dispatched, so there is nothing
-            # half-applied, and the task can be skipped or accepted.
-            result.stop["refused_before_dispatch"] = True
-            result.stop["policy"] = first.write_outcome == WRITE_POLICY_VIOLATION
-            if result.stop["policy"]:
-                # Fix round 20: the files its way forward names. Fix round
-                # 21: and the rule that refused each, which words it.
-                result.stop["policy_paths"] = list(
-                    self._refused_policy_paths.get(first.task_id) or [])
-                result.stop["policy_rules"] = [
-                    hit.to_dict()
-                    for hit in self._refused_policy_hits.get(first.task_id) or []
-                ]
-        if first is not None and first.applied_without_changes:
-            # Fix round 14: it said `applied` and changed nothing, twice.
-            result.stop["applied_without_changes"] = True
-        # Whether the stop left bytes a human has to look at (fix round 14:
-        # "the half-applied state is left in place" followed a refusal before
-        # dispatch and a clean failure, where nothing was half-applied). Fix
-        # round 15: what the sweep observed, not what the rollback store holds,
-        # so a file with no rollback point counts — and is named.
-        result.stop["bytes_moved"] = any(o.bytes_moved for o in failed)
-        if (
-            self.kind in APPLY_WRITE_KINDS and first is not None
-            and first.unapplied_ids
-        ):
-            # Fix round 18: the items its readable report left out of both
-            # `ids` and `declined` — what `--human-task <id>=skip` answers.
-            result.stop["unapplied_ids"] = list(first.unapplied_ids)
-        # Fix round 16 (OpenCode racing 06, T006): a batch killed at its time
-        # limit after its edits landed. The edits stay; the plain way forward
-        # is the resume, which dispatches it again on top of them.
-        if first is not None and first.write_outcome == WRITE_PARTIAL and (
-            self._ran_out_of_time(first)
-        ):
-            result.stop["timed_out"] = True
-        unrestorable = sorted({p for o in failed for p in o.unrestorable})
-        if unrestorable:
-            result.stop["unrestorable"] = unrestorable
-        if result.blocked_by_check:
-            # The tasks a check with findings holds, which this stop's own
-            # remedy does not release (fix round 13).
-            result.stop["blocked"] = dict(sorted(result.blocked_by_check.items()))
-            result.stop["check_task_ids"] = self._blocking_checks(result)
-        answers = self._stop_answers(result, failed)
-        if answers:
-            result.stop["answers"] = answers
-        why = self._stop_resume_why(result, failed)
-        if why:
-            result.stop["resume_why"] = why
-        self._set_stop_headline(result.stop)
-
-    def _stop_answers(
-        self, result: SchedulerResult, failed: Sequence[TaskOutcome] = (),
-    ) -> List[Dict[str, Any]]:
-        """The ``--human-task`` answers this stop offers, as data (fix round 14).
-
-        ``[{"flags": [...], "why": ...}]``, each a resume command's flags
-        (``--resume`` first) and one plain clause saying what it does, in the
-        order a user weighs them: the one combined command that goes on
-        without fixing anything (when more than one task needs an answer),
-        then each task's own answers — a task refused before dispatch
-        (``skip``, ``done``), a clean failure (``done``, ``skip``, ``retry``
-        when it was not run again) and each check whose findings hold tasks
-        back (``done``, ``skip``, ``retry``). The same answers the stop
-        message names (:meth:`_way_forward_lines`,
-        :meth:`_held_by_checks_lines`, :meth:`_check_block_message`); a
-        partial application offers none, since it is inspected first.
-
-        Recorded on the stop (``write_batch_report.json``, the mirror) so
-        ``util next-command --blocked implement`` can hand the tool routes
-        each one as a command the user types and an ``options`` entry: on
-        live run 5 the answers lived only in the result's ``error`` and the
-        hosts relayed them in two of four first stops. On an apply phase
-        (fix round 18) the one answer is ``--human-task <batch>=skip`` for a
-        partial application whose report left items out (``unapplied_ids``):
-        keep what it applied and go on without them — Codex racing run 7's
-        08b resumed into the same stop with nothing else to offer.
-        """
-        if self.kind != "implement":
-            first = failed[0] if failed else None
-            if (
-                self.kind in APPLY_WRITE_KINDS and first is not None
-                and first.unapplied_ids
-            ):
-                return [{
-                    "flags": ["--resume", "--human-task", f"{first.task_id}=skip"],
-                    "why": self._keep_partial_clause(first),
-                }]
-            return []
-        already = set(result.human_plan.skipped)
-        manual = {
-            str(t.get("task_id", "")) for t in self.tasks
-            if t.get("executor_role") == "human" or t.get("is_human")
-        }
-
-        def undone_with(task_id: str) -> List[str]:
-            return [
-                dep for dep in self._dependents_of(task_id)
-                if dep not in already and dep not in manual
-                and self._task_by_id(dep) is not None
-            ]
-
-        refused = [o for o in failed if o.task_id in self._refused_before_dispatch]
-        acceptable = [
-            o for o in failed
-            if o.task_id not in self._refused_before_dispatch
-            and o.write_outcome == WRITE_CLEAN_FAILURE and not o.bytes_moved
-        ]
-        blocked = result.blocked_by_check
-        return _stop_answers.compose_stop_answers(
-            refused=[o.task_id for o in refused],
-            failed=[
-                _stop_answers.FailedAnswerable(
-                    task_id=o.task_id,
-                    unlanded=bool(o.applied_without_changes),
-                    not_rerun=bool(o.not_rerun),
-                )
-                for o in acceptable
-            ],
-            checks=self._blocking_checks(result) if blocked else [],
-            blocked=blocked,
-            findings=result.check_findings(),
-            undone_with=undone_with,
-        )
-
-    def _stop_resume_why(
-        self, result: SchedulerResult, failed: Sequence[TaskOutcome] = (),
-    ) -> Optional[str]:
-        """What this stop's plain ``--resume`` does on an unchanged tree
-        (``write_outcomes.resume_why``), recorded on the stop as
-        ``resume_why`` beside its ``answers``. A check is judged on the tree
-        as the stop leaves it, taken once and only when a check needs
-        judging (:meth:`_verdict_holds_tree`, the comparison
-        :meth:`_unchanged_since_failure` and :meth:`_check_findings_rerun`
-        make)."""
-        tree: List[Optional[str]] = []
-
-        def kept_on(task_id: str, *, failed_check: bool) -> bool:
-            if not tree:
-                tree.append(self._tree_fingerprint())
-            return self._verdict_holds_tree(task_id, tree[0], failed=failed_check)
-
-        return _write_outcomes.resume_why(
-            result.outcomes, failed, _write_outcomes.ResumeContext(
-                kind=self.kind,
-                tasks=self.tasks,
-                skipped=set(result.human_plan.skipped),
-                refused_before_dispatch=self._refused_before_dispatch,
-                refused_policy_hits=self._refused_policy_hits,
-                blocked=result.blocked_by_check,
-                blocking_checks=lambda: self._blocking_checks(result),
-                dependents_of=self._dependents_of,
-                implement_done=lambda: _stop_answers.implement_tasks_done(self.state),
-                kept_on=kept_on,
-            ),
-        )
-
-    def _verdict_holds_tree(
-        self, task_id: str, tree: Optional[str], *, failed: bool,
-    ) -> bool:
-        """Whether a resume on *tree* keeps *task_id*'s check from running:
-        its result file holds a check's verdict (a failed one under
-        *failed*, as :meth:`_unchanged_since_failure` reads it) stamped with
-        that very tree (``verdict.tree_fingerprint``), the comparison
-        :meth:`_unchanged_since_failure` and :meth:`_check_findings_rerun`
-        make. No file, no stamp, another tree or a tree git cannot measure:
-        the resume dispatches it again (fix round 23)."""
-        if tree is None:
-            return False
-        task = self._task_by_id(task_id)
-        if task is None:
-            return False
-        try:
-            own = resolve_output_target(task, self.phase_dir)
-        except ResultRejected:
-            return False
-        if own is None:
-            return False
-        try:
-            data = json.loads(Path(own).read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return False
-        verdict = data.get("verdict") if isinstance(data, dict) else None
-        return (
-            isinstance(verdict, dict) and bool(verdict.get("verification_only"))
-            and (not failed or not verdict.get("ok"))
-            and verdict.get("tree_fingerprint") == tree
-        )
-
-    def _record_not_run_in_state(self, result: SchedulerResult) -> None:
-        """Give each ``result.not_run`` task its reason on a ``pending`` status.
-
-        Only a task with no status or a ``pending`` one: a status an earlier
-        run recorded (completed, failed, skipped) is never overwritten.
-        """
-        if self.state is None or not result.not_run:
-            return
-        with self._effects_lock:
-            for task_id, reason in result.not_run.items():
-                current = None
-                try:
-                    current = self.state.get_task_status(task_id)
-                except Exception:  # noqa: BLE001 - advisory
-                    current = None
-                if current in (None, "pending"):
-                    self.state.update_task_status(task_id, "pending", reason=reason)
-            try:
-                self.state.save()
-            except Exception as exc:  # noqa: BLE001 - bookkeeping must not fail a phase
-                self.log(f"[write-subagents] warning: could not record the not-run tasks: {exc}")
 
     def _restamp_check_trees(self, result: SchedulerResult) -> None:
         """Stamp the tree as this run left it on each check with findings.
@@ -6912,79 +5770,6 @@ class WriteBatchScheduler:
                     f"{path.name} for {outcome.task_id}: {exc}"
                 )
 
-    def _blocking_checks(self, result: SchedulerResult) -> List[str]:
-        """The check tasks that kept a task from running, in task order."""
-        blocking = set(result.blocked_by_check.values())
-        order = [str(t.get("task_id", "")) for t in self.tasks]
-        return sorted(
-            blocking, key=lambda tid: (order.index(tid) if tid in order else len(order), tid),
-        )
-
-    def _record_check_block(self, result: SchedulerResult) -> None:
-        """Account for the tasks a check with findings kept from running.
-
-        The end-of-loop counterpart of :meth:`_record_stop` (fix round 11):
-        every task that could run has run, and the ones in
-        ``result.blocked_by_check`` were left out. Each is ``not run`` with
-        :func:`blocked_by_check_reason` on its ``pending`` status, and the
-        stop record (``kind: "check-findings"``) names the checks, what they
-        reported and the tasks waiting for them — the record the summary,
-        ``write_batch_report.json``, the mirror and the result line's
-        ``error`` render from.
-        """
-        for task_id, check_id in result.blocked_by_check.items():
-            result.not_run[task_id] = _check_records.blocked_by_check_reason(check_id)
-        self._record_not_run_in_state(result)
-        self._restamp_check_trees(result)
-        checks = self._blocking_checks(result)
-        found = result.check_findings()
-        first = checks[0]
-        findings = found.get(first) or []
-        result.stop = {
-            "batch_index": None,
-            "failed_task_ids": [],
-            "task_id": first,
-            "kind": "check-findings",
-            "check_task_ids": checks,
-            "blocked": dict(sorted(result.blocked_by_check.items())),
-            "what": (
-                f"its check reported {len(findings)} problem(s)"
-                if findings else "its check reported problems"
-            ),
-            "reported": clip("; ".join(findings), 600) or None,
-            "not_run": sorted(result.not_run),
-            "acceptable": True,
-            "not_rerun": False,
-        }
-        answers = self._stop_answers(result)
-        if answers:
-            result.stop["answers"] = answers
-        why = self._stop_resume_why(result)
-        if why:
-            result.stop["resume_why"] = why
-        self._set_stop_headline(result.stop)
-
-    def _manual_gate(self, result: SchedulerResult) -> Optional[Dict[str, Any]]:
-        """The manual-task gates (:func:`plan_manual_gates`) when this run
-        must stop on them, else ``None`` (fix round 28): an implement run
-        that started no runner, on an implement not on record completed (a
-        resume of a completed one that runs nothing keeps it completed, fix
-        round 14), whose every code task left waits on a manual task not
-        recorded done, one the user can do now among them."""
-        if self.kind != "implement" or self.dry_run or self.state is None:
-            return None
-        if any(self._started_a_runner(o) for o in result.outcomes):
-            return None
-        try:
-            if self.state.is_phase_completed(self.phase):
-                return None
-        except Exception:  # noqa: BLE001 - a state fake without the record
-            return None
-        gates = self._manual_gates(result.human_plan)
-        if not gates or not gates.get("gated") or not gates.get("waiting"):
-            return None
-        return gates
-
     def _stop_on_manual_gate(
         self, result: SchedulerResult, gates: Dict[str, Any],
     ) -> SchedulerResult:
@@ -6994,531 +5779,17 @@ class WriteBatchScheduler:
         ``[ETA]`` line, summary.md and the block naming the way on."""
         result.exit_code = EXIT_NEEDS_HUMAN
         self._mark_implement_started()
-        self._record_manual_gate(result, gates)
+        self._stop.record_manual_gate(result, gates)
         gating = list(result.stop.get("manual_task_ids") or [])
         held = list(result.stop.get("held_task_ids") or [])
         return self._end_run(
-            result, lambda: self._manual_gate_message(result),
+            result, lambda: self._stop.manual_gate_message(result),
             eta_why=(
                 f"{', '.join(gating)} left for you (manual); {len(held)} code "
                 f"task(s) wait on {'it' if len(gating) == 1 else 'them'}"
             ),
             unverified=False, check_lines=False, summary=FULL_SUMMARY_LINE,
         )
-
-    def _record_manual_gate(
-        self, result: SchedulerResult, gates: Dict[str, Any],
-    ) -> None:
-        """The stop record of a run a manual task gates (``kind:
-        "manual-gate"``): the gating manual tasks (the ones the user can do
-        now that code tasks wait on), the code tasks waiting on each, the
-        resume that records them done (``resume_flags``) and what it does
-        (``resume_why``), and the headline the result line's ``error``
-        carries."""
-        waiting = {
-            manual: list(codes) for manual, codes in sorted(gates["waiting"].items())
-            if codes
-        }
-        gating = sorted(waiting, key=_metrics._id_key)
-        flags: List[str] = ["--resume"]
-        for manual in gating:
-            flags += ["--human-task", f"{manual}=done"]
-        held = sorted({code for codes in waiting.values() for code in codes},
-                      key=_metrics._id_key)
-        result.stop = {
-            "batch_index": None,
-            "failed_task_ids": [],
-            "task_id": gating[0],
-            "kind": "manual-gate",
-            "manual_task_ids": gating,
-            "waiting": waiting,
-            "what": (
-                f"every code task left waits on "
-                f"{'manual task' if len(gating) == 1 else 'manual tasks'} "
-                f"{', '.join(gating)}, not recorded done"
-            ),
-            "reported": None,
-            "not_run": [],
-            "acceptable": True,
-            "not_rerun": False,
-            "resume_flags": flags,
-            "held_task_ids": held,
-        }
-        why = self._manual_gate_why(gating, waiting)
-        if why:
-            result.stop["resume_why"] = why
-        # Fix round 29 (review of round 28 #1): the user's decline beside
-        # that resume, as an answer the section lists.
-        answers = self._manual_gate_answers(gating, waiting)
-        if answers:
-            result.stop["answers"] = answers
-        # The merge of fix round 28: and beside it the line without the way
-        # on the section carries (its resume records the gate done), which
-        # the tool routes relay in the `error`'s place.
-        self._set_stop_headline(result.stop)
-
-    def _manual_gate_entry(
-        self, gating: Sequence[str], waiting: Mapping[str, Sequence[str]],
-    ) -> Dict[str, Any]:
-        """The gate as the workflow payload's ``implement`` entry gives it
-        to ``next_phase``'s gate words, over this run's titles."""
-        return {
-            "manual_close_ids": list(gating),
-            "manual_waiting": {k: list(v) for k, v in waiting.items()},
-            "manual_tasks": [
-                {"id": manual, "title": self._task_title(manual)}
-                for manual in gating
-            ],
-        }
-
-    def _manual_gate_why(
-        self, gating: Sequence[str], waiting: Mapping[str, Sequence[str]],
-    ) -> Optional[str]:
-        """What the gate's resume does, in ``next_phase.manual_gate_why``'s
-        words, over this run's titles."""
-        from .next_phase import manual_gate_why
-
-        try:
-            return manual_gate_why(self._manual_gate_entry(gating, waiting))
-        except Exception:  # noqa: BLE001 - advisory wording
-            return None
-
-    def _manual_gate_answers(
-        self, gating: Sequence[str], waiting: Mapping[str, Sequence[str]],
-    ) -> List[Dict[str, Any]]:
-        """The gate's other ways on, ``next_phase.manual_gate_decline_answers``
-        (fix round 29): the user's ``--human-task <id>=skip`` for each
-        gating manual task, recorded on the stop as its ``answers``."""
-        from .next_phase import manual_gate_decline_answers
-
-        try:
-            return manual_gate_decline_answers(self._manual_gate_entry(gating, waiting))
-        except Exception:  # noqa: BLE001 - advisory: the resume stands
-            return []
-
-    def _task_title(self, task_id: str) -> Optional[str]:
-        """*task_id*'s title from this run's tasks, else ``state.json``'s
-        ``task_titles``, else ``None``."""
-        task = self._task_by_id(task_id) or {}
-        title = task.get("task_title") or task.get("title")
-        if not title and self.state is not None:
-            try:
-                title = (self.state.get("task_titles") or {}).get(task_id)
-            except Exception:  # noqa: BLE001 - a state fake without the map
-                title = None
-        return str(title) if title else None
-
-    def _manual_gate_message(self, result: SchedulerResult) -> List[str]:
-        """The exit-3 block of a run a manual task gates: nothing ran and
-        why, each gating manual task with the code tasks waiting on it, the
-        account of every task, and the one way on."""
-        stop = result.stop or {}
-        gating = list(stop.get("manual_task_ids") or [])
-        waiting = stop.get("waiting") or {}
-        lines = [
-            "",
-            f"ERROR: {self.phase} ran nothing: every code task left waits on "
-            f"{'a manual task' if len(gating) == 1 else 'manual tasks'} not "
-            f"recorded done, and implement does not do a manual task:",
-        ]
-        for manual in gating:
-            codes = sorted(waiting.get(manual) or [], key=_metrics._id_key)
-            lines.append(
-                f"  {manual}{self._task_label(manual)}: {len(codes)} code "
-                f"task(s) wait on it ({_check_records._id_range(codes)})"
-            )
-        lines.extend(self._account_lines(result))
-        flags = list(stop.get("resume_flags") or [])
-        answers = " ".join(flags[1:])
-        template = self.user_commands.get("answers") or ""
-        command = template.replace("{answers}", answers) if "{answers}" in template else ""
-        it = "it" if len(gating) == 1 else "them"
-        lines.append("To go on:")
-        lines.append(
-            f"  - do {', '.join(gating)} by hand, then resume this phase "
-            f"recording {it} done; the code tasks that wait on {it} then run:"
-        )
-        lines.append(f"        {command or 'add ' + answers + ' to the resume command'}")
-        # Fix round 29 (review of round 28 #1): or the user's decline.
-        for entry in stop.get("answers") or []:
-            skips = " ".join(list(entry.get("flags") or [])[1:])
-            spelled = (
-                template.replace("{answers}", skips) if "{answers}" in template else "")
-            lines.append(f"  - or, {entry.get('why')}:")
-            lines.append(f"        {spelled or 'add ' + skips + ' to the resume command'}")
-        return lines
-
-    def _check_block_message(self, result: SchedulerResult) -> List[str]:
-        """The exit-3 block after a run whose checks kept tasks from running.
-
-        Names each check, what it reported and the tasks waiting for it, the
-        account of every task, and the three ways forward: fix and resume
-        (the check runs again), accept the findings (``=done``: the waiting
-        tasks run, the findings stay listed for review-code) or skip.
-        """
-        cmds = self.user_commands
-        found = result.check_findings()
-        blocked = result.blocked_by_check
-        checks = self._blocking_checks(result)
-        lines = [
-            "",
-            f"ERROR: {self.phase} did not run {len(blocked)} task(s) that depend "
-            f"on a check that reported problems:",
-        ]
-        for check_id in checks:
-            findings = found.get(check_id) or []
-            waiting = sorted(tid for tid, cid in blocked.items() if cid == check_id)
-            lines.append(
-                f"  {check_id}{self._task_label(check_id)} reported "
-                f"{len(findings)} problem(s): {clip('; '.join(findings), 600)}"
-            )
-            lines.append(f"      not run: {', '.join(waiting)}")
-        lines.extend(self._account_lines(result))
-        resume = cmds.get("resume") or "re-invoke this phase with --resume"
-        lines.append("To go on:")
-        lines.append(
-            "  - fix what the check reported in the code — by hand, or run the "
-            "review-code phase and then apply-code-fixes"
-            + (":" if cmds.get("review") and cmds.get("fix") else "")
-        )
-        if cmds.get("review") and cmds.get("fix"):
-            lines.append(f"        {cmds['review']}")
-            lines.append(f"        {cmds['fix']}")
-        lines.append(
-            "    then resume this phase; the check runs again and, once it "
-            "passes, the tasks after it follow (a resume that changes no file "
-            "does not run it again):"
-        )
-        lines.append(f"        {resume}")
-        for check_id in checks:
-            waiting = sorted(tid for tid, cid in blocked.items() if cid == check_id)
-            accept = cmds.get("accept", "").replace("{task_id}", check_id) or (
-                f"add --human-task {check_id}=done to the resume command"
-            )
-            skip = cmds.get("skip", "").replace("{task_id}", check_id) or (
-                f"add --human-task {check_id}=skip to the resume command"
-            )
-            retry = cmds.get("retry", "").replace("{task_id}", check_id) or (
-                f"add --human-task {check_id}=retry to the resume command"
-            )
-            lines.append(
-                f"  - or accept {check_id}'s findings and run the tasks after "
-                f"it: {accept} ({', '.join(waiting)} then run, told that you "
-                f"accepted the findings, which stay listed for review-code), "
-                f"or {skip} ({check_id} and "
-                f"{', '.join(waiting)} stay undone)."
-            )
-            lines.append(
-                f"  - or run {check_id}'s check again on unchanged files: {retry}."
-            )
-        return lines
-
-    def _set_stop_headline(
-        self, stop: Dict[str, Any], *, tail: Optional[str] = None,
-    ) -> None:
-        """Record *stop*'s ``headline`` and, beside it, the same line
-        without the ways forward its resume section carries
-        (``headline_beside_section``, :data:`HEADLINE_BESIDE_SECTION_KEY`).
-
-        Fix round 28 (live run 12 #5): at a stop the Codex host relayed the
-        whole ``error`` line, whose "To go on (your call): … add --human-task
-        T005=skip … --human-task T002=done …" restated every answer the
-        ready section then gave as commands. ``util next-command --blocked``
-        hands the tool routes this second line beside the section, and the
-        servers relay it in the ``error``'s place: what stopped, what it
-        reported, what did not run, the fixes only the user can make (a
-        ``driver.write_paths`` change, fixing what a check reported), and
-        the tests line, never an answer. Recorded only when it differs and
-        every ``--human-task`` answer it leaves out is one of the stop's own
-        ``answers``, which the section lists; else the key is dropped, and
-        the full line stays the only one.
-        """
-        stop["headline"] = self._stop_headline(stop, tail=tail)
-        beside = self._stop_headline(stop, tail=tail, beside_section=True)
-        if beside != stop["headline"] and _stop_answers.answers_cover(
-                stop["headline"], beside, stop):
-            stop[_stop_answers.HEADLINE_BESIDE_SECTION_KEY] = beside
-        else:
-            stop.pop(_stop_answers.HEADLINE_BESIDE_SECTION_KEY, None)
-
-    def _stop_headline(
-        self, stop: Dict[str, Any], *, tail: Optional[str] = None,
-        beside_section: bool = False,
-    ) -> str:
-        """One plain line for the result line's ``error``: what the hosts relay
-        as "the last line it left", ending with *tail* (the line saying nothing
-        ran the repository's tests) when one is owed.
-
-        Fix round 19 (review of round 18, decline #5 and implement #2): the
-        line is bounded (``cli_common.ERROR_MAX_CHARS``), and the bound used
-        to cut its end — the ``--human-task <batch>=skip`` sentence of an
-        apply stop, the remedy and the ``--human-task T002=done`` answer of a
-        check-findings stop — while the model's quoted words were kept whole.
-        One rule now fits every stop headline (:func:`fit_stop_headline`):
-        the model's quoted words give way first, then the list of tasks not
-        run, then the task titles named in it (shorter, then none), and only
-        then the head itself; the remedy, the answers and *tail* stay whole.
-        """
-        caps = (None,) + _stop_answers.STOP_HEADLINE_LABEL_CAPS
-        for cap in caps:
-            parts = self._stop_headline_parts(
-                stop, label_cap=cap, beside_section=beside_section)
-            fitted = _stop_answers.fit_stop_headline(
-                *parts, tail=tail, last_resort=cap == caps[-1],
-            )
-            if fitted is not None:
-                return fitted
-        raise AssertionError("unreachable: the last resort always fits")
-
-    def _stop_headline_parts(
-        self, stop: Dict[str, Any], *, label_cap: Optional[int] = None,
-        beside_section: bool = False,
-    ) -> Tuple[str, Optional[str], List[str], List[str], str]:
-        """``(head, reported, not_run, body, terminator)`` of a stop's
-        headline (:meth:`_stop_headline`): *head* says what stopped and
-        names the task, *reported* is the model's own words, *not_run* the
-        tasks the stop left, *body* the remedy and the answers, in order.
-        A task title in *head* is cut to *label_cap* characters (``0``: left
-        out). *beside_section* (fix round 28): *body* without the ways
-        forward a resume section carries — every ``--human-task`` answer
-        and a bare "resume this phase" — keeping each fix only the user can
-        make before the resume (:meth:`_set_stop_headline`)."""
-
-        def label(task_id: str) -> str:
-            text = self._task_label(task_id)
-            if label_cap is None or not text:
-                return text
-            if label_cap <= 0:
-                return ""
-            inner = text[2:-1]
-            if len(inner) <= label_cap:
-                return text
-            return f" ({clip(inner, label_cap + 1)})"
-
-        task_id = stop.get("task_id")
-        reported = stop.get("reported") or None
-        if stop.get("kind") == "answer-refused":
-            # Fix round 19: a `--human-task <batch>=skip` this run refused.
-            return (
-                f"{self.phase} {stop.get('what')}", None, [],
-                ["Nothing was dispatched and no file was changed.",
-                 _write_outcomes.REFUSED_SKIP_WAY_FORWARD],
-                ".",
-            )
-        if stop.get("kind") == "manual-gate":
-            # Fix round 28 (live run 12, Codex racing 06).
-            gating = list(stop.get("manual_task_ids") or [task_id])
-            waiting = {
-                mid: list((stop.get("waiting") or {}).get(mid) or [])
-                for mid in gating
-            }
-            held = sorted(
-                {code for codes in waiting.values() for code in codes},
-                key=_metrics._id_key)
-            head = _human_task_plan.manual_gate_head(
-                self.phase, {mid: label(mid) for mid in gating}, waiting)
-            # Beside the section, what stopped and why: its one way on is
-            # the section's resume.
-            return head, None, held, (
-                [] if beside_section else [_human_task_plan.manual_gate_way_on(gating)]), "."
-        if stop.get("kind") == "check-findings":
-            checks = stop.get("check_task_ids") or [task_id]
-            named = ", ".join(f"{cid}{label(cid)}" for cid in checks)
-            head = (
-                f"{self.phase} did not run {', '.join(sorted(stop.get('blocked') or {}))}: "
-                f"they depend on {named}, whose check reported problems"
-            )
-            answer = (
-                f"--human-task {task_id}=done" if len(checks) == 1
-                else "--human-task <check id>=done for each check"
-            )
-            fix = (
-                "To go on: fix what the check reported (by hand, or "
-                "review-code then apply-code-fixes), then resume this phase — "
-                "the check runs again"
-            )
-            return head, reported, [], [
-                f"{fix}." if beside_section else
-                f"{fix}; or accept its findings by adding "
-                f"{answer} to the resume command (the tasks after it then run, "
-                f"told that you accepted the findings)."
-            ], "."
-        if not task_id:
-            return (
-                f"{self.phase} stopped at batch {stop.get('batch_index')}: "
-                f"{stop.get('what') or 'the batch was refused'}",
-                None, [], [], "",
-            )
-        head = f"{self.phase} stopped at {task_id}{label(task_id)}: {stop.get('what')}"
-        body: List[str] = []
-        if stop.get("kind") == "check" and stop.get("acceptable"):
-            fix = (
-                "To go on: fix what the check reported (by hand, or review-code "
-                "then apply-code-fixes), then resume this phase"
-            )
-            body.append(
-                f"{fix}." if beside_section else
-                f"{fix}; or accept the "
-                f"failure by adding --human-task {task_id}=done to the resume "
-                f"command (the tasks after it then run)."
-            )
-        elif stop.get("applied_without_changes") and stop.get("bytes_moved"):
-            # Fix round 15: the files it declares did not change, others did
-            # (a plan or task-list batch is judged on its declared file).
-            body.append(
-                "Files outside the ones it declares changed: inspect them "
-                "(restore the batch, or keep them), then resume this phase "
-                "and it is dispatched again."
-            )
-        elif stop.get("applied_without_changes") and beside_section:
-            # Its only way forward is the section's: the resume (which
-            # dispatches it again) and the answers.
-            body.append("Nothing changed, so there is nothing to restore.")
-        elif stop.get("applied_without_changes"):
-            body.append(
-                "Nothing changed, so there is nothing to restore. To go on: "
-                "resume this phase and it is dispatched again"
-                + (
-                    # Fix round 15: going on without it first, and `done`
-                    # only for a change made by hand; implement's flag only.
-                    f"; or leave it and the tasks after it undone with "
-                    f"--human-task {task_id}=skip, or make its change "
-                    f"yourself and add --human-task {task_id}=done to the "
-                    f"resume command."
-                    if self.kind == "implement" else "."
-                )
-            )
-        elif stop.get("acceptable"):
-            body.append(
-                "To go on: fix what it reported, then resume this phase"
-                + (
-                    f"; or accept the failure by adding --human-task "
-                    f"{task_id}=done to the resume command."
-                    if self.kind == "implement" and not beside_section else "."
-                )
-            )
-        elif stop.get("refused_before_dispatch") and stop.get("policy"):
-            # Fix round 20 (live run 8 #4, a user decision: permissive):
-            # allowing the file stays a way forward, worded as the user's own
-            # call and naming the file, beside the skip answer.
-            # Fix round 21: worded per rule from `policy_rules` (a deny hit
-            # names the deny rule; the paths alone, from a record that kept
-            # no rule, get the wording right for either), and no policy
-            # change at all for a file outside the repository.
-            refused_rules = stop.get("policy_rules") or stop.get("policy_paths") or []
-            clause = policy_allow_clause(refused_rules)
-            if clause is not None:
-                body.append(
-                    "To go on (your call): " + clause + ", then resume this phase"
-                    + (f"; {policy_skip_clause(task_id)}."
-                       if self.kind == "implement" and not beside_section else ".")
-                )
-            elif self.kind == "implement" and beside_section:
-                # Its one way forward, the skip, is the section's.
-                note = policy_outside_note(refused_rules)
-                body.append(f"{note[0].upper()}{note[1:]}.")
-            else:
-                note = policy_outside_note(refused_rules)
-                body.append(
-                    f"{note[0].upper()}{note[1:]}. To go on: "
-                    + (f"{policy_skip_clause(task_id, alone=True)}."
-                       if self.kind == "implement"
-                       else "fix what refused it, then resume this phase.")
-                )
-        elif stop.get("refused_before_dispatch"):
-            body.append(
-                "To go on: fix what refused it"
-                + (
-                    ", then resume this phase; or leave it and the tasks after "
-                    f"it undone by adding --human-task {task_id}=skip to the "
-                    "resume command."
-                    if self.kind == "implement" and not beside_section
-                    else ", then resume this phase."
-                )
-            )
-        elif stop.get("bytes_moved", True) and stop.get("timed_out"):
-            body.append(
-                f"Its edits are kept in place. To go on: resume this phase, "
-                f"and {task_id} is dispatched again on top of them to finish "
-                f"what is left (or restore the batch first to start it over); "
-                f"if it runs out of time again, raise driver.subagent_timeout_s "
-                f"or run it on a faster model."
-            )
-        elif stop.get("bytes_moved", True):
-            body.append(
-                "To go on: inspect the half-applied state, restore or keep it, "
-                "fix the cause, then resume this phase."
-            )
-            if stop.get("unrestorable"):
-                # Fix round 15: a moved file with no rollback point.
-                names = stop["unrestorable"]
-                body.append(
-                    f"{', '.join(names[:5])}{', …' if len(names) > 5 else ''} "
-                    f"changed and cannot be restored automatically: inspect "
-                    f"{'it' if len(names) == 1 else 'them'} by hand."
-                )
-        else:
-            body.append(
-                "Nothing changed, so there is nothing to restore. To go on: "
-                "fix the cause, then resume this phase."
-            )
-        if stop.get("unapplied_ids") and not beside_section:
-            # Fix round 18: the way out of a stop a resume only repeats.
-            body.append(
-                f"Or keep what it applied and go on without "
-                f"{self._unapplied_words(stop['unapplied_ids'])}: add "
-                f"--human-task {task_id}=skip to the resume command (recorded "
-                f"as not applied, skipped at your request; the batches after "
-                f"it run)."
-            )
-        blocked = stop.get("blocked") or {}
-        for check_id in stop.get("check_task_ids") or []:
-            waiting = sorted(t for t, c in blocked.items() if c == check_id)
-            held = (
-                f"{check_id}'s check reported problems and holds back "
-                f"{', '.join(waiting)}: fix them and resume (a resume runs it "
-                f"again only once the files changed)"
-            )
-            body.append(
-                f"{held}." if beside_section else
-                f"{held}, or accept its findings "
-                f"by adding --human-task {check_id}=done to the resume command "
-                f"({', '.join(waiting)} then run, told that you accepted them)."
-            )
-        return head, reported, list(stop.get("not_run") or []), body, "."
-
-    def _refusal_message(
-        self, exc: ExecutorError, batch_index: int, result: SchedulerResult
-    ) -> List[str]:
-        """A refused batch, worded like :meth:`_stop_message` (D3k rung 1).
-
-        The refusal's own text already names the offending key, the spec as
-        written and the fix (one rejection formatter, ``_render_runner_rejection``),
-        so this frames it rather than restating it: which batch was refused, that
-        no child started for it, and what the batches before it left behind.
-        """
-        lines = [
-            "",
-            f"ERROR: batch {batch_index} was refused before any child started. No "
-            f"later batch was dispatched and the {self.phase} phase is NOT marked "
-            f"completed.",
-            f"  - {exc.message}",
-        ]
-        if result.batches_dispatched:
-            lines += [
-                f"Batches already applied this run: "
-                f"{', '.join(str(i) for i in result.batches_dispatched)} — their "
-                f"pre-batch snapshots are intact under "
-                f"{os.path.join(self.safety_dir, 'pre_batch')}/, and re-invoking "
-                f"with --resume re-dispatches only the unfinished batches.",
-                f"Audit log: {self.audit.path}",
-            ]
-        else:
-            lines.append(
-                "Nothing was dispatched and no file was modified."
-            )
-        lines.extend(self._account_lines(result))
-        return lines
 
     def _record_refusal(self, exc: ExecutorError, batch_index: int) -> None:
         """I11: name the refusal in ``.status.json``, with nothing in flight.
@@ -7546,23 +5817,12 @@ class WriteBatchScheduler:
                 "runner_key": (getattr(exc, "key", "") or "") if rejected else "",
                 "refused_batch": batch_index,
                 "progress": {"write_subagents": {
-                    **self._mirror_snapshot(),
+                    **self._reports.mirror_snapshot(),
                     "in_flight": [],
                 }},
             })
         except Exception:  # noqa: BLE001 - observability must not fail a phase
             pass
-
-    def _mirror_snapshot(self) -> Dict[str, Any]:
-        """The ``write_subagents`` mirror as last written, for a patch."""
-        from . import status_file as _status_file
-        try:
-            existing = _status_file.read_status(self.phase_dir)
-        except Exception:  # noqa: BLE001 - a missing file is an empty mirror
-            return {}
-        progress = existing.get("progress") if isinstance(existing, dict) else None
-        mirror = (progress or {}).get("write_subagents") if isinstance(progress, dict) else None
-        return dict(mirror) if isinstance(mirror, dict) else {}
 
     # -- verification ---------------------------------------------------
 
@@ -7752,7 +6012,7 @@ class WriteBatchScheduler:
             # for a run whose check passes. Fix round 21: and its `[ETA]` lines
             # close on the failed command, not on "ALL BATCHES COMPLETE".
             verification = result.verification or {}
-            self._eta_close(
+            self._eta.close(
                 result,
                 why=(
                     f"`{verification.get('command')}` exited "
@@ -7761,13 +6021,13 @@ class WriteBatchScheduler:
                 ),
             )
             if self.summary_file:
-                result.summary_file = self._write_summary(result)
+                result.summary_file = self._reports.write_summary(result)
                 result.messages.append(
                     f"Implementation summary: {result.summary_file}"
                 )
             return
         if self.state is not None:
-            self._metrics_finish(result)
+            self._eta.finish(result)
             # A resume of a phase already completed that dispatched nothing —
             # `implement --resume --human-task T007=done` closing a deferred
             # manual task — changed no code, so its completion keeps its date:
@@ -7820,10 +6080,10 @@ class WriteBatchScheduler:
                 # 2026-09-16).
                 self._reload_state()
         if self.summary_file:
-            result.summary_file = self._write_summary(result)
-            self._insert_plan_reference(result.summary_file)
+            result.summary_file = self._reports.write_summary(result)
+            self._reports.insert_plan_reference(result.summary_file)
             if self.state is not None:
-                # `_insert_plan_reference` is the one plan edit a run makes
+                # `WriteReports.insert_plan_reference` is the one plan edit a run makes
                 # *after* the stamp above (implement's own back-reference
                 # insertion) — re-stamp once more so it is not left stale too.
                 self.state.refresh_plan_hash()
@@ -7876,337 +6136,6 @@ class WriteBatchScheduler:
             except Exception:  # noqa: BLE001 - bookkeeping must not fail a phase
                 pass
 
-    def _eta_total(self, result: SchedulerResult) -> int:
-        """The ``[ETA]`` denominator: the tasks this run finishes or keeps.
-
-        Every materialized task but the ones it never dispatches: a task the
-        human-task plan skips or accepts, a manual task (no runner ever runs
-        one), and a task a check with findings holds back
-        (``result.blocked_by_check``, which grows as checks report). Fix round
-        18 (live run 7): the accept path's resume counted the accepted check
-        T002 and its last line read "batch 1/2 … ~0m 24s remaining" after the
-        one task it dispatched; a check holding T007 left "6/7" the same way.
-        On implement, only the tasks the run dispatches (fix round 20,
-        :meth:`_eta_task_ids`). The numerator never counts the others.
-        """
-        return len(self._eta_task_ids(result))
-
-    def _eta_task_ids(self, result: SchedulerResult) -> List[str]:
-        """The tasks :meth:`_eta_total` counts, in the task file's order.
-
-        Fix round 19 (review of round 18, #1): the run mirror counted its
-        ``total`` over another set — a held task and a manual one in — so one
-        run read "batch 6/6 … ALL BATCHES COMPLETE" in its log and
-        "implement 6/7 batches ok" on ``status`` and the OpenCode poll.
-        :meth:`_mirror_status` counts over this one too.
-
-        Fix round 20 (live run 8 #1): on implement, the set starts from what
-        the run will dispatch (``_eta_scope``, the walk the ``Organized into
-        …`` line counts), so a task the write policy refuses before dispatch,
-        the tasks after it that the run never reaches, a task kept from an
-        earlier run and one held by a check's findings on record are out from
-        the first line; the stop fixture's first run read "batch 1/7" under
-        "5 task(s) to dispatch" and stopped at "4/6". A task that finishes
-        without a runner leaves it, one dispatched against the walk's
-        reading joins it (:meth:`_eta_mark`), and a held task leaves it as
-        before. Fix round 23 (review of round 22, #1): on every phase, a task
-        that ended without a runner and not ok (an apply batch refused before
-        dispatch) is out, so "run stopped after batch 2/3" no longer counts
-        the refused batch among the ones done; a resume's kept batch stays in.
-        """
-        out = (
-            set(result.human_plan.skipped) | set(result.human_plan.accepted)
-            | set(result.blocked_by_check) | set(self._eta_held)
-            | set(self._eta_unrun)
-        )
-        scope = self._eta_scope
-        return [
-            str(task.get("task_id", "")) for task in self.tasks
-            if str(task.get("task_id", "")) not in out
-            and (scope is None or str(task.get("task_id", "")) in scope)
-            and not task.get("is_human") and task.get("executor_role") != "human"
-        ]
-
-    def _eta_mark(self, task_id: str, *, ran: bool, ok: bool = True) -> None:
-        """One more finished task for the ``[ETA]`` numerator (F3).
-
-        *ran*: a runner was started for it (its metric is recorded). On
-        implement (fix round 20) a task finished without one — kept from an
-        earlier run, refused before dispatch, a check not run again — was
-        not dispatched, so it leaves the counted set, as the native leg's
-        ``util batch-done`` withdraws a refused task; a task dispatched that
-        the walk did not foresee joins it, so the line never reads past its
-        own total. Called under ``_effects_lock``.
-
-        *ok*: how it ended; a dispatched task that failed stops the run
-        short of its phase (fix round 22), so the line it drives at N/N
-        claims no completion.
-        """
-        task_id = str(task_id)
-        self._eta_finished.add(task_id)
-        self._eta_failed.discard(task_id)
-        self._eta_unrun.discard(task_id)
-        if not ok:
-            # Ran and failed, or ended without a runner: refused before
-            # dispatch, a failed check not run again on unchanged files.
-            (self._eta_failed if ran else self._eta_unrun).add(task_id)
-        if self._eta_scope is not None:
-            if ran:
-                self._eta_scope.add(task_id)
-            else:
-                self._eta_scope.discard(task_id)
-
-    def _eta_progress(self, result: SchedulerResult) -> Tuple[int, int]:
-        """``(finished, total)`` over the tasks :meth:`_eta_task_ids` counts:
-        the two numbers every ``[ETA]`` line of this run prints."""
-        counted = self._eta_task_ids(result)
-        return sum(1 for task_id in counted if task_id in self._eta_finished), len(counted)
-
-    def _eta_left_out(self, result: SchedulerResult) -> Dict[str, str]:
-        """``{task id: how}`` for every task this run leaves undone, in
-        ``metrics.left_out_tail``'s words (fix round 22, live run 9 #1): the
-        stop fixture's executor closed on a bare "run stopped after batch
-        4/4" while T005 (refused), T006 (after it) and T007 (held by check
-        T002) had not run. What the dispatch walk foresaw and the run has
-        not met yet, a counted task not finished, a task the stop left
-        (``result.not_run``), a task a check holds and a task that ended
-        without a runner and not ok (refused, or a failed check not run
-        again). A task that ran and failed is not in it: it ran. Reads,
-        over copies: an abort's signal handler asks it mid-batch."""
-        finished = set(self._eta_finished)
-        left: Dict[str, str] = {
-            task_id: how for task_id, how in dict(self._eta_walk_left).items()
-            if task_id not in finished
-        }
-        for task_id in self._eta_task_ids(result):
-            if task_id not in finished:
-                left.setdefault(task_id, _metrics.LEFT_NOT_RUN)
-        for task_id in list(result.not_run):
-            if task_id not in finished:
-                left[str(task_id)] = _metrics.LEFT_NOT_RUN
-        held = {**dict(self._eta_held), **dict(result.blocked_by_check)}
-        for task_id, check_id in held.items():
-            left[str(task_id)] = _metrics.left_out_check(str(check_id))
-        for task_id in set(self._eta_unrun):
-            left[task_id] = (
-                _metrics.LEFT_REFUSED if task_id in self._refused_before_dispatch
-                else _metrics.LEFT_NOT_RUN
-            )
-        return left
-
-    def _eta_ends_short(self, result: SchedulerResult) -> bool:
-        """Whether this run will end short of completing its phase: a task
-        failed or was left (:meth:`_eta_left_out`). The ``[ETA]`` line that
-        reaches N/N then claims no completion (fix round 22)."""
-        return bool(self._eta_failed or self._eta_unrun or self._eta_left_out(result))
-
-    def _eta_failure(self, outcome: TaskOutcome) -> Tuple[str, bool]:
-        """What a failed dispatch's ``[ETA]`` line says happened, and whether
-        its edits are half-applied (fix round 24, live run 10 #5: OpenCode's
-        T002 timed out and its line read "task 2/11 done in 20m 5s"). The
-        status its batch line shows (``timeout``, ``batch failed``); for a
-        partial application, what stopped it."""
-        half = outcome.write_outcome == WRITE_PARTIAL or outcome.status == STATUS_PARTIAL
-        if outcome.applied_without_changes:
-            return "its change did not land", half
-        status = str(outcome.status or "")
-        if half:
-            status = "timeout" if self._ran_out_of_time(outcome) else next(
-                (
-                    str(attempt.status) for attempt in reversed(outcome.attempts)
-                    if attempt.status not in (STATUS_OK, STATUS_PARTIAL)
-                ),
-                "",
-            )
-        return status.replace("_", " "), half
-
-    def _eta_dropped(self, result: SchedulerResult) -> str:
-        """Why this line's total is lower than the last line's, in
-        ``metrics.left_out_tail``'s words, or ``""`` (fix round 24, live run
-        10 #7: the stop fixture's lines went "task 1/5", "task 2/4" with
-        nothing saying T007 left when check T002 reported problems). Moves
-        the baseline to this line's tasks."""
-        counted = set(self._eta_task_ids(result))
-        before, self._eta_line_ids = self._eta_line_ids, counted
-        gone = (before or set()) - counted
-        if not gone:
-            return ""
-        left = self._eta_left_out(result)
-        how = {
-            task_id: (
-                _metrics.LEFT_KEPT
-                if task_id in self._eta_finished and task_id not in self._eta_unrun
-                and task_id not in left
-                else left.get(task_id, _metrics.LEFT_NOT_RUN)
-            )
-            for task_id in gone
-        }
-        return _metrics.left_out_tail(how, unit=_metrics.eta_unit(self.phase))
-
-    def _manual_task_ids(self) -> List[str]:
-        """This run's manual tasks: no runner ever runs one."""
-        return [
-            str(task.get("task_id", "")) for task in self.tasks
-            if task.get("is_human") or task.get("executor_role") == "human"
-        ]
-
-    def _eta_closing_line(
-        self, result: Optional[SchedulerResult], *, verb: str = "stopped",
-        why: str = "",
-    ) -> Optional[str]:
-        """The closing ``[ETA]`` line of a run that ends short of completing
-        its phase (``metrics.closing_line``: the native leg's ``util metrics
-        finish`` words it the same), or ``None`` when there is nothing to
-        close (no baseline). Fix round 22: it names what the run left
-        (:meth:`_eta_left_out`), and a run that dispatched nothing closes
-        too ("run stopped with nothing dispatched · …"; 01b and 01c of live
-        run 9 logged no line). Pure: it logs and saves nothing, so an
-        abort's signal handler can ask for it."""
-        if not self._eta_started or result is None:
-            return None
-        done, total = self._eta_progress(result)
-        return _metrics.closing_line(
-            self.phase, done=done, total=total, verb=verb,
-            tail=_metrics.left_out_tail(
-                self._eta_left_out(result), unit=_metrics.eta_unit(self.phase),
-            ), why=why,
-        )
-
-    def _eta_close(
-        self, result: Optional[SchedulerResult], *, verb: str = "stopped",
-        why: str = "",
-    ) -> None:
-        """Close this run's ``[ETA]`` lines on an ending short of completion.
-
-        Fix round 20 (live run 8 #1): a stop that came before any "N/N" left
-        "batch 4/6 done in 0m 15s · ~0m 37s remaining" standing, so a stop
-        short of its total logged one closing line. Fix round 21 (review of
-        round 20, #1): every ending of a write phase closes them, once — a
-        stop, a refusal, the tasks a check holds back, a failed
-        ``driver.verify_command``, an exception out of the loop, a
-        foreground Ctrl-C (``verb="interrupted"``), a detached worker's
-        abort (:meth:`_eta_abort_line`) — and a finished phase with its
-        ``phase complete`` line (:meth:`_metrics_finish`). A check that
-        reported findings and held the last two tasks used to end the run
-        on "batch 3/5 … ~<1s remaining" with no closing line, and
-        ``metrics_progress.implement.total_batches`` still at 5: the stored
-        total is re-stamped here to the one the line and the write mirror
-        count. Best-effort.
-        """
-        if self._eta_closed:
-            return
-        self._eta_closed = True
-        _metrics.close_eta_run(self._eta_abort_line)
-        try:
-            line = self._eta_closing_line(result, verb=verb, why=why)
-            if result is not None and self._eta_started:
-                self._eta_restamp(self._eta_progress(result)[1])
-        except Exception:  # noqa: BLE001 - a count line must not fail a phase
-            return
-        if line:
-            self.log(line)
-
-    def _eta_restamp(self, total: int) -> None:
-        """Keep ``metrics_progress.{phase}.total_batches`` at the total the
-        ``[ETA]`` lines and the write mirror count (N1; fix round 21: an
-        ending with no later metric re-stamps it here)."""
-        live = getattr(self.state, "state", None)
-        progress = (
-            (live.get("metrics_progress") or {}).get(self.phase)
-            if isinstance(live, dict) else None
-        )
-        if not isinstance(progress, dict) or progress.get("total_batches") == total:
-            return
-        self.state.set_metrics_total(self.phase, total)
-        try:
-            self.state.save()
-        except Exception:  # noqa: BLE001 - bookkeeping must not fail a phase
-            pass
-
-    def _eta_abort_line(self, cause: str) -> Optional[str]:
-        """The closing line a detached worker's abort prints for this run
-        (``metrics.aborted_eta_line``, fix round 21): the signal handler ends
-        the process with ``os._exit``, so no ``finally`` of this run closes
-        its lines. Reads, takes no lock, logs nothing."""
-        return self._eta_closing_line(self._eta_result, verb=f"aborted ({cause})")
-
-    def _metrics_start(self, result: SchedulerResult) -> None:
-        """Stamp the phase's ETA baseline before the first dispatch.
-
-        Only the `util metrics start` CLI leg ever called `start_phase`, so on
-        the executor path `metrics_progress` never existed and neither did the
-        `[ETA]` line `instructions/implement.md` step 5 describes (F4).
-
-        The baseline is the number of **tasks** this run will actually dispatch
-        (or, on an apply phase, resume-skip) — :meth:`_eta_total`, the same
-        total ``_record_metrics``
-        uses (and keeps the stored baseline at) — never the
-        bare materialized count, which still counts a deferred human task that is
-        never dispatched (N1, 2026-09-16: with the bare count, the stored
-        ``metrics_progress.total_batches`` disagreed with every ``[ETA]`` line
-        the run went on to print). Tasks, not batches, because that is the unit
-        the numerator counts as well: see :meth:`_record_metrics` (F3).
-        """
-        if self.state is None or not hasattr(self.state, "start_metrics_phase"):
-            return
-        total_batches = self._eta_total(result)
-        try:
-            self.state.start_metrics_phase(self.phase, total_batches)
-            # A native emit's left-out tasks are that leg's (fix round
-            # 22): this run closes its own lines. Its set-aside tasks
-            # too (fix round 24): this run names its own.
-            self.state.set_metrics_left_out(self.phase, {})
-            self.state.set_metrics_set_aside(self.phase, {})
-            self._eta_started = True
-            self.state.save()
-        except Exception:  # noqa: BLE001 - bookkeeping must not fail a phase
-            pass
-        if self._eta_started:
-            # Fix round 21: what an ending with no other hold on the run
-            # counts over, and the line a detached worker's abort prints.
-            self._eta_result = result
-            _metrics.open_eta_run(self._eta_abort_line)
-            # Fix round 24: the total the first line is held to.
-            self._eta_line_ids = set(self._eta_task_ids(result))
-
-    def _metrics_finish(self, result: Optional[SchedulerResult] = None) -> None:
-        """Pop the phase's ETA baseline and log its closing line (F7).
-
-        The line goes through ``self.log`` for the same reason every per-batch
-        ``[ETA]`` line does — so it lands in the phase log ``status`` points at,
-        beside the lines it closes. ``finish_metrics_phase`` used to print it to
-        stderr itself, which on a foreground or in-process ``full`` run put the
-        closing line somewhere none of the others went.
-
-        Fix round 29 (review of round 28 #1): an implement run that started
-        no runner has no N/N line to name the tasks its plan set aside, so
-        its ``phase complete`` line names them (a manual task declined with
-        ``--human-task <id>=skip`` and the tasks skipped with it, say).
-        """
-        if not hasattr(self.state, "finish_metrics_phase"):
-            return
-        # The finished phase's closing line (fix round 21: one per ending).
-        self._eta_closed = True
-        _metrics.close_eta_run(self._eta_abort_line)
-        try:
-            finished = self.state.finish_metrics_phase(self.phase)
-        except Exception:  # noqa: BLE001 - bookkeeping must not fail a phase
-            return
-        # `(elapsed_ms, line)` when the phase had a baseline, `None` when it
-        # never started.
-        if isinstance(finished, tuple) and finished[1]:
-            line = finished[1]
-            if (result is not None and self.kind == "implement"
-                    and not any(self._started_a_runner(o) for o in result.outcomes)):
-                try:
-                    tail = _metrics.set_aside_tail(_human_task_plan.set_aside_by_plan(
-                        result.human_plan, self._manual_task_ids()))
-                except Exception:  # noqa: BLE001 - a count line must not fail a phase
-                    tail = ""
-                if tail:
-                    line = f"{line} · {tail}"
-            self.log(line)
-
     def _earlier_report_rows(self) -> List[Dict[str, Any]]:
         """The task rows the previous run left in ``write_batch_report.json``.
 
@@ -8223,7 +6152,7 @@ class WriteBatchScheduler:
         completion belongs to the earlier cycle, and a missing date on
         either side keeps the rows.
         """
-        path = os.path.join(self.phase_dir, WRITE_BATCH_REPORT_FILENAME)
+        path = os.path.join(self.phase_dir, _write_reports.WRITE_BATCH_REPORT_FILENAME)
         try:
             with open(path, "r", encoding="utf-8") as handle:
                 data = json.load(handle)
@@ -8235,7 +6164,7 @@ class WriteBatchScheduler:
         reviewed_at = self._review_completed_at()
         if predates_review(written_at, reviewed_at):
             self.log(
-                f"[write-subagents] the earlier {WRITE_BATCH_REPORT_FILENAME} "
+                f"[write-subagents] the earlier {_write_reports.WRITE_BATCH_REPORT_FILENAME} "
                 f"(written {written_at.isoformat(timespec='seconds')}) predates "
                 f"this phase's review (completed "
                 f"{reviewed_at.isoformat(timespec='seconds')}); its rows belong "
@@ -8253,772 +6182,19 @@ class WriteBatchScheduler:
         (:func:`review_completed_at`)."""
         return review_completed_at(getattr(self.state, "state", None), self.kind)
 
-    def _applied_to_label(self) -> Optional[str]:
-        """The phase's single write target relative to the repository root
-        (the plan for apply-suggestions, the task list for
-        apply-task-suggestions), or ``None`` for a phase without one."""
-        if not self.write_target:
-            return None
-        try:
-            # A label in prose and in the result line: `/` on every platform.
-            return os.path.relpath(
-                self.write_target, os.path.realpath(self.repo_root)).replace(os.sep, "/")
-        except ValueError:  # pragma: no cover - another drive (Windows)
-            return self.write_target
-
-    def _manual_close_note(
-        self, deferred: Dict[str, str], plan: Optional[_human_task_plan.HumanTaskPlan] = None,
-        stop: Optional[Mapping[str, Any]] = None,
-    ) -> Optional[str]:
-        """How to record the deferred manual tasks done, in the host's
-        spelling (``user_commands["answers"]``), or ``None``.
-
-        Fix round 16 (live run 6): the how-to-close note rode implement's
-        result only, never its summary.md, on either leg. The manual tasks
-        only: a code task skipped with one is not answerable ``done`` and
-        runs on that resume. Fix round 28: only the ones the user can do now
-        (:meth:`_manual_gates`), and the note says what waits on them. Fix
-        round 29 (review of round 28 #2): a run that stopped on a manual-task
-        gate (*stop*) gives the gate's resume alone, the one command its stop
-        names, and the note names the task(s) it records when the list above
-        holds another manual task, which stays listed.
-        """
-        template = self.user_commands.get("answers")
-        if self.kind != "implement" or not template or "{answers}" not in template:
-            return None
-        manual = sorted(
-            task_id for task_id in deferred
-            if (self._task_by_id(task_id) or {}).get("executor_role") == "human"
-            or (self._task_by_id(task_id) or {}).get("is_human")
-        )
-        listed = list(manual)
-        named: Optional[List[str]] = None
-        if (stop or {}).get("kind") == "manual-gate":
-            gating = [str(t) for t in (stop or {}).get("manual_task_ids") or []]
-            manual = [task_id for task_id in gating if task_id in listed]
-            waiting = len(set((stop or {}).get("held_task_ids") or []))
-            if set(listed) - set(manual):
-                named = list(manual)
-        else:
-            gates = self._manual_gates(plan) if plan is not None else None
-            waiting = 0
-            if gates is not None:
-                manual = [task_id for task_id in manual if task_id in gates["closable"]]
-                waiting = len({
-                    code for task_id in manual
-                    for code in gates["waiting"].get(task_id, ())
-                })
-        if not manual:
-            return None
-        from .next_phase import manual_close_note
-
-        return manual_close_note(template.replace(
-            "{answers}", " ".join(f"--human-task {task_id}=done" for task_id in manual)),
-            len(manual), waiting=waiting, named=named)
-
-    def _manual_gates(self, plan: Optional[_human_task_plan.HumanTaskPlan]) -> Optional[Dict[str, Any]]:
-        """:func:`plan_manual_gates` over this run's decomposition and
-        ``state.json`` as recorded, or ``None`` when it cannot be read."""
-        try:
-            statuses = (
-                dict(self.state.get_all_task_statuses())
-                if self.state is not None else {}
-            )
-        except Exception:  # noqa: BLE001 - a state fake without the map
-            statuses = {}
-        try:
-            return _human_task_plan.plan_manual_gates(
-                plan, _check_records.decomposition_graph(self.tasks, self.state), statuses)
-        except Exception:  # noqa: BLE001 - advisory wording, never fatal
-            return None
-
-    def _dispatched_sentence(self, result: SchedulerResult) -> str:
-        """summary.md's count of what this run dispatched: the tasks a
-        runner was started for and the batches they ran in, then the ones
-        it handled without a runner (fix round 24, live run 10 #7: the stop
-        fixture's summary said "5 batch task(s) dispatched across 4
-        batch(es)" beside "Organized into 3 execution batches" and "task
-        4/4", counting T005, refused before dispatch, and its batch). An
-        apply phase's task is its batch."""
-        ran = [o for o in result.outcomes if self._started_a_runner(o)]
-
-        def unit_ids(outcomes: Sequence[TaskOutcome]) -> str:
-            return ", ".join(sorted({o.task_id for o in outcomes}, key=_metrics._id_key))
-
-        if not ran:
-            sentence = "Nothing was dispatched in this run."
-        elif self.kind == "implement":
-            batches = {
-                int((self._task_by_id(o.task_id) or {}).get("batch_index", 0))
-                for o in ran
-            }
-            sentence = (
-                f"{len(ran)} task(s) dispatched across {len(batches)} batch(es), "
-                f"in order; each was checked against its pre-batch snapshot "
-                f"before the next was dispatched."
-            )
-        else:
-            sentence = (
-                f"{len(ran)} batch(es) dispatched, in order; each was checked "
-                f"against its pre-batch snapshot before the next was dispatched."
-            )
-        refused = [
-            o for o in result.outcomes
-            if not o.skipped and o.task_id in self._refused_before_dispatch
-        ]
-        not_rerun = [o for o in result.outcomes if not o.skipped and o.not_rerun]
-        kept = [
-            o for o in result.outcomes
-            if not o.skipped and o.skipped_items
-            and o.task_id not in self._refused_before_dispatch
-        ]
-        if refused:
-            sentence += f" Refused before dispatch (no runner started): {unit_ids(refused)}."
-        if not_rerun:
-            sentence += (
-                f" Not run again (nothing in the repository changed since it "
-                f"failed): {unit_ids(not_rerun)}."
-            )
-        if kept:
-            sentence += f" Kept as it stood at your request: {unit_ids(kept)}."
-        return sentence
-
-    def _started_a_runner(self, outcome: TaskOutcome) -> bool:
+    def _started_a_runner(
+        self, outcome: TaskOutcome, refusals: _write_context.Refusals,
+    ) -> bool:
         """Whether this run started a runner for *outcome*'s task: not a
         resume skip, a task refused before dispatch, a check not run again
         or a batch kept as it stood at the user's request (its left-out
         items are ``skipped_items``, :meth:`_keep_at_request`)."""
         return not (
             outcome.skipped or outcome.not_rerun or outcome.skipped_items
-            or outcome.task_id in self._refused_before_dispatch
+            or outcome.task_id in refusals.before_dispatch
         )
-
-    @staticmethod
-    def _answered_this_run(result: SchedulerResult) -> Dict[str, Tuple[str, str]]:
-        """``{task_id: (label, reason)}`` for the tasks this run's answers
-        settled without a runner: accepted (``=done`` on a failed task or a
-        check), completed by hand (``=done`` on a manual task), and skipped
-        at the user's request with the tasks skipped with them — in the
-        accounting line's words (fix round 26)."""
-        plan = result.human_plan
-        out: Dict[str, Tuple[str, str]] = {}
-        for task_id, reason in (plan.declined() or {}).items():
-            seed = is_declined_reason(reason)
-            out[str(task_id)] = (
-                "skipped at your request" if seed else "skipped with a skipped task",
-                str(reason),
-            )
-        for task_id, reason in (plan.accepted or {}).items():
-            out[str(task_id)] = (_human_task_plan.answered_done_label(plan, task_id), str(reason))
-        for task_id in plan.completed or ():
-            out[str(task_id)] = (
-                COMPLETED_BY_HAND_LABEL, f"answered --human-task {task_id}=done")
-        return out
-
-    def _write_summary(self, result: SchedulerResult) -> str:
-        """The implementation summary, with the three conditional sections (D3n)."""
-        plan_name = Path(self.plan_file).name if self.plan_file else "(plan)"
-        lines = [
-            f"# Implementation Summary: {plan_name}",
-            "",
-            f"*Generated: {datetime.now().isoformat()}*",
-            "",
-            f"**Plan**: {plan_name}",
-            f"**Phase**: {self.phase}",
-            f"**Invoker**: {self.invoker}",
-        ]
-        # F4: the template the instructions publish has always promised a
-        # `Typecheck status` line, and on this leg nothing filled it. Only for
-        # the code-editing kinds — a plan-text phase has no check to report.
-        if self.kind in _batch_prompt.CODE_WRITE_KINDS:
-            lines.append(f"**Verification**: {_verification_lines.verification_line(result)}")
-        rows = result.report_rows()
-        answered = self._answered_this_run(result)
-        earlier = [
-            row for row in rows
-            if row.get("from_earlier_run") and str(row.get("task_id")) not in answered
-        ]
-        account = self._accounting(result)
-        lines += [
-            "",
-            "## Summary",
-            "",
-            self._dispatched_sentence(result)
-            + (
-                f" The table below also carries {len(earlier)} task(s) "
-                f"recorded by earlier run(s) of this phase (marked), which this "
-                f"`--resume` did not dispatch again."
-                if earlier else ""
-            ),
-            "",
-            _stop_answers._accounting_line(account),
-            "",
-            "## Task Results",
-            "",
-            "| Task | Outcome | Files touched | Notes |",
-            "|------|---------|---------------|-------|",
-        ]
-        folded: Set[str] = set()
-        for row in rows:
-            # `reason` first: it is `_classify`'s own diagnostic (why a
-            # partial/clean-failure/no-op-with-bytes-moved outcome landed
-            # where it did) and, unlike `summary`, is only ever set when there
-            # is something worth explaining beyond the runner's own claim — a
-            # plain applied batch has none, so `summary` still carries the
-            # row. Before this a self-contradicting `no-op` claim printed its
-            # own rosy summary ("T006 already implemented: …") with no sign
-            # the bytes disagreed (N2, 2026-09-16).
-            task_cell = f"{row['task_id']}" + (
-                " (earlier run)" if row.get("from_earlier_run") else ""
-            )
-            outcome_cell = row_outcome_label(row) or row.get("status")
-            if row.get("status") == STATUS_OK and row_batch_check_findings(row):
-                # Fix round 14: never a plain success.
-                outcome_cell = f"{outcome_cell}, " + (
-                    "its check could not run"
-                    if batch_check_could_not_run(row_batch_check_findings(row))
-                    else "its check fails"
-                )
-            notes = (row.get("reason") or row.get("summary") or "").replace("|", "/")
-            answer = answered.get(str(row.get("task_id")))
-            if answer is not None and row.get("from_earlier_run"):
-                # Fix round 26 (live run 11 #9, OpenCode fix 02): a task you
-                # answered on this run reads as your answer, its earlier
-                # run's outcome named as what the answer was about; it read
-                # "(earlier run) policy-violation" here beside "## Skipped
-                # at your request" below.
-                label, why = answer
-                folded.add(str(row["task_id"]))
-                lines.append(
-                    f"| {row['task_id']} | {label} | — | "
-                    f"{clip(why.replace('|', '/'), 120)} (earlier run: "
-                    f"{outcome_cell}: {clip(notes, 160)}) |"
-                )
-                continue
-            lines.append(
-                f"| {task_cell} | {outcome_cell} | "
-                f"{', '.join(row.get('files_touched') or []) or '—'} | "
-                f"{clip(notes, 160)} |"
-            )
-        for task_id, reason in sorted(result.human_plan.accepted.items()):
-            if task_id in folded:
-                continue
-            label = _human_task_plan.answered_done_label(result.human_plan, task_id)
-            lines.append(f"| {task_id} | {label} | — | {clip(reason.replace('|', '/'), 160)} |")
-        for task_id in sorted(result.human_plan.completed):
-            if task_id in folded:
-                continue
-            lines.append(f"| {task_id} | completed by hand | — | answered --human-task {task_id}=done |")
-        for task_id, reason in sorted(result.not_run.items()):
-            lines.append(f"| {task_id} | not run | — | {clip(reason.replace('|', '/'), 160)} |")
-        findings_by_task = result.check_findings()
-        if findings_by_task:
-            # Racing re-run 4 (2026-10-05): T007's two html-validate problems
-            # read VERIFIED here and lived only in the runner's notes. They
-            # are listed whole, for the reader and for review-code, which is
-            # given this file and state.json's record of them.
-            fate = "; ".join(self._check_findings_fate(
-                result, findings_by_task,
-                # A check-findings stop is the end of a run whose other
-                # tasks went on; a failed task's stop is not.
-                stopped=bool(result.stop)
-                and (result.stop or {}).get("kind") != "check-findings",
-                see_below=True,
-            ))
-            lines += [
-                "", "## Check Findings", "",
-                "These checks ran and changed no file, but reported problems. "
-                + fate[:1].upper() + fate[1:] + ". "
-                + "Review-code is told about them, and apply-code-fixes "
-                "applies the fixes review-code validates.", "",
-            ]
-            # Fix round 22: a code task whose own check reported again only
-            # what you accepted for a check is named under that check.
-            again: Dict[str, List[str]] = {}
-            for task_id, matched in result.batch_check_accepted().items():
-                for check_id in matched:
-                    again.setdefault(check_id, []).append(task_id)
-            notes = result.batch_check_notes()
-            # Fix round 28: a code task whose own check reported only what a
-            # check task reported is named under that check too.
-            repeated: Dict[str, List[str]] = {}
-            repeated_found: Dict[Tuple[str, str], List[str]] = {}
-            for task_id, matched in result.batch_check_repeats().items():
-                for check_id, found in matched.items():
-                    repeated.setdefault(check_id, []).append(task_id)
-                    repeated_found[(task_id, check_id)] = [str(item) for item in found]
-            for task_id, findings in findings_by_task.items():
-                lines.append(f"### {task_id}")
-                lines.append("")
-                lines += [f"- {finding}" for finding in findings]
-                lines.append("")
-                for rerun in again.get(task_id, []):
-                    lines += [
-                        f"{rerun} ran this check again, and its own report says "
-                        f"only what you accepted: not counted as {rerun}'s own "
-                        f"failure.{_check_records._note_sentence(notes.get(rerun))}", "",
-                    ]
-                for rerun in repeated.get(task_id, []):
-                    # Fix round 29 (review of round 28, checks #5): the record
-                    # is what the task's run saw. A check that ran again and
-                    # no longer lists what it repeated has the repeat quoted,
-                    # never set under findings the task never reported.
-                    found = repeated_found.get((rerun, task_id)) or []
-                    left, _same = _check_records.split_repeated_findings(found, {task_id: findings})
-                    if found and left:
-                        lines += [
-                            f"{rerun} ran this check too, and its own report "
-                            f"said only what {task_id} reported then: "
-                            f"{_check_records.quoted_findings(found, 300)} — not what "
-                            f"{task_id} reports now, and not counted as "
-                            f"{rerun}'s own failure."
-                            f"{_check_records._note_sentence(notes.get(rerun))}", "",
-                        ]
-                        continue
-                    lines += [
-                        f"{rerun} ran this check too, and its own report says "
-                        f"only what {task_id} reported: it repeats {task_id}'s "
-                        f"finding, not counted as {rerun}'s own failure."
-                        f"{_check_records._note_sentence(notes.get(rerun))}", "",
-                    ]
-            lines.pop()
-        lines += _check_records.batch_check_section(rows, heading=not findings_by_task)
-        touched: List[str] = []
-        for row in rows:
-            for path in row.get("files_touched") or []:
-                if path not in touched:
-                    touched.append(path)
-        lines += ["", "## Files Modified", ""]
-        lines += [f"- `{path}`" for path in touched] or ["- (none)"]
-
-        plan = result.human_plan
-        deferred = plan.deferred()
-        declined = plan.declined()
-        if deferred:
-            lines += ["", "## Manual Tasks (Deferred)", ""]
-            lines += ["| Task | Reason |", "|------|--------|"]
-            for task_id, reason in sorted(deferred.items()):
-                lines.append(f"| {task_id} | {reason} |")
-            note = self._manual_close_note(deferred, plan, stop=result.stop)
-            if note:
-                lines += ["", note]
-        if declined:
-            # The user's own decision, not work left for them: a pause-and-ask
-            # "Skip", a failed task answered `--human-task <id>=skip`, and the
-            # tasks skipped with them. Listed apart so the summary and the
-            # workflow's `[MANUAL_TASK]` lines (which leave these out) agree.
-            lines += ["", "## Skipped at your request", ""]
-            lines += ["| Task | Reason |", "|------|--------|"]
-            for task_id, reason in sorted(declined.items()):
-                lines.append(f"| {task_id} | {reason} |")
-        if plan.overrides:
-            lines += [
-                "", "## Dependency Override Warnings", "",
-                "The following tasks ran with skipped human-task dependencies "
-                "(skip-continue strategy):", "",
-                "| Task | Overridden Dependencies | Risk |",
-                "|------|------------------------|------|",
-            ]
-            for task_id, deps in sorted(plan.overrides.items()):
-                lines.append(
-                    f"| {task_id} | {', '.join(deps)} | ran against an unmet "
-                    f"manual precondition |"
-                )
-        blocked = result.blocked_by_check
-        if blocked:
-            # Fix round 11: the tasks a check with findings kept from
-            # running, apart from a stop's own not-run list.
-            lines += [
-                "", "## Not Run: Upstream Check Reported Problems", "",
-                "These tasks depend on a check that reported problems (listed "
-                "under Check Findings), so they were not run; they stay "
-                "`pending`. Fix what the check reported and resume this phase "
-                "(the check runs again, and once it passes they run), or "
-                "accept the check's findings with `--human-task <check id>=done` "
-                "on the resume (they run, told that you accepted the findings, "
-                "which stay listed for review-code), or leave the check and them "
-                "undone with "
-                "`--human-task <check id>=skip`.", "",
-                "| Task | Waits for check |", "|------|-----------------|",
-            ]
-            for task_id, check_id in sorted(blocked.items()):
-                lines.append(f"| {task_id} | {check_id} |")
-        if (result.stop or {}).get("kind") == "manual-gate":
-            # Fix round 28 (live run 12, Codex racing 06): nothing ran, and
-            # the summary says why rather than reading as a finished run.
-            lines += [
-                "", "## Not Finished: Waiting On A Manual Task", "",
-                str(result.stop.get("headline") or ""),
-            ]
-        if result.stopped_at_batch is not None:
-            stop = result.stop or {}
-            lines += ["", "## Cancelled", ""]
-            if stop.get("headline"):
-                lines.append(stop["headline"])
-            else:
-                lines.append(
-                    f"The write loop stopped at batch {result.stopped_at_batch}."
-                )
-            lines.append("")
-            stopped = sorted(t for t in result.not_run if t not in blocked)
-            if stopped:
-                lines.append(
-                    "Not run (the stop came before they were dispatched; they "
-                    "stay `pending` and a `--resume` dispatches them after the "
-                    "failed task passes or is accepted):"
-                )
-                lines.append("")
-                lines += [f"- {task_id}" for task_id in stopped]
-            elif blocked:
-                lines.append(
-                    "Every other task of the decomposition had run, or waits "
-                    "for a check (above)."
-                )
-            else:
-                lines.append("Every other task of the decomposition had run.")
-            lines += [
-                "",
-                f"Snapshots are intact under "
-                f"`{os.path.join(self.safety_dir, 'pre_batch')}/`.",
-            ]
-        text = "\n".join(lines) + "\n"
-        target = Path(self.summary_file)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
-        return str(target)
-
-    def _insert_plan_reference(self, summary_file: Optional[str]) -> None:
-        """``insert_implementation_summary_reference`` on the plan (D3n)."""
-        if not (self.plan_file and summary_file):
-            return
-        from .plan_updater import insert_implementation_summary_reference
-        # `/`-spelled like `get_relative_output_path`'s: a link in the plan.
-        relative = self.summary_file_relative or os.path.relpath(
-            summary_file, str(Path(self.plan_file).parent)
-        ).replace(os.sep, "/")
-        try:
-            path = Path(self.plan_file)
-            content = path.read_text(encoding="utf-8")
-            path.write_text(
-                insert_implementation_summary_reference(content, relative),
-                encoding="utf-8",
-            )
-        except OSError as exc:  # pragma: no cover
-            self.log(f"[write-subagents] warning: plan reference failed: {exc}")
 
     # -- reports and status ---------------------------------------------
-
-    def _write_report(self, result: SchedulerResult) -> str:
-        path = os.path.join(self.phase_dir, WRITE_BATCH_REPORT_FILENAME)
-        # D3l: a scheduler artifact is written under the same rules as any other
-        # executor write — same-directory temp, 0600, ``os.replace`` — so a run
-        # killed mid-write leaves either the old report or the new one, never a
-        # truncated JSON for `status`/CI to parse, and never a umask-wide mode.
-        _atomic_write_json(path, result.to_dict())
-        # The executor's own per-dispatch report, so `--status` and the D3k rung
-        # accounting look identical on both halves of the executor.
-        effective, configured, provider_limits = self._ceiling_record()
-        report = BatchReport(
-            phase=self.phase, kind=self.kind, phase_dir=self.phase_dir,
-            # N9: the read path fills this from the `task_file` argument
-            # `run_task_file` was handed; the write path never takes one —
-            # `WriteBatchScheduler` is constructed from an already-materialized
-            # task LIST — but `write_task_file_for_phase` always persists that
-            # same list at exactly this path (every write orchestrator passes
-            # it the identical `phase_dir`), so it is not a guess.
-            task_file=os.path.join(self.phase_dir, WRITE_TASK_FILENAME),
-            outcomes=list(result.outcomes), invoker=self.invoker,
-            # F12: filled the same way the read path fills it
-            # (`_preflight_batch_runners`) — every distinct runner this run
-            # actually preflighted, with the version it reported.
-            runner_versions=dict(self._runner_versions),
-            ceilings={"effective": effective,
-                      "driver_max_concurrent_write_subagents": configured,
-                      "provider_max_concurrent": provider_limits,
-                      "host_max_concurrent_subagents": self.host_max,
-                      "shared_artifact_phase":
-                          self.kind in SHARED_ARTIFACT_WRITE_KINDS},
-        )
-        report.write()
-        return path
-
-    def _mirror_status(
-        self, result: SchedulerResult, *,
-        finished_in_batch: Sequence[TaskOutcome] = ()
-    ) -> None:
-        """Per-task write progress in ``.status.json`` (D3g/D4a). Best-effort.
-
-        ``finished_in_batch`` is the current batch's finished tasks, which are
-        not on ``result.outcomes`` until the batch returns; passing them is
-        what makes the counts advance *during* a batch instead of at its
-        boundary. The rows are appended, never merged, so a task cannot be
-        counted twice. (Named to leave ``in_flight`` — the JSON key below —
-        for tasks that are the opposite: dispatched and NOT yet finished.)
-        """
-        from . import status_file as _status_file
-        try:
-            outcomes = list(result.outcomes) + list(finished_in_batch)
-            if result.finalized:
-                phase_state = "complete"
-            elif result.stopped_at_batch is not None or result.exit_code:
-                phase_state = "subagents_failed"
-            else:
-                phase_state = "running"
-            # F4: `progress.step` is set before a dispatch and never replaced, so
-            # a write phase whose last `report_progress` came from the judging
-            # dispatch printed `dispatching human-decision judging` for the whole
-            # 288 s of batch application AND in the terminal payload, beside
-            # `run.state: done` (measured 2026-09-16). The mirror already writes
-            # `progress` on every advance, so it is the one place that can move
-            # the step with the work; it is written key-by-key, so every sibling
-            # counter survives.
-            step = {
-                "complete": "complete",
-                "subagents_failed": "stopped",
-            }.get(phase_state, "applying")
-            # F9: the mirror's `total`/`ok` count BATCHES, not the suggestions
-            # or fixes inside them — a 15-batch, 29-suggestion apply-suggestions
-            # run mirrored (and the model then reported) "15/15 ok, applied 15",
-            # 14 suggestions short. `expected_ids` is every write task's own
-            # declared item list (`write_phase_bridge`: suggestion/fix member
-            # ids for the three apply kinds, the task id itself for implement),
-            # so both counts are already on hand with no new bookkeeping.
-            #
-            # F9 (2026-09-16): both denominators also used to include the human
-            # task(s) `human_task_strategy` skips — they never dispatch, so a
-            # clean 14-task run with one deferred manual task mirrored
-            # `13/14 batches ok`, a run that did everything it could reading as
-            # one short. `result.human_plan.skipped` is resolved before this is
-            # ever called (`_run`'s step 1), so it is on hand the same way.
-            #
-            # Fix round 19 (review of round 18, #1): and over the same tasks
-            # the `[ETA]` line counts (`_eta_task_ids`): not a manual task,
-            # nor one a check with findings holds back — the line names that
-            # one as not run, with the check. Counted over the materialized
-            # tasks: an answered task an earlier run recorded
-            # (`answered_done_on_record`) is in `accepted` without being one
-            # of them.
-            counted_ids = self._eta_task_ids(result)
-            counted = set(counted_ids)
-            expected_ids_by_task = {
-                str(task.get("task_id", "")):
-                    [str(i) for i in (task.get("expected_ids") or [])]
-                for task in self.tasks
-                if str(task.get("task_id", "")) in counted
-            }
-            total = len(counted_ids)
-            # Fix round 20: the `ok` of `<ok>/<total> batches ok`, over the
-            # same tasks, so a task an implement run kept from an earlier one
-            # (never dispatched, never in `total`) is not counted as one of
-            # its batches; the progress line names it as kept instead.
-            ok_count = sum(1 for o in outcomes if o.ok and o.task_id in counted)
-            items_total = sum(len(ids) for ids in expected_ids_by_task.values())
-            items_applied = sum(
-                len([
-                    # Fix round 18: an item its batch declined, or one
-                    # skipped at the user's request, was not applied.
-                    item for item in expected_ids_by_task.get(o.task_id, [])
-                    if item not in o.declined and item not in o.skipped_items
-                ])
-                for o in outcomes if o.write_outcome == WRITE_APPLIED
-            )
-            declined_rows = [
-                {"task_id": o.task_id, "id": item, "reason": reason}
-                for o in outcomes if o.ok
-                for item, reason in o.declined.items()
-            ]
-            skipped_rows = [
-                {"task_id": o.task_id, "id": item, "reason": reason}
-                for o in outcomes if o.ok
-                for item, reason in o.skipped_items.items()
-            ]
-            # F10: a dispatch that has started and not yet been classified —
-            # `_dispatch_started`, added in `_begin_sweep` and removed in
-            # `_undeclared_writes`. Read under the same lock those methods take,
-            # since a disjoint group dispatches on threads.
-            in_flight = self._sweep.in_flight()
-            kept_rows = self._resume_kept_rows(result, outcomes)
-            kept_ids = (
-                [str(row.get("task_id")) for row in kept_rows]
-                + self._resume_answered_ids(result, outcomes, kept_rows)
-            ) or [o.task_id for o in outcomes if o.skipped]
-            _status_file.update_status(self.phase_dir, {
-                # The read phases record a phase-level `state` beside the run
-                # record; without one here `status` printed `phase state: (none)`
-                # for every finished write phase (measured 2026-09-16).
-                "state": phase_state,
-                "phase": self.phase,
-                "progress": {
-                    "step": step,
-                    "write_subagents": {
-                        "kind": self.kind,
-                        "invoker": self.invoker,
-                        # F9: excludes tasks `human_task_strategy` skipped —
-                        # they will never dispatch, so counting them here read
-                        # a clean run as short by exactly its deferred tasks.
-                        "total": total,
-                        "ok": ok_count,
-                        # F10: the tasks dispatched and NOT yet finished, so
-                        # an 11-minute single-task batch never reads as a
-                        # stall. (The finished count is the `tasks` rows.)
-                        "in_flight": [
-                            {"task_id": task_id, "dispatched_at": started}
-                            for task_id, started in in_flight
-                        ],
-                        "items_total": items_total,
-                        "items_applied": items_applied,
-                        # Fix round 26 (live run 11, OpenCode 05): the one
-                        # file a single-target phase edits, repo-relative,
-                        # so `status` says where the items were applied
-                        # ("applied to plans/x.md" was the host's guess).
-                        **({"applied_to": self._applied_to_label()}
-                           if self._applied_to_label() else {}),
-                        # Fix round 18: what finished batches did not apply
-                        # on purpose, and why — `status` names each one.
-                        **({"declined_items": declined_rows}
-                           if declined_rows else {}),
-                        **({"skipped_items": skipped_rows}
-                           if skipped_rows else {}),
-                        # F7: the run's own resolved runner, so `status` polled
-                        # outside the session that launched it names what the
-                        # batches actually dispatched to — `render_runner_text`
-                        # prefers this over a fresh resolution the same way it
-                        # already prefers the read path's `subagents` mirror.
-                        "runner_versions": dict(self._runner_versions),
-                        "batches_dispatched": list(result.batches_dispatched),
-                        "stopped_at_batch": result.stopped_at_batch,
-                        # F4: written only once the command really ran, so the
-                        # key's presence means "a check happened" rather than
-                        # "this version knows about checks". The mirror is
-                        # rewritten on every advance and verification is the
-                        # last thing a run does, so an absent key on a finished
-                        # run is the "not configured" notice in the log.
-                        **({"verification": result.verification}
-                           if result.verification else {}),
-                        "human_task_strategy": result.human_plan.strategy,
-                        "skipped_task_ids": sorted(result.human_plan.skipped),
-                        # Fix round 14: which of those the user skipped
-                        # (`--human-task <id>=skip`, a pause-and-ask "Skip")
-                        # and which went with them, so `status` no longer
-                        # lists them as "deferred manual" — work owed by hand
-                        # — beside a summary that says "skipped at your
-                        # request" (Codex stop-path accept 02).
-                        **_human_task_plan._declined_split(result.human_plan),
-                        # Fix round 17: which of the rest wait on a deferred
-                        # manual task, named apart from it on `status`.
-                        **_human_task_plan._deferred_split(result.human_plan),
-                        # One row per finished task. The id lists its rows
-                        # already carry (the tasks not `ok`, the checks with
-                        # findings, the code batches whose own check failed)
-                        # are read from them (`task_ledger.mirror_ids`), never
-                        # written beside them.
-                        "tasks": [
-                            {
-                                "task_id": o.task_id,
-                                "batch_index": self._batch_index_of(o.task_id),
-                                "status": o.status,
-                                "write_outcome": o.write_outcome,
-                                **({"verification_only": True,
-                                    "outcome_label": o.outcome_label}
-                                   if o.verification_only else {}),
-                                # Racing re-run 4: what a check found, only on
-                                # the row of a check that found something.
-                                **({"check_findings": list(o.check_findings)}
-                                   if o.ok and o.check_findings else {}),
-                                # Fix round 14: a code batch whose own check
-                                # failed after its edits.
-                                **({"batch_check_findings": list(o.batch_check)}
-                                   if o.ok and o.batch_check else {}),
-                                "files_touched": list(o.files_touched),
-                                # Fix round 15: moved, with no rollback point.
-                                **({"unrestorable": list(o.unrestorable)}
-                                   if o.unrestorable else {}),
-                                # Plan step 3: the rung, only when there was one.
-                                **({"sandbox_rung": self._dispatch_rungs[o.task_id]}
-                                   if self._dispatch_rungs.get(o.task_id) else {}),
-                            }
-                            for o in outcomes
-                        ],
-                        # Fix round 23 (review of round 22, #4): which of
-                        # the failed tasks a runner ran in this run — not one
-                        # refused before dispatch, nor a failed check not run
-                        # again — so `status` says "nothing crashed" only of
-                        # a stop no runner failed. Always written: an older
-                        # mirror without it is read by `failed_task_ids`.
-                        "runner_failed_task_ids": [
-                            o.task_id for o in outcomes
-                            if not o.ok and not o.skipped and not o.not_rerun
-                            and o.task_id not in self._refused_before_dispatch
-                        ],
-                        # Fix round 18 (run 7 #3): the tasks this run kept
-                        # from an earlier one instead of dispatching them, so
-                        # `status` does not read them as this run's batches.
-                        # Fix round 22 (live run 9 #5): every task the
-                        # resume kept, as its `resume: kept` line names
-                        # them, not only the ones it materialized again.
-                        # Fix round 23: the line's whole set — the tasks an
-                        # earlier run finished and this one did not
-                        # dispatch, then the ones kept on the user's
-                        # `--human-task <id>=done` (an accepted check or
-                        # failed task, a manual task completed by hand).
-                        **({"kept_task_ids": kept_ids} if kept_ids else {}),
-                        # Which of them the user completed by hand, so
-                        # `status` names them in the line's words.
-                        **({"completed_by_hand_task_ids": sorted(
-                            set(result.human_plan.completed) & set(kept_ids)
-                        )} if set(result.human_plan.completed) & set(kept_ids)
-                           else {}),
-                        # Fix round 23: a task whose own check repeated only
-                        # the findings the user accepted, by the checks.
-                        **({"batch_check_accepted": {
-                            o.task_id: sorted(o.batch_check_accepted)
-                            for o in outcomes if o.ok and o.batch_check_accepted
-                        }} if any(o.ok and o.batch_check_accepted for o in outcomes)
-                           else {}),
-                        # Fix round 28: one whose own check repeated only a
-                        # check task's finding, by the checks.
-                        **({"batch_check_repeats": {
-                            o.task_id: sorted(o.batch_check_repeats)
-                            for o in outcomes if o.ok and o.batch_check_repeats
-                        }} if any(o.ok and o.batch_check_repeats for o in outcomes)
-                           else {}),
-                        # Fix round 14: nothing ran the repository's tests.
-                        **({"unverified": result.unverified}
-                           if result.unverified else {}),
-                        # Racing re-run 3 (2026-10-05): the tasks a stop left
-                        # undispatched, and the failed tasks the user accepted,
-                        # so `status` and a terminal poll account for every
-                        # task rather than only the dispatched ones.
-                        "not_run_task_ids": sorted(result.not_run),
-                        # Fix round 11: which of them wait for a check that
-                        # reported problems, and for which one.
-                        **({"blocked_by_check": dict(sorted(result.blocked_by_check.items()))}
-                           if result.blocked_by_check else {}),
-                        "accepted_task_ids": sorted(result.human_plan.accepted),
-                        # Fix round 16: which of them are checks accepted with
-                        # their findings, so `status` does not read them
-                        # "accepted after failing" (Codex accept 02).
-                        **({"accepted_with_findings_task_ids": sorted(
-                            task_id for task_id, reason
-                            in result.human_plan.accepted.items()
-                            if ACCEPTED_WITH_FINDINGS_MARK in str(reason or "")
-                        )} if any(
-                            ACCEPTED_WITH_FINDINGS_MARK in str(reason or "")
-                            for reason in result.human_plan.accepted.values()
-                        ) else {}),
-                        **({"stop": copy.deepcopy(result.stop)}
-                           if result.stop else {}),
-                    }
-                }
-            })
-        except Exception:  # noqa: BLE001 - observability must not fail a phase
-            pass
-
-    def _batch_index_of(self, task_id: str) -> Optional[int]:
-        for task in self.tasks:
-            if str(task.get("task_id", "")) == task_id:
-                return int(task.get("batch_index", 0))
-        return None
 
     # -- dry run --------------------------------------------------------
 
@@ -9077,7 +6253,7 @@ class WriteBatchScheduler:
                     entries.append(entry)
                     continue
                 try:
-                    prompt = self.dispatched_prompt(task)
+                    prompt = self._prompts.dispatched_prompt(task)
                 except ResultRejected as exc:
                     entry["would_dispatch"] = False
                     entry["reason"] = exc.message
@@ -9121,7 +6297,7 @@ class WriteBatchScheduler:
 
         path = os.path.join(self.phase_dir, DRY_RUN_FILENAME)
         effective, configured, provider_limits = self._ceiling_record()
-        # Same containment as every other executor write (see ``_write_report``).
+        # Same containment as every other executor write (see ``WriteReports.write_report``).
         _atomic_write_json(path, {
             "dry_run_version": 1,
             "kind": self.kind,

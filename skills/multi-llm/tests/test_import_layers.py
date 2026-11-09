@@ -131,6 +131,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.batch_done",
         "utils.batch_ledger",
         "utils.batch_prompt",
+        "utils.batch_prompt_builder",
         "utils.batch_reply",
         "utils.check_records",
         "utils.check_reply",
@@ -172,11 +173,14 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.wakeup_check",
         "utils.write_batch_scheduler",
         "utils.write_context",
+        "utils.write_eta",
         "utils.write_phase_bridge",
         "utils.write_prompt",
         "utils.write_record",
+        "utils.write_reports",
         "utils.write_outcomes",
         "utils.write_safety",
+        "utils.write_stop",
         "utils.write_sweep",
         "utils.write_verdict",
         "utils.write_verify",
@@ -287,9 +291,11 @@ KNOWN_UPWARD: Dict[Tuple[str, str], str] = {
         "recorded_plan_spelling: belongs in a routes module at L1, with resolve_route",
     ("utils.detach", "utils.next_phase"):
         "resolve_route, _skill_module: belong in a routes module at L1",
-    ("utils.write_batch_scheduler", "utils.next_phase"):
-        "manual_close_note, manual_gate_why, manual_gate_decline_answers: "
+    ("utils.write_stop", "utils.next_phase"):
+        "manual_gate_why, manual_gate_decline_answers: "
         "belong in a manual-tasks module at L3",
+    ("utils.write_reports", "utils.next_phase"):
+        "manual_close_note: belongs in a manual-tasks module at L3",
     ("utils.stop_answers", "utils.next_phase"):
         "MAX_RECORDED_WHY_CHARS: belongs in a manual-tasks module at L3",
     ("utils.apply_orchestrator_base", "utils.next_phase"):

@@ -82,7 +82,7 @@ def test_the_census_is_the_tree_without_links_vcs_or_the_executors_own_files(env
     runs.mkdir(parents=True)
     (runs / "r.json").write_text("{}", encoding="utf-8")
 
-    census = scheduler._census()
+    census = scheduler._sweep.census()
 
     expected = {}
     for folder, dirs, files in os.walk(env.root):
@@ -229,7 +229,7 @@ def test_a_folder_swapped_for_a_link_after_the_census_is_not_copied_through(env,
     path where it now leads, never copy those bytes into the store."""
     _plant(env, tmp_path)
     scheduler = env.scheduler([env.apply_task(0)])
-    census = scheduler._census()
+    census = scheduler._sweep.census()
     assert "src/deep/er/d.py" in census
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
@@ -238,7 +238,7 @@ def test_a_folder_swapped_for_a_link_after_the_census_is_not_copied_through(env,
     (env.root / "src" / "deep" / "er").rmdir()
     (env.root / "src" / "deep" / "er").symlink_to(elsewhere, target_is_directory=True)
 
-    kept = scheduler._retain(census)
+    kept = scheduler._sweep.retain(census)
 
     assert "src/deep/er/d.py" not in kept
     assert b"bytes from outside the repository\n" not in _store_bytes(scheduler)
@@ -278,7 +278,7 @@ def test_a_file_swapped_for_a_link_inside_the_retention_pass_is_not_copied(
     _plant(env, tmp_path)
     env.use(write_paths={"allow": ["src/**"], "deny": ["**/.env"]})
     scheduler = env.scheduler([env.apply_task(0)])
-    census = scheduler._census()
+    census = scheduler._sweep.census()
     outside = tmp_path / "outside" / "secret.txt"
     outside.write_text("bytes the deny list keeps out\n", encoding="utf-8")
     target = env.root / "src" / "b.py"
@@ -288,7 +288,7 @@ def test_a_file_swapped_for_a_link_inside_the_retention_pass_is_not_copied(
         target.symlink_to(outside)
 
     fired = _after_first_resolve(monkeypatch, target, swap)
-    kept = scheduler._retain(census)
+    kept = scheduler._sweep.retain(census)
 
     assert fired
     assert "src/b.py" not in kept
@@ -307,7 +307,7 @@ def test_a_phase_path_swapped_inside_the_retention_pass_stops_it_at_the_next_fil
     bytes are copied, even when the swap is undone right after it."""
     scheduler = env.scheduler([env.apply_task(0)])
     write_safety.claim_external_safety_dir(str(env.phase_dir), str(env.root))
-    census = scheduler._census()
+    census = scheduler._sweep.census()
     saved = env.phase_dir.with_name("saved-phase")
     forged = tmp_path / "forged"
     forged.mkdir()
@@ -328,7 +328,7 @@ def test_a_phase_path_swapped_inside_the_retention_pass_stops_it_at_the_next_fil
 
     monkeypatch.setattr(scheduler._sweep, "store_blob", store_then_swap)
     with pytest.raises(write_safety.WriteSafetyError, match="trusted phase identity"):
-        scheduler._retain(census)
+        scheduler._sweep.retain(census)
     assert copied == ["p.md", "a.py"]
     assert not any(forged.iterdir())
 
@@ -402,7 +402,7 @@ def test_a_link_swapped_in_after_the_first_resolve_is_not_followed_under_the_def
     _plant(env, tmp_path)
     scheduler = env.scheduler([env.apply_task(0)])
     assert scheduler.policy.allow == ["**"]
-    census = scheduler._census()
+    census = scheduler._sweep.census()
     secret = b"bytes from outside, linked in mid-pass\n"
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
@@ -426,7 +426,7 @@ def test_a_link_swapped_in_after_the_first_resolve_is_not_followed_under_the_def
             folder.symlink_to(elsewhere, target_is_directory=True)
 
     fired = _after_first_resolve(monkeypatch, target, swap)
-    kept = scheduler._retain(census)
+    kept = scheduler._sweep.retain(census)
 
     assert fired
     assert relative not in kept
@@ -449,7 +449,7 @@ def test_a_file_changed_between_its_hash_and_its_copy_stores_the_bytes_hashed(
                     "replaced while it is read")
     _plant(env, tmp_path)
     scheduler = env.scheduler([env.apply_task(0)])
-    census = scheduler._census()
+    census = scheduler._sweep.census()
     target = env.root / "src" / "a.py"
     digest = hashlib.sha256(target.read_bytes()).hexdigest()
     secret = tmp_path / "outside" / "between.txt"
@@ -470,7 +470,7 @@ def test_a_file_changed_between_its_hash_and_its_copy_stores_the_bytes_hashed(
         return blob_path(name)
 
     monkeypatch.setattr(scheduler._sweep, "blob_path", name_the_blob)
-    kept = scheduler._retain(census)
+    kept = scheduler._sweep.retain(census)
 
     assert fired
     if _copies_by_path(opening):
@@ -493,7 +493,7 @@ def test_by_path_a_link_there_only_for_the_open_is_refused(env, tmp_path, monkey
     monkeypatch.setattr(write_safety, "OPENS_WITHOUT_FOLLOWING", False, raising=False)
     _plant(env, tmp_path)
     scheduler = env.scheduler([env.apply_task(0)])
-    census = scheduler._census()
+    census = scheduler._sweep.census()
     target = env.root / "src" / "b.py"
     saved = target.with_name("b.saved")
     secret = tmp_path / "outside" / "for-the-open.txt"
@@ -515,7 +515,7 @@ def test_by_path_a_link_there_only_for_the_open_is_refused(env, tmp_path, monkey
             os.rename(saved, target)
 
     monkeypatch.setattr(os, "open", open_through_a_link)
-    kept = scheduler._retain(census)
+    kept = scheduler._sweep.retain(census)
 
     assert fired
     assert "src/b.py" not in kept
@@ -531,12 +531,12 @@ def test_a_fifo_swapped_in_after_the_census_is_refused_without_waiting(
     and refused as not a regular file: opened by path for reading, the pass
     used to wait for a writer that never comes."""
     scheduler = env.scheduler([env.apply_task(0)])
-    census = scheduler._census()
+    census = scheduler._sweep.census()
     target = env.root / "src" / "b.py"
     target.unlink()
     os.mkfifo(target)
 
-    kept = scheduler._retain(census)
+    kept = scheduler._sweep.retain(census)
 
     assert "src/b.py" not in kept
     assert "src/a.py" in kept
@@ -561,10 +561,10 @@ def test_a_blob_keeps_what_copy2_kept_of_the_file(env, opening):
             pass
     scheduler = env.scheduler([env.apply_task(0)])
 
-    kept = scheduler._retain(scheduler._census())
+    kept = scheduler._sweep.retain(scheduler._sweep.census())
 
     source = os.stat(target)
-    blob = os.stat(scheduler._blob_path(kept["src/a.py"]))
+    blob = os.stat(scheduler._sweep.blob_path(kept["src/a.py"]))
     assert stat.S_IMODE(blob.st_mode) == stat.S_IMODE(source.st_mode)
     assert blob.st_mtime_ns == source.st_mtime_ns
     if not _copies_by_path(opening):
@@ -572,7 +572,7 @@ def test_a_blob_keeps_what_copy2_kept_of_the_file(env, opening):
         # back to check its bytes can move it.
         assert blob.st_atime_ns == source.st_atime_ns
     if xattr is not None:
-        assert os.getxattr(scheduler._blob_path(kept["src/a.py"]),
+        assert os.getxattr(scheduler._sweep.blob_path(kept["src/a.py"]),
                            "user.multi-llm-test") == xattr
 
 
@@ -587,10 +587,10 @@ def test_a_link_planted_at_the_pending_name_is_replaced_never_written_through(
     ``CopyFile2`` copies), so the link's target is neither written, re-moded
     nor, for a dangling link, created."""
     scheduler = env.scheduler([env.apply_task(0)])
-    census = scheduler._census()
+    census = scheduler._sweep.census()
     source = env.root / "src" / "a.py"
     digest = hashlib.sha256(source.read_bytes()).hexdigest()
-    blob = Path(scheduler._blob_path(digest))
+    blob = Path(scheduler._sweep.blob_path(digest))
     pending = Path(f"{blob}.{os.getpid()}.{threading.get_ident()}.tmp")
     pending.parent.mkdir(parents=True)
     victim = tmp_path / "victim.txt"
@@ -600,7 +600,7 @@ def test_a_link_planted_at_the_pending_name_is_replaced_never_written_through(
         mode = stat.S_IMODE(victim.stat().st_mode)
     pending.symlink_to(victim)
 
-    kept = scheduler._retain(census)
+    kept = scheduler._sweep.retain(census)
 
     assert kept["src/a.py"] == digest
     if planted == "to a file":
@@ -628,7 +628,7 @@ def test_by_path_a_copy_of_another_file_is_refused_and_removed(
     _by_path_with_copy_file2(monkeypatch)
     _plant(env, tmp_path)
     scheduler = env.scheduler([env.apply_task(0)])
-    census = scheduler._census()
+    census = scheduler._sweep.census()
     relative = "src/deep/er/d.py"
     target = env.root / relative
     folder = target.parent
@@ -659,7 +659,7 @@ def test_by_path_a_copy_of_another_file_is_refused_and_removed(
         return copy(source, destination, flags)
 
     monkeypatch.setattr(write_safety, "_COPY_FILE2", copy_another)
-    kept = scheduler._retain(census)
+    kept = scheduler._sweep.retain(census)
 
     assert fired
     assert relative not in kept
@@ -708,7 +708,7 @@ def test_a_refused_read_only_copy_is_removed(env, monkeypatch):
     pending copy is left in the store."""
     lines: list = []
     scheduler = env.scheduler([env.apply_task(0)], log=lines.append)
-    census = scheduler._census()
+    census = scheduler._sweep.census()
 
     def copy_changed_read_only(source, destination, flags, copy) -> None:
         _copy_then_change(source, destination, flags, copy)
@@ -717,7 +717,7 @@ def test_a_refused_read_only_copy_is_removed(env, monkeypatch):
 
     copy_file2, fired = _copying(env.root / "src" / "a.py", copy_changed_read_only)
     monkeypatch.setattr(write_safety, "_COPY_FILE2", copy_file2)
-    kept = scheduler._retain(census)
+    kept = scheduler._sweep.retain(census)
 
     assert fired
     assert "src/a.py" not in kept
@@ -765,7 +765,7 @@ def test_a_refused_copy_that_cannot_be_removed_is_reported(
     lines: list = []
     scheduler = env.scheduler([env.apply_task(0)], log=lines.append)
 
-    kept = scheduler._retain(scheduler._census())
+    kept = scheduler._sweep.retain(scheduler._sweep.census())
 
     assert fired
     assert "src/a.py" not in kept
@@ -777,7 +777,7 @@ def test_a_refused_copy_that_cannot_be_removed_is_reported(
     assert any(f"src/a.py (its refused copy is left at {left[0]})" in line
                for line in lines), lines
     blobs = [blob for blob in _blobs(scheduler) if not blob.name.endswith(".tmp")]
-    assert scheduler._retained_bytes == (
+    assert scheduler._sweep._retained_bytes == (
         sum(blob.stat().st_size for blob in blobs) + left[0].stat().st_size)
 
 
@@ -802,7 +802,7 @@ def test_a_link_at_the_pending_name_once_copied_is_refused_and_named(
     lines: list = []
     scheduler = env.scheduler([env.apply_task(0)], log=lines.append)
 
-    kept = scheduler._retain(scheduler._census())
+    kept = scheduler._sweep.retain(scheduler._sweep.census())
 
     assert fired
     assert "src/a.py" not in kept
@@ -833,12 +833,12 @@ def test_a_dangling_link_planted_before_the_copy_is_not_followed(
     monkeypatch.setattr(write_safety, "_COPY_FILE2", copy_file2)
     scheduler = env.scheduler([env.apply_task(0)])
 
-    kept = scheduler._retain(scheduler._census())
+    kept = scheduler._sweep.retain(scheduler._sweep.census())
 
     assert fired
     assert not os.path.lexists(absent)
     if "src/a.py" in kept:
-        blob = Path(scheduler._blob_path(kept["src/a.py"]))
+        blob = Path(scheduler._sweep.blob_path(kept["src/a.py"]))
         assert blob.read_bytes() == (env.root / "src" / "a.py").read_bytes()
     for blob in _blobs(scheduler):
         if not blob.name.endswith(".tmp"):
@@ -865,10 +865,10 @@ def test_by_path_a_refused_copy_falls_back_as_copy2_does(env, monkeypatch, winer
     scheduler = env.scheduler([env.apply_task(0)])
     source = env.root / "src" / "a.py"
 
-    kept = scheduler._retain(scheduler._census())
+    kept = scheduler._sweep.retain(scheduler._sweep.census())
 
     if winerror == 5:
-        blob = Path(scheduler._blob_path(kept["src/a.py"]))
+        blob = Path(scheduler._sweep.blob_path(kept["src/a.py"]))
         assert blob.read_bytes() == source.read_bytes()
         assert blob.stat().st_mtime_ns == source.stat().st_mtime_ns
     else:
@@ -1996,17 +1996,17 @@ def test_the_discarded_store_is_gone_whole_and_says_nothing(env, tmp_path):
     (its target keeps its bytes), and a store already gone says nothing."""
     lines: list = []
     scheduler = env.scheduler([env.apply_task(0)], log=lines.append)
-    assert scheduler._retain(scheduler._census())
+    assert scheduler._sweep.retain(scheduler._sweep.census())
     victim = tmp_path / "victim.txt"
     victim.write_bytes(b"not the discard's to remove\n")
     (_store(scheduler) / "planted").symlink_to(victim)
 
-    scheduler._discard_rollback_store()
-    scheduler._discard_rollback_store()
+    scheduler._sweep.discard_store()
+    scheduler._sweep.discard_store()
 
     assert not os.path.lexists(_store(scheduler))
     assert victim.read_bytes() == b"not the discard's to remove\n"
-    assert not scheduler._retained and scheduler._retained_bytes == 0
+    assert not scheduler._sweep._retained and scheduler._sweep._retained_bytes == 0
     assert not [line for line in lines if "WARNING" in line], lines
 
 
@@ -2017,8 +2017,8 @@ def test_what_the_discard_cannot_remove_is_named_and_never_tried_again(env, monk
     time. The folders left only because it is are not named again."""
     lines: list = []
     scheduler = env.scheduler([env.apply_task(0)], log=lines.append)
-    kept = scheduler._retain(scheduler._census())
-    blob = scheduler._blob_path(kept["src/a.py"])
+    kept = scheduler._sweep.retain(scheduler._sweep.census())
+    blob = scheduler._sweep.blob_path(kept["src/a.py"])
     tries: list = []
     real_unlink = os.unlink
 
@@ -2032,7 +2032,7 @@ def test_what_the_discard_cannot_remove_is_named_and_never_tried_again(env, monk
         patched.setattr(os, "unlink", unlink)
         patched.setattr(write_safety, "_clear_readonly",
                         lambda *args: pytest.fail("no attribute is cleared"))
-        scheduler._discard_rollback_store()
+        scheduler._sweep.discard_store()
 
     assert len(tries) == 1
     assert os.path.lexists(blob)
@@ -2042,7 +2042,7 @@ def test_what_the_discard_cannot_remove_is_named_and_never_tried_again(env, monk
     assert warnings[0].count(" could not be removed (") == 1
     assert "It was not tried again; left there it costs disk space only." in warnings[0]
     assert "delete it by hand" in warnings[0]
-    assert not scheduler._retained and scheduler._retained_bytes == 0
+    assert not scheduler._sweep._retained and scheduler._sweep._retained_bytes == 0
 
 
 @pytest.mark.skipif(
@@ -2061,8 +2061,8 @@ def test_a_refused_blob_is_never_tried_again_through_a_folder_swapped_for_a_link
     and the folder is swapped once ``rmtree`` holds it.)"""
     lines: list = []
     scheduler = env.scheduler([env.apply_task(0)], log=lines.append)
-    kept = scheduler._retain(scheduler._census())
-    blob = Path(scheduler._blob_path(kept["src/a.py"]))
+    kept = scheduler._sweep.retain(scheduler._sweep.census())
+    blob = Path(scheduler._sweep.blob_path(kept["src/a.py"]))
     folder, saved = blob.parent, blob.parent.with_name(blob.parent.name + ".saved")
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -2083,7 +2083,7 @@ def test_a_refused_blob_is_never_tried_again_through_a_folder_swapped_for_a_link
     try:
         with monkeypatch.context() as patched:
             patched.setattr(os, "unlink", unlink)
-            scheduler._discard_rollback_store()
+            scheduler._sweep.discard_store()
     finally:
         os.chmod(saved if saved.exists() else folder, stat.S_IRWXU)
 
@@ -2105,8 +2105,8 @@ def test_a_store_folder_swapped_for_a_junction_clears_nothing_outside(
     its attribute and bytes stay; the blob is named."""
     lines: list = []
     scheduler = env.scheduler([env.apply_task(0)], log=lines.append)
-    kept = scheduler._retain(scheduler._census())
-    blob = Path(scheduler._blob_path(kept["src/a.py"]))
+    kept = scheduler._sweep.retain(scheduler._sweep.census())
+    blob = Path(scheduler._sweep.blob_path(kept["src/a.py"]))
     folder = blob.parent
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -2126,7 +2126,7 @@ def test_a_store_folder_swapped_for_a_junction_clears_nothing_outside(
     try:
         with monkeypatch.context() as patched:
             patched.setattr(os, "unlink", unlink)
-            scheduler._discard_rollback_store()
+            scheduler._sweep.discard_store()
 
         assert swapped
         assert victim.read_bytes() == b"not the discard's to remove\n"
@@ -2148,11 +2148,11 @@ def test_a_read_only_blob_is_named_and_left_by_the_discard(env):
     scheduler = env.scheduler([env.apply_task(0)], log=lines.append)
     os.chmod(target, stat.S_IREAD)
     try:
-        kept = scheduler._retain(scheduler._census())
-        blob = scheduler._blob_path(kept["src/a.py"])
+        kept = scheduler._sweep.retain(scheduler._sweep.census())
+        blob = scheduler._sweep.blob_path(kept["src/a.py"])
         assert _file_attributes(blob) & stat.FILE_ATTRIBUTE_READONLY
 
-        scheduler._discard_rollback_store()
+        scheduler._sweep.discard_store()
 
         assert os.path.lexists(blob)
         assert _file_attributes(blob) & stat.FILE_ATTRIBUTE_READONLY

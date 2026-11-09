@@ -534,7 +534,7 @@ file-granular and repo-rooted — and for opencode deliberately outside `HERMETI
 server orphaned, and signed off with `killall -9 … python3`, killing the detached orchestrator that
 had dispatched it (F2, 2026-09-16).
 
-The write-batch scheduler's shared result-contract seam (`_with_result_contract`,
+The write-batch scheduler's shared result-contract seam (`BatchPromptBuilder.with_result_contract`,
 `utils/write_batch_scheduler.py`) therefore names
 `kill`/`pkill`/`killall` and background servers,
 watchers and browsers as forbidden on every dispatched write batch (fix round 21 dropped its "verify

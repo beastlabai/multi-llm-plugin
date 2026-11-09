@@ -460,17 +460,17 @@ def test_parent_runtime_files_are_not_runner_edits(env, mode):
     parent.mkdir()
     env.monkeypatch.setattr(detach, "_ACTIVE", SimpleNamespace(phase_dir=str(parent)))
     scheduler = env.scheduler([env.apply_task(0)])
-    before = scheduler._census()
+    before = scheduler._sweep.census()
     for name in (".status.json", ".status.lock", "orchestrator-run.log"):
         (parent / name).write_text("runtime update\n")
-    assert scheduler._census() == before
+    assert scheduler._sweep.census() == before
     # A source edit, a sibling artifact and a composite result are still visible.
     (env.root / "src/a.py").write_text("changed source bytes\n")
     (parent / "result.json").write_text("changed result\n")
     sibling = env.out_dir / "review-plan"
     sibling.mkdir()
     (sibling / ".status.json").write_text("unrelated phase\n")
-    after = scheduler._census()
+    after = scheduler._sweep.census()
     changed = {p for p in set(before) | set(after) if before.get(p) != after.get(p)}
     assert changed == {"src/a.py", f".multi-llm/p/{mode}/result.json", ".multi-llm/p/review-plan/.status.json"}
 

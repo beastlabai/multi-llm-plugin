@@ -1734,7 +1734,7 @@ class TestVerificationOnlyImplementTask:
         import utils.write_sweep as write_sweep
         scheduler = env.scheduler([self._task(env)], kind="implement",
                                   finalize=False)
-        monkeypatch.setattr(write_sweep, "SWEEP_MAX_FILES", len(scheduler._census()))
+        monkeypatch.setattr(write_sweep, "SWEEP_MAX_FILES", len(scheduler._sweep.census()))
         env.edits([{"path": str(env.root / "node_modules" / "x.js"),
                     "mode": "create", "content": "x\n"}],
                   result={"status": "applied", "ids": ["T009"],
@@ -3482,7 +3482,7 @@ class TestAdditivityAndDetach:
             # F10: `_begin_sweep` also patches `write_subagents` (its
             # `in_flight` entry), one write per dispatch START rather than
             # per task completion — real, but a different advance than the
-            # one this test pins. Only a full `_mirror_status` write carries
+            # one this test pins. Only a full `WriteReports.mirror_status` write carries
             # `step`, so that is what distinguishes the two here.
             if "step" in progress and isinstance(mirror, dict):
                 rows.append(len(mirror["tasks"]))
@@ -4725,7 +4725,7 @@ class TestOnlyACodePhaseRecordsTrackedFiles:
 class TestTheEtaLineUsesThisRunsOwnBatchCount:
     """A resumed run's materialized tasks carry `batch_index` wherever the
     plan's decomposition put them (5..9 here) and still include a deferred
-    human task never dispatched — `_record_metrics`/`_metrics_start` used to
+    human task never dispatched — `EtaLines.record`/`EtaLines.start` used to
     pass both straight through, so every line read `batch 6/6` ...
     `batch 10/6 ... WARNING: batch_index > total_batches`."""
 
@@ -4768,7 +4768,7 @@ class TestTheEtaLineUsesThisRunsOwnBatchCount:
             assert "WARNING" not in line, line
 
         on_disk = json.loads(Path(state.state_file).read_text(encoding="utf-8"))
-        # `_metrics_finish` (via `_finalize`, skipped here by `finalize=False`)
+        # `EtaLines.finish` (via `_finalize`, skipped here by `finalize=False`)
         # is what pops `metrics_progress`; with it off the baseline this run
         # started with is still on disk to assert against directly.
         assert on_disk["metrics_progress"]["implement"]["total_batches"] == 5
@@ -5071,21 +5071,21 @@ class TestTheRollbackStoreBudgetCountsBlobsAlreadyOnDisk:
         digest = write_safety.file_sha256(str(absolute))
 
         scheduler = env.scheduler([env.apply_task(0)])
-        blob = scheduler._blob_path(digest)
+        blob = scheduler._sweep.blob_path(digest)
         os.makedirs(os.path.dirname(blob), exist_ok=True)
         shutil.copy2(absolute, blob)
-        assert scheduler._retained_bytes == 0
+        assert scheduler._sweep._retained_bytes == 0
 
         returned = scheduler._sweep.store_blob(relative, stamp)
         assert returned == digest
-        assert scheduler._retained_bytes == info.st_size
+        assert scheduler._sweep._retained_bytes == info.st_size
 
         # A second call for the same content (a re-hash after an edit then a
         # revert, or a second relative path with identical bytes) must not
         # double-count it — the store is content-addressed once.
         again = scheduler._sweep.store_blob(relative, stamp)
         assert again == digest
-        assert scheduler._retained_bytes == info.st_size
+        assert scheduler._sweep._retained_bytes == info.st_size
 
     def test_a_fresh_copy_is_still_counted_exactly_once(self, env):
         """The companion case: nothing pre-exists, so `_store_blob` copies
@@ -5098,9 +5098,9 @@ class TestTheRollbackStoreBudgetCountsBlobsAlreadyOnDisk:
         scheduler = env.scheduler([env.apply_task(0)])
         digest = scheduler._sweep.store_blob(relative, stamp)
         assert digest is not None
-        assert scheduler._retained_bytes == info.st_size
+        assert scheduler._sweep._retained_bytes == info.st_size
         assert scheduler._sweep.store_blob(relative, stamp) == digest
-        assert scheduler._retained_bytes == info.st_size
+        assert scheduler._sweep._retained_bytes == info.st_size
 
     def test_a_run_that_inherits_a_killed_runs_store_counts_its_bytes_too(
         self, env
@@ -5122,9 +5122,9 @@ class TestTheRollbackStoreBudgetCountsBlobsAlreadyOnDisk:
         first = env.scheduler([env.apply_task(0)])
         # A killed run never reaches `run()`'s `finally` (which tears the
         # store down) — simulate that by calling the retain step directly.
-        first._retain(first._census())
+        first._sweep.retain(first._sweep.census())
         assert (env.phase_dir / "rollback_store").is_dir()
-        inherited_bytes = first._retained_bytes
+        inherited_bytes = first._sweep._retained_bytes
         assert inherited_bytes > 0
 
         lines = []
@@ -5134,7 +5134,7 @@ class TestTheRollbackStoreBudgetCountsBlobsAlreadyOnDisk:
         second._sweep.discard_store = lambda: None
         result = second.run()
         assert result.exit_code == 0, result.messages
-        assert second._retained_bytes >= inherited_bytes
+        assert second._sweep._retained_bytes >= inherited_bytes
         reported = [
             l for l in lines
             if l.startswith("[write-subagents] rollback store peaked at")
@@ -5193,7 +5193,7 @@ class TestTheInFlightMirrorNamesADispatchInProgress:
         result = SchedulerResult(kind=scheduler.kind, phase=scheduler.phase)
         # The pre-loop mirror `_run` writes before dispatching anything —
         # `_begin_sweep`'s patch preserves whatever this last wrote.
-        scheduler._mirror_status(result)
+        scheduler._reports.mirror_status(result)
 
         snapshot = scheduler._snapshot(task)
         scheduler._begin_sweep("apply-batch-0", ["plans/p.md"])
@@ -5208,7 +5208,7 @@ class TestTheInFlightMirrorNamesADispatchInProgress:
         assert mirror["total"] == 1
 
         scheduler._undeclared_writes("apply-batch-0", snapshot)
-        scheduler._mirror_status(result)
+        scheduler._reports.mirror_status(result)
         mirror = status_file.read_status(
             str(env.phase_dir)
         )["progress"]["write_subagents"]
@@ -5449,7 +5449,7 @@ class TestTheContractCarriesTheProcessSafetyRule:
         for kind in ("apply_suggestions", "apply_task_suggestions",
                      "apply_code_fixes", "implement"):
             scheduler = make_scheduler(tmp_path, kind=kind)
-            text = scheduler._with_result_contract(
+            text = scheduler._prompts.with_result_contract(
                 {"expected_ids": ["X1"]}, "do the thing"
             )
             assert "## Process safety (required)" in text, kind

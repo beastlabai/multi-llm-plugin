@@ -297,7 +297,7 @@ class TestEachBatchIsToldTheChecks:
         _declare_npm_test(env)
         for kind in ("implement", "apply_suggestions"):
             scheduler = env.scheduler([], kind=kind)
-            assert scheduler._known_checks_section({"task_id": "T001"}) == ""
+            assert scheduler._prompts.known_checks_section({"task_id": "T001"}) == ""
         task = {"task_id": "x", "expected_ids": ["x"], "declared_files": ["src/a.py"]}
         assert "## The repository's checks" not in with_result_contract(
             "implement", task, "Do it.")
@@ -396,8 +396,8 @@ class TestTheTwoLegsBindTheSameSection:
             out, kind="apply_code_fixes", phase="apply-code-fixes",
             phase_dir=phase_dir, state=state, tasks=tasks, plan_file=plan,
         )
-        executor = scheduler._with_result_contract(
-            tasks[1], scheduler.dispatched_prompt(tasks[1]))
+        executor = scheduler._prompts.with_result_contract(
+            tasks[1], scheduler._prompts.dispatched_prompt(tasks[1]))
         assert native == executor
         assert f"- `{RACE_CHECK}` (named by task T004)" in native
         assert f'- apply-fix-batch-0: "{FAILING}"' in native

@@ -66,7 +66,7 @@ class VerifyStep:
     ``_effects_lock``, which every in-memory ``state.json`` write of the run
     takes; *finalize* is the scheduler's ``finalize``. The four callables
     reach the scheduler's ``_task_by_id``, ``_unverified_text``,
-    ``_set_stop_headline`` and ``_run_verify_command``, looked up at each call.
+    ``StopAccount.set_stop_headline`` and ``_run_verify_command``, looked up at each call.
     """
 
     def __init__(
@@ -108,8 +108,8 @@ class VerifyStep:
         in the result's ``notice``, and neither host relayed ``notice`` at a
         stop — both relay the stop's headline, the result line's ``error``
         (the one line the needs-human ``message`` quotes). So the line also
-        ends the headline of a stop already recorded (the scheduler's ``_record_stop``
-        and ``_record_check_block`` run first): the tool routes carry it where
+        ends the headline of a stop already recorded (the scheduler's ``StopAccount.record_stop``
+        and ``StopAccount.record_check_block`` run first): the tool routes carry it where
         they carry the stop — the result line's ``error`` in the tool output
         — and ``run.error`` and ``status`` with it. Not the OpenCode stop
         title (fix round 19, review of round 18, #5): that cuts the error
@@ -313,7 +313,7 @@ class VerifyStep:
     def verification_message(self, result: Any) -> List[str]:
         """The exit-3 block for a failed `driver.verify_command` (F4).
 
-        Worded like the scheduler's ``_stop_message``: what happened, what was NOT undone,
+        Worded like the scheduler's ``StopAccount.stop_message``: what happened, what was NOT undone,
         and the one command that moves it forward. Deliberately *not* a rollback
         — every batch was verified against its own snapshot and the half-applied
         state a revert would destroy is exactly what a human needs to read.

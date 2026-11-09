@@ -103,7 +103,7 @@ class _Racing08:
             phase_dir=self.phase_dir, state={}, tasks=self.tasks, plan_file=self.plan,
         )
         task = self.tasks[index]
-        return scheduler._with_result_contract(task, scheduler.dispatched_prompt(task))
+        return scheduler._prompts.with_result_contract(task, scheduler._prompts.dispatched_prompt(task))
 
 
 SUMMARIES = [

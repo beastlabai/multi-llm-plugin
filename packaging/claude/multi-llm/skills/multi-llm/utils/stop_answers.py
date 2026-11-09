@@ -227,7 +227,7 @@ def compose_resume_why(
     repository — else is checked again before it is dispatched.
     *undone_with* names the tasks waiting on a
     task that does not run. Both legs compose it from the facts they answer
-    the stop from (the executor's ``_stop_resume_why``,
+    the stop from (the executor's ``StopAccount.stop_resume_why``,
     :func:`native_resume_why`), and it is cut at a word to
     ``next_phase.MAX_RECORDED_WHY_CHARS`` (fix round 23).
 

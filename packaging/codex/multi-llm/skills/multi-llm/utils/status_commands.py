@@ -287,7 +287,7 @@ def _resume_command(
             "--reaggregate" if mode in _REAGGREGATE_MODES else "--force"
         )
         # *extra*: the answers the resume carries (fix round 28: a manual task
-        # every code task left waits on, `_manual_gate_answers`).
+        # every code task left waits on, `StopAccount.manual_gate_answers`).
         verbs = [verb, *[str(token) for token in extra]]
     if spell is not None:
         _positionals, tokens = cli_common.retry_tokens(*positionals, *verbs, flags=flags)

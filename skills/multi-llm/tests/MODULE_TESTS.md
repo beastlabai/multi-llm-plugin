@@ -60,6 +60,7 @@ cannot be narrowed by this map: choose by the file names or run the CI command.
 | `utils/batch_done.py` | 23 | `test_batch_done.py`, `test_accepted_finding_restate.py`, `test_commit_apply.py`, `test_selected_tasks_and_check_trees.py`, `test_apply_fix_known_checks.py`, `test_batch_snapshot.py`, `test_check_always_reported.py`, `test_clipped_previews.py`, `test_declined_reason_punctuation.py`, `test_empty_review_outcomes.py`, `test_implement_continues_a_started_run.py`, `test_native_apply_count_over_the_run.py`, +11 more |
 | `utils/batch_ledger.py` | 2 | `test_batch_ledger.py`, `test_write_legs_parity.py` |
 | `utils/batch_prompt.py` | 1 | `test_write_batch_scheduler_moved_names.py` |
+| `utils/batch_prompt_builder.py` | 1 | `test_write_batch_scheduler_moved_names.py` |
 | `utils/batch_reply.py` | 1 | `test_subagent_executor_moved_names.py` |
 | `utils/check_records.py` | 1 | `test_write_batch_scheduler_moved_names.py` |
 | `utils/check_reply.py` | 3 | `test_check_reply.py`, `test_scope_prompts_and_validation.py`, `test_validation_reply_printed_once.py` |
@@ -218,11 +219,14 @@ cannot be narrowed by this map: choose by the file names or run the CI command.
 | `utils/wakeup_check.py` | 3 | `test_wakeup_check.py`, `test_hook_transcript_settle.py`, `test_report_check_composite.py` |
 | `utils/write_batch_scheduler.py` | 57 | **hub**, cannot narrow: `test_write_batch_scheduler_moved_names.py`, `test_accepted_check_rerun.py`, `test_accepted_finding_note.py`, `test_accepted_finding_restate.py`, `test_accepted_findings_scope.py`, `test_apply_fix_known_checks.py`, `test_apply_orchestrator_base.py`, `test_batch_own_check.py`, `test_check_always_reported.py`, `test_check_repeats_finding.py`, `test_code_fix_prior_batches.py`, `test_commit_apply.py`, +45 more |
 | `utils/write_context.py` | 1 | `test_write_batch_scheduler_moved_names.py` |
+| `utils/write_eta.py` | 1 | `test_write_batch_scheduler_moved_names.py` |
 | `utils/write_outcomes.py` | 2 | `test_write_outcomes.py`, `test_write_batch_scheduler_moved_names.py` |
 | `utils/write_phase_bridge.py` | 45 | **hub**, cannot narrow: `test_apply_code_fixes_unit.py`, `test_apply_fix_known_checks.py`, `test_apply_suggestions_integration.py`, `test_batch_done.py`, `test_batch_snapshot.py`, `test_clipped_previews.py`, `test_code_fix_prior_batches.py`, `test_commit_write_policy.py`, `test_implement_continues_a_started_run.py`, `test_implement_orchestrator.py`, `test_native_apply_count_over_the_run.py`, `test_native_apply_view_names_declined_items.py`, +33 more |
 | `utils/write_prompt.py` | 11 | `test_write_prompt.py`, `test_selected_tasks_and_check_trees.py`, `test_apply_fix_known_checks.py`, `test_apply_suggestions_integration.py`, `test_batch_snapshot.py`, `test_code_fix_prior_batches.py`, `test_commit_write_policy.py`, `test_prior_batches_named_by_id.py`, `test_prompt_files_stay_inside.py`, `test_scope_policy_apply.py`, `test_write_executor_orchestrators.py` |
 | `utils/write_record.py` | 1 | `test_write_record.py` |
+| `utils/write_reports.py` | 1 | `test_write_batch_scheduler_moved_names.py` |
 | `utils/write_safety.py` | 27 | `test_batch_ledger.py`, `test_check_gate_fixture.py`, `test_commit_apply.py`, `test_commit_write_policy.py`, `test_cursor_auth_probe.py`, `test_implement_continues_a_started_run.py`, `test_next_step_relay_rules.py`, `test_plugin_landlock_acceptance.py`, `test_policy_way_forward.py`, `test_probe_output_redaction.py`, `test_redaction.py`, `test_redaction_pem_scanner.py`, +15 more |
+| `utils/write_stop.py` | 1 | `test_write_batch_scheduler_moved_names.py` |
 | `utils/write_sweep.py` | 5 | `test_applied_without_changes.py`, `test_commit_write_policy.py`, `test_stop_resume_wording.py`, `test_write_batch_scheduler_moved_names.py`, `test_write_executor.py` |
 | `utils/write_verdict.py` | 1 | `test_write_verdict_table.py` |
 | `utils/write_verify.py` | 1 | `test_write_batch_scheduler_moved_names.py` |

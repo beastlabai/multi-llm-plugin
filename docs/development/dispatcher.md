@@ -433,7 +433,7 @@ when the same batch is bound again (`prepare_batch_snapshot`, 2026-11-08), and p
 [write safety](write-safety.md#write-safety-controls).
 
 The executor leg keeps the same file (fix round 16, run 6 #10b: T007's prompt with the accepted
-findings was in no artifact on either tool route): `WriteBatchScheduler._keep_dispatched_prompt` writes each dispatch's
+findings was in no artifact on either tool route): `BatchPromptBuilder.keep_dispatched_prompt` writes each dispatch's
 prompt to `{phase}/prompts/<id>.prompt.txt` (`dispatched_prompt_path`) just before the child starts, overwritten
 by a later dispatch as a `--resume` rebinds the native one, and an attempt that sends
 something else (a report re-ask, rule 9's re-send) to `<id>.attempt-<n>.prompt.txt`, which the task's next

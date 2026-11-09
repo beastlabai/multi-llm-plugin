@@ -416,7 +416,7 @@ A needs-human exit 3 on a tool route also carries `resume_command`, the same-pha
 (`dispatcher.resume` in the surface, additive within v5; since fix round 14 its
 `user_resume` also carries the resume's `flags` and the
 `--human-task` answers the implement stop recorded (`stop.answers`,
-`write_batch_scheduler._stop_answers`), which the servers make the first options — the resume first, so it and
+`write_stop.StopAccount.stop_answers`), which the servers make the first options — the resume first, so it and
 `resume_command` are one command — `resume_answers` and the surface's
 `needs_human_message.answers` clause), which answers only for a phase the workflow view shows
 `in_progress` — a prerequisite refusal, a stop before the first dispatch or a missing plan
@@ -460,7 +460,7 @@ round 24, live run 10 #5/#7, Claude Code racing #6).
 
 A task that failed reads `task 2/11 failed (timeout) after 20m 5s` (plus `· half-applied: its edits are kept` when it changed files
 first), never `done` and with no estimate, on both legs: the executor passes the
-outcome (`_eta_failure`), the native `util metrics record` reads the record
+outcome (`EtaLines.failure`), the native `util metrics record` reads the record
 `util batch-done` just wrote (`metrics.native_failure`: `metrics_progress.{phase}.failed` and the recorded
 reason, for `--task-id`, which the four runbooks pass, or the id the implement label
 starts with; with neither, the one failed task of this run that has no record yet, and among two or
@@ -470,14 +470,14 @@ more none — `[METRICS_NO_TASK_ID]` asks for `--task-id` and the entry, marked
 (`_compute_eta`).
 
 The line whose total is lower than the last line's adds `total now 4 (T007 not run: check T002 reported problems)` in
-`left_out_tail`'s words (executor `_eta_dropped` against `_eta_line_ids`;
+`left_out_tail`'s words (executor `EtaLines.dropped` against `EtaLines.line_ids`;
 native `metrics_progress.{phase}.named_out` over `withdrawn`).
 
 A complete implement run whose human-task plan set tasks aside ends `ALL DISPATCHED TASKS COMPLETE · T011 left for you (manual); T012 skipped with a manual task`
 (`set_aside_by_plan`; the native emit records it as `state.json`'s
 `metrics_set_aside`, dropped by `finish` or an executor start), and
 `phase complete` is unchanged. summary.md counts the tasks a runner was started for and the
-batches they ran in, naming a task refused before dispatch apart (`_dispatched_sentence`; it read "5
+batches they ran in, naming a task refused before dispatch apart (`WriteReports.dispatched_sentence`; it read "5
 batch task(s) dispatched across 4 batch(es)" for 4 tasks in 3 batches), and `status`'s
 implement line counts tasks alone, with no `items applied`.
 

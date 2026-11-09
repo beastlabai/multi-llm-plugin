@@ -1,5 +1,5 @@
 """The contract for the names `utils.write_batch_scheduler` re-exports from the
-ten helper modules split out of it (stated in the scheduler's module docstring):
+helper modules split out of it (stated in the scheduler's module docstring):
 
 * **Reads work.** `write_batch_scheduler.X`, `from utils.write_batch_scheduler
   import X`, `dir()`, `inspect.getmembers` and the scheduler's `__all__` see
@@ -12,8 +12,9 @@ ten helper modules split out of it (stated in the scheduler's module docstring):
   of the owner reaches the loop and every other helper.
 * **The modules import down only**: `commit_write_guard`, `check_records`,
   `verification_lines`, `human_task_plan`, `stop_answers`, `batch_prompt`,
-  `write_outcomes`, `write_context`, `write_verify`, `write_sweep`, and none of
-  them imports the scheduler.
+  `write_outcomes`, `write_context`, `write_verify`, `write_sweep`, `write_eta`,
+  `write_reports`, `write_stop`, `batch_prompt_builder`, and none of them
+  imports the scheduler.
 """
 
 import ast
@@ -41,6 +42,10 @@ from utils import (  # noqa: E402
     write_context,
     write_verify,
     write_sweep,
+    write_eta,
+    write_reports,
+    write_stop,
+    batch_prompt_builder,
 )
 
 #: Lowest first: each module may import only the ones before it.
@@ -55,6 +60,10 @@ OWNERS = {
     "write_context": write_context,
     "write_verify": write_verify,
     "write_sweep": write_sweep,
+    "write_eta": write_eta,
+    "write_reports": write_reports,
+    "write_stop": write_stop,
+    "batch_prompt_builder": batch_prompt_builder,
 }
 SCHEDULER = "write_batch_scheduler"
 
@@ -103,7 +112,7 @@ class TestTheMovedNamesTable:
     def test_it_lists_exactly_what_each_owner_defines(self, owner):
         assert set(write_batch_scheduler._MOVED[owner]) == _top_level_definitions(owner)
 
-    def test_it_names_the_ten_owners(self):
+    def test_it_names_every_owner(self):
         assert list(write_batch_scheduler._MOVED) == list(OWNERS)
 
     def test_the_scheduler_defines_and_binds_none_of_them(self):
@@ -197,7 +206,10 @@ class TestEveryReaderGoesThroughTheOwner:
             assert name in _top_level_definitions(alias[1:]), f"{alias}.{name}"
 
     def test_the_scheduler_reads_its_owners_through_qualified_names(self):
-        assert len(_qualified_reads(SCHEDULER)) > 100
+        # Not vacuous: the scan finds the reads the scheduler and its
+        # collaborators make (the collaborators took many of them, WRITE-5).
+        assert len(_qualified_reads(SCHEDULER)) > 50
+        assert sum(len(_qualified_reads(name)) for name in [SCHEDULER, *OWNERS]) > 150
 
     def test_a_patch_on_the_owner_reaches_the_schedulers_own_code(self):
         scheduler = write_batch_scheduler.WriteBatchScheduler.__new__(
@@ -237,7 +249,7 @@ class TestTheLayering:
         above = set(order[order.index(module_name) + 1:]) | {SCHEDULER}
         assert not _imported_modules(module_name) & above
 
-    def test_the_scheduler_imports_all_ten(self):
+    def test_the_scheduler_imports_every_owner(self):
         assert set(OWNERS) <= _imported_modules(SCHEDULER)
 
 
