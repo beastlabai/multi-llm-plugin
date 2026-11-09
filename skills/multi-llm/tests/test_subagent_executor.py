@@ -4405,6 +4405,36 @@ class TestModelCatalogPreflight:
         assert report.ok
         assert "could not confirm" in capsys.readouterr().err
 
+    def test_a_type_error_inside_the_catalog_read_is_never_retried(
+            self, tmp_path, runner_env, monkeypatch):
+        """Every adapter takes ``profile``, so a TypeError is the adapter's own
+        bug: one call, read as an unknown catalog, never a second call without
+        the keyword that could mask it (U86, from U55's review)."""
+        from utils.providers import opencode as oc
+
+        runner_env.use("opencode:opencode/big-pickle")
+        calls = []
+
+        def broken(self, model, *, anchor=None, profile="agent-readonly"):
+            calls.append((model, profile))
+            raise TypeError("a bug inside the adapter")
+
+        monkeypatch.setattr(oc.OpenCodeProvider, "describe_unlisted_model", broken)
+        info = executor.preflight_runner("opencode:opencode/big-pickle")
+        assert len(calls) == 1
+        assert info["model_catalog"] == "unknown"
+
+    def test_every_adapter_takes_the_catalog_keywords(self):
+        """The preflight calls every adapter with ``anchor`` and ``profile``; one
+        that drops either would read as an unknown catalog on every run."""
+        import inspect
+
+        from utils.provider_registry import _PROVIDERS
+
+        for name, adapter in sorted(_PROVIDERS.items()):
+            method = type(adapter).describe_unlisted_model
+            inspect.signature(method).bind(adapter, "m", anchor=None, profile=None)
+
     def test_adapters_without_a_catalog_answer_unknown_silently(
         self, tmp_path, runner_env, monkeypatch, capsys
     ):

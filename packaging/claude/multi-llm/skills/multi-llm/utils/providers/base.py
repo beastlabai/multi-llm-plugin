@@ -1653,7 +1653,8 @@ class LLMProvider(ABC):
         pass
 
     def describe_unlisted_model(
-        self, model: str, *, anchor: Optional[str] = None
+        self, model: str, *, anchor: Optional[str] = None,
+        profile: Optional[str] = None,
     ) -> version_gate.ModelVerdict:
         """Is ``model`` in this CLI's own live catalog? (D3 step 4)
 

@@ -809,17 +809,13 @@ def _detect_model(
     if cache_key in _probe_state._MODEL_CACHE:
         return _probe_state._MODEL_CACHE[cache_key]
 
+    # Every adapter takes `profile` (LLMProvider's signature does), so a
+    # TypeError here is a bug in the adapter's own code, not a narrow signature:
+    # it is reported as a catalog that could not be read, never retried.
     try:
         verdict = provider.describe_unlisted_model(
             model, anchor=anchor, profile=profile
         )
-    except TypeError:
-        # An adapter (or a narrow double) declaring the plan's minimal
-        # signature, without the profile keyword.
-        try:
-            verdict = provider.describe_unlisted_model(model, anchor=anchor)
-        except Exception:  # noqa: BLE001 - a catalog read may never end a preflight
-            verdict = None
     except Exception:  # noqa: BLE001 - a catalog read may never end a preflight
         verdict = None
 
