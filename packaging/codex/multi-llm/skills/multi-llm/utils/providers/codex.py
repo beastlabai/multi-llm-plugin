@@ -599,10 +599,7 @@ def jail_developer_instructions(context: JailContext) -> str:
 def repo_wide_developer_sentences(context: JailContext) -> str:
     """The ``repo-wide`` grant's sentences, naming the root the dir rule sits
     on and this run's output folder (root grant, 2026-10-05)."""
-    try:
-        from ..landlock_dispatch import repo_wide_root
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.landlock_dispatch import repo_wide_root  # type: ignore[no-redef]
+    from ..landlock_dispatch import repo_wide_root
     output_dir = context.output_dir or "(none)"
     return JAIL_DEVELOPER_TARGET_REPO.format(
         root=repo_wide_root(context.request), output_dir=output_dir,

@@ -44,24 +44,14 @@ from typing import (
 # The status vocabulary is the retry ladder's, never a second copy of it.
 # Adapters and callers read ``STATUS_*`` through this module, so it stays
 # imported here; the classifier that uses it is ``failure_classifier``.
-try:  # pragma: no cover - import shim mirrors the rest of utils/
-    from ..retry_ladder import (  # noqa: F401 - re-exported
-        STATUS_AUTH_FAILED,
-        STATUS_CONTEXT_LENGTH_EXCEEDED,
-        STATUS_RATE_LIMITED,
-        STATUS_RUNNER_ERROR,
-        STATUS_SPAWN_FAILED,
-        STATUS_TIMEOUT,
-    )
-except ImportError:  # pragma: no cover - direct-script import shim
-    from utils.retry_ladder import (  # noqa: F401 - re-exported
-        STATUS_AUTH_FAILED,
-        STATUS_CONTEXT_LENGTH_EXCEEDED,
-        STATUS_RATE_LIMITED,
-        STATUS_RUNNER_ERROR,
-        STATUS_SPAWN_FAILED,
-        STATUS_TIMEOUT,
-    )
+from ..retry_ladder import (  # noqa: F401 - re-exported
+    STATUS_AUTH_FAILED,
+    STATUS_CONTEXT_LENGTH_EXCEEDED,
+    STATUS_RATE_LIMITED,
+    STATUS_RUNNER_ERROR,
+    STATUS_SPAWN_FAILED,
+    STATUS_TIMEOUT,
+)
 
 from . import (
     types,
@@ -1771,10 +1761,7 @@ class LLMProvider(ABC):
         top-level ``git_env`` → ``auto``. Read through the registry accessor
         rather than by indexing the config, exactly like the ``driver.*`` keys.
         """
-        try:  # pragma: no cover - import shim mirrors the rest of utils/
-            from ..provider_registry import get_git_credential_helper
-        except ImportError:  # pragma: no cover - direct-script import shim
-            from utils.provider_registry import get_git_credential_helper
+        from ..provider_registry import get_git_credential_helper
         return get_git_credential_helper(self.name, anchor=anchor)
 
     def resolve_env(

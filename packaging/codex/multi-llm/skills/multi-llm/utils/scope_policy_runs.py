@@ -56,12 +56,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-try:  # normal import (utils is a package)
-    from . import scope_policy as sp
-    from .clock import local_iso
-except ImportError:  # pragma: no cover - direct script runs with utils/ on path
-    import scope_policy as sp  # type: ignore
-    from clock import local_iso  # type: ignore[no-redef]
+from . import scope_policy as sp
+from .clock import local_iso
 
 #: The ``state.json`` top-level key holding the run records.
 RUNS_KEY = "scope_policy_runs"
@@ -95,12 +91,7 @@ def ending_phases(mode: str) -> Tuple[str, ...]:
     apply-suggestions), a leaf mode's own phase (``implement``). Read off the
     mode table, so a new composite needs no edit here.
     """
-    try:
-        import modes as mode_table  # type: ignore
-    except ImportError:  # pragma: no cover - only when utils/ is sys.path[0]
-        from .cli_common import modes_table
-
-        mode_table = modes_table()
+    import modes as mode_table  # type: ignore
     row = mode_table.resolve(mode)
     if row is None:
         return ()
@@ -296,10 +287,7 @@ def announce(
     """
     if not unattended or source == sp.SOURCE_EXPLICIT:
         return None
-    try:
-        from . import unattended as unattended_mod
-    except ImportError:  # pragma: no cover - direct script runs
-        import unattended as unattended_mod  # type: ignore
+    from . import unattended as unattended_mod
     decision = resolution_text(policy, source, mode=mode)
     unattended_mod.record_resolution(phase_dir, SITE_ID, decision, quiet=quiet)
     return decision

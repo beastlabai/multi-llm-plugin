@@ -33,16 +33,10 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-try:
-    from . import scope_policy as sp
-    from .clock import local_iso_seconds
-    from .human_decisions import group_id_of
-    from .importance import get_highest_importance
-except ImportError:  # pragma: no cover - script-style import
-    from utils import scope_policy as sp  # type: ignore
-    from utils.clock import local_iso_seconds  # type: ignore
-    from utils.human_decisions import group_id_of  # type: ignore
-    from utils.importance import get_highest_importance  # type: ignore
+from . import scope_policy as sp
+from .clock import local_iso_seconds
+from .human_decisions import group_id_of
+from .importance import get_highest_importance
 
 #: Formatted ``to_apply`` / ``needs_human_review`` items carry their scope
 #: context here, under ``preserve`` only.

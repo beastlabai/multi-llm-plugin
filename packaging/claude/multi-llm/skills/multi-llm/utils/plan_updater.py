@@ -5,20 +5,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-try:
-    from .tasks_file import (
-        TASKS_FILE_MARKER_PATTERN,
-        markdown_code_ranges,
-        tasks_marker,
-        tasks_marker_spans,
-    )
-except ImportError:  # pragma: no cover - direct script invocation
-    from utils.tasks_file import (  # type: ignore
-        TASKS_FILE_MARKER_PATTERN,
-        markdown_code_ranges,
-        tasks_marker,
-        tasks_marker_spans,
-    )
+from .tasks_file import (
+    TASKS_FILE_MARKER_PATTERN,
+    markdown_code_ranges,
+    tasks_marker,
+    tasks_marker_spans,
+)
 
 
 # HTML comment markers for idempotent updates

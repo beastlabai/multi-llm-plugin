@@ -49,6 +49,21 @@ claude-code`` is ``--check``-only (D5c): that host's shim is the plugin's own
 
 from __future__ import annotations
 
+if __name__ == "__main__" and not __package__:
+    # Run by path: put the skill root on sys.path, found from this file's real
+    # location as Python finds sys.path[0], then call the package module's entry
+    # point with sys.argv untouched, so the program name stays the one typed
+    # (docs/development/dispatcher.md#import-safety).
+    import os
+    import sys
+
+    _UTILS_DIR = os.path.dirname(os.path.realpath(__file__))
+    sys.path[:] = [os.path.dirname(_UTILS_DIR)] + [
+        p for p in sys.path if os.path.realpath(p) != _UTILS_DIR]
+    from utils.host_install import main
+
+    raise SystemExit(main(sys.argv[1:]))
+
 import argparse
 import os
 import re
@@ -58,216 +73,111 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-try:  # normal import (utils is a package)
-    from . import host_capabilities as caps
-    from .atomic_io import atomic_write_bytes as _atomic_write_bytes
-    from .cli_common import (
-        EXIT_NEEDS_HUMAN,
-        EXIT_NOTHING_TO_DO,
-        EXIT_OK,
-        dispatcher_prefix,
-        record_artifact,
-        skill_dir,
-    )
-    from .stream_bootstrap import bootstrap_streams
-    from .unattended import find_uv, uv_missing_text
-except ImportError:  # pragma: no cover - direct script runs with utils/ on path
-    import host_capabilities as caps  # type: ignore
-    from atomic_io import atomic_write_bytes as _atomic_write_bytes  # type: ignore
-    from cli_common import (  # type: ignore
-        EXIT_NEEDS_HUMAN,
-        EXIT_NOTHING_TO_DO,
-        EXIT_OK,
-        dispatcher_prefix,
-        record_artifact,
-        skill_dir,
-    )
-    from stream_bootstrap import bootstrap_streams  # type: ignore
-    from unattended import find_uv, uv_missing_text  # type: ignore
+from . import host_capabilities as caps
+from .atomic_io import atomic_write_bytes as _atomic_write_bytes
+from .cli_common import (
+    EXIT_NEEDS_HUMAN,
+    EXIT_NOTHING_TO_DO,
+    EXIT_OK,
+    dispatcher_prefix,
+    record_artifact,
+    skill_dir,
+)
+from .stream_bootstrap import bootstrap_streams
+from .unattended import find_uv, uv_missing_text
 
 
 # The shim's paths, text and package routes live in their own modules; every
 # name stays importable from here, the installer's public surface.
-try:  # normal import (utils is a package)
-    from .host_paths import (  # noqa: F401
-        Refused,
-        SCOPE_PROJECT,
-        SCOPE_GLOBAL,
-        SCOPE_LEGACY,
-        WRITABLE_SCOPES,
-        DEFAULT_SCOPE,
-        _HOME_TOKENS,
-        _XDG_TOKENS,
-        _ABSOLUTE_RE,
-        user_home,
-        expand_path_tokens,
-        checked_entry,
-        _join,
-        Location,
-        shim_filename,
-        locations,
-        _is_user_rooted,
-        target_location,
-        existing_copies,
-    )
-    from .host_shim import (  # noqa: F401
-        SHIM_VERSION,
-        HEADER_KEY,
-        _HEADER_SYNTAX,
-        _HEADER_RE,
-        SLOT_UV_MISSING_TEXT,
-        SLOT_UV_MISSING_FILE,
-        _SLOT_RE,
-        _UV_RUN_FLAGS_RE,
-        _BAKED_PREFIX_QUOTED_RE,
-        _BAKED_PREFIX_BARE_RE,
-        FORBIDDEN_IN_INSTALLED,
-        _HOST_EXPANDED_PLACEHOLDER,
-        UV_MISSING_RELATIVE,
-        SNIPPET_DIR,
-        _MAX_SNIPPET_DEPTH,
-        PLUGIN_SKILL_DESCRIPTION_MAX,
-        template_path,
-        snippets,
-        render,
-        baked_prefix,
-        _sha256,
-        body_of,
-        parse_header,
-        _header_line,
-        with_header,
-        _template_sha,
-        render_installed,
-        local_edit,
-        _is_pristine_shim,
-    )
-    from .host_routes import (  # noqa: F401
-        PackageRoute,
-        _NOTE_FORMS,
-    )
-    from .host_routes.npm import (  # noqa: F401
-        _package_name,
-        _config_dirs,
-        _config_env_names,
-        _project_config_dirs,
-        _config_files,
-        _cache_root,
-        _npm_payload_path,
-        _PAYLOAD_PROBES,
-        _npm_route,
-        _declared_spec,
-    )
-    from .host_routes.codex import (  # noqa: F401
-        CODEX_SERVER_MIN_PYTHON,
-        CODEX_LIST_TIMEOUT_S,
-        _CODEX_PAYLOAD_MARKERS,
-        codex_home,
-        _codex_payload_dir,
-        _codex_payload_answers,
-        _codex_plugin_list,
-        _strip_toml_comment,
-        _TOML_ENABLED_KEY_RE,
-        _TOML_ENABLED_RE,
-        _TOML_TOP_LEVEL_PLUGINS_RE,
-        _is_plugins_family_header,
-        _Abstain,
-        _scan_codex_config,
-        _codex_route,
-        _with_enabled,
-        _with_siblings,
-        _python3_problem,
-        _codex_note,
-    )
-except ImportError:  # pragma: no cover - direct script runs with utils/ on path
-    from host_paths import (  # noqa: F401  # type: ignore
-        Refused,
-        SCOPE_PROJECT,
-        SCOPE_GLOBAL,
-        SCOPE_LEGACY,
-        WRITABLE_SCOPES,
-        DEFAULT_SCOPE,
-        _HOME_TOKENS,
-        _XDG_TOKENS,
-        _ABSOLUTE_RE,
-        user_home,
-        expand_path_tokens,
-        checked_entry,
-        _join,
-        Location,
-        shim_filename,
-        locations,
-        _is_user_rooted,
-        target_location,
-        existing_copies,
-    )
-    from host_shim import (  # noqa: F401  # type: ignore
-        SHIM_VERSION,
-        HEADER_KEY,
-        _HEADER_SYNTAX,
-        _HEADER_RE,
-        SLOT_UV_MISSING_TEXT,
-        SLOT_UV_MISSING_FILE,
-        _SLOT_RE,
-        _UV_RUN_FLAGS_RE,
-        _BAKED_PREFIX_QUOTED_RE,
-        _BAKED_PREFIX_BARE_RE,
-        FORBIDDEN_IN_INSTALLED,
-        _HOST_EXPANDED_PLACEHOLDER,
-        UV_MISSING_RELATIVE,
-        SNIPPET_DIR,
-        _MAX_SNIPPET_DEPTH,
-        PLUGIN_SKILL_DESCRIPTION_MAX,
-        template_path,
-        snippets,
-        render,
-        baked_prefix,
-        _sha256,
-        body_of,
-        parse_header,
-        _header_line,
-        with_header,
-        _template_sha,
-        render_installed,
-        local_edit,
-        _is_pristine_shim,
-    )
-    from host_routes import (  # noqa: F401  # type: ignore
-        PackageRoute,
-        _NOTE_FORMS,
-    )
-    from host_routes.npm import (  # noqa: F401  # type: ignore
-        _package_name,
-        _config_dirs,
-        _config_env_names,
-        _project_config_dirs,
-        _config_files,
-        _cache_root,
-        _npm_payload_path,
-        _PAYLOAD_PROBES,
-        _npm_route,
-        _declared_spec,
-    )
-    from host_routes.codex import (  # noqa: F401  # type: ignore
-        CODEX_SERVER_MIN_PYTHON,
-        CODEX_LIST_TIMEOUT_S,
-        _CODEX_PAYLOAD_MARKERS,
-        codex_home,
-        _codex_payload_dir,
-        _codex_payload_answers,
-        _codex_plugin_list,
-        _strip_toml_comment,
-        _TOML_ENABLED_KEY_RE,
-        _TOML_ENABLED_RE,
-        _TOML_TOP_LEVEL_PLUGINS_RE,
-        _is_plugins_family_header,
-        _Abstain,
-        _scan_codex_config,
-        _codex_route,
-        _with_enabled,
-        _with_siblings,
-        _python3_problem,
-        _codex_note,
-    )
+from .host_paths import (  # noqa: F401
+    Refused,
+    SCOPE_PROJECT,
+    SCOPE_GLOBAL,
+    SCOPE_LEGACY,
+    WRITABLE_SCOPES,
+    DEFAULT_SCOPE,
+    _HOME_TOKENS,
+    _XDG_TOKENS,
+    _ABSOLUTE_RE,
+    user_home,
+    expand_path_tokens,
+    checked_entry,
+    _join,
+    Location,
+    shim_filename,
+    locations,
+    _is_user_rooted,
+    target_location,
+    existing_copies,
+)
+from .host_shim import (  # noqa: F401
+    SHIM_VERSION,
+    HEADER_KEY,
+    _HEADER_SYNTAX,
+    _HEADER_RE,
+    SLOT_UV_MISSING_TEXT,
+    SLOT_UV_MISSING_FILE,
+    _SLOT_RE,
+    _UV_RUN_FLAGS_RE,
+    _BAKED_PREFIX_QUOTED_RE,
+    _BAKED_PREFIX_BARE_RE,
+    FORBIDDEN_IN_INSTALLED,
+    _HOST_EXPANDED_PLACEHOLDER,
+    UV_MISSING_RELATIVE,
+    SNIPPET_DIR,
+    _MAX_SNIPPET_DEPTH,
+    PLUGIN_SKILL_DESCRIPTION_MAX,
+    template_path,
+    snippets,
+    render,
+    baked_prefix,
+    _sha256,
+    body_of,
+    parse_header,
+    _header_line,
+    with_header,
+    _template_sha,
+    render_installed,
+    local_edit,
+    _is_pristine_shim,
+)
+from .host_routes import (  # noqa: F401
+    PackageRoute,
+    _NOTE_FORMS,
+)
+from .host_routes.npm import (  # noqa: F401
+    _package_name,
+    _config_dirs,
+    _config_env_names,
+    _project_config_dirs,
+    _config_files,
+    _cache_root,
+    _npm_payload_path,
+    _PAYLOAD_PROBES,
+    _npm_route,
+    _declared_spec,
+)
+from .host_routes.codex import (  # noqa: F401
+    CODEX_SERVER_MIN_PYTHON,
+    CODEX_LIST_TIMEOUT_S,
+    _CODEX_PAYLOAD_MARKERS,
+    codex_home,
+    _codex_payload_dir,
+    _codex_payload_answers,
+    _codex_plugin_list,
+    _strip_toml_comment,
+    _TOML_ENABLED_KEY_RE,
+    _TOML_ENABLED_RE,
+    _TOML_TOP_LEVEL_PLUGINS_RE,
+    _is_plugins_family_header,
+    _Abstain,
+    _scan_codex_config,
+    _codex_route,
+    _with_enabled,
+    _with_siblings,
+    _python3_problem,
+    _codex_note,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1161,10 +1071,7 @@ def configured_runner(
     The layer is reported alongside the spec because "I set it and nothing
     changed" is otherwise a support question (D3o).
     """
-    try:
-        from .provider_registry import resolve_subagent_runner
-    except ImportError:  # pragma: no cover - direct script runs
-        from provider_registry import resolve_subagent_runner  # type: ignore
+    from .provider_registry import resolve_subagent_runner
     anchor = str(project_root) if project_root is not None else None
     # The resolver reports the layer it actually took, so the middle rung is named
     # as itself: re-deriving the provenance here would let the check and the
@@ -1210,20 +1117,12 @@ def probe_runner(spec: str, *, anchor: Optional[str] = None) -> Dict[str, str]:
         "auth": "unknown", "version": "unknown", "problem": "", "metadata": "",
     }
     try:
-        try:
-            from .providers.base import PROFILE_AGENT_READONLY
-            from .task_outcome import RunnerRejected
-            from .runner_preflight import (
-                preflight_runner,
-                probe_setup_metadata,
-            )
-        except ImportError:  # pragma: no cover - direct script runs
-            from providers.base import PROFILE_AGENT_READONLY  # type: ignore
-            from task_outcome import RunnerRejected  # type: ignore
-            from runner_preflight import (  # type: ignore
-                preflight_runner,
-                probe_setup_metadata,
-            )
+        from .providers.base import PROFILE_AGENT_READONLY
+        from .task_outcome import RunnerRejected
+        from .runner_preflight import (
+            preflight_runner,
+            probe_setup_metadata,
+        )
     except Exception:  # pragma: no cover - a partial install never fails a check
         return dict(unknown)
     try:
@@ -1266,10 +1165,7 @@ def _runner_state(provider: str, facts: Dict[str, str]) -> str:
     Anything unresolvable is ``""`` — a diagnostic never fails a ``--check``.
     """
     try:
-        try:
-            from .provider_registry import get_provider
-        except ImportError:  # pragma: no cover - direct script runs
-            from provider_registry import get_provider  # type: ignore
+        from .provider_registry import get_provider
         adapter = get_provider(provider)
         if adapter is None:
             return ""
@@ -1396,10 +1292,7 @@ def runner_available(provider: str) -> bool:
     second probe that could disagree with ``--init``.
     """
     try:
-        try:
-            from .provider_registry import get_provider
-        except ImportError:  # pragma: no cover - direct script runs
-            from provider_registry import get_provider  # type: ignore
+        from .provider_registry import get_provider
         adapter = get_provider(provider)
     except Exception:  # pragma: no cover - a config error is not a check failure
         return False

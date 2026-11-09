@@ -39,13 +39,8 @@ import threading
 import time
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple, TypedDict, Union
 
-try:
-    from . import process_control
-    from .held_folder import anchor_plan_dir, remove_in_plan_dir, write_in_plan_dir
-except ImportError:  # pragma: no cover - direct script runs (metrics.py) with utils/ on path
-    import process_control  # type: ignore[no-redef]
-    from held_folder import (  # type: ignore[no-redef]
-        anchor_plan_dir, remove_in_plan_dir, write_in_plan_dir)
+from . import process_control
+from .held_folder import anchor_plan_dir, remove_in_plan_dir, write_in_plan_dir
 
 PathLike = Union[str, "os.PathLike[str]"]
 

@@ -57,142 +57,73 @@ from typing import (
     Any, Dict, List, Tuple,
 )
 
-try:  # pragma: no cover - import shim mirrors the rest of utils/
-    from . import process_capture
-    from . import process_control
-    from .json_extractor import (
-        extract_json_from_text,
-    )
-    from .llm_client import (
-        expand_env_home,
-    )
-    from .provider_registry import (
-        SESSION_LAYER,
-    )
-    from .providers.base import (
-        PROFILE_AGENT_READONLY,
-        PROFILE_AGENT_WRITE,
-        ProfileUnsupported,
-        version_verdict,
-    )
-    from .retry_ladder import (  # noqa: F401 - re-exported, see below
-        BACKOFF_STATUSES,
-        FATAL_STATUSES,
-        MIN_ATTEMPT_BUDGET_S,
-        RETRYABLE_STATUSES,
-        RUNG_BY_STATUS,
-        STATUS_AUTH_FAILED,
-        STATUS_BUDGET_EXHAUSTED,
-        STATUS_INCOMPLETE,
-        STATUS_INCOMPLETE_REPORT,
-        STATUS_INVALID_MODEL,
-        STATUS_OK,
-        STATUS_RATE_LIMITED,
-        STATUS_REJECTED,
-        STATUS_RUNNER_ERROR,
-        STATUS_SALVAGE_UNRECOVERABLE,
-        STATUS_SANDBOX_UNAVAILABLE,
-        STATUS_SCHEMA_INVALID,
-        STATUS_SPAWN_FAILED,
-        STATUS_TIMEOUT,
-        STATUS_UNPARSEABLE,
-        STOP_BUDGET,
-        STOP_DEADLINE,
-        REPAIR_INCOMPLETE_REPORT,
-        REPAIR_SCHEMA_INVALID,
-        RESEND_NOTHING_CHANGED,
-        RetryLadder,
-        budget_exhausted_reason,
-    )
-    from .subagent_prompts import (
-        build_schema_repair_prompt,
-    )
-    from .subagent_tasks import (
-        KINDS,  # noqa: F401 - re-exported for callers that read it off this module
-        WRITE_KINDS,
-    )
-    from . import known_checks as _known_checks
-    from . import batch_reply as _batch_reply
-    from . import failure_capture as _failure_capture
-    from . import task_outcome as _task_outcome
-    from . import task_result as _task_result
-    from . import runner_selection as _runner_selection
-    from . import probe_state as _probe_state
-    from . import sandbox_walk as _sandbox_walk
-    from . import dispatch_spawn as _dispatch_spawn
-    from . import attempt_classifier as _attempt_classifier
-    from . import runner_preflight as _runner_preflight
-    from . import task_dispatch as _task_dispatch
-    from . import task_batch as _task_batch
-    from . import task_file_runner as _task_file_runner
-except ImportError:  # pragma: no cover - direct-script import shim
-    from utils import process_capture
-    from utils import process_control
-    from utils.json_extractor import (
-        extract_json_from_text,
-    )
-    from utils.llm_client import (
-        expand_env_home,
-    )
-    from utils.provider_registry import (
-        SESSION_LAYER,
-    )
-    from utils.providers.base import (
-        PROFILE_AGENT_READONLY,
-        PROFILE_AGENT_WRITE,
-        ProfileUnsupported,
-        version_verdict,
-    )
-    from utils.retry_ladder import (  # noqa: F401 - re-exported, see below
-        BACKOFF_STATUSES,
-        FATAL_STATUSES,
-        MIN_ATTEMPT_BUDGET_S,
-        RETRYABLE_STATUSES,
-        RUNG_BY_STATUS,
-        STATUS_AUTH_FAILED,
-        STATUS_BUDGET_EXHAUSTED,
-        STATUS_INCOMPLETE,
-        STATUS_INCOMPLETE_REPORT,
-        STATUS_INVALID_MODEL,
-        STATUS_OK,
-        STATUS_RATE_LIMITED,
-        STATUS_REJECTED,
-        STATUS_RUNNER_ERROR,
-        STATUS_SALVAGE_UNRECOVERABLE,
-        STATUS_SANDBOX_UNAVAILABLE,
-        STATUS_SCHEMA_INVALID,
-        STATUS_SPAWN_FAILED,
-        STATUS_TIMEOUT,
-        STATUS_UNPARSEABLE,
-        STOP_BUDGET,
-        STOP_DEADLINE,
-        REPAIR_INCOMPLETE_REPORT,
-        REPAIR_SCHEMA_INVALID,
-        RESEND_NOTHING_CHANGED,
-        RetryLadder,
-        budget_exhausted_reason,
-    )
-    from utils.subagent_prompts import (
-        build_schema_repair_prompt,
-    )
-    from utils.subagent_tasks import (
-        KINDS,  # noqa: F401 - re-exported for callers that read it off this module
-        WRITE_KINDS,
-    )
-    from utils import known_checks as _known_checks  # type: ignore[no-redef]
-    from utils import batch_reply as _batch_reply  # type: ignore[no-redef]
-    from utils import failure_capture as _failure_capture  # type: ignore[no-redef]
-    from utils import task_outcome as _task_outcome  # type: ignore[no-redef]
-    from utils import task_result as _task_result  # type: ignore[no-redef]
-    from utils import runner_selection as _runner_selection  # type: ignore[no-redef]
-    from utils import probe_state as _probe_state  # type: ignore[no-redef]
-    from utils import sandbox_walk as _sandbox_walk  # type: ignore[no-redef]
-    from utils import dispatch_spawn as _dispatch_spawn  # type: ignore[no-redef]
-    from utils import attempt_classifier as _attempt_classifier  # type: ignore[no-redef]
-    from utils import runner_preflight as _runner_preflight  # type: ignore[no-redef]
-    from utils import task_dispatch as _task_dispatch  # type: ignore[no-redef]
-    from utils import task_batch as _task_batch  # type: ignore[no-redef]
-    from utils import task_file_runner as _task_file_runner  # type: ignore[no-redef]
+from . import process_capture
+from . import process_control
+from .json_extractor import (
+    extract_json_from_text,
+)
+from .llm_client import (
+    expand_env_home,
+)
+from .provider_registry import (
+    SESSION_LAYER,
+)
+from .providers.base import (
+    PROFILE_AGENT_READONLY,
+    PROFILE_AGENT_WRITE,
+    ProfileUnsupported,
+    version_verdict,
+)
+from .retry_ladder import (  # noqa: F401 - re-exported, see below
+    BACKOFF_STATUSES,
+    FATAL_STATUSES,
+    MIN_ATTEMPT_BUDGET_S,
+    RETRYABLE_STATUSES,
+    RUNG_BY_STATUS,
+    STATUS_AUTH_FAILED,
+    STATUS_BUDGET_EXHAUSTED,
+    STATUS_INCOMPLETE,
+    STATUS_INCOMPLETE_REPORT,
+    STATUS_INVALID_MODEL,
+    STATUS_OK,
+    STATUS_RATE_LIMITED,
+    STATUS_REJECTED,
+    STATUS_RUNNER_ERROR,
+    STATUS_SALVAGE_UNRECOVERABLE,
+    STATUS_SANDBOX_UNAVAILABLE,
+    STATUS_SCHEMA_INVALID,
+    STATUS_SPAWN_FAILED,
+    STATUS_TIMEOUT,
+    STATUS_UNPARSEABLE,
+    STOP_BUDGET,
+    STOP_DEADLINE,
+    REPAIR_INCOMPLETE_REPORT,
+    REPAIR_SCHEMA_INVALID,
+    RESEND_NOTHING_CHANGED,
+    RetryLadder,
+    budget_exhausted_reason,
+)
+from .subagent_prompts import (
+    build_schema_repair_prompt,
+)
+from .subagent_tasks import (
+    KINDS,  # noqa: F401 - re-exported for callers that read it off this module
+    WRITE_KINDS,
+)
+from . import known_checks as _known_checks
+from . import batch_reply as _batch_reply
+from . import failure_capture as _failure_capture
+from . import task_outcome as _task_outcome
+from . import task_result as _task_result
+from . import runner_selection as _runner_selection
+from . import probe_state as _probe_state
+from . import sandbox_walk as _sandbox_walk
+from . import dispatch_spawn as _dispatch_spawn
+from . import attempt_classifier as _attempt_classifier
+from . import runner_preflight as _runner_preflight
+from . import task_dispatch as _task_dispatch
+from . import task_batch as _task_batch
+from . import task_file_runner as _task_file_runner
 
 
 #: The status vocabulary, the D3k rung table, ``MIN_ATTEMPT_BUDGET_S`` and the

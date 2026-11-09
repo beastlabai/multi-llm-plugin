@@ -1385,13 +1385,7 @@ def _host_capabilities():
     imports ``cli_common`` (which imports this module's siblings) and because most
     invocations never need the yaml parse at all.
     """
-    try:
-        from . import host_capabilities
-    except ImportError:  # pragma: no cover - partial install / direct script run
-        try:
-            import host_capabilities  # type: ignore
-        except ImportError:
-            return None
+    from . import host_capabilities
     return host_capabilities
 
 

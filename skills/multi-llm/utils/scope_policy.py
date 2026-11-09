@@ -37,10 +37,7 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-try:
-    from .clock import local_iso_seconds
-except ImportError:  # pragma: no cover - direct script runs with utils/ on path
-    from clock import local_iso_seconds  # type: ignore[no-redef]
+from .clock import local_iso_seconds
 
 # ---------------------------------------------------------------------------
 # Vocabulary
@@ -192,10 +189,7 @@ def flatten_text(value: Any, limit: int = REASON_LIMIT) -> str:
         return ""
     if not isinstance(value, str):
         value = str(value)
-    try:
-        from .text_clip import clip, plain_line
-    except ImportError:  # pragma: no cover - script-style import
-        from utils.text_clip import clip, plain_line
+    from .text_clip import clip, plain_line
     text = plain_line(value)
     previous = None
     while previous != text:

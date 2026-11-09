@@ -31,18 +31,28 @@ Stdlib plus the L0 ``stream_bootstrap``; layer L0 (``tests/test_import_layers.py
 
 from __future__ import annotations
 
+if __name__ == "__main__" and not __package__:
+    # Run by path: put the skill root on sys.path, found from this file's real
+    # location as Python finds sys.path[0], then call the package module's entry
+    # point with sys.argv untouched, so the program name stays the one typed
+    # (docs/development/dispatcher.md#import-safety).
+    import os
+    import sys
+
+    _UTILS_DIR = os.path.dirname(os.path.realpath(__file__))
+    sys.path[:] = [os.path.dirname(_UTILS_DIR)] + [
+        p for p in sys.path if os.path.realpath(p) != _UTILS_DIR]
+    from utils.env_vars import main
+
+    sys.exit(main())
+
 import argparse
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-try:
-    from .stream_bootstrap import bootstrap_streams
-except ImportError:
-    # Direct script invocation (`python utils/env_vars.py`): sys.path[0] is
-    # the utils/ directory, so import the sibling module directly.
-    from stream_bootstrap import bootstrap_streams
+from .stream_bootstrap import bootstrap_streams
 
 # --- kinds -----------------------------------------------------------------
 

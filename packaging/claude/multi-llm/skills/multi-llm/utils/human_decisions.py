@@ -39,48 +39,26 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-try:
-    from .judge_vocab import (
-        JUDGE_AUTO_DECIDE,
-        JUDGE_AUTO_DECIDE_SALVAGE,
-        JUDGE_BATCH_ID_PREFIX,
-        JUDGE_SKIPPED,
-        canonical_value,
-    )
-    from . import importance as _importance
-    from .schema_validator import schema_version_supplied, validate_human_decision_verdicts
-    from .subagent_prompts import build_human_decision_judge_prompt
-    from .subagent_tasks import (
-        PromptBudget,
-        build_inputs,
-        content_hash,
-        file_bytes_sha256,
-        make_task,
-        make_task_file,
-        safe_output_token,
-        write_task_file,
-    )
-except ImportError:  # pragma: no cover - direct-script import shim
-    from utils.judge_vocab import (
-        JUDGE_AUTO_DECIDE,
-        JUDGE_AUTO_DECIDE_SALVAGE,
-        JUDGE_BATCH_ID_PREFIX,
-        JUDGE_SKIPPED,
-        canonical_value,
-    )
-    from utils import importance as _importance
-    from utils.schema_validator import schema_version_supplied, validate_human_decision_verdicts
-    from utils.subagent_prompts import build_human_decision_judge_prompt
-    from utils.subagent_tasks import (
-        PromptBudget,
-        build_inputs,
-        content_hash,
-        file_bytes_sha256,
-        make_task,
-        make_task_file,
-        safe_output_token,
-        write_task_file,
-    )
+from .judge_vocab import (
+    JUDGE_AUTO_DECIDE,
+    JUDGE_AUTO_DECIDE_SALVAGE,
+    JUDGE_BATCH_ID_PREFIX,
+    JUDGE_SKIPPED,
+    canonical_value,
+)
+from . import importance as _importance
+from .schema_validator import schema_version_supplied, validate_human_decision_verdicts
+from .subagent_prompts import build_human_decision_judge_prompt
+from .subagent_tasks import (
+    PromptBudget,
+    build_inputs,
+    content_hash,
+    file_bytes_sha256,
+    make_task,
+    make_task_file,
+    safe_output_token,
+    write_task_file,
+)
 
 
 __all__ = [
@@ -191,10 +169,7 @@ def group_id_of(group: Dict[str, Any]) -> str:
     existing = group.get("group_hash") or group.get("group_id")
     if existing:
         return str(existing)
-    try:
-        from .state_manager import generate_group_id
-    except ImportError:  # pragma: no cover
-        from utils.state_manager import generate_group_id
+    from .state_manager import generate_group_id
     return generate_group_id(group)
 
 
@@ -386,10 +361,7 @@ class VerdictIngest:
 
 
 def _supply_verdict_version(document: Any) -> Optional[str]:
-    try:
-        from .schema_validator import supply_schema_version
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.schema_validator import supply_schema_version
+    from .schema_validator import supply_schema_version
     return supply_schema_version(document, "human_decision_verdicts.schema.json")
 
 
@@ -525,10 +497,7 @@ def judge_labels(
     replaced after ingestion never takes another file's credit. Without it
     (offline callers) the files are read now.
     """
-    try:
-        from .task_outcome import batch_report_path
-    except ImportError:  # pragma: no cover
-        from utils.task_outcome import batch_report_path
+    from .task_outcome import batch_report_path
     # With *ingest* the key is the source path as ingested; without it (offline
     # callers) the file's realpath now, as before.
     runner_by_path: Dict[str, str] = {}

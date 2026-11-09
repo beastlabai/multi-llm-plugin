@@ -16,6 +16,9 @@ import sys
 from typing import Dict, List, Optional
 
 from .json_extractor import sanitize_model_name
+# `resolve_models` reads the resolvers through the module, at each call: tests
+# patch `provider_registry.get_provider` and `parse_model_spec`.
+from . import provider_registry as _provider_registry
 from .provider_registry import get_all_model_specs, is_model_valid, load_config
 from .unattended import NeedsHuman, fail_closed, row
 
@@ -514,15 +517,6 @@ def resolve_models(
             distinct canonical specs sanitize to the same filename stem and
             would therefore write over each other's per-model results.
     """
-    # Import here to avoid circular imports
-    from .provider_registry import (
-        get_default_models,
-        get_provider,
-        get_quick_models,
-        has_default_models,
-        has_quick_models,
-        parse_model_spec,
-    )
 
     def _canonical(specs: List[str]) -> List[str]:
         """Resolve every entry once, against this call's anchor (§9.3.d), then
@@ -547,7 +541,7 @@ def resolve_models(
         """
         resolved: List[str] = []
         for spec in specs:
-            provider_name, model_name = parse_model_spec(spec, anchor=anchor)
+            provider_name, model_name = _provider_registry.parse_model_spec(spec, anchor=anchor)
             canonical = f"{provider_name}:{model_name}"
             if canonical not in resolved:
                 resolved.append(canonical)
@@ -585,7 +579,7 @@ def resolve_models(
 
     # 3. --quick flag uses quick_models from YAML
     if quick:
-        if not has_quick_models(mode, anchor=anchor):
+        if not _provider_registry.has_quick_models(mode, anchor=anchor):
             message = (
                 "No quick_models configured in providers.yaml. "
                 "Add a 'quick_models' list under 'defaults' in providers.yaml."
@@ -593,13 +587,13 @@ def resolve_models(
             if unattended:
                 raise NeedsHuman(f"ERROR: {message}", site=row(2).site_id)
             raise RuntimeError(message)
-        quick_models = get_quick_models(mode, anchor=anchor)
+        quick_models = _provider_registry.get_quick_models(mode, anchor=anchor)
         available_models = []
         unavailable_providers = set()
 
         for model_spec in quick_models:
-            provider_name, _ = parse_model_spec(model_spec, anchor=anchor)
-            provider = get_provider(provider_name)
+            provider_name, _ = _provider_registry.parse_model_spec(model_spec, anchor=anchor)
+            provider = _provider_registry.get_provider(provider_name)
 
             if provider is not None and provider.is_available():
                 available_models.append(model_spec)
@@ -629,14 +623,14 @@ def resolve_models(
             raise RuntimeError(message)
 
     # 4. Check for YAML defaults (with availability filtering)
-    if has_default_models(mode, anchor=anchor):
-        default_models = get_default_models(mode, anchor=anchor)
+    if _provider_registry.has_default_models(mode, anchor=anchor):
+        default_models = _provider_registry.get_default_models(mode, anchor=anchor)
         available_models = []
         unavailable_providers = set()
 
         for model_spec in default_models:
-            provider_name, _ = parse_model_spec(model_spec, anchor=anchor)
-            provider = get_provider(provider_name)
+            provider_name, _ = _provider_registry.parse_model_spec(model_spec, anchor=anchor)
+            provider = _provider_registry.get_provider(provider_name)
 
             if provider is not None and provider.is_available():
                 available_models.append(model_spec)

@@ -758,16 +758,12 @@ def manual_close_note(
 
 
 # ---------------------------------------------------------------------------
-# Imports from the skill root (tolerating a direct script run)
+# Imports from the skill root
 # ---------------------------------------------------------------------------
 
 def _skill_module(name: str):
     """Import a top-level skill module (``modes``, ``check_workflow_prerequisites``)."""
-    try:
-        return importlib.import_module(name)
-    except ImportError:  # pragma: no cover - only when utils/ is sys.path[0]
-        sys.path.insert(0, str(Path(os.path.abspath(__file__)).parent.parent))
-        return importlib.import_module(name)
+    return importlib.import_module(name)
 
 
 def _host_capabilities():

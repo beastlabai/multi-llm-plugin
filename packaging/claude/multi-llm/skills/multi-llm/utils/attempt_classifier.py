@@ -21,54 +21,29 @@ import json
 import sys
 from typing import Any, List, Optional, Tuple
 
-try:  # pragma: no cover - import shim mirrors the rest of utils/
-    from . import structured_output
-    from .json_extractor import describe_syntax_error
-    from .providers.base import exit_zero_failure_category
-    from .retry_ladder import (
-        STATUS_AUTH_FAILED,
-        STATUS_BUDGET_EXHAUSTED,
-        STATUS_CONTEXT_LENGTH_EXCEEDED,
-        STATUS_INVALID_MODEL,
-        STATUS_OK,
-        STATUS_RATE_LIMITED,
-        STATUS_REJECTED,
-        STATUS_RUNNER_ERROR,
-        STATUS_SALVAGE_UNRECOVERABLE,
-        STATUS_SANDBOX_UNAVAILABLE,
-        STATUS_SCHEMA_INVALID,
-        STATUS_SPAWN_FAILED,
-        STATUS_TIMEOUT,
-    )
-    from . import task_outcome as _task_outcome
-    from . import task_result as _task_result
-    from . import runner_selection as _runner_selection
-    from . import dispatch_spawn as _dispatch_spawn
-    from .write_safety import redact_text
-except ImportError:  # pragma: no cover - direct-script import shim
-    from utils import structured_output
-    from utils.json_extractor import describe_syntax_error
-    from utils.providers.base import exit_zero_failure_category
-    from utils.retry_ladder import (
-        STATUS_AUTH_FAILED,
-        STATUS_BUDGET_EXHAUSTED,
-        STATUS_CONTEXT_LENGTH_EXCEEDED,
-        STATUS_INVALID_MODEL,
-        STATUS_OK,
-        STATUS_RATE_LIMITED,
-        STATUS_REJECTED,
-        STATUS_RUNNER_ERROR,
-        STATUS_SALVAGE_UNRECOVERABLE,
-        STATUS_SANDBOX_UNAVAILABLE,
-        STATUS_SCHEMA_INVALID,
-        STATUS_SPAWN_FAILED,
-        STATUS_TIMEOUT,
-    )
-    from utils import task_outcome as _task_outcome  # type: ignore[no-redef]
-    from utils import task_result as _task_result  # type: ignore[no-redef]
-    from utils import runner_selection as _runner_selection  # type: ignore[no-redef]
-    from utils import dispatch_spawn as _dispatch_spawn  # type: ignore[no-redef]
-    from utils.write_safety import redact_text  # type: ignore[no-redef]
+from . import structured_output
+from .json_extractor import describe_syntax_error
+from .providers.base import context_length_message, exit_zero_failure_category, match_streams
+from .retry_ladder import (
+    STATUS_AUTH_FAILED,
+    STATUS_BUDGET_EXHAUSTED,
+    STATUS_CONTEXT_LENGTH_EXCEEDED,
+    STATUS_INVALID_MODEL,
+    STATUS_OK,
+    STATUS_RATE_LIMITED,
+    STATUS_REJECTED,
+    STATUS_RUNNER_ERROR,
+    STATUS_SALVAGE_UNRECOVERABLE,
+    STATUS_SANDBOX_UNAVAILABLE,
+    STATUS_SCHEMA_INVALID,
+    STATUS_SPAWN_FAILED,
+    STATUS_TIMEOUT,
+)
+from . import task_outcome as _task_outcome
+from . import task_result as _task_result
+from . import runner_selection as _runner_selection
+from . import dispatch_spawn as _dispatch_spawn
+from .write_safety import _REDACTIONS, _replace_group, redact_text
 
 
 def _classify_pre_parse(capture: _dispatch_spawn._Capture) -> Tuple[str, str]:
@@ -345,10 +320,6 @@ def _redact_tracking(text: str, offset: int) -> Tuple[str, int]:
     redacted = redact_text(text)
     offset = min(max(0, offset), len(text))
     try:
-        try:  # pragma: no cover - import shim mirrors the rest of utils/
-            from .write_safety import _REDACTIONS, _replace_group
-        except ImportError:  # pragma: no cover - direct-script import shim
-            from utils.write_safety import _REDACTIONS, _replace_group
         out, pos = text or "", offset
         if out:
             for _name, pattern, group, predicate in _REDACTIONS:
@@ -423,11 +394,6 @@ def _quote_verdict(
     for the reason ``failure_capture._tail`` gives; the match position is carried beside it by
     :func:`_redact_tracking`, never by a character inserted into the stream.
     """
-    try:  # pragma: no cover - import shim mirrors the rest of utils/
-        from .providers.base import match_streams
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.providers.base import match_streams
-
     match = None
     try:
         launch = getattr(provider, "launch_diagnostics", None)
@@ -530,10 +496,6 @@ def _classify_failed_run(
         # shipping behaviour until open question 13 designs a prompt splitter —
         # re-sending an unchanged oversized prompt is the one retry guaranteed to
         # fail identically, and a rung-down would only spend the budget doing it.
-        try:  # pragma: no cover - import shim mirrors the rest of utils/
-            from .providers.base import context_length_message
-        except ImportError:  # pragma: no cover - direct-script import shim
-            from utils.providers.base import context_length_message
         return STATUS_CONTEXT_LENGTH_EXCEEDED, context_length_message(model)
     if classified == STATUS_BUDGET_EXHAUSTED:
         # The provider already consumed its internal step budget. Repeating

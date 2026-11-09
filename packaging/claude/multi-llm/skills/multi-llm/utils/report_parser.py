@@ -8,12 +8,8 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
-try:
-    from .judge_vocab import JUDGE_DECIDE, upgrade_legacy
-    from . import report_markdown as rm
-except ImportError:  # pragma: no cover - imported with utils/ on sys.path
-    from judge_vocab import JUDGE_DECIDE, upgrade_legacy
-    import report_markdown as rm
+from .judge_vocab import JUDGE_DECIDE, upgrade_legacy
+from . import report_markdown as rm
 
 # Regex for extracting display hashes from bracket notation in report headers.
 # Matches 8-16 char lowercase hex strings inside square brackets.
@@ -56,10 +52,7 @@ def _warn_unhashed(refused: List[str], header: str, report_path: str) -> None:
 
 def _strip_scope_fields(data, source: str):
     """*data* without scope/policy-like keys (``scope_report.strip_selection_scope_fields``)."""
-    try:
-        from .scope_report import strip_selection_scope_fields
-    except ImportError:  # pragma: no cover - imported with utils/ on sys.path
-        from scope_report import strip_selection_scope_fields
+    from .scope_report import strip_selection_scope_fields
     return strip_selection_scope_fields(data, source)
 
 
@@ -97,13 +90,7 @@ def _load_stamped_groups_for_legacy(report_path: str) -> Optional[List[Dict]]:
     Used as a legacy fallback when report.md lacks bracket-notation hashes.
     Returns stamped groups list, or None if grouped.json is unavailable.
     """
-    try:
-        from .state_manager import stamp_stable_ids, load_groups_payload
-    except ImportError:
-        try:
-            from utils.state_manager import stamp_stable_ids, load_groups_payload
-        except ImportError:
-            return None
+    from .state_manager import stamp_stable_ids, load_groups_payload
 
     report_dir = Path(report_path).parent
     grouped_path = report_dir / "grouped.json"
@@ -551,16 +538,9 @@ def find_edited_descriptions(
         return {}
 
     # Ensure groups are stamped so suggestion_hash is available
-    try:
-        from .state_manager import stamp_stable_ids
-    except ImportError:
-        try:
-            from utils.state_manager import stamp_stable_ids
-        except ImportError:
-            stamp_stable_ids = None
+    from .state_manager import stamp_stable_ids
 
-    if stamp_stable_ids is not None:
-        stamp_stable_ids(grouped)  # idempotent
+    stamp_stable_ids(grouped)  # idempotent
 
     edited: Dict[str, Tuple[str, str]] = {}
 
@@ -695,27 +675,13 @@ def load_html_selections(
             )
 
     # Detect format version and migrate v1 -> v2 if needed
-    try:
-        from .state_manager import get_format_version
-    except ImportError:
-        try:
-            from utils.state_manager import get_format_version
-        except ImportError:
-            get_format_version = None
+    from .state_manager import get_format_version
 
-    if get_format_version is not None:
-        version = get_format_version(data)
-        if version < 2 and groups is not None:
-            try:
-                from .selection_migration import _migrate_v1_html_selections
-            except ImportError:
-                try:
-                    from utils.selection_migration import _migrate_v1_html_selections
-                except ImportError:
-                    _migrate_v1_html_selections = None
+    version = get_format_version(data)
+    if version < 2 and groups is not None:
+        from .selection_migration import _migrate_v1_html_selections
 
-            if _migrate_v1_html_selections is not None:
-                data = _migrate_v1_html_selections(data, groups)
+        data = _migrate_v1_html_selections(data, groups)
 
     # Validate references against groups if provided (post-migration, so
     # validation works on the v2 hash-based keys)
@@ -1135,27 +1101,13 @@ def load_consolidated_html_selections(
         return None
 
     # Detect format version and migrate if needed
-    try:
-        from .state_manager import get_format_version
-    except ImportError:
-        try:
-            from utils.state_manager import get_format_version
-        except ImportError:
-            get_format_version = None
+    from .state_manager import get_format_version
 
-    if get_format_version is not None:
-        version = get_format_version(data)
-        if version < 2 and groups is not None:
-            try:
-                from .selection_migration import _migrate_v1_html_selections
-            except ImportError:
-                try:
-                    from utils.selection_migration import _migrate_v1_html_selections
-                except ImportError:
-                    _migrate_v1_html_selections = None
+    version = get_format_version(data)
+    if version < 2 and groups is not None:
+        from .selection_migration import _migrate_v1_html_selections
 
-            if _migrate_v1_html_selections is not None:
-                data = _migrate_v1_html_selections(data, groups)
+        data = _migrate_v1_html_selections(data, groups)
 
     return data
 
@@ -1224,10 +1176,7 @@ def issue_numbering_digest(issues: List[Dict]) -> str:
     different step and carry fields (timestamps, model attribution) that move
     without the numbering moving.
     """
-    try:
-        from .state_manager import generate_suggestion_id
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.state_manager import generate_suggestion_id
+    from .state_manager import generate_suggestion_id
 
     joined = "\n".join(
         str(issue.get("suggestion_hash") or generate_suggestion_id(issue))

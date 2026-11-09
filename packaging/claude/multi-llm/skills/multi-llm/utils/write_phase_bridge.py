@@ -34,30 +34,17 @@ import os
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
-try:  # pragma: no cover - import shim mirrors the rest of utils/
-    from .code_fix_batcher import fix_member_ids
-    from .prior_changes import entry_id, stable_key
-    from .scope_apply import TASK_KEY, task_block
-    from .suggestion_batcher import suggestion_member_ids
-    from .subagent_tasks import (
-        PHASE_BY_WRITE_KIND,
-        build_inputs,
-        make_task_file,
-        make_write_task,
-        write_task_file,
-    )
-except ImportError:  # pragma: no cover - direct-script import shim
-    from utils.code_fix_batcher import fix_member_ids
-    from utils.prior_changes import entry_id, stable_key
-    from utils.scope_apply import TASK_KEY, task_block
-    from utils.suggestion_batcher import suggestion_member_ids
-    from utils.subagent_tasks import (
-        PHASE_BY_WRITE_KIND,
-        build_inputs,
-        make_task_file,
-        make_write_task,
-        write_task_file,
-    )
+from .code_fix_batcher import fix_member_ids
+from .prior_changes import entry_id, stable_key
+from .scope_apply import TASK_KEY, task_block
+from .suggestion_batcher import suggestion_member_ids
+from .subagent_tasks import (
+    PHASE_BY_WRITE_KIND,
+    build_inputs,
+    make_task_file,
+    make_write_task,
+    write_task_file,
+)
 
 
 __all__ = [

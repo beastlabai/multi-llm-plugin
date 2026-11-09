@@ -29,12 +29,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-try:
-    from . import scope_policy as sp
-    from .state_file import STATE_FILENAME, read_document
-except ImportError:  # pragma: no cover - direct script import
-    import scope_policy as sp  # type: ignore
-    from state_file import STATE_FILENAME, read_document  # type: ignore
+from . import scope_policy as sp
+from .state_file import STATE_FILENAME, read_document
 
 #: ``report_data.json`` / ``consolidated_report_data.json`` key holding the
 #: round's policy block (policy line, legend, counts, baseline).

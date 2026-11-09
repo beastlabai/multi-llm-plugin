@@ -7,10 +7,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Set
 from pathlib import Path
 
-try:
-    from .subagent_tasks import derive_executor_role, subagent_type_for_role
-except ImportError:
-    from utils.subagent_tasks import derive_executor_role, subagent_type_for_role
+from .subagent_tasks import derive_executor_role, subagent_type_for_role
 
 
 class TaskStatus(Enum):
@@ -961,10 +958,7 @@ def decompose_plan_file(plan_path: Path) -> TaskDecomposer:
     Returns:
         TaskDecomposer instance with parsed tasks
     """
-    try:
-        from .tasks_file import read_task_list
-    except ImportError:  # pragma: no cover - direct script invocation
-        from utils.tasks_file import read_task_list  # type: ignore
+    from .tasks_file import read_task_list
     decomposer = TaskDecomposer()
     decomposer.parse_plan(read_task_list(plan_path).text)
     return decomposer

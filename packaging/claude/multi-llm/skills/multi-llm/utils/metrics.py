@@ -4,6 +4,21 @@ Records per-subagent metrics (tokens, tool uses, duration) into state JSON
 and generates markdown reports for individual phases or cross-phase summaries.
 """
 
+if __name__ == "__main__" and not __package__:
+    # Run by path: put the skill root on sys.path, found from this file's real
+    # location as Python finds sys.path[0], then call the package module's entry
+    # point with sys.argv untouched, so the program name stays the one typed
+    # (docs/development/dispatcher.md#import-safety).
+    import os
+    import sys
+
+    _UTILS_DIR = os.path.dirname(os.path.realpath(__file__))
+    sys.path[:] = [os.path.dirname(_UTILS_DIR)] + [
+        p for p in sys.path if os.path.realpath(p) != _UTILS_DIR]
+    from utils.metrics import main
+
+    sys.exit(main(sys.argv[1:]))
+
 import argparse
 import json
 import os
@@ -17,16 +32,9 @@ from typing import (
     Tuple,
 )
 
-try:
-    from . import state_file as _state_file
-    from .stream_bootstrap import bootstrap_streams
-    from .text_clip import clip
-except ImportError:
-    # Direct script invocation (`python utils/metrics.py`): sys.path[0]
-    # is the utils/ directory, so import the sibling module directly.
-    import state_file as _state_file  # type: ignore[no-redef]
-    from stream_bootstrap import bootstrap_streams
-    from text_clip import clip  # type: ignore[no-redef]
+from . import state_file as _state_file
+from .stream_bootstrap import bootstrap_streams
+from .text_clip import clip
 
 
 # The state file's lock, reader and writer live in ``utils/state_file.py``;
@@ -110,9 +118,7 @@ def describe_usage(usage: Optional[Dict[str, Any]]) -> str:
     :func:`format_number` and :func:`format_duration`, and — unlike
     ``llm_client``, where it was first written for the failed-slot error line
     — it imports nothing but the standard library. That is what lets
-    ``html_report_generator`` (which must keep working as
-    ``python utils/html_report_generator.py``, where a relative-importing
-    module cannot be loaded at all) render the same clause the fan-out logs,
+    ``html_report_generator`` render the same clause the fan-out logs,
     instead of a second copy of these rules drifting in a template.
     ``llm_client.describe_usage`` re-exports it for the callers that have
     always reached it there.

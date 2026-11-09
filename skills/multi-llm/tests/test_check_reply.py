@@ -190,9 +190,9 @@ class TestMain:
         assert UTIL_COMMANDS["check-reply"][0] == "utils.check_reply"
 
     def test_it_runs_as_a_direct_script(self, tmp_path):
-        """`python utils/check_reply.py` is a supported entry point: its import
-        shim loads schema_validator as a top-level module, so every module that
-        one imports must load outside the package too."""
+        """`python utils/check_reply.py` is a supported entry point: its guard
+        puts the skill root on sys.path and calls the package module's `main`
+        before any package import runs."""
         env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
         done = subprocess.run(
             [sys.executable, str(SKILL_ROOT / "utils" / "check_reply.py"), "--help"],

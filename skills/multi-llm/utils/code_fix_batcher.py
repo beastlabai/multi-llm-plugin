@@ -16,18 +16,11 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
-try:
-    from . import importance as _importance
-    from .plan_updater import get_tasks_file_path
-    from .prior_changes import entries as prior_changes_entries
-    from .prior_changes import entry_id, plain_entry_id, record_line, stable_key
-    from .subagent_tasks import subagent_type_for_role
-except ImportError:
-    from utils import importance as _importance
-    from utils.plan_updater import get_tasks_file_path
-    from utils.prior_changes import entries as prior_changes_entries
-    from utils.prior_changes import entry_id, plain_entry_id, record_line, stable_key
-    from utils.subagent_tasks import subagent_type_for_role
+from . import importance as _importance
+from .plan_updater import get_tasks_file_path
+from .prior_changes import entries as prior_changes_entries
+from .prior_changes import entry_id, plain_entry_id, record_line, stable_key
+from .subagent_tasks import subagent_type_for_role
 
 
 # Configuration constants

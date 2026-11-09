@@ -3693,10 +3693,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         """
         if self.state is None:
             return
-        try:
-            from .git_utils import get_modified_files, get_staged_files
-        except ImportError:  # pragma: no cover
-            from utils.git_utils import get_modified_files, get_staged_files
+        from .git_utils import get_modified_files, get_staged_files
         if self.state.get("pre_existing_changes") is not None:
             existing = self.state.get("pre_existing_changes") or []
             # "path(s)", not "file(s)": `git status --porcelain` collapses an

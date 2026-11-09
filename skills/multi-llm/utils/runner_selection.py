@@ -16,48 +16,27 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-try:  # pragma: no cover - import shim mirrors the rest of utils/
-    from .provider_registry import (
-        session_runner,
-        get_provider,
-        parse_model_spec,
-        require_one_config_source,
-        resolve_subagent_runner,
-    )
-    from .providers.base import (
-        PROFILE_AGENT_READONLY,
-        PROFILE_AGENT_WRITE,
-        split_reasoning_effort,
-        WRITE_SCOPE_PLAN_FILE,
-        WRITE_SCOPE_REPO_WIDE,
-        WRITE_SCOPE_TASKS,
-    )
-    from .subagent_tasks import (
-        READ_KINDS,
-        WRITE_KINDS,
-    )
-    from . import task_outcome as _task_outcome
-except ImportError:  # pragma: no cover - direct-script import shim
-    from utils.provider_registry import (
-        session_runner,
-        get_provider,
-        parse_model_spec,
-        require_one_config_source,
-        resolve_subagent_runner,
-    )
-    from utils.providers.base import (
-        PROFILE_AGENT_READONLY,
-        PROFILE_AGENT_WRITE,
-        split_reasoning_effort,
-        WRITE_SCOPE_PLAN_FILE,
-        WRITE_SCOPE_REPO_WIDE,
-        WRITE_SCOPE_TASKS,
-    )
-    from utils.subagent_tasks import (
-        READ_KINDS,
-        WRITE_KINDS,
-    )
-    from utils import task_outcome as _task_outcome  # type: ignore[no-redef]
+from . import provider_registry as _provider_registry
+from .provider_registry import (
+    session_runner,
+    get_provider,
+    parse_model_spec,
+    require_one_config_source,
+    resolve_subagent_runner,
+)
+from .providers.base import (
+    PROFILE_AGENT_READONLY,
+    PROFILE_AGENT_WRITE,
+    split_reasoning_effort,
+    WRITE_SCOPE_PLAN_FILE,
+    WRITE_SCOPE_REPO_WIDE,
+    WRITE_SCOPE_TASKS,
+)
+from .subagent_tasks import (
+    READ_KINDS,
+    WRITE_KINDS,
+)
+from . import task_outcome as _task_outcome
 
 
 #: Every read/analyze kind runs read-only; every write kind runs ``agent-write``.
@@ -113,12 +92,8 @@ def eligible_runners(profile: str) -> List[str]:
     actually present on PATH. Printed as advice by every rejection; an empty
     intersection gets its own sentence rather than an empty list.
     """
-    try:
-        from .provider_registry import _PROVIDERS  # local import: avoids a cycle
-    except ImportError:  # pragma: no cover
-        from utils.provider_registry import _PROVIDERS
     names = []
-    for name, provider in _PROVIDERS.items():
+    for name, provider in _provider_registry._PROVIDERS.items():
         if not provider.supports_profile(profile):
             continue
         try:
@@ -374,11 +349,7 @@ def _is_session_model(
 
 
 def _registry_module() -> Any:
-    try:  # pragma: no cover - import shim mirrors the rest of utils/
-        from . import provider_registry
-    except ImportError:  # pragma: no cover - direct-script import shim
-        import utils.provider_registry as provider_registry  # type: ignore[no-redef]
-    return provider_registry
+    return _provider_registry
 
 
 def _effort_stripped(provider: Any, model: str) -> str:

@@ -357,11 +357,7 @@ def _manual_gate_answers(
 
 def _stale_review_of(phase_name: str, workflow: Dict[str, Any]) -> Optional[str]:
     """The phase name of *phase_name*'s prerequisite review when it is stale too."""
-    try:
-        import check_workflow_prerequisites as prereq  # type: ignore
-    except ImportError:  # pragma: no cover - only when utils/ is sys.path[0]
-        sys.path.insert(0, str(Path(os.path.abspath(__file__)).parent.parent))
-        import check_workflow_prerequisites as prereq  # type: ignore
+    import check_workflow_prerequisites as prereq  # type: ignore
     for review in prereq.PHASE_PREREQUISITES.get(phase_name, ()):
         if ((workflow.get("phases") or {}).get(review) or {}).get("stale"):
             return review

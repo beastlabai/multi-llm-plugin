@@ -718,10 +718,7 @@ def _open_recommendation(phase_dir: str, recommendation: Any) -> Any:
     """
     if not recommendation:
         return recommendation
-    try:
-        from .consolidation import consolidation_is_current
-    except ImportError:  # pragma: no cover - direct script runs
-        from utils.consolidation import consolidation_is_current  # type: ignore
+    from .consolidation import consolidation_is_current
     try:
         if consolidation_is_current(phase_dir):
             return None

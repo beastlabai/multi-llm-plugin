@@ -16,12 +16,8 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-try:
-    from . import importance as _importance
-    from .prior_changes import entry_id, stable_key
-except ImportError:
-    from utils import importance as _importance
-    from utils.prior_changes import entry_id, stable_key
+from . import importance as _importance
+from .prior_changes import entry_id, stable_key
 
 
 # Configuration constants

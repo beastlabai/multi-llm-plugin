@@ -174,11 +174,8 @@ from .subagent_tasks import (
     build_inputs,
     write_salvage_task_file,
 )
-from . import (
-    group_similar_suggestions,
-    apply_validation_to_groups,
-    save_validation_results,
-)
+from .suggestion_processor import group_similar_suggestions
+from .validation import apply_validation_to_groups, save_validation_results
 
 # Required fields for each suggestion (shared across review phases)
 REQUIRED_FIELDS = ["title", "desc", "importance", "reference", "type"]
@@ -486,12 +483,8 @@ def _authoritative_validator_runner(
     Returns:
         ``{batch_index: runner_or_None}`` for every batch in ``batch_metadata``.
     """
-    try:
-        from .task_batch import _recorded_provenance, _recorded_runners
-        from .subagent_tasks import batch_manifest, file_bytes_sha256
-    except ImportError:  # pragma: no cover - direct script runs
-        from task_batch import _recorded_provenance, _recorded_runners  # type: ignore
-        from subagent_tasks import batch_manifest, file_bytes_sha256  # type: ignore
+    from .task_batch import _recorded_provenance, _recorded_runners
+    from .subagent_tasks import batch_manifest, file_bytes_sha256
     kind = batch_metadata.get("kind") or "validation"
     batches = batch_metadata.get("batches", [])
     result: Dict[int, Optional[str]] = {}
@@ -584,12 +577,8 @@ def merge_validation_batches(
     wrote itself are merged; a batch without them is missing, never read from
     disk.
     """
-    try:
-        from .subagent_tasks import batch_manifest
-        from .validation import join_model_names
-    except ImportError:  # pragma: no cover - direct script runs
-        from subagent_tasks import batch_manifest  # type: ignore
-        from validation import join_model_names  # type: ignore
+    from .subagent_tasks import batch_manifest
+    from .validation import join_model_names
     held: Dict[Any, Any] = {}
     batch_hashes: Dict[str, str] = {}
     held_indexes: set = set()
@@ -684,12 +673,8 @@ def reopen_phase_for_validation(
     snapshot. The file goes back as read, less this phase's entry and plus
     what every ``StateManager`` load and save stamps.
     """
-    try:
-        from .metrics import state_file_lock
-        from .output_handler import output_dir_path
-    except ImportError:  # pragma: no cover - direct script runs
-        from utils.metrics import state_file_lock  # type: ignore[no-redef]
-        from utils.output_handler import output_dir_path  # type: ignore[no-redef]
+    from .metrics import state_file_lock
+    from .output_handler import output_dir_path
 
     plan = Path(plan_path)
     with state_file_lock(output_dir_path(plan.resolve()) / "state.json"):
@@ -4881,10 +4866,7 @@ def _closing_key(key: Any) -> str:
 def phase_summary_key(plan_path: Union[str, Path], phase_name: str) -> str:
     """The closing-summary key of a plan's phase: its phase directory,
     computed and never created (``output_dir_path``, not ``get_phase_dir``)."""
-    try:
-        from .output_handler import PHASE_DIRECTORIES, output_dir_path
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.output_handler import PHASE_DIRECTORIES, output_dir_path  # type: ignore[no-redef]
+    from .output_handler import PHASE_DIRECTORIES, output_dir_path
     return str(
         output_dir_path(Path(plan_path)) / PHASE_DIRECTORIES.get(phase_name, phase_name)
     )
@@ -5046,10 +5028,7 @@ def bypass_ignore_prefixes(
         return prefixes
     # `output_dir_path`, not `get_output_dir`: the latter `mkdir`s, and a
     # detective check must not create the directory it is about to exclude.
-    try:
-        from .output_handler import output_dir_path
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.output_handler import output_dir_path  # type: ignore[no-redef]
+    from .output_handler import output_dir_path
     try:
         out_dir = os.path.realpath(str(output_dir_path(Path(plan_path))))
         relative = os.path.relpath(out_dir, os.path.realpath(project_root))

@@ -163,6 +163,21 @@ Import is side-effect free: argparse and all I/O live inside :func:`main`.
 
 from __future__ import annotations
 
+if __name__ == "__main__" and not __package__:
+    # Run by path: put the skill root on sys.path, found from this file's real
+    # location as Python finds sys.path[0], then call the package module's entry
+    # point with sys.argv untouched, so the program name stays the one typed
+    # (docs/development/dispatcher.md#import-safety).
+    import os
+    import sys
+
+    _UTILS_DIR = os.path.dirname(os.path.realpath(__file__))
+    sys.path[:] = [os.path.dirname(_UTILS_DIR)] + [
+        p for p in sys.path if os.path.realpath(p) != _UTILS_DIR]
+    from utils.report_check import main
+
+    sys.exit(main(sys.argv[1:]))
+
 import argparse
 import json
 import re
@@ -171,10 +186,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set
 
-try:
-    from .stream_bootstrap import bootstrap_streams
-except ImportError:  # direct script invocation
-    from stream_bootstrap import bootstrap_streams  # type: ignore
+from .stream_bootstrap import bootstrap_streams
 
 #: The block's four line kinds. The
 #: trailing space is part of each command prefix: ``[NEXT_COMMAND] `` must never

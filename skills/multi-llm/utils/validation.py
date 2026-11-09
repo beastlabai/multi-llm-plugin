@@ -19,60 +19,32 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
-try:
-    from .atomic_io import atomic_write_bytes, read_back_text
-    from .held_folder import write_in_plan_dir
-    from .state_manager import generate_group_id, CURRENT_FORMAT_VERSION
-    from .state_manager import group_join_ids, records_by_unique_id, stamped_group_id
-    from .cli_common import (
-        current_replay_flags, durable_reaggregate_fields, retry_command,
-    )
-    from .subagent_prompts import build_validation_prompt, code_review_validation_guidance
-    from . import scope_policy as _sp
-    from . import review_round as _review_round
-    from . import scope_round as _scope_round
-    from . import validation_sections as _sections
-    from .schema_validator import VALIDATION_VERDICTS
-    from .subagent_tasks import (
-        PromptBudget,
-        TaskFileError,
-        batch_manifest,
-        build_inputs,
-        content_hash,
-        file_bytes_sha256,
-        file_content_hash,
-        make_task,
-        make_task_file,
-        split_indices,
-        tasks_of,
-    )
-except ImportError:
-    from utils.atomic_io import atomic_write_bytes, read_back_text
-    from utils.held_folder import write_in_plan_dir
-    from utils.state_manager import generate_group_id, CURRENT_FORMAT_VERSION
-    from utils.state_manager import group_join_ids, records_by_unique_id, stamped_group_id
-    from utils.cli_common import (
-        current_replay_flags, durable_reaggregate_fields, retry_command,
-    )
-    from utils.subagent_prompts import build_validation_prompt, code_review_validation_guidance
-    from utils import scope_policy as _sp
-    from utils import review_round as _review_round
-    from utils import scope_round as _scope_round
-    from utils import validation_sections as _sections
-    from utils.schema_validator import VALIDATION_VERDICTS
-    from utils.subagent_tasks import (
-        PromptBudget,
-        TaskFileError,
-        batch_manifest,
-        build_inputs,
-        content_hash,
-        file_bytes_sha256,
-        file_content_hash,
-        make_task,
-        make_task_file,
-        split_indices,
-        tasks_of,
-    )
+from .atomic_io import atomic_write_bytes, read_back_text
+from .held_folder import write_in_plan_dir
+from .state_manager import generate_group_id, CURRENT_FORMAT_VERSION
+from .state_manager import group_join_ids, records_by_unique_id, stamped_group_id
+from .cli_common import (
+    current_replay_flags, durable_reaggregate_fields, retry_command,
+)
+from .subagent_prompts import build_validation_prompt, code_review_validation_guidance
+from . import scope_policy as _sp
+from . import review_round as _review_round
+from . import scope_round as _scope_round
+from . import validation_sections as _sections
+from .schema_validator import VALIDATION_VERDICTS
+from .subagent_tasks import (
+    PromptBudget,
+    TaskFileError,
+    batch_manifest,
+    build_inputs,
+    content_hash,
+    file_bytes_sha256,
+    file_content_hash,
+    make_task,
+    make_task_file,
+    split_indices,
+    tasks_of,
+)
 
 
 #: The shared-context ceiling for a validation prompt, applied **per context
@@ -908,22 +880,12 @@ def publish_validation_context(
     Returns:
         The published object, or ``None`` when the round is all inline.
     """
-    try:
-        from .validation_context import (
-            build_validation_context,
-            validation_context_notice,
-        )
-        from .status_file import read_status, remove_status_keys, update_status
-        from . import cli_common as _cli
-    except ImportError:  # pragma: no cover - flat-import fallback
-        from utils.validation_context import (  # type: ignore[no-redef]
-            build_validation_context,
-            validation_context_notice,
-        )
-        from utils.status_file import (  # type: ignore[no-redef]
-            read_status, remove_status_keys, update_status,
-        )
-        from utils import cli_common as _cli  # type: ignore[no-redef]
+    from .validation_context import (
+        build_validation_context,
+        validation_context_notice,
+    )
+    from .status_file import read_status, remove_status_keys, update_status
+    from . import cli_common as _cli
 
     obj = build_validation_context(
         phase=phase or os.path.basename(os.path.abspath(phase_dir)),
@@ -1166,10 +1128,7 @@ def host_views_lock(phase_dir: str) -> Iterator[bool]:
     holder that keeps the lock for :data:`HOST_VIEWS_LOCK_TIMEOUT_S` stops the
     run with exit 3 naming the lock file.
     """
-    try:
-        from . import process_control
-    except ImportError:  # pragma: no cover - flat import layout
-        from utils import process_control  # type: ignore
+    from . import process_control
     key = os.path.realpath(host_views_lock_path(phase_dir))
     with _VIEWS_LOCKS_GUARD:
         state = _VIEWS_LOCKS.setdefault(key, _ViewsLockState())
@@ -2154,18 +2113,11 @@ def load_validation_results(
 
 # --- Batched Validation Functions ---
 
-try:
-    from .validation_batcher import (
-        batch_validation_groups,
-        estimate_validation_batching_stats,
-        ValidationBatch,
-    )
-except ImportError:
-    from utils.validation_batcher import (
-        batch_validation_groups,
-        estimate_validation_batching_stats,
-        ValidationBatch,
-    )
+from .validation_batcher import (
+    batch_validation_groups,
+    estimate_validation_batching_stats,
+    ValidationBatch,
+)
 
 
 def build_validation_batch_records(
@@ -3246,12 +3198,8 @@ def pinned_validation_guidance(plan_file: Optional[str]) -> str:
     """
     if not plan_file:
         return ""
-    try:
-        from .commit_range import display_range, pinned_endpoints, pinned_head_read_rule
-        from .output_handler import output_dir_path
-    except ImportError:  # pragma: no cover - flat import layout
-        from utils.commit_range import display_range, pinned_endpoints, pinned_head_read_rule
-        from utils.output_handler import output_dir_path
+    from .commit_range import display_range, pinned_endpoints, pinned_head_read_rule
+    from .output_handler import output_dir_path
     try:
         document = json.loads(
             (output_dir_path(Path(plan_file)) / "state.json").read_text(encoding="utf-8")
@@ -3304,10 +3252,7 @@ def revalidation_scope_binding(
     )
     state: Dict[str, Any] = {}
     if plan_file:
-        try:
-            from .output_handler import output_dir_path
-        except ImportError:  # pragma: no cover - flat import layout
-            from utils.output_handler import output_dir_path
+        from .output_handler import output_dir_path
         try:
             loaded = json.loads(
                 (output_dir_path(Path(plan_file)) / "state.json").read_text(encoding="utf-8")
@@ -3512,12 +3457,8 @@ def prepare_batched_revalidation_tasks(
     # Create batched tasks for the subset
     # Revalidation reads the same frozen context plan, including when invoked
     # from apply-code-fixes. Carry its expected hash and source into the task file.
-    try:
-        from .commit_report import context_plan_path, run_commit_range
-        from .git_utils import get_project_root
-    except ImportError:  # pragma: no cover - flat import layout
-        from utils.commit_report import context_plan_path, run_commit_range
-        from utils.git_utils import get_project_root
+    from .commit_report import context_plan_path, run_commit_range
+    from .git_utils import get_project_root
 
     commit_record = run_commit_range(plan_file)
     context_plan_file = (

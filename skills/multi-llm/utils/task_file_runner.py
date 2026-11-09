@@ -17,58 +17,35 @@ import json
 import os
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-try:  # pragma: no cover - import shim mirrors the rest of utils/
-    from . import structured_output
-    from .llm_client import provider_dispatch_context
-    from .provider_registry import (
-        get_provider,
-        parse_model_spec,
-    )
-    from . import landlock_dispatch
-    from .providers.base import (
-        JailRequest,
-        sandbox_rung_id,
-    )
-    from .subagent_tasks import (
-        preferred_prompt_transport,
-        refuse_reason,
-        tasks_of,
-    )
-    from . import failure_capture as _failure_capture
-    from . import task_outcome as _task_outcome
-    from . import task_result as _task_result
-    from . import runner_selection as _runner_selection
-    from . import probe_state as _probe_state
-    from . import dispatch_spawn as _dispatch_spawn
-    from . import runner_preflight as _runner_preflight
-    from . import task_dispatch as _task_dispatch
-    from . import task_batch as _task_batch
-except ImportError:  # pragma: no cover - direct-script import shim
-    from utils import structured_output
-    from utils.llm_client import provider_dispatch_context
-    from utils.provider_registry import (
-        get_provider,
-        parse_model_spec,
-    )
-    from utils import landlock_dispatch  # type: ignore[no-redef]
-    from utils.providers.base import (
-        JailRequest,
-        sandbox_rung_id,
-    )
-    from utils.subagent_tasks import (
-        preferred_prompt_transport,
-        refuse_reason,
-        tasks_of,
-    )
-    from utils import failure_capture as _failure_capture  # type: ignore[no-redef]
-    from utils import task_outcome as _task_outcome  # type: ignore[no-redef]
-    from utils import task_result as _task_result  # type: ignore[no-redef]
-    from utils import runner_selection as _runner_selection  # type: ignore[no-redef]
-    from utils import probe_state as _probe_state  # type: ignore[no-redef]
-    from utils import dispatch_spawn as _dispatch_spawn  # type: ignore[no-redef]
-    from utils import runner_preflight as _runner_preflight  # type: ignore[no-redef]
-    from utils import task_dispatch as _task_dispatch  # type: ignore[no-redef]
-    from utils import task_batch as _task_batch  # type: ignore[no-redef]
+from . import cli_common
+from . import host_capabilities as caps
+from . import structured_output
+from .llm_client import provider_dispatch_context
+from .provider_registry import (
+    get_provider,
+    parse_model_spec,
+)
+from . import landlock_dispatch
+from .providers.base import (
+    JailRequest,
+    sandbox_rung_id,
+)
+from . import subagent_tasks as _subagent_tasks
+from .subagent_tasks import (
+    preferred_prompt_transport,
+    refuse_reason,
+    tasks_of,
+)
+from .write_safety import DRY_RUN_FILENAME, redact_argv
+from . import failure_capture as _failure_capture
+from . import task_outcome as _task_outcome
+from . import task_result as _task_result
+from . import runner_selection as _runner_selection
+from . import probe_state as _probe_state
+from . import dispatch_spawn as _dispatch_spawn
+from . import runner_preflight as _runner_preflight
+from . import task_dispatch as _task_dispatch
+from . import task_batch as _task_batch
 
 
 #: The provenance a task file records about itself: the document key naming a
@@ -109,11 +86,6 @@ def _recomputed_inputs(
     (every salvage task file records ``plan_sha256: ""``), so re-hashing
     something in its place would refuse a file that was never bound to it.
     """
-    try:
-        from .subagent_tasks import file_content_hash
-    except ImportError:  # pragma: no cover
-        from utils.subagent_tasks import file_content_hash
-
     recorded = document.get("inputs")
     if not isinstance(recorded, dict):
         return {}
@@ -135,7 +107,7 @@ def _recomputed_inputs(
         path = source if os.path.isabs(source) else os.path.join(phase_dir, source)
         if not os.path.isfile(path):
             continue
-        current[input_key] = file_content_hash(path)
+        current[input_key] = _subagent_tasks.file_content_hash(path)
     return current
 
 
@@ -180,44 +152,28 @@ def run_task_file(
     resolved_dir = phase_dir or os.path.dirname(os.path.abspath(task_file))
     if document is None:
         try:
-            from .subagent_tasks import (
-                TaskFileError,
-                check_task_file_inputs,
-                read_task_file,
-            )
-        except ImportError:  # pragma: no cover
-            from utils.subagent_tasks import (
-                TaskFileError,
-                check_task_file_inputs,
-                read_task_file,
-            )
-        try:
-            document = read_task_file(task_file, phase_dir=resolved_dir)
+            document = _subagent_tasks.read_task_file(task_file, phase_dir=resolved_dir)
             bound = (
                 current_inputs if current_inputs is not None
                 else _recomputed_inputs(document, resolved_dir, anchor)
             )
             if bound:
-                check_task_file_inputs(document, task_file, resolved_dir, bound)
-        except TaskFileError as exc:
+                # Through the module, at each call: tests patch the binding check.
+                _subagent_tasks.check_task_file_inputs(document, task_file, resolved_dir, bound)
+        except _subagent_tasks.TaskFileError as exc:
             raise _task_outcome.ExecutorError(str(exc)) from exc
 
     # A frozen context plan is read by path even when the caller has already
     # materialized the document in memory. Bind it on both entry paths, and
     # treat a missing snapshot (or old task file lacking provenance) as stale.
     if (document.get("inputs") or {}).get("context_plan_sha256"):
-        try:
-            from .subagent_tasks import TaskFileError, check_task_file_inputs, file_bytes_sha256
-        except ImportError:  # pragma: no cover - flat import layout
-            from utils.subagent_tasks import TaskFileError, check_task_file_inputs, file_bytes_sha256
-
         source = document.get("context_plan_file")
         path = os.path.join(resolved_dir, source) if isinstance(source, str) and source else None
         try:
-            check_task_file_inputs(document, task_file, resolved_dir, {
-                "context_plan_sha256": file_bytes_sha256(path),
+            _subagent_tasks.check_task_file_inputs(document, task_file, resolved_dir, {
+                "context_plan_sha256": _subagent_tasks.file_bytes_sha256(path),
             })
-        except TaskFileError as exc:
+        except _subagent_tasks.TaskFileError as exc:
             raise _task_outcome.ExecutorError(str(exc)) from exc
 
     tasks = [
@@ -344,18 +300,9 @@ def dry_run_report(
     ``{phase}/subagent_dry_run.json`` and return, having spawned nothing but
     ``--version``.
     """
-    try:
-        from .write_safety import DRY_RUN_FILENAME, redact_argv
-    except ImportError:  # pragma: no cover
-        from utils.write_safety import DRY_RUN_FILENAME, redact_argv
-
     resolved_dir = phase_dir or os.path.dirname(os.path.abspath(task_file))
     if document is None:
-        try:
-            from .subagent_tasks import read_task_file
-        except ImportError:  # pragma: no cover
-            from utils.subagent_tasks import read_task_file
-        document = read_task_file(task_file, phase_dir=resolved_dir)
+        document = _subagent_tasks.read_task_file(task_file, phase_dir=resolved_dir)
 
     kind = str(document.get("kind", ""))
     entries: List[Dict[str, Any]] = []
@@ -387,11 +334,7 @@ def dry_run_report(
         transport = preferred_prompt_transport(provider_name)
         entry["prompt_transport"] = transport
         prompt = str(task.get("prompt") or "")
-        try:
-            from .subagent_tasks import utf16_units
-        except ImportError:  # pragma: no cover
-            from utils.subagent_tasks import utf16_units
-        entry["prompt_utf16_units"] = utf16_units(prompt)
+        entry["prompt_utf16_units"] = _subagent_tasks.utf16_units(prompt)
         reason = refuse_reason(
             task,
             supports_workspace_reads=bool(
@@ -512,15 +455,7 @@ def _retry_instruction(
     capability is *already known*, in Python, and the agent is handed a finished
     sentence. Nothing here asks an agent to consult the capability matrix
     mid-run (D5); the matrix stays off every agent read path.
-
-    Two imports, no third fallback: ``host_capabilities`` sits beside this module
-    in the same package, so if neither spelling resolves this module's own
-    top-level imports have already failed.
     """
-    try:
-        from . import host_capabilities as caps
-    except ImportError:  # pragma: no cover - direct script runs
-        import host_capabilities as caps  # type: ignore
     host_id = caps.resolve_host_id(explicit=getattr(args, "host", None))
     return caps.retry_instruction(
         host_id, failed_ids=failed_ids, retry_command=retry_command
@@ -673,10 +608,6 @@ def _shaped_retry_block(
     retry_command: Optional[str],
 ) -> List[str]:
     """`_retry_instruction` wrapped in the shape `cli_common.retry_shape` picks."""
-    try:
-        from . import cli_common
-    except ImportError:  # pragma: no cover - direct script runs
-        import cli_common  # type: ignore
     statuses = [o.status for o in report.failed]
     shape = cli_common.retry_shape(
         statuses=statuses, artifacts_ok=_artifacts_usable(document, phase_dir)

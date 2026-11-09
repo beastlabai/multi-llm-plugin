@@ -14,30 +14,17 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from . import PackageRoute
 
-try:  # normal import (utils is a package)
-    from ..host_paths import (
-        SCOPE_GLOBAL,
-        SCOPE_PROJECT,
-        Refused,
-        _is_user_rooted,
-        _join,
-        checked_entry,
-        expand_path_tokens,
-        user_home,
-    )
-    from ..json_extractor import strip_jsonc as _strip_jsonc
-except ImportError:  # pragma: no cover - direct script runs with utils/ on path
-    from host_paths import (  # type: ignore
-        SCOPE_GLOBAL,
-        SCOPE_PROJECT,
-        Refused,
-        _is_user_rooted,
-        _join,
-        checked_entry,
-        expand_path_tokens,
-        user_home,
-    )
-    from json_extractor import strip_jsonc as _strip_jsonc  # type: ignore
+from ..host_paths import (
+    SCOPE_GLOBAL,
+    SCOPE_PROJECT,
+    Refused,
+    _is_user_rooted,
+    _join,
+    checked_entry,
+    expand_path_tokens,
+    user_home,
+)
+from ..json_extractor import strip_jsonc as _strip_jsonc
 
 
 def _package_name(spec: str) -> str:

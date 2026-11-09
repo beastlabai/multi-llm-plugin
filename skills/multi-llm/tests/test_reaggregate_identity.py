@@ -2829,8 +2829,8 @@ class TestGroupedCoverageGap:
     """The pure comparison behind the branch, one case per way it must not lie."""
 
     def _grouped(self, issues_by_model):
-        from utils import group_similar_suggestions
         from utils.state_manager import stamp_stable_ids
+        from utils.suggestion_processor import group_similar_suggestions
 
         flat = []
         for model, issues in issues_by_model.items():

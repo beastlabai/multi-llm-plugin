@@ -344,11 +344,7 @@ def _workflow_payload(
     """
     from .state_manager import StateManager
 
-    try:
-        import check_workflow_prerequisites as prereq  # type: ignore
-    except ImportError:  # pragma: no cover - only when utils/ is sys.path[0]
-        sys.path.insert(0, str(Path(os.path.abspath(__file__)).parent.parent))
-        import check_workflow_prerequisites as prereq  # type: ignore
+    import check_workflow_prerequisites as prereq  # type: ignore
 
     # A poll: read-only, so it never rewrites the file a run is writing.
     state = StateManager(plan_path, read_only=True)

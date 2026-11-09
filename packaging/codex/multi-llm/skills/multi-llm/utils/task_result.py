@@ -21,58 +21,34 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
-try:  # pragma: no cover - import shim mirrors the rest of utils/
-    from . import process_capture
-    from .json_extractor import (
-        extract_json_from_text,
-        is_answer_shaped,
-    )
-    from .llm_client import (
-        SALVAGE_FAILURE_KEY,
-        SALVAGE_FAILURE_TIMEOUT,
-    )
-    from .providers.base import availability_from_failure
-    from .retry_ladder import (  # noqa: F401 - re-exported, see below
-        STATUS_REJECTED,
-        STATUS_RUNNER_ERROR,
-        STATUS_SCHEMA_INVALID,
-        STATUS_UNPARSEABLE,
-    )
-    from .schema_validator import (
-        schema_version_supplied,
-        validate_human_decision_verdicts,
-        validate_with_schema_file,
-        validation_reply_problems,
-    )
-    from .subagent_tasks import WRITE_KINDS, content_hash
-    from . import failure_capture as _failure_capture
-    from . import task_outcome as _task_outcome
-except ImportError:  # pragma: no cover - direct-script import shim
-    from utils import process_capture
-    from utils.json_extractor import (
-        extract_json_from_text,
-        is_answer_shaped,
-    )
-    from utils.llm_client import (
-        SALVAGE_FAILURE_KEY,
-        SALVAGE_FAILURE_TIMEOUT,
-    )
-    from utils.providers.base import availability_from_failure
-    from utils.retry_ladder import (  # noqa: F401 - re-exported, see below
-        STATUS_REJECTED,
-        STATUS_RUNNER_ERROR,
-        STATUS_SCHEMA_INVALID,
-        STATUS_UNPARSEABLE,
-    )
-    from utils.schema_validator import (
-        schema_version_supplied,
-        validate_human_decision_verdicts,
-        validate_with_schema_file,
-        validation_reply_problems,
-    )
-    from utils.subagent_tasks import WRITE_KINDS, content_hash
-    from utils import failure_capture as _failure_capture  # type: ignore[no-redef]
-    from utils import task_outcome as _task_outcome  # type: ignore[no-redef]
+from . import process_capture
+from .json_extractor import (
+    extract_json_from_text,
+    is_answer_shaped,
+)
+from .llm_client import (
+    SALVAGE_FAILURE_KEY,
+    SALVAGE_FAILURE_TIMEOUT,
+)
+from .providers.base import availability_from_failure
+from .retry_ladder import (  # noqa: F401 - re-exported, see below
+    STATUS_REJECTED,
+    STATUS_RUNNER_ERROR,
+    STATUS_SCHEMA_INVALID,
+    STATUS_UNPARSEABLE,
+)
+from .schema_validator import (
+    schema_version_supplied,
+    supply_schema_version,
+    validate_human_decision_verdicts,
+    validate_with_schema_file,
+    validation_reply_problems,
+)
+from .subagent_tasks import WRITE_KINDS, content_hash
+from . import review_round as _review_round
+from .task_decomposer import validate_generated_tasks
+from . import failure_capture as _failure_capture
+from . import task_outcome as _task_outcome
 
 
 #: Result size cap (D3f): reject rather than truncate, so a runaway or
@@ -332,10 +308,9 @@ def persist_result_bytes(
         )
     # Written only while the round that dispatched it is still the round on
     # record; a late result of a replaced round is dropped (utils/review_round.py).
-    from .review_round import persisting_result, record_checked_result
-
+    # Through the module, at each call: tests patch `review_round.persisting_result`.
     persisted: Optional[bytes] = None
-    with persisting_result(phase_dir, target.name) as current:
+    with _review_round.persisting_result(phase_dir, target.name) as current:
         if current:
             # By the phase folder as the run spelled it, not as it resolves
             # now: the write holds that folder from the plan's directory, so a
@@ -348,7 +323,7 @@ def persist_result_bytes(
             # "Consuming checked bytes").
             if isinstance(written, bytes):
                 persisted = written
-                record_checked_result(phase_dir, target.name, written, dispatched=True)
+                _review_round.record_checked_result(phase_dir, target.name, written, dispatched=True)
     return str(target), persisted
 
 
@@ -818,10 +793,6 @@ def supply_result_version(kind: str, data: Any) -> Optional[str]:
     schema = VERSIONED_RESULT_SCHEMAS.get(kind)
     if schema is None:
         return None
-    try:
-        from .schema_validator import supply_schema_version
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.schema_validator import supply_schema_version
     return supply_schema_version(data, schema)
 
 
@@ -855,8 +826,6 @@ def validate_result(kind: str, data: Any) -> List[str]:
         errors = validate_with_schema_file(data, "generated_tasks.schema.json")
         if errors:
             return errors
-        from .task_decomposer import validate_generated_tasks
-
         return validate_generated_tasks(data.get("tasks") or [])
     if kind == "salvage":
         return _salvage_result_errors(data)
@@ -908,9 +877,7 @@ def complete_result_bytes(task: Dict[str, Any], phase_dir: str) -> Optional[byte
     # The bytes judged complete, for a review round that dispatched this task
     # to read instead of the file (docs/development/review-results.md,
     # "Consuming checked bytes").
-    from .review_round import record_checked_result
-
-    record_checked_result(phase_dir, target.name, raw, dispatched=False)
+    _review_round.record_checked_result(phase_dir, target.name, raw, dispatched=False)
     return raw
 
 

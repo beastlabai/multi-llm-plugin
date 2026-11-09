@@ -25,7 +25,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 
 The roster is derived. `utils/providers/__init__.py` discovers every concrete `LLMProvider`
 subclass defined in `utils/providers/`, and `provider_registry._PROVIDERS` instantiates them,
-sorted by `name`; `utils/__init__.py` and `init_config.py` derive their lists from it. Adding
+sorted by `name`; `utils.providers.__all__` and `init_config.py` derive their lists from it. Adding
 the module registers the adapter, and no code names it anywhere else. Adapter behaviour stays
 in code, not in `providers.yaml`, because a cloned repository can layer its own config over
 that file.

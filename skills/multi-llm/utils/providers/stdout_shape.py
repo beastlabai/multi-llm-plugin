@@ -17,10 +17,7 @@ from typing import Any, Collection, Dict, List, Pattern, Tuple
 
 # The one ANSI/OSC pattern (`utils.json_extractor` sits below the provider
 # layer, so the import closes no cycle).
-try:  # pragma: no cover - import shim mirrors the rest of utils/
-    from ..json_extractor import _ANSI_ESCAPE
-except ImportError:  # pragma: no cover - direct-script import shim
-    from utils.json_extractor import _ANSI_ESCAPE
+from ..json_extractor import _ANSI_ESCAPE
 
 
 def envelope_signature(*openers: Any) -> Tuple["Pattern[str]", ...]:

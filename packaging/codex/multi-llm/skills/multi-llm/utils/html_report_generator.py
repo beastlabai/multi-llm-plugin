@@ -5,6 +5,21 @@ model badges, section context previews, and embedded log snippets.
 Supports both grouped.json and consolidated.json as data sources.
 """
 
+if __name__ == "__main__" and not __package__:
+    # Run by path: put the skill root on sys.path, found from this file's real
+    # location as Python finds sys.path[0], then call the package module's entry
+    # point with sys.argv untouched, so the program name stays the one typed
+    # (docs/development/dispatcher.md#import-safety).
+    import os
+    import sys
+
+    _UTILS_DIR = os.path.dirname(os.path.realpath(__file__))
+    sys.path[:] = [os.path.dirname(_UTILS_DIR)] + [
+        p for p in sys.path if os.path.realpath(p) != _UTILS_DIR]
+    from utils.html_report_generator import main
+
+    sys.exit(main(sys.argv[1:]))
+
 import base64
 import hashlib
 import json
@@ -14,40 +29,21 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
-try:
-    from .atomic_io import atomic_write_text
-    from .state_file import read_document as _read_state_document
-    from .stream_bootstrap import bootstrap_streams
-    from .json_extractor import sanitize_model_name
-    from .metrics import describe_usage
-    from .judge_vocab import (
-        JUDGE_AUTO_DECIDE,
-        JUDGE_AUTO_DECIDE_SALVAGE,
-        JUDGE_DECIDED,
-        canonical_value,
-        upgrade_legacy,
-    )
-    from . import scope_report as _scope_report
-    from . import importance as _importance
-    from .process_state import process_cache
-except ImportError:
-    # Direct script invocation (`python utils/html_report_generator.py`):
-    # sys.path[0] is the utils/ directory, so import the sibling module directly.
-    from atomic_io import atomic_write_text  # type: ignore
-    from state_file import read_document as _read_state_document  # type: ignore
-    from stream_bootstrap import bootstrap_streams
-    from json_extractor import sanitize_model_name
-    from process_state import process_cache  # type: ignore
-    from metrics import describe_usage
-    from judge_vocab import (
-        JUDGE_AUTO_DECIDE,
-        JUDGE_AUTO_DECIDE_SALVAGE,
-        JUDGE_DECIDED,
-        canonical_value,
-        upgrade_legacy,
-    )
-    import scope_report as _scope_report
-    import importance as _importance
+from .atomic_io import atomic_write_text
+from .state_file import read_document as _read_state_document
+from .stream_bootstrap import bootstrap_streams
+from .json_extractor import sanitize_model_name
+from .metrics import describe_usage
+from .judge_vocab import (
+    JUDGE_AUTO_DECIDE,
+    JUDGE_AUTO_DECIDE_SALVAGE,
+    JUDGE_DECIDED,
+    canonical_value,
+    upgrade_legacy,
+)
+from . import scope_report as _scope_report
+from . import importance as _importance
+from .process_state import process_cache
 
 logger = logging.getLogger(__name__)
 
@@ -1785,10 +1781,7 @@ def generate_html_report(
             or when ``data_source="consolidated"`` and the file is malformed,
             or when the template has no data placeholder.
     """
-    try:
-        from .report_view import ReportInputs, build_report_view, compact_views
-    except ImportError:
-        from report_view import ReportInputs, build_report_view, compact_views
+    from .report_view import ReportInputs, build_report_view, compact_views
 
     view = build_report_view(ReportInputs(
         groups=groups, plan_path=plan_path, phase_dir=phase_dir, phase_type=phase_type,
@@ -2759,8 +2752,7 @@ def _read_guard_from_state(state_file: Path) -> Optional[Dict[str, Any]]:
         return None
     if not isinstance(state, dict):
         return None
-    # `commit_range.pinned_record`'s order, spelled here because this module
-    # also runs as a direct script, where the package import is unavailable.
+    # `commit_range.pinned_record`'s order: keep the two in step.
     for key in ("commit_range", "head_ref"):
         record = state.get(key)
         if isinstance(record, dict):

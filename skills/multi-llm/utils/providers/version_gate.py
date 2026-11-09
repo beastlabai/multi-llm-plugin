@@ -14,10 +14,7 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Set, Tuple
 
-try:  # pragma: no cover - import shim mirrors the rest of utils/
-    from ..process_state import process_cache
-except ImportError:  # pragma: no cover - direct-script import shim
-    from utils.process_state import process_cache
+from ..process_state import process_cache
 
 from . import types, child_env
 

@@ -12,10 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, TextIO
 
-try:
-    from .validation import publish_host_view, remove_host_view
-except ImportError:  # pragma: no cover - direct script runs
-    from utils.validation import publish_host_view, remove_host_view  # type: ignore
+from .validation import publish_host_view, remove_host_view
 
 #: The host's view of an apply phase's ``orchestrator_output.json``, beside it.
 #: The output's ``batches`` carry each batch's unbound ``prompt`` and its full

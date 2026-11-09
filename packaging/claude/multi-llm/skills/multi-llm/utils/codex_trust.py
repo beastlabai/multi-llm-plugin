@@ -56,14 +56,9 @@ import threading
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
-try:  # pragma: no cover - import shim mirrors the rest of utils/
-    from .atomic_io import atomic_write_bytes
-    from .git_utils import git_argv
-    from .process_state import process_cache
-except ImportError:  # pragma: no cover - direct-script import shim
-    from utils.atomic_io import atomic_write_bytes
-    from utils.git_utils import git_argv
-    from utils.process_state import process_cache
+from .atomic_io import atomic_write_bytes
+from .git_utils import git_argv
+from .process_state import process_cache
 
 CONFIG_NAME = "config.toml"
 

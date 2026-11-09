@@ -42,120 +42,63 @@ import time
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
-try:  # pragma: no cover - import shim mirrors the rest of utils/
-    from . import structured_output
-    from .launch_limiter import attempt_turn_blocking
-    from .llm_client import (
-        _CMD_UNSAFE_CHARS,
-        _resolve_executable,
-    )
-    from .provider_registry import (
-        get_provider,
-        get_subagent_retries,
-        get_subagent_timeout,
-        parse_model_spec,
-    )
-    from . import landlock_dispatch
-    from .providers.base import (
-        JailRequest,
-        host_write_posture_consent,
-        PROFILE_AGENT_WRITE,
-        SANDBOX_RUNG_UNSANDBOXED,
-        StructuredOutputUnavailable,
-    )
-    from .retry_ladder import (
-        BACKOFF_STATUSES,
-        RETRYABLE_STATUSES,
-        STATUS_BUDGET_EXHAUSTED,
-        STATUS_INCOMPLETE_REPORT,
-        STATUS_OK,
-        STATUS_REJECTED,
-        STATUS_RUNNER_ERROR,
-        STATUS_SCHEMA_INVALID,
-        STATUS_SPAWN_FAILED,
-        STATUS_TIMEOUT,
-        STATUS_UNPARSEABLE,
-        STOP_BUDGET,
-        REPAIR_INCOMPLETE_REPORT,
-        REPAIR_SCHEMA_INVALID,
-        RESEND_NOTHING_CHANGED,
-        RetryLadder,
-        budget_exhausted_reason,
-    )
-    from .subagent_prompts import (
-        build_nothing_changed_resend_prompt,
-        build_schema_repair_prompt,
-    )
-    from .subagent_tasks import (
-        WRITE_KINDS,
-        declared_file_set,
-        preferred_prompt_transport,
-        refuse_reason,
-    )
-    from . import batch_reply as _batch_reply
-    from . import failure_capture as _failure_capture
-    from . import task_outcome as _task_outcome
-    from . import task_result as _task_result
-    from . import runner_selection as _runner_selection
-    from . import dispatch_spawn as _dispatch_spawn
-    from . import attempt_classifier as _attempt_classifier
-except ImportError:  # pragma: no cover - direct-script import shim
-    from utils import structured_output
-    from utils.launch_limiter import attempt_turn_blocking  # type: ignore
-    from utils.llm_client import (
-        _CMD_UNSAFE_CHARS,
-        _resolve_executable,
-    )
-    from utils.provider_registry import (
-        get_provider,
-        get_subagent_retries,
-        get_subagent_timeout,
-        parse_model_spec,
-    )
-    from utils import landlock_dispatch  # type: ignore[no-redef]
-    from utils.providers.base import (
-        JailRequest,
-        host_write_posture_consent,
-        PROFILE_AGENT_WRITE,
-        SANDBOX_RUNG_UNSANDBOXED,
-        StructuredOutputUnavailable,
-    )
-    from utils.retry_ladder import (
-        BACKOFF_STATUSES,
-        RETRYABLE_STATUSES,
-        STATUS_BUDGET_EXHAUSTED,
-        STATUS_INCOMPLETE_REPORT,
-        STATUS_OK,
-        STATUS_REJECTED,
-        STATUS_RUNNER_ERROR,
-        STATUS_SCHEMA_INVALID,
-        STATUS_SPAWN_FAILED,
-        STATUS_TIMEOUT,
-        STATUS_UNPARSEABLE,
-        STOP_BUDGET,
-        REPAIR_INCOMPLETE_REPORT,
-        REPAIR_SCHEMA_INVALID,
-        RESEND_NOTHING_CHANGED,
-        RetryLadder,
-        budget_exhausted_reason,
-    )
-    from utils.subagent_prompts import (
-        build_nothing_changed_resend_prompt,
-        build_schema_repair_prompt,
-    )
-    from utils.subagent_tasks import (
-        WRITE_KINDS,
-        declared_file_set,
-        preferred_prompt_transport,
-        refuse_reason,
-    )
-    from utils import batch_reply as _batch_reply  # type: ignore[no-redef]
-    from utils import failure_capture as _failure_capture  # type: ignore[no-redef]
-    from utils import task_outcome as _task_outcome  # type: ignore[no-redef]
-    from utils import task_result as _task_result  # type: ignore[no-redef]
-    from utils import runner_selection as _runner_selection  # type: ignore[no-redef]
-    from utils import dispatch_spawn as _dispatch_spawn  # type: ignore[no-redef]
-    from utils import attempt_classifier as _attempt_classifier  # type: ignore[no-redef]
+from . import structured_output
+from .launch_limiter import attempt_turn_blocking
+from .llm_client import (
+    _CMD_UNSAFE_CHARS,
+    _resolve_executable,
+)
+from .provider_registry import (
+    get_provider,
+    get_subagent_retries,
+    get_subagent_timeout,
+    parse_model_spec,
+)
+from . import landlock_dispatch
+from .providers.base import (
+    JailRequest,
+    host_write_posture_consent,
+    PROFILE_AGENT_WRITE,
+    SANDBOX_RUNG_UNSANDBOXED,
+    StructuredOutputUnavailable,
+)
+from .retry_ladder import (
+    BACKOFF_STATUSES,
+    RETRYABLE_STATUSES,
+    STATUS_BUDGET_EXHAUSTED,
+    STATUS_INCOMPLETE_REPORT,
+    STATUS_OK,
+    STATUS_REJECTED,
+    STATUS_RUNNER_ERROR,
+    STATUS_SCHEMA_INVALID,
+    STATUS_SPAWN_FAILED,
+    STATUS_TIMEOUT,
+    STATUS_UNPARSEABLE,
+    STOP_BUDGET,
+    REPAIR_INCOMPLETE_REPORT,
+    REPAIR_SCHEMA_INVALID,
+    RESEND_NOTHING_CHANGED,
+    RetryLadder,
+    budget_exhausted_reason,
+)
+from .subagent_prompts import (
+    build_nothing_changed_resend_prompt,
+    build_schema_repair_prompt,
+)
+from . import subagent_tasks as _subagent_tasks
+from .subagent_tasks import (
+    WRITE_KINDS,
+    declared_file_set,
+    preferred_prompt_transport,
+    refuse_reason,
+)
+from . import batch_reply as _batch_reply
+from . import failure_capture as _failure_capture
+from . import task_outcome as _task_outcome
+from . import task_result as _task_result
+from . import runner_selection as _runner_selection
+from . import dispatch_spawn as _dispatch_spawn
+from . import attempt_classifier as _attempt_classifier
 
 
 #: The only statuses ``_classify_failed_run`` may reclassify (D3k). Rungs 4 and 5
@@ -2077,11 +2020,6 @@ def _prompt_over_budget(
     the renderer the audit record uses, with the executable resolved where the
     spawn resolves it.
     """
-    try:
-        from .subagent_tasks import prompt_budget_utf16, utf16_units
-    except ImportError:  # pragma: no cover
-        from utils.subagent_tasks import prompt_budget_utf16, utf16_units
-
     if transport in ("stdin", "file"):
         return None
     shim = {"batch": False}
@@ -2123,14 +2061,15 @@ def _prompt_over_budget(
     # Measure the argv `_spawn` will actually run: the resolved launcher, not the
     # adapter's bare command name.
     non_prompt = [arg for arg in rendered if arg != prompt]
-    ceiling = prompt_budget_utf16(
+    # Through the module, at each call: tests patch `subagent_tasks.prompt_budget_utf16`.
+    ceiling = _subagent_tasks.prompt_budget_utf16(
         transport=transport,
         non_prompt_argv=non_prompt,
         is_batch_shim=is_batch_shim,
     )
     if ceiling is None:
         return None
-    units = utf16_units(prompt)
+    units = _subagent_tasks.utf16_units(prompt)
     if units <= ceiling:
         return None
     launcher_kind = (
@@ -2163,10 +2102,10 @@ def _apply_backoff_hook(delay: float) -> float:
     ``MULTI_LLM_TEST_FAST_BACKOFF`` and an exact 10 ms under it — a jittered test
     suite would be both slower and nondeterministic.
     """
-    try:
-        from .review_orchestrator_base import get_backoff_delay
-    except ImportError:  # pragma: no cover
-        from utils.review_orchestrator_base import get_backoff_delay
+    # Imported here: `review_orchestrator_base` sits a layer above (an edge in
+    # tests/test_import_layers.py KNOWN_UPWARD), and a top-level import would load
+    # the review stack with the executor.
+    from .review_orchestrator_base import get_backoff_delay
     return get_backoff_delay(delay)
 
 

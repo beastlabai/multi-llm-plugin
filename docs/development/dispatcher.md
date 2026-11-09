@@ -492,6 +492,30 @@ plan's first phase it failed "state file not found" and the host shrugged it off
 `--internal-*` re-entry rely on it); the instruction core and shims name only
 `multi_llm.py`.
 
+**Every `utils/` module imports as part of the package.** A module imports its siblings relatively
+(`from .x import y`), with no `try`/`except ImportError` second spelling, and names the module
+that defines a name: `utils/__init__.py` re-exports nothing, so importing a leaf loads only what
+that leaf needs. `tests/test_utils_imports.py` imports every `utils` module first in its own fresh
+interpreter and keeps `utils.text_clip` and `utils.report_check` free of the provider stack and
+YAML. Run a utility as `multi_llm.py util <name>`; a module with an entry point also runs as
+`python -m utils.<name>` from the skill directory. The nine modules that developers run by path
+(`python utils/check_reply.py`, `env_vars`, `metrics` and a few more) open with a guard that, before
+any package import, puts the skill root on `sys.path`, found from the file's real location as Python
+finds `sys.path[0]` (so a symlink to the file or to the skill directory works), and calls the package
+module's `main` with `sys.argv` untouched, so help and errors keep the program name typed.
+`tests/test_utils_entry_points.py` runs each spelling. `utils/landlock_exec.py` is the exception: the
+jail wrapper runs by path in a stdlib-only `-I -S` interpreter and imports nothing from the
+package, so `landlock_dispatch` loads it under either spelling
+([process primitives](runtime.md#process-primitives)).
+
+**A function-level import needs a reason, stated beside it.** Import at module top unless the
+import closes a load-time cycle (an adapter importing `llm_client`, which loads the adapters), is
+an optional dependency (`tomllib` on 3.10, `_winapi`), points up a layer through an edge
+`tests/test_import_layers.py` lists in `KNOWN_UPWARD`, or keeps a light module light. When a test
+patches a name on its owner (`monkeypatch.setattr(subagent_tasks, "prompt_budget_utf16", ...)`), a
+module-top `from x import name` copy would not see the patch: import the module and read
+`x.name` at the call instead.
+
 **Module-level caches live in one registry.** Because one interpreter runs several targets, a cache
 at module scope is shared by every phase of a run on purpose (the sandbox probe's once-per-process
 budget, [status.md](status.md)). Declare one with `utils/process_state.process_cache("<module>.<name>")`
@@ -502,9 +526,7 @@ calls `process_state.reset_all()` around every test, which empties each register
 place, under its lock. A cache whose lock stays held, or whose `busy` stays True, for `LOCK_WAIT_S`
 is left as it was, and the reset raises `CacheBusyError` naming the cache and the thread in its
 module's code: a test left a worker running. So a registered cache is cleared, never rebound, by its
-module and by tests alike (`.clear()`, `lines[:] = [...]` or `patch.dict`). The import shims' flat
-`import process_state` reaches the same registry as `utils.process_state`: whichever loads second
-returns the first. `tests/test_process_state.py` covers module level, module-level `if`/`try`/`with`
+module and by tests alike (`.clear()`, `lines[:] = [...]` or `patch.dict`). `tests/test_process_state.py` covers module level, module-level `if`/`try`/`with`
 blocks and class bodies (`<module>.<Class>.<attr>`), not instance attributes or `lru_cache`. It fails
 on an unregistered cache-named container (`CACHE_WORDS`), on any other empty container in `utils/` that
 is not in `NOT_REGISTERED` with its reason, on a rebinding, and on a cache used under a module lock it

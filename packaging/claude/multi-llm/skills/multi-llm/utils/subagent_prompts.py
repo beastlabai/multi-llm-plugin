@@ -41,17 +41,9 @@ to write a file.
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, TypedDict
 
-try:
-    from . import importance as _importance
-except ImportError:  # pragma: no cover - direct-script import shim
-    from utils import importance as _importance
-
-try:  # Python 3.8+: TypedDict lives in typing
-    from typing import TypedDict
-except ImportError:  # pragma: no cover
-    TypedDict = dict  # type: ignore[misc,assignment]
+from . import importance as _importance
 
 __all__ = [
     "ContextSource",
@@ -1759,14 +1751,11 @@ def replace_reference_section(document: str, name: str) -> str:
 def main(argv: Optional[List[str]] = None) -> int:
     """Rewrite every generated markdown block from its constant.
 
-    ``uv run --project <skill-dir> -- python <skill-dir>/utils/subagent_prompts.py``
+    From the skill directory: ``uv run --project . -- python -m utils.subagent_prompts``
     """
     import pathlib
 
-    try:
-        from .stream_bootstrap import bootstrap_streams
-    except ImportError:  # direct script invocation
-        from stream_bootstrap import bootstrap_streams
+    from .stream_bootstrap import bootstrap_streams
     bootstrap_streams()
 
     skill_dir = pathlib.Path(__file__).resolve().parent.parent

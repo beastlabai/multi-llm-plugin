@@ -26,14 +26,9 @@ import os
 import threading
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-try:  # normal import (utils is a package)
-    from .cli_common import skill_dir
-    from .process_state import process_cache
-    from .unattended import NeedsHuman
-except ImportError:  # pragma: no cover - direct script runs with utils/ on path
-    from cli_common import skill_dir  # type: ignore
-    from process_state import process_cache  # type: ignore
-    from unattended import NeedsHuman  # type: ignore
+from .cli_common import skill_dir
+from .process_state import process_cache
+from .unattended import NeedsHuman
 
 
 #: Relative to the skill root. Ships inside the skill so a shim can name the
@@ -162,10 +157,7 @@ def _load_uncached(root: str) -> Dict[str, Any]:
     """Parse and check ``<root>/hosts/capabilities.yaml``; :func:`load` caches it."""
     # Imported here, not at module scope: most readers of this module never
     # parse, and importing PyYAML costs about 7 ms.
-    try:
-        from . import yaml_io
-    except ImportError:  # pragma: no cover - direct script runs with utils/ on path
-        import yaml_io  # type: ignore
+    from . import yaml_io
 
     path = os.path.join(root, CAPABILITIES_FILE)
     try:
@@ -309,10 +301,7 @@ def resolve_host_id(
     if explicit:
         return explicit
     if argv:
-        try:
-            from .cli_common import flag_value
-        except ImportError:  # pragma: no cover
-            from cli_common import flag_value  # type: ignore
+        from .cli_common import flag_value
         found = flag_value(argv, "--host")
         if found:
             return found

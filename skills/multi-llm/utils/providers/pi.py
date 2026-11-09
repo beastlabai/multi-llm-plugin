@@ -43,15 +43,6 @@ from .pi_family_stream import (  # noqa: F401 - _MAX_DIAGNOSIS_CHARS re-exported
     warn_stream_version,
 )
 
-# Terminal codes, imported by name from the runner as omp.py does: a parse that
-# sets one tells `invoke_with_file_output` whether a findings file beside a
-# failed parse may still be recovered.
-try:  # pragma: no cover - import shim mirrors the rest of utils/
-    from ..llm_client import ERROR_SUBPROCESS_FAILED, ERROR_TIMEOUT
-except ImportError:  # pragma: no cover - direct-script import shim
-    ERROR_SUBPROCESS_FAILED = "SUBPROCESS_FAILED"
-    ERROR_TIMEOUT = "TIMEOUT"
-
 # Thinking levels accepted by `pi --thinking` (per pi.dev docs). pi also
 # parses the same levels as a native ":level" suffix on --model; the adapter
 # strips the suffix itself so only --thinking carries it.
@@ -792,6 +783,12 @@ class PiProvider(LLMProvider):
            it classifies ``context_length_exceeded``. A successful run that
            compacted after its answer is still a success.
         """
+        # The terminal codes, by name from their owner rather than re-spelled:
+        # `invoke_with_file_output` reads the same constants to decide whether a
+        # findings file beside a failed parse may still be recovered. Imported
+        # here because `provider_outcome` loads `providers.base`, whose package
+        # loads every adapter, this one included (a load-time cycle).
+        from ..provider_outcome import ERROR_SUBPROCESS_FAILED, ERROR_TIMEOUT
         raw = stdout or ""
         if not raw.strip() or not has_stream_envelope(raw, PI_DIALECT):
             if raw.strip():

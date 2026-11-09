@@ -515,7 +515,7 @@ class TestTheGroupHash:
         assert groups[0]["suggestions"][0]["desc"] == "One details"
 
     def test_two_models_that_disagree_still_group_together(self):
-        from utils import group_similar_suggestions
+        from utils.suggestion_processor import group_similar_suggestions
 
         issue = {"title": "Off by one", "desc": "The loop ends early.", "importance": "high",
                  "file": "a.py", "line_range": [3, 3], "type": "bug"}

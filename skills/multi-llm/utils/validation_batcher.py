@@ -9,10 +9,7 @@ where each subagent gets a fresh context window for better accuracy.
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-try:
-    from . import importance as _importance
-except ImportError:
-    from utils import importance as _importance
+from . import importance as _importance
 
 
 # Configuration constants

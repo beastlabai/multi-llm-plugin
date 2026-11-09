@@ -25,12 +25,8 @@ import copy
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, NamedTuple, Optional, Sequence
 
-try:  # pragma: no cover - import shim mirrors the rest of utils/
-    from .text_clip import clip
-    from . import known_checks as _known_checks
-except ImportError:  # pragma: no cover - direct-script import shim
-    from utils.text_clip import clip  # type: ignore
-    from utils import known_checks as _known_checks  # type: ignore[no-redef]
+from .text_clip import clip
+from . import known_checks as _known_checks
 
 
 #: The four D3g write outcomes, plus the D3l containment failure. Recorded on the
@@ -384,11 +380,7 @@ def batch_check_note(result: Any) -> Optional[str]:
 
 def _ran_word(which: str) -> str:
     """``known_checks``' ``passed`` / ``failed`` outcome word."""
-    try:
-        from .known_checks import LISTED_FAILED, LISTED_PASSED
-    except ImportError:  # pragma: no cover - direct script import shim
-        from utils.known_checks import LISTED_FAILED, LISTED_PASSED
-    return LISTED_FAILED if which == "failed" else LISTED_PASSED
+    return _known_checks.LISTED_FAILED if which == "failed" else _known_checks.LISTED_PASSED
 
 
 def _stated_findings(check: Dict[str, Any]) -> List[str]:
@@ -437,12 +429,8 @@ def ran_check_outcomes(result: Any) -> Dict[str, str]:
         ran = pairs
     if not isinstance(ran, dict) or not ran:
         return {}
-    try:
-        from .known_checks import listed_check_outcomes
-    except ImportError:  # pragma: no cover - direct script import shim
-        from utils.known_checks import listed_check_outcomes
     return {
-        command: word for command, word in listed_check_outcomes(ran).items()
+        command: word for command, word in _known_checks.listed_check_outcomes(ran).items()
         if not _is_placeholder(command)
     }
 
@@ -500,13 +488,9 @@ def ran_no_check(result: Any) -> bool:
     ] if isinstance(ran, list) else [key for key in ran if not _is_placeholder(str(key))]
     if not named:
         return True
-    try:
-        from .known_checks import LISTED_NOT_RUN
-    except ImportError:  # pragma: no cover - direct script import shim
-        from utils.known_checks import LISTED_NOT_RUN
     outcomes = ran_check_outcomes(result)
     return len(outcomes) == len(named) and all(
-        word == LISTED_NOT_RUN for word in outcomes.values()
+        word == _known_checks.LISTED_NOT_RUN for word in outcomes.values()
     )
 
 
@@ -529,11 +513,7 @@ def _with_ran_failures(
     }
     if not failed:
         return findings
-    try:
-        from .known_checks import with_listed_failures
-    except ImportError:  # pragma: no cover - direct script import shim
-        from utils.known_checks import with_listed_failures
-    current = with_listed_failures(findings, failed) or []
+    current = _known_checks.with_listed_failures(findings, failed) or []
     if len(current) > 1 and current[0] == _known_checks.CHECK_FAILED_WITHOUT_FINDINGS:
         current = current[1:]
     return current
@@ -551,14 +531,9 @@ def _report_check_evidence(result: Any) -> Optional[Dict[str, Any]]:
     check = result.get("check") if isinstance(result, dict) else None
     if not isinstance(check, dict):
         return None
-    try:
-        from .known_checks import listed_check_outcomes
-    except ImportError:  # pragma: no cover - direct script import shim
-        from utils.known_checks import listed_check_outcomes
-
     if (
         batch_check_findings(result) is not None
-        or listed_check_outcomes(check.get("listed"))
+        or _known_checks.listed_check_outcomes(check.get("listed"))
         # "I ran no check" is an answer too; a restatement
         # cannot turn it into a pass.
         or ran_no_check(result)

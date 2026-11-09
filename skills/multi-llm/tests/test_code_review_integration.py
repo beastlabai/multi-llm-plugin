@@ -10,10 +10,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from code_review_orchestrator import format_tracked_files_for_prompt
-from utils import (
-    group_similar_suggestions,
-    validate_code_review_issues,
-)
+from utils.schema_validator import validate_code_review_issues
+from utils.suggestion_processor import group_similar_suggestions
 
 
 class TestCodeReviewIssueGrouping:

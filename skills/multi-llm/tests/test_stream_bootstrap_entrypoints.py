@@ -1,8 +1,8 @@
 """Guard test: every CLI entry point must bootstrap its stdout/stderr.
 
 Any module with an ``if __name__ == "__main__"`` block can be invoked as a
-process (the instruction files run several of them directly, e.g.
-``python "${CLAUDE_SKILL_DIR}/utils/metrics.py" record ...``). On Windows an
+process (``python -m utils.metrics record ...``, or by path for the modules
+whose guard calls the package module's ``main``). On Windows an
 unbootstrapped process writes its stdout/stderr with the locale codec (cp1252),
 so a non-cp1252 character (the ETA line's ``·``, em dashes, model output) is
 either mangled into bytes that are not valid UTF-8 or raises UnicodeEncodeError
@@ -27,10 +27,7 @@ _EXCLUDED_DIRS = {"tests", "__pycache__", "node_modules", "build", "dist"}
 
 _FIX_HINT = (
     "Add the stream bootstrap to this entry point:\n"
-    "    try:\n"
-    "        from .stream_bootstrap import bootstrap_streams\n"
-    "    except ImportError:  # direct script invocation\n"
-    "        from stream_bootstrap import bootstrap_streams\n"
+    "    from .stream_bootstrap import bootstrap_streams\n"
     "(top-level scripts use `from utils.stream_bootstrap import "
     "bootstrap_streams`)\n"
     "and call `bootstrap_streams()` as the first statement of main()."

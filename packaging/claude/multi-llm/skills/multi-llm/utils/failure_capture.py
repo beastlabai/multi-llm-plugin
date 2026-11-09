@@ -17,23 +17,24 @@ only: patch one here, never through the executor
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Sequence
 
-try:  # pragma: no cover - import shim mirrors the rest of utils/
-    from .held_folder import plan_dir_of, write_in_plan_dir
-    from .retry_ladder import (  # noqa: F401 - re-exported, see below
-        RUNG_BY_STATUS,
-    )
-    from .write_safety import redact_text
-except ImportError:  # pragma: no cover - direct-script import shim
-    from utils.held_folder import plan_dir_of, write_in_plan_dir  # type: ignore
-    from utils.retry_ladder import (  # noqa: F401 - re-exported, see below
-        RUNG_BY_STATUS,
-    )
-    from utils.write_safety import redact_text  # type: ignore[no-redef]
+from .held_folder import plan_dir_of, write_in_plan_dir
+from .retry_ladder import (  # noqa: F401 - re-exported, see below
+    RUNG_BY_STATUS,
+)
+from .write_safety import (
+    WriteSafetyError,
+    contain_local_path,
+    redact_text,
+    rename_below_root,
+    write_below_root,
+)
 
 
 #: Per-attempt diagnostic captures (D3k). A directory, so the reaggregation glob
@@ -145,15 +146,9 @@ def _retire_capture(target: Path, root: str, *, resolve_root: bool = True) -> No
     (*resolve_root* off; ``write_safety.rename_below_root``), never through a
     link.
     """
-    try:  # pragma: no cover - import shim mirrors the rest of utils/
-        from .write_safety import rename_below_root
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.write_safety import rename_below_root
     try:
         if not target.exists():
             return
-        from datetime import datetime, timezone
-
         stamp = datetime.fromtimestamp(
             target.stat().st_mtime, tz=timezone.utc
         ).strftime("%Y%m%dT%H%M%SZ")
@@ -196,15 +191,6 @@ def _write_failure_capture(
     subsume §4.5. Redaction runs on the **full** stream before the tail is taken,
     and the assembled payload is walked once more on the way out.
     """
-    import hashlib
-
-    try:  # pragma: no cover - import shim mirrors the rest of utils/
-        from .write_safety import WriteSafetyError, contain_local_path, write_below_root
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.write_safety import (  # type: ignore[no-redef]
-            WriteSafetyError, contain_local_path, write_below_root,
-        )
-
     try:
         capture_dir = Path(phase_dir) / FAILED_CAPTURE_DIRNAME
         name = f"{_safe_task_filename(str(task.get('task_id', '')))}.attempt{attempt_index}.json"

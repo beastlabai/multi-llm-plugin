@@ -31,21 +31,19 @@ from typing import Dict, List, Optional, Set, Tuple
 sys.path.insert(0, str(Path(__file__).parent))
 
 from utils.stream_bootstrap import bootstrap_streams
-from utils import get_modified_files as utils_get_modified_files
-from utils import (
-    baseline_covers,
-    get_staged_files,
-    list_untracked_files,
-    subtract_baseline,
-)
 from utils.commit_paths import commit_review_artifact, commit_reviews_folder_rel
 from utils.git_utils import (
     GitError,
+    baseline_covers,
     get_project_root_from_dir,
+    get_staged_files,
     head_or_empty_tree,
     ignored_paths,
+    list_untracked_files,
     paths_in_commit,
+    subtract_baseline,
 )
+from utils.git_utils import get_modified_files as utils_get_modified_files
 from utils.metrics import StateLockTimeout, state_file_lock
 from utils.output_handler import workflow_file_entries
 from utils.state_file import write_document
@@ -339,15 +337,12 @@ def _restamp_check_trees(state_path: Path) -> None:
     handed out again and nobody re-ran has none, and runs on the next resume.
     Best-effort and silent: a check with no stamp is run again.
     """
-    try:
-        from utils.state_manager import (
-            TASK_CHECK_TREES_KEY,
-            set_task_check_tree_in_state,
-        )
-        from utils.check_records import rerunnable_checks
-        from utils.write_prompt import check_tree_fingerprint
-    except ImportError:  # pragma: no cover - the skill is always on the path
-        return
+    from utils.state_manager import (
+        TASK_CHECK_TREES_KEY,
+        set_task_check_tree_in_state,
+    )
+    from utils.check_records import rerunnable_checks
+    from utils.write_prompt import check_tree_fingerprint
     try:
         with state_file_lock(state_path):
             state = json.loads(state_path.read_text(encoding="utf-8"))
@@ -505,14 +500,11 @@ def _held_by_a_check(
     problems`` reason is held too (a state with no graph on record), scoped
     to the decomposition implement ran last when it is on record.
     """
-    try:
-        from utils.check_records import (
-            BLOCKED_BY_CHECK_PREFIX,
-            held_back_by_checks,
-        )
-        from utils.write_phase_bridge import WRITE_TASK_FILENAME
-    except ImportError:  # pragma: no cover - the skill is always on the path
-        return []
+    from utils.check_records import (
+        BLOCKED_BY_CHECK_PREFIX,
+        held_back_by_checks,
+    )
+    from utils.write_phase_bridge import WRITE_TASK_FILENAME
     tasks: list = []
     if state_path is not None:
         try:
@@ -883,7 +875,7 @@ def _census_paths(
 
 def _insert_summary_reference(plan_file: str, summary_relative: str) -> int:
     """Idempotently add the implementation-summary link to the plan."""
-    from utils import insert_implementation_summary_reference
+    from utils.plan_updater import insert_implementation_summary_reference
 
     plan_path = Path(plan_file)
     if not plan_path.exists():

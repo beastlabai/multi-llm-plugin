@@ -179,10 +179,7 @@ def _redact(text: str) -> str:
     ``redact_text`` directly. Callers redact before any tail or cut. The call
     is on a per-invocation path, not a per-line one.
     """
-    try:  # pragma: no cover - import shim mirrors the rest of utils/
-        from .write_safety import redact_text
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.write_safety import redact_text
+    from .write_safety import redact_text
     return redact_text(text)
 
 

@@ -19,26 +19,15 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-try:  # pragma: no cover - import shim mirrors the rest of utils/
-    from .providers.base import PROFILE_AGENT_READONLY
-    from .retry_ladder import (  # noqa: F401 - re-exported, see below
-        FATAL_STATUSES,
-        RUNG_BY_STATUS,
-        STATUS_OK,
-    )
-    from . import batch_reply as _batch_reply
-    from . import failure_capture as _failure_capture
-    from .write_safety import redact_text
-except ImportError:  # pragma: no cover - direct-script import shim
-    from utils.providers.base import PROFILE_AGENT_READONLY
-    from utils.retry_ladder import (  # noqa: F401 - re-exported, see below
-        FATAL_STATUSES,
-        RUNG_BY_STATUS,
-        STATUS_OK,
-    )
-    from utils import batch_reply as _batch_reply  # type: ignore[no-redef]
-    from utils import failure_capture as _failure_capture  # type: ignore[no-redef]
-    from utils.write_safety import redact_text  # type: ignore[no-redef]
+from .providers.base import PROFILE_AGENT_READONLY
+from .retry_ladder import (  # noqa: F401 - re-exported, see below
+    FATAL_STATUSES,
+    RUNG_BY_STATUS,
+    STATUS_OK,
+)
+from . import batch_reply as _batch_reply
+from . import failure_capture as _failure_capture
+from .write_safety import redact_text
 
 
 # ---------------------------------------------------------------------------

@@ -1292,10 +1292,7 @@ def _sweep_dead_index_copies(git_dir: str) -> None:
     effort: a directory that cannot be listed, or a file that cannot be
     removed, changes nothing about the run.
     """
-    try:
-        from .process_control import process_alive
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.process_control import process_alive
+    from .process_control import process_alive
     try:
         names = os.listdir(git_dir)
     except OSError:

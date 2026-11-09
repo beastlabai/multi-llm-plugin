@@ -16,6 +16,7 @@ only: patch one here, never through the executor
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -23,72 +24,39 @@ import subprocess
 import sys
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-try:  # pragma: no cover - import shim mirrors the rest of utils/
-    from .llm_client import _resolve_executable
-    from .provider_registry import (
-        SESSION_LAYER,
-        get_provider,
-        is_model_valid,
-        parse_model_spec,
-    )
-    from .providers.base import (
-        JailRequest,
-        LLMProvider,
-        PROFILE_AGENT_READONLY,
-        split_reasoning_effort,
-        env_allowlist_enabled,
-        matches_any,
-        version_verdict,
-        AUTH_STATE_CONFIG,
-        CONFIG_AUTH_DECLARED,
-        CONFIG_AUTH_UNKNOWN,
-    )
-    from .retry_ladder import (
-        STATUS_AUTH_FAILED,
-        STATUS_INVALID_MODEL,
-        STATUS_SANDBOX_UNAVAILABLE,
-    )
-    from .subagent_tasks import preferred_prompt_transport
-    from . import failure_capture as _failure_capture
-    from . import task_outcome as _task_outcome
-    from . import runner_selection as _runner_selection
-    from . import probe_state as _probe_state
-    from . import sandbox_walk as _sandbox_walk
-    from . import dispatch_spawn as _dispatch_spawn
-    from . import attempt_classifier as _attempt_classifier
-except ImportError:  # pragma: no cover - direct-script import shim
-    from utils.llm_client import _resolve_executable
-    from utils.provider_registry import (
-        SESSION_LAYER,
-        get_provider,
-        is_model_valid,
-        parse_model_spec,
-    )
-    from utils.providers.base import (
-        JailRequest,
-        LLMProvider,
-        PROFILE_AGENT_READONLY,
-        split_reasoning_effort,
-        env_allowlist_enabled,
-        matches_any,
-        version_verdict,
-        AUTH_STATE_CONFIG,
-        CONFIG_AUTH_DECLARED,
-        CONFIG_AUTH_UNKNOWN,
-    )
-    from utils.retry_ladder import (
-        STATUS_AUTH_FAILED,
-        STATUS_INVALID_MODEL,
-        STATUS_SANDBOX_UNAVAILABLE,
-    )
-    from utils.subagent_tasks import preferred_prompt_transport
-    from utils import failure_capture as _failure_capture  # type: ignore[no-redef]
-    from utils import task_outcome as _task_outcome  # type: ignore[no-redef]
-    from utils import runner_selection as _runner_selection  # type: ignore[no-redef]
-    from utils import probe_state as _probe_state  # type: ignore[no-redef]
-    from utils import sandbox_walk as _sandbox_walk  # type: ignore[no-redef]
-    from utils import dispatch_spawn as _dispatch_spawn  # type: ignore[no-redef]
-    from utils import attempt_classifier as _attempt_classifier  # type: ignore[no-redef]
+from .llm_client import _resolve_executable
+from . import provider_registry as _provider_registry
+from .provider_registry import (
+    SESSION_LAYER,
+    get_provider,
+    is_model_valid,
+    parse_model_spec,
+)
+from .providers.base import (
+    JailRequest,
+    LLMProvider,
+    PROFILE_AGENT_READONLY,
+    split_reasoning_effort,
+    env_allowlist_enabled,
+    matches_any,
+    version_verdict,
+    AUTH_STATE_CONFIG,
+    CONFIG_AUTH_DECLARED,
+    CONFIG_AUTH_UNKNOWN,
+)
+from .retry_ladder import (
+    STATUS_AUTH_FAILED,
+    STATUS_INVALID_MODEL,
+    STATUS_SANDBOX_UNAVAILABLE,
+)
+from .subagent_tasks import preferred_prompt_transport
+from . import failure_capture as _failure_capture
+from . import task_outcome as _task_outcome
+from . import runner_selection as _runner_selection
+from . import probe_state as _probe_state
+from . import sandbox_walk as _sandbox_walk
+from . import dispatch_spawn as _dispatch_spawn
+from . import attempt_classifier as _attempt_classifier
 
 
 #: The four ``nested_exec`` refusal codes, mapped to the capability field each
@@ -746,13 +714,9 @@ def _model_cache_key(
         hermetic = "plain"
     digest = "-"
     try:
-        try:
-            from .provider_registry import load_config
-        except ImportError:  # pragma: no cover
-            from utils.provider_registry import load_config
-        block = (load_config(anchor=anchor).get("providers") or {}).get(provider_name)
-        import hashlib
-
+        # Through the module, at each call: tests patch `provider_registry.load_config`.
+        block = (_provider_registry.load_config(anchor=anchor).get("providers") or {}).get(
+            provider_name)
         digest = hashlib.sha256(
             json.dumps(block or {}, sort_keys=True, default=str).encode("utf-8")
         ).hexdigest()[:16]

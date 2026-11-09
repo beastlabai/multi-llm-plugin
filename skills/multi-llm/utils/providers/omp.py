@@ -91,18 +91,6 @@ from .pi_family_stream import (
     warn_stream_version,
 )
 
-# --------------------------------------------------------------------------- #
-# Terminal codes. Imported by name from the runner rather than re-spelled: the
-# whole point of `parse_output` setting one is that `invoke_with_file_output`
-# reads the *same* constants when it decides whether a written findings file may
-# still be recovered beside a failed parse.
-# --------------------------------------------------------------------------- #
-try:  # pragma: no cover - import shim mirrors the rest of utils/
-    from ..llm_client import ERROR_SUBPROCESS_FAILED, ERROR_TIMEOUT
-except ImportError:  # pragma: no cover - direct-script import shim
-    ERROR_SUBPROCESS_FAILED = "SUBPROCESS_FAILED"
-    ERROR_TIMEOUT = "TIMEOUT"
-
 
 #: The overlay every dispatch loads with ``--config``, resolved **absolutely**.
 #:
@@ -1145,6 +1133,12 @@ class OmpProvider(LLMProvider):
         The three in-stream terminal shapes and the denial therefore carry a code
         from the hard tuple, so the file is neither read nor reported.
         """
+        # The terminal codes, by name from their owner rather than re-spelled:
+        # `invoke_with_file_output` reads the same constants to decide whether a
+        # findings file beside a failed parse may still be recovered. Imported
+        # here because `provider_outcome` loads `providers.base`, whose package
+        # loads every adapter, this one included (a load-time cycle).
+        from ..provider_outcome import ERROR_SUBPROCESS_FAILED, ERROR_TIMEOUT
         raw = stdout or ""
         if not raw.strip():
             diagnosis = stderr_diagnosis(stderr)

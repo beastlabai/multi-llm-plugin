@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import io
 import os
 import subprocess
 import sys
@@ -26,98 +27,55 @@ import threading
 import time
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
-try:  # pragma: no cover - import shim mirrors the rest of utils/
-    from . import process_control
-    from .llm_client import _resolve_executable
-    from .provider_registry import get_provider
-    from . import landlock_dispatch
-    from .providers.base import (
-        HOST_POSTURE_FULL_ACCESS,
-        HOST_SANDBOX_POSTURE_ENV,
-        INCIDENTAL_LANE_EXECUTOR,
-        JailRequest,
-        SANDBOX_WRITE_FALLBACK_PROFILES,
-        SKIP_RUNG_ENV,
-        WALK_OUTCOME_SKIPPED_BY_SWITCH,
-        WRITE_SCOPE_REPO_WIDE,
-        WRITE_SCOPES_BY_CONSENT,
-        WRITE_SCOPES_ON_RUNG,
-        host_write_posture_consent,
-        rung_is_incidental,
-        sandbox_incidental_notice_text,
-        skip_rung_requested,
-        version_newer,
-        write_consent_allows,
-        write_rung_allowed,
-        PROFILE_AGENT_READONLY,
-        PROFILE_AGENT_WRITE,
-        SANDBOX_BYPASSED_MARKER,
-        SANDBOX_CANARY_DENIED,
-        SANDBOX_CANARY_NOT_DENIED,
-        SANDBOX_FALLBACK_AUTO,
-        SANDBOX_FALLBACK_CONTAINED,
-        SANDBOX_FALLBACK_OFF,
-        SANDBOX_FALLBACK_PROFILES,
-        SANDBOX_RUNG_UNSANDBOXED,
-        SandboxRung,
-        sandbox_bypassed_notice_text,
-        sandbox_fallback_notice_text,
-        sandbox_rung_allowed,
-        sandbox_rung_retired_notice,
-        sandbox_walk_clause,
-        rung_probe_said_removed,
-        rung_removed_for_version,
-    )
-    from . import failure_capture as _failure_capture
-    from . import task_outcome as _task_outcome
-    from . import runner_selection as _runner_selection
-    from . import probe_state as _probe_state
-except ImportError:  # pragma: no cover - direct-script import shim
-    from utils import process_control
-    from utils.llm_client import _resolve_executable
-    from utils.provider_registry import get_provider
-    from utils import landlock_dispatch  # type: ignore[no-redef]
-    from utils.providers.base import (
-        HOST_POSTURE_FULL_ACCESS,
-        HOST_SANDBOX_POSTURE_ENV,
-        INCIDENTAL_LANE_EXECUTOR,
-        JailRequest,
-        SANDBOX_WRITE_FALLBACK_PROFILES,
-        SKIP_RUNG_ENV,
-        WALK_OUTCOME_SKIPPED_BY_SWITCH,
-        WRITE_SCOPE_REPO_WIDE,
-        WRITE_SCOPES_BY_CONSENT,
-        WRITE_SCOPES_ON_RUNG,
-        host_write_posture_consent,
-        rung_is_incidental,
-        sandbox_incidental_notice_text,
-        skip_rung_requested,
-        version_newer,
-        write_consent_allows,
-        write_rung_allowed,
-        PROFILE_AGENT_READONLY,
-        PROFILE_AGENT_WRITE,
-        SANDBOX_BYPASSED_MARKER,
-        SANDBOX_CANARY_DENIED,
-        SANDBOX_CANARY_NOT_DENIED,
-        SANDBOX_FALLBACK_AUTO,
-        SANDBOX_FALLBACK_CONTAINED,
-        SANDBOX_FALLBACK_OFF,
-        SANDBOX_FALLBACK_PROFILES,
-        SANDBOX_RUNG_UNSANDBOXED,
-        SandboxRung,
-        sandbox_bypassed_notice_text,
-        sandbox_fallback_notice_text,
-        sandbox_rung_allowed,
-        sandbox_rung_retired_notice,
-        sandbox_walk_clause,
-        rung_probe_said_removed,
-        rung_removed_for_version,
-    )
-    from utils import failure_capture as _failure_capture  # type: ignore[no-redef]
-    from utils import task_outcome as _task_outcome  # type: ignore[no-redef]
-    from utils import runner_selection as _runner_selection  # type: ignore[no-redef]
-    from utils import probe_state as _probe_state  # type: ignore[no-redef]
+from . import process_control
+from . import write_safety as _write_safety
+from .git_utils import get_project_root_from_dir
+from .llm_client import _resolve_executable
+from .provider_registry import get_provider
+from .providers.codex import PLUGIN_LANDLOCK_CANARY_POSITIVE_EXIT
+from . import landlock_dispatch
+from .providers.base import (
+    HOST_POSTURE_FULL_ACCESS,
+    HOST_SANDBOX_POSTURE_ENV,
+    INCIDENTAL_LANE_EXECUTOR,
+    JailRequest,
+    SANDBOX_WRITE_FALLBACK_PROFILES,
+    SKIP_RUNG_ENV,
+    WALK_OUTCOME_SKIPPED_BY_SWITCH,
+    WRITE_SCOPE_REPO_WIDE,
+    WRITE_SCOPES_BY_CONSENT,
+    WRITE_SCOPES_ON_RUNG,
+    host_write_posture_consent,
+    rung_is_incidental,
+    sandbox_incidental_notice_text,
+    skip_rung_requested,
+    version_newer,
+    write_consent_allows,
+    write_rung_allowed,
+    PROFILE_AGENT_READONLY,
+    PROFILE_AGENT_WRITE,
+    SANDBOX_BYPASSED_MARKER,
+    SANDBOX_CANARY_DENIED,
+    SANDBOX_CANARY_NOT_DENIED,
+    SANDBOX_FALLBACK_AUTO,
+    SANDBOX_FALLBACK_CONTAINED,
+    SANDBOX_FALLBACK_OFF,
+    SANDBOX_FALLBACK_PROFILES,
+    SANDBOX_RUNG_UNSANDBOXED,
+    SandboxRung,
+    sandbox_bypassed_notice_text,
+    sandbox_fallback_notice_text,
+    sandbox_rung_allowed,
+    sandbox_rung_retired_notice,
+    sandbox_walk_clause,
+    rung_probe_said_removed,
+    rung_removed_for_version,
+    sandbox_probe_inconclusive,
+)
+from . import failure_capture as _failure_capture
+from . import task_outcome as _task_outcome
+from . import runner_selection as _runner_selection
+from . import probe_state as _probe_state
 
 
 #: Wall-clock budget for the D6 sandbox self-test (`sandbox_probe_command`).
@@ -290,10 +248,6 @@ RUNG_SKIPPED_BY_SWITCH = WALK_OUTCOME_SKIPPED_BY_SWITCH
 
 
 def _sandbox_probe_inconclusive(text: str) -> bool:
-    try:  # pragma: no cover - import shim mirrors the rest of utils/
-        from .providers.base import sandbox_probe_inconclusive
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.providers.base import sandbox_probe_inconclusive
     return sandbox_probe_inconclusive(text)
 
 
@@ -552,14 +506,7 @@ def _walk_wrapped_rung(
 
 def _plugin_landlock_positive_exit() -> int:
     """The rung canary's positive-control exit (5), read from the adapter
-    module so the two cannot drift; 5 when the adapter cannot be imported."""
-    try:  # pragma: no cover - import shim mirrors the rest of utils/
-        from .providers.codex import PLUGIN_LANDLOCK_CANARY_POSITIVE_EXIT
-    except ImportError:  # pragma: no cover - direct-script import shim
-        try:
-            from utils.providers.codex import PLUGIN_LANDLOCK_CANARY_POSITIVE_EXIT
-        except ImportError:
-            return 5
+    module so the two cannot drift."""
     return int(PLUGIN_LANDLOCK_CANARY_POSITIVE_EXIT)
 
 
@@ -775,10 +722,6 @@ def _probe_cwd(anchor: Optional[str]) -> Optional[str]:
     probe asks the same question in the same place. Without a resolvable root
     the process cwd stands in — ``None`` here means "inherit".
     """
-    try:
-        from .git_utils import get_project_root_from_dir
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.git_utils import get_project_root_from_dir
     start: Optional[str] = None
     if anchor:
         start = anchor if os.path.isdir(anchor) else (os.path.dirname(anchor) or ".")
@@ -1435,16 +1378,10 @@ def repo_wide_write_refusal(
     the budget, and leaves nothing in the caches for a dispatch to inherit.
     ``None`` probes under the dispatch's own timeout.
     """
-    import contextlib
-    import io
-
-    try:
-        from .write_safety import resolve_repo_root
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.write_safety import resolve_repo_root  # type: ignore[no-redef]
     provider_name = str(spec).partition(":")[0]
     try:
-        repo_root = resolve_repo_root(anchor)
+        # Through the module, at each call: tests patch `write_safety.resolve_repo_root`.
+        repo_root = _write_safety.resolve_repo_root(anchor)
         request = JailRequest(
             repo_root=repo_root, kind="implement", write_scope=WRITE_SCOPE_REPO_WIDE,
             output_dir=os.path.realpath(output_dir) if output_dir else None,

@@ -132,31 +132,19 @@ class TestGeneratedProviderExports:
         }
         assert exported == _registered_class_names()
 
-    def test_utils_all_is_exactly_the_registered_roster(self):
-        import utils
-
-        exported = set(utils.__all__) & (
-            _registered_class_names() | {"LLMProvider"}
-        )
-        assert exported - {"LLMProvider"} == _registered_class_names()
-
     @pytest.mark.parametrize("name", sorted(_PROVIDERS))
-    def test_each_adapter_is_reachable_from_both_packages(self, name):
-        import utils
+    def test_each_adapter_is_reachable_from_the_providers_package(self, name):
         import utils.providers as providers_pkg
 
         cls = type(_PROVIDERS[name])
         assert getattr(providers_pkg, cls.__name__) is cls
-        assert getattr(utils, cls.__name__) is cls
 
     def test_every_exported_name_resolves(self):
         """`__all__` may not name anything the module does not actually bind."""
-        import utils
         import utils.providers as providers_pkg
 
-        for module in (providers_pkg, utils):
-            missing = [n for n in module.__all__ if not hasattr(module, n)]
-            assert not missing, f"{module.__name__}.__all__ names {missing}"
+        missing = [n for n in providers_pkg.__all__ if not hasattr(providers_pkg, n)]
+        assert not missing, f"utils.providers.__all__ names {missing}"
 
     def test_deleting_an_export_cannot_pass(self):
         """The measured hole: a *removed* export used to leave the suite green.

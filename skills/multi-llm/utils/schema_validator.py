@@ -6,12 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
-try:
-    from .json_extractor import first_fenced_block, first_to_last_bracket
-except ImportError:  # pragma: no cover - direct-script import shim
-    # `python utils/check_reply.py` imports this module as a top-level one
-    # (check_reply.py's own shim), with utils/ itself on sys.path.
-    from json_extractor import first_fenced_block, first_to_last_bracket
+from .json_extractor import first_fenced_block, first_to_last_bracket
 
 SCHEMA_DIR = Path(__file__).parent.parent / "schemas"
 
@@ -610,10 +605,7 @@ def drop_non_record_entries(
 
 def _normalize_member_scope(records: List[Dict[str, Any]]) -> None:
     """Normalize the reviewer scope fields of ``records`` in place (see above)."""
-    try:
-        from .scope_policy import has_scope_fields, normalize_scope_fields
-    except ImportError:  # pragma: no cover - script-style import
-        from utils.scope_policy import has_scope_fields, normalize_scope_fields
+    from .scope_policy import has_scope_fields, normalize_scope_fields
     for record in records:
         if has_scope_fields(record):
             record.update(normalize_scope_fields(record))

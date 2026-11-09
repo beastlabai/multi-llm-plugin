@@ -14,10 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-try:  # normal import (utils is a package)
-    from . import host_capabilities as caps
-except ImportError:  # pragma: no cover - direct script runs with utils/ on path
-    import host_capabilities as caps  # type: ignore
+from . import host_capabilities as caps
 
 
 class Refused(Exception):

@@ -43,30 +43,16 @@ import sys
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-try:  # normal import (utils is a package)
-    from .cli_common import (
-        AGENT_DECIDE_FLAG,
-        LEGACY_AGENT_DECIDE_FLAGS,
-        EXIT_NEEDS_HUMAN,
-        EXIT_OK,
-        STATE_PARTIAL,
-        active_result,
-        skill_dir,
-    )
-    from .scope_policy import FLAG as SCOPE_POLICY_FLAG, POLICIES as SCOPE_POLICIES
-except ImportError:  # pragma: no cover - direct script runs with utils/ on path
-    from cli_common import (  # type: ignore
-        AGENT_DECIDE_FLAG,
-        LEGACY_AGENT_DECIDE_FLAGS,
-        EXIT_NEEDS_HUMAN,
-        EXIT_OK,
-        STATE_PARTIAL,
-        active_result,
-        skill_dir,
-    )
-    from scope_policy import (  # type: ignore
-        FLAG as SCOPE_POLICY_FLAG, POLICIES as SCOPE_POLICIES,
-    )
+from .cli_common import (
+    AGENT_DECIDE_FLAG,
+    LEGACY_AGENT_DECIDE_FLAGS,
+    EXIT_NEEDS_HUMAN,
+    EXIT_OK,
+    STATE_PARTIAL,
+    active_result,
+    skill_dir,
+)
+from .scope_policy import FLAG as SCOPE_POLICY_FLAG, POLICIES as SCOPE_POLICIES
 
 
 # ---------------------------------------------------------------------------
@@ -1047,10 +1033,7 @@ def record_resolution(
         print(f"{RESOLVED_MARKER} {site_id}: {decision}")
     if not phase_dir:
         return
-    try:
-        from . import detach as _detach  # local: keep `status` sub-second
-    except ImportError:  # pragma: no cover - direct script runs
-        import detach as _detach  # type: ignore
+    from . import detach as _detach  # local: keep `status` sub-second
     try:
         _detach.record_resolution(str(phase_dir), site_id, decision)
     except Exception:  # pragma: no cover - recording must never break a phase

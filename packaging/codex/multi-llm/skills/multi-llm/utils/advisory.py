@@ -36,10 +36,7 @@ import traceback
 from contextlib import contextmanager
 from typing import Iterator, Optional
 
-try:
-    from .stream_bootstrap import _FdWriter
-except ImportError:  # pragma: no cover - direct script runs
-    from stream_bootstrap import _FdWriter  # type: ignore
+from .stream_bootstrap import _FdWriter
 
 DEBUG_ENV = "MULTI_LLM_DEBUG"
 STRICT_ENV = "MULTI_LLM_STRICT_ADVISORY"

@@ -14,16 +14,10 @@ import re
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
-try:  # normal import (utils is a package)
-    from . import host_capabilities as caps
-    from .cli_common import render_instruction_text, skill_dir
-    from .host_paths import Refused
-    from .unattended import uv_missing_text
-except ImportError:  # pragma: no cover - direct script runs with utils/ on path
-    import host_capabilities as caps  # type: ignore
-    from cli_common import render_instruction_text, skill_dir  # type: ignore
-    from host_paths import Refused  # type: ignore
-    from unattended import uv_missing_text  # type: ignore
+from . import host_capabilities as caps
+from .cli_common import render_instruction_text, skill_dir
+from .host_paths import Refused
+from .unattended import uv_missing_text
 
 
 # ---------------------------------------------------------------------------

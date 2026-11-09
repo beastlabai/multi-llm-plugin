@@ -76,10 +76,7 @@ from typing import (
     Set, Tuple, TypeVar,
 )
 
-try:  # pragma: no cover - import shim mirrors the rest of utils/
-    from .process_state import process_cache
-except ImportError:  # pragma: no cover - direct script runs with utils/ on path
-    from process_state import process_cache  # type: ignore[no-redef]
+from .process_state import process_cache
 
 _T = TypeVar("_T")
 

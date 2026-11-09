@@ -73,10 +73,7 @@ RESULT_MARKER = "MULTI_LLM_RESULT:"
 # `plain_line` and its control-character set live in `text_clip`, beside the one rule
 # for cutting a preview short; re-exported here, the
 # name every caller has always imported.
-try:
-    from .text_clip import _CONTROL_CHARACTERS, clip, join_clauses, plain_line  # noqa: E402,F401
-except ImportError:  # pragma: no cover - direct script runs with utils/ on path
-    from text_clip import _CONTROL_CHARACTERS, clip, join_clauses, plain_line  # type: ignore # noqa: E402,F401
+from .text_clip import _CONTROL_CHARACTERS, clip, join_clauses, plain_line  # noqa: E402,F401
 
 #: Uniform exit codes across every mode. The dispatcher never remaps a target's
 #: code and invents one of its own only for an unknown mode or a rejected flag
@@ -392,12 +389,8 @@ def modes_table():
 
 
 def _modes():
-    """Import the top-level ``modes`` table, tolerating direct script runs."""
-    try:
-        import modes  # type: ignore
-    except ImportError:  # pragma: no cover - only when utils/ is sys.path[0]
-        sys.path.insert(0, str(skill_dir()))
-        import modes  # type: ignore
+    """The top-level ``modes`` table."""
+    import modes  # type: ignore
     return modes
 
 

@@ -985,10 +985,7 @@ def redact_probe_output(text: str) -> str:
     if not text:
         return ""
     try:
-        try:
-            from ..write_safety import redact_text
-        except ImportError:  # pragma: no cover - direct-script import shim
-            from utils.write_safety import redact_text  # type: ignore
+        from ..write_safety import redact_text
     except Exception:  # pragma: no cover - a diagnostic never leaks on failure
         return "<redacted:probe-output>"
     return redact_text(text)

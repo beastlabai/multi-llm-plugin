@@ -347,13 +347,6 @@ class TestTheLegacyLaneIsGone:
         bound = [n for n in self.RETIRED[module_name] if hasattr(module, n)]
         assert not bound, f"{module_name} still binds {bound}"
 
-    def test_the_package_exports_none_of_them(self):
-        import utils
-
-        names = {n for names in self.RETIRED.values() for n in names}
-        assert not names & set(utils.__all__)
-        assert not [n for n in names if hasattr(utils, n)]
-
     def test_code_review_orchestrator_dropped_its_dead_imports(self):
         import code_review_orchestrator
 

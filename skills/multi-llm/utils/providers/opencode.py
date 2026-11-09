@@ -28,6 +28,8 @@ from typing import (
 from ..json_extractor import extract_json_from_text, strip_jsonc
 from ..process_state import process_cache
 from .base import (
+    CONFIG_AUTH_DECLARED,
+    CONFIG_AUTH_UNKNOWN,
     LAUNCH_DIAGNOSTICS_NONE,
     PROFILE_AGENT_READONLY,
     PROFILE_AGENT_WRITE,
@@ -656,19 +658,13 @@ def _list_models(
     hermetic delta, which the executor's probe has no channel for.
     """
     launcher: List[str] = [argv[0]]
-    try:  # pragma: no cover - import shim mirrors the rest of utils/
-        from ..llm_client import _resolve_executable
-    except ImportError:  # pragma: no cover - direct-script import shim
-        try:
-            from utils.llm_client import _resolve_executable  # type: ignore
-        except ImportError:
-            _resolve_executable = None  # type: ignore[assignment]
-    if _resolve_executable is not None:
-        try:
-            launcher, _ = _resolve_executable(argv[0])
-            launcher = list(launcher)
-        except Exception:  # noqa: BLE001 - fall back to the bare name
-            launcher = [argv[0]]
+    # Imported here: `llm_client` loads the adapters, this one included.
+    from ..llm_client import _resolve_executable
+    try:
+        launcher, _ = _resolve_executable(argv[0])
+        launcher = list(launcher)
+    except Exception:  # noqa: BLE001 - fall back to the bare name
+        launcher = [argv[0]]
     try:
         return subprocess.run(
             [*launcher, *argv[1:]],
@@ -840,13 +836,8 @@ class DeclaredConfig(NamedTuple):
 
 def _opencode_launcher(binary: str) -> List[str]:
     """``binary`` resolved the way ``_list_models`` and the executor resolve it."""
-    try:  # pragma: no cover - import shim mirrors the rest of utils/
-        from ..llm_client import _resolve_executable
-    except ImportError:  # pragma: no cover - direct-script import shim
-        try:
-            from utils.llm_client import _resolve_executable  # type: ignore
-        except ImportError:
-            return [binary]
+    # Imported here: `llm_client` loads the adapters, this one included.
+    from ..llm_client import _resolve_executable
     try:
         launcher, _ = _resolve_executable(binary)
         return list(launcher)
@@ -2036,10 +2027,6 @@ class OpenCodeProvider(LLMProvider):
         ``env_builder`` of ``None`` composes ``resolve_env`` + ``build_child_env``
         here with no host guards (a caller outside the executor). Never raises.
         """
-        try:
-            from .base import CONFIG_AUTH_DECLARED, CONFIG_AUTH_UNKNOWN
-        except ImportError:  # pragma: no cover - direct-script import shim
-            CONFIG_AUTH_DECLARED, CONFIG_AUTH_UNKNOWN = "declared", "unknown"
         base_model, _effort = split_reasoning_effort(model or "", REASONING_EFFORTS)
         token = base_model.strip()
         prefix = token.split("/", 1)[0].strip() if "/" in token else ""

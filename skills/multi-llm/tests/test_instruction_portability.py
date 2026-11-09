@@ -3419,9 +3419,17 @@ class TestDispatchTargetsImportCleanly:
 
 
 def _is_main_guard(node) -> bool:
-    if not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare):
+    """``if __name__ == "__main__":``, or an ``and`` that requires it first: the
+    by-path guard ``__name__ == "__main__" and not __package__`` runs only as
+    ``__main__`` too (docs/development/dispatcher.md#import-safety)."""
+    if not isinstance(node, ast.If):
         return False
-    left, comparators = node.test.left, node.test.comparators
+    test = node.test
+    if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And):
+        test = test.values[0]
+    if not isinstance(test, ast.Compare):
+        return False
+    left, comparators = test.left, test.comparators
     names = {n.id for n in [left, *comparators] if isinstance(n, ast.Name)}
     consts = {n.value for n in [left, *comparators] if isinstance(n, ast.Constant)}
     return "__name__" in names and "__main__" in consts

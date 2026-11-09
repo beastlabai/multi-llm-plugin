@@ -555,10 +555,7 @@ def _redact_command_text(text: str) -> str:
     ``write_safety`` is imported late: it reaches the provider registry, so a
     module-level import here would close an import cycle.
     """
-    try:  # pragma: no cover - import shim mirrors the rest of utils/
-        from ..write_safety import redact_text
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.write_safety import redact_text
+    from ..write_safety import redact_text
     out = redact_text(text)
     home = os.path.expanduser("~")
     if home and home not in ("~", "/") and len(home) > 1:

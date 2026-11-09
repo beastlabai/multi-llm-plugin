@@ -37,10 +37,7 @@ def applied_to_label(target: Optional[str], plan_path: str) -> Optional[str]:
     root above *plan_path*, or ``None`` without one."""
     if not target:
         return None
-    try:
-        from .git_utils import find_git_entry_root
-    except ImportError:  # pragma: no cover - direct script runs
-        from git_utils import find_git_entry_root  # type: ignore
+    from .git_utils import find_git_entry_root
     try:
         # The `.git` holder above the plan, walked (no git runs here).
         start = os.path.dirname(os.path.realpath(plan_path))
@@ -267,10 +264,7 @@ class ApplyPhaseReport:
         # other path when absent, so `--dry-run-subagents` names no report.
         paths["summary"] = os.path.join(phase_dir, "summary.md")
 
-        try:
-            from .write_safety import repo_root_for_report
-        except ImportError:  # pragma: no cover - direct script runs
-            from write_safety import repo_root_for_report  # type: ignore
+        from .write_safety import repo_root_for_report
 
         repo_root = repo_root_for_report(self.plan_path)
         for index, touched_path in enumerate(self.touched_files(), start=1):
@@ -286,10 +280,7 @@ class ApplyPhaseReport:
         # that only reads this run's `output_files`. Asked of the executor
         # rather than spelled out here (F6, 2026-09-17): it owns the naming
         # rule, and a hand-typed copy would drop this key on the day it moves.
-        try:
-            from .task_outcome import batch_report_path
-        except ImportError:  # pragma: no cover - direct script runs
-            from task_outcome import batch_report_path  # type: ignore
+        from .task_outcome import batch_report_path
 
         judge_report = batch_report_path(phase_dir, "human_decision_judge")
         if os.path.exists(judge_report):
@@ -301,10 +292,7 @@ class ApplyPhaseReport:
         if overlay_path:
             paths["decisions_overlay"] = overlay_path
 
-        try:
-            from . import detach as _detach
-        except ImportError:  # pragma: no cover - direct script runs
-            import detach as _detach  # type: ignore
+        from . import detach as _detach
         _detach.record_output_files(phase_dir, **paths)
         record_artifacts(
             path for path in paths.values() if path and os.path.exists(path)
@@ -576,10 +564,7 @@ class ApplyPhaseReport:
             return
         from . import cli_common as _cli
 
-        try:
-            from . import detach as _detach
-        except ImportError:  # pragma: no cover - direct script runs
-            import detach as _detach  # type: ignore
+        from . import detach as _detach
         _detach.report_progress(
             os.path.join(self.out_dir, self.phase_name), notes=notes,
         )
@@ -783,14 +768,9 @@ class ApplyPhaseReport:
         Best-effort and never fatal — a report is not worth failing an applied
         run over. Returns the path written, or ``None``.
         """
-        try:
-            from .check_records import batch_check_section
-            from .verification_lines import verification_line
-            from .batch_prompt import CODE_WRITE_KINDS
-        except ImportError:  # pragma: no cover - direct script runs
-            from utils.check_records import batch_check_section  # type: ignore
-            from utils.verification_lines import verification_line  # type: ignore
-            from utils.batch_prompt import CODE_WRITE_KINDS  # type: ignore
+        from .check_records import batch_check_section
+        from .verification_lines import verification_line
+        from .batch_prompt import CODE_WRITE_KINDS
         from .commit_spelling import commit_view
         from .batch_reply import (
             DECLINED_SECTION_HEADING,
@@ -1060,10 +1040,7 @@ class ApplyPhaseReport:
         if not isinstance(report, dict) or report.get("summary_file") == summary_path:
             return
         report["summary_file"] = summary_path
-        try:
-            from .failure_capture import _atomic_write_json
-        except ImportError:  # pragma: no cover - direct script runs
-            from failure_capture import _atomic_write_json  # type: ignore
+        from .failure_capture import _atomic_write_json
         try:
             _atomic_write_json(report_path, report)
         except OSError as exc:  # noqa: BLE001 - best-effort
@@ -1094,16 +1071,10 @@ class ApplyPhaseReport:
             from .commit_apply import guard_record
 
             guard = guard_record(self.state.state)
-        try:
-            from .html_report_generator import (
-                regenerate_report_with_human_decisions,
-                scope_regeneration_needed,
-            )
-        except ImportError:  # pragma: no cover - direct script runs
-            from utils.html_report_generator import (  # type: ignore
-                regenerate_report_with_human_decisions,
-                scope_regeneration_needed,
-            )
+        from .html_report_generator import (
+            regenerate_report_with_human_decisions,
+            scope_regeneration_needed,
+        )
         # A recorded scope-policy change (an apply override, its deferrals)
         # refreshes the report's eligibility even with no decision to badge.
         if (not decisions and not (guard and guard.get("skipped"))

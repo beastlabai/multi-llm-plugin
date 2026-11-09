@@ -83,118 +83,61 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-try:
-    from . import known_checks as _known_checks
-    from . import process_control as _process_control
-    from . import prior_changes as _prior_changes
-    from . import prompt_files as _prompt_files
-    from .git_utils import (
-        find_git_entry_root, pin_repo_root, worktree_file_stats, worktree_fingerprint,
-    )
-    from .metrics import (
-        METRICS_TEMP_PREFIX, _read_state, mark_failed_in_progress, state_file_lock,
-        withdraw_from_progress_in_state,
-    )
-    from .state_file import StateDocumentError
-    from .state_file import update as update_state
-    from .state_manager import (
-        PROCESSED_LEG_NATIVE, record_batch_items_in_state, update_task_status_in_state,
-    )
-    from .stream_bootstrap import bootstrap_streams
-    from .task_outcome import ExecutorError, ResultRejected
-    from .subagent_tasks import (
-        APPLY_WRITE_KINDS, PHASE_BY_WRITE_KIND, TASKS_SCHEMA_VERSION, declared_file_set,
-    )
-    from .write_batch_scheduler import SWEEP_MAX_FILES
-    from .commit_write_guard import (
-        COMMIT_GUARD_KIND,
-        batch_fixes_for,
-        commit_group_files,
-        commit_guard_of,
-        commit_head7,
-        commit_recheck_failing,
-        commit_stale_line,
-        commit_stale_reason,
-        commit_stale_split,
-        load_commit_apply,
-        load_orchestrator_batches,
-    )
-    from .check_records import (
-        accepted_upstream_checks,
-        decomposition_graph,
-        rerunnable_checks,
-        upstream_held_check,
-    )
-    from .batch_prompt import (
-        DISPATCHED_PROMPTS_SUBDIR,
-        OWN_RUN_CONTEXT_PHASES,
-        bind_prior_changes,
-        dispatched_prompt_path,
-        is_check_task,
-        last_phase_end,
-        with_result_contract,
-    )
-    from .write_phase_bridge import WRITE_TASK_FILENAME
-    from .write_safety import (
-        PolicyViolation, WritePolicy, policy_allow_clause, policy_outside_note,
-        relative_to_root,
-    )
-except ImportError:  # pragma: no cover - direct script invocation
-    from utils import known_checks as _known_checks  # type: ignore
-    from utils import process_control as _process_control  # type: ignore
-    from utils import prior_changes as _prior_changes  # type: ignore
-    from utils import prompt_files as _prompt_files  # type: ignore
-    from utils.git_utils import (  # type: ignore
-        find_git_entry_root, pin_repo_root, worktree_file_stats, worktree_fingerprint,
-    )
-    from utils.metrics import (  # type: ignore
-        METRICS_TEMP_PREFIX, _read_state, mark_failed_in_progress, state_file_lock,
-        withdraw_from_progress_in_state,
-    )
-    from utils.state_file import StateDocumentError  # type: ignore
-    from utils.state_file import update as update_state  # type: ignore
-    from utils.state_manager import (  # type: ignore
-        PROCESSED_LEG_NATIVE, record_batch_items_in_state, update_task_status_in_state,
-    )
-    from utils.stream_bootstrap import bootstrap_streams  # type: ignore
-    from utils.task_outcome import ExecutorError, ResultRejected  # type: ignore
-    from utils.subagent_tasks import (  # type: ignore
-        APPLY_WRITE_KINDS, PHASE_BY_WRITE_KIND, TASKS_SCHEMA_VERSION, declared_file_set,
-    )
-    from utils.write_batch_scheduler import SWEEP_MAX_FILES  # type: ignore
-    from utils.commit_write_guard import (  # type: ignore
-        COMMIT_GUARD_KIND,
-        batch_fixes_for,
-        commit_group_files,
-        commit_guard_of,
-        commit_head7,
-        commit_recheck_failing,
-        commit_stale_line,
-        commit_stale_reason,
-        commit_stale_split,
-        load_commit_apply,
-        load_orchestrator_batches,
-    )
-    from utils.check_records import (  # type: ignore
-        accepted_upstream_checks,
-        decomposition_graph,
-        rerunnable_checks,
-        upstream_held_check,
-    )
-    from utils.batch_prompt import (  # type: ignore
-        DISPATCHED_PROMPTS_SUBDIR,
-        OWN_RUN_CONTEXT_PHASES,
-        bind_prior_changes,
-        dispatched_prompt_path,
-        is_check_task,
-        last_phase_end,
-        with_result_contract,
-    )
-    from utils.write_phase_bridge import WRITE_TASK_FILENAME  # type: ignore
-    from utils.write_safety import (  # type: ignore
-        PolicyViolation, WritePolicy, policy_allow_clause, policy_outside_note,
-        relative_to_root,
-    )
+from . import known_checks as _known_checks
+from . import process_control as _process_control
+from . import prior_changes as _prior_changes
+from . import prompt_files as _prompt_files
+from .git_utils import (
+    find_git_entry_root, pin_repo_root, worktree_file_stats, worktree_fingerprint,
+)
+from .metrics import (
+    METRICS_TEMP_PREFIX, _read_state, mark_failed_in_progress, state_file_lock,
+    withdraw_from_progress_in_state,
+)
+from .state_file import StateDocumentError
+from .state_file import update as update_state
+from .state_manager import (
+    PROCESSED_LEG_NATIVE, record_batch_items_in_state, update_task_status_in_state,
+)
+from .stream_bootstrap import bootstrap_streams
+from .task_outcome import ExecutorError, ResultRejected
+from .subagent_tasks import (
+    APPLY_WRITE_KINDS, PHASE_BY_WRITE_KIND, TASKS_SCHEMA_VERSION, declared_file_set,
+)
+from .write_batch_scheduler import SWEEP_MAX_FILES
+from .commit_write_guard import (
+    COMMIT_GUARD_KIND,
+    batch_fixes_for,
+    commit_group_files,
+    commit_guard_of,
+    commit_head7,
+    commit_recheck_failing,
+    commit_stale_line,
+    commit_stale_reason,
+    commit_stale_split,
+    load_commit_apply,
+    load_orchestrator_batches,
+)
+from .check_records import (
+    accepted_upstream_checks,
+    decomposition_graph,
+    rerunnable_checks,
+    upstream_held_check,
+)
+from .batch_prompt import (
+    DISPATCHED_PROMPTS_SUBDIR,
+    OWN_RUN_CONTEXT_PHASES,
+    bind_prior_changes,
+    dispatched_prompt_path,
+    is_check_task,
+    last_phase_end,
+    with_result_contract,
+)
+from .write_phase_bridge import WRITE_TASK_FILENAME
+from .write_safety import (
+    PolicyViolation, WritePolicy, policy_allow_clause, policy_outside_note,
+    relative_to_root,
+)
 
 
 __all__ = [
@@ -373,10 +316,7 @@ def render_write_prompt(
 
 def _scope_refusal(task: Dict[str, Any], output_dir: str, phase: Optional[str]) -> Optional[str]:
     """``scope_apply.stale_task_refusal`` against the plan dir's ``state.json``."""
-    try:
-        from . import scope_apply as _scope
-    except ImportError:  # pragma: no cover - direct script invocation
-        from utils import scope_apply as _scope  # type: ignore
+    from . import scope_apply as _scope
     state = _known_checks.read_state(output_dir)
     policy, baseline = _scope.effective_from_state(
         state if isinstance(state, dict) else {}, str(phase or ""))
@@ -859,10 +799,7 @@ def check_tree_path(phase_dir: Path, task_id: str) -> Path:
 
 def _tree_exclusions(phase_dir: Path, repo_root: str) -> List[str]:
     """The precise workflow-artifact exclusions shared with the executor."""
-    try:
-        from .check_tree import check_tree_exclusions
-    except ImportError:  # pragma: no cover - direct script invocation
-        from utils.check_tree import check_tree_exclusions
+    from .check_tree import check_tree_exclusions
 
     return check_tree_exclusions(phase_dir, repo_root)
 

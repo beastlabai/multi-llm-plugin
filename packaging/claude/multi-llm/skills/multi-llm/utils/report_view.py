@@ -38,15 +38,9 @@ from typing import (
     Any, Callable, Dict, List, Mapping, NamedTuple, Optional, Sequence, Set, TypedDict,
 )
 
-try:
-    from . import html_report_generator as _hrg
-    from . import scope_report as _scope_report
-    from .metrics import describe_usage
-except ImportError:
-    # Direct script invocation, as html_report_generator supports.
-    import html_report_generator as _hrg
-    import scope_report as _scope_report
-    from metrics import describe_usage
+from . import html_report_generator as _hrg
+from . import scope_report as _scope_report
+from .metrics import describe_usage
 
 #: The views whose buckets list groups.
 VIEW_KEYS = _hrg._GROUP_VIEWS

@@ -39,12 +39,9 @@ import shlex
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-try:
-    from .state_file import STATE_FILENAME, read_document
-    from .text_clip import clip
-except ImportError:  # pragma: no cover - direct script runs with utils/ on path
-    from state_file import STATE_FILENAME, read_document  # type: ignore
-    from text_clip import clip  # type: ignore
+from .state_file import STATE_FILENAME, read_document
+from .tasks_file import read_task_list
+from .text_clip import clip
 
 #: At most this many commands are listed in a prompt (prompt size).
 KNOWN_CHECKS_MAX = 6
@@ -398,14 +395,11 @@ def implement_task_list_text(output_dir: Any, plan: Optional[Path]) -> Optional[
     if plan is None or output_dir is None:
         return None
     try:
-        try:
-            from .subagent_tasks import content_hash
-            from .tasks_file import read_task_list
-            from .write_phase_bridge import WRITE_TASK_FILENAME
-        except ImportError:  # pragma: no cover - direct script invocation
-            from utils.subagent_tasks import content_hash  # type: ignore
-            from utils.tasks_file import read_task_list  # type: ignore
-            from utils.write_phase_bridge import WRITE_TASK_FILENAME  # type: ignore
+        # Imported at call time, as are the readers below: `batch_reply` and
+        # `check_records` import this module and load neither the provider
+        # stack nor a YAML parser, which these modules bring.
+        from .subagent_tasks import content_hash
+        from .write_phase_bridge import WRITE_TASK_FILENAME
         document = json.loads(
             (Path(str(output_dir)) / "implement" / WRITE_TASK_FILENAME).read_text(encoding="utf-8")
         )
@@ -444,10 +438,7 @@ def _task_list_commands(
     if text is None:
         return []
     try:
-        try:
-            from .task_decomposer import TaskDecomposer
-        except ImportError:  # pragma: no cover - direct script invocation
-            from utils.task_decomposer import TaskDecomposer  # type: ignore
+        from .task_decomposer import TaskDecomposer
         tasks = list(TaskDecomposer().parse_plan(text))
     except Exception:  # noqa: BLE001 - a task list that cannot be parsed names none
         return []
@@ -491,10 +482,7 @@ def known_check_commands(
     plan = Path(str(plan_text)) if plan_text else None
     found: List[Tuple[str, str]] = []
     try:
-        try:
-            from .provider_registry import get_verify_command
-        except ImportError:  # pragma: no cover - direct script invocation
-            from utils.provider_registry import get_verify_command  # type: ignore
+        from .provider_registry import get_verify_command
         verify = get_verify_command(anchor=str(plan) if plan else None)
     except Exception:  # noqa: BLE001 - no config read is no configured check
         verify = None
@@ -504,18 +492,13 @@ def known_check_commands(
     root = repo_root
     if root is None and plan is not None:
         try:
-            try:
-                from .write_safety import resolve_repo_root
-            except ImportError:  # pragma: no cover - direct script invocation
-                from utils.write_safety import resolve_repo_root  # type: ignore
+            from .write_safety import resolve_repo_root
             root = resolve_repo_root(str(plan))
         except Exception:  # noqa: BLE001 - no root is no declared test command
             root = None
     try:
-        try:
-            from .verification_lines import verify_command_candidate
-        except ImportError:  # pragma: no cover - direct script invocation
-            from utils.verification_lines import verify_command_candidate  # type: ignore
+        # Imported at call time: `verification_lines` imports this module.
+        from .verification_lines import verify_command_candidate
         candidate = verify_command_candidate(root)
     except Exception:  # noqa: BLE001
         candidate = None

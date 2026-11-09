@@ -23,26 +23,15 @@ from typing import Any, Collection, Dict, Optional, Pattern, Tuple
 # The dependency runs one way only: this module may import the ladder, and the
 # ladder must stay free of provider imports — it reads an adapter's retry
 # envelope *structurally*, through a Protocol, for exactly that reason.
-try:  # pragma: no cover - import shim mirrors the rest of utils/
-    from ..process_state import process_cache
-    from ..retry_ladder import (
-        STATUS_AUTH_FAILED,
-        STATUS_CONTEXT_LENGTH_EXCEEDED,
-        STATUS_RATE_LIMITED,
-        STATUS_RUNNER_ERROR,
-        STATUS_SPAWN_FAILED,
-        STATUS_TIMEOUT,
-    )
-except ImportError:  # pragma: no cover - direct-script import shim
-    from utils.process_state import process_cache
-    from utils.retry_ladder import (
-        STATUS_AUTH_FAILED,
-        STATUS_CONTEXT_LENGTH_EXCEEDED,
-        STATUS_RATE_LIMITED,
-        STATUS_RUNNER_ERROR,
-        STATUS_SPAWN_FAILED,
-        STATUS_TIMEOUT,
-    )
+from ..process_state import process_cache
+from ..retry_ladder import (
+    STATUS_AUTH_FAILED,
+    STATUS_CONTEXT_LENGTH_EXCEEDED,
+    STATUS_RATE_LIMITED,
+    STATUS_RUNNER_ERROR,
+    STATUS_SPAWN_FAILED,
+    STATUS_TIMEOUT,
+)
 
 
 #: Terms that make a *bare* token a real failure signal rather than a

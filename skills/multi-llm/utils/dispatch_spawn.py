@@ -28,66 +28,36 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
-try:  # pragma: no cover - import shim mirrors the rest of utils/
-    from . import process_capture
-    from . import process_control
-    from . import structured_output
-    from .llm_client import (
-        _resolve_executable,
-        expand_env_home,
-        provider_dispatch_context,
-    )
-    from . import landlock_dispatch
-    from .providers.base import (
-        CODEX_HOME_CHECK_MARKER,
-        HOST_POSTURE_FULL_ACCESS,
-        INCIDENTAL_LANE_EXECUTOR,
-        JailContext,
-        JailRequest,
-        WRITE_SCOPE_REPO_WIDE,
-        WRITE_SCOPES_BY_CONSENT,
-        WRITE_SCOPES_ON_RUNG,
-        WritePostureConsent,
-        PROFILE_AGENT_WRITE,
-        SandboxRung,
-        build_child_env,
-    )
-    from .subagent_tasks import WRITE_KINDS
-    from . import task_outcome as _task_outcome
-    from . import task_result as _task_result
-    from . import runner_selection as _runner_selection
-    from . import probe_state as _probe_state
-    from . import sandbox_walk as _sandbox_walk
-except ImportError:  # pragma: no cover - direct-script import shim
-    from utils import process_capture
-    from utils import process_control
-    from utils import structured_output
-    from utils.llm_client import (
-        _resolve_executable,
-        expand_env_home,
-        provider_dispatch_context,
-    )
-    from utils import landlock_dispatch  # type: ignore[no-redef]
-    from utils.providers.base import (
-        CODEX_HOME_CHECK_MARKER,
-        HOST_POSTURE_FULL_ACCESS,
-        INCIDENTAL_LANE_EXECUTOR,
-        JailContext,
-        JailRequest,
-        WRITE_SCOPE_REPO_WIDE,
-        WRITE_SCOPES_BY_CONSENT,
-        WRITE_SCOPES_ON_RUNG,
-        WritePostureConsent,
-        PROFILE_AGENT_WRITE,
-        SandboxRung,
-        build_child_env,
-    )
-    from utils.subagent_tasks import WRITE_KINDS
-    from utils import task_outcome as _task_outcome  # type: ignore[no-redef]
-    from utils import task_result as _task_result  # type: ignore[no-redef]
-    from utils import runner_selection as _runner_selection  # type: ignore[no-redef]
-    from utils import probe_state as _probe_state  # type: ignore[no-redef]
-    from utils import sandbox_walk as _sandbox_walk  # type: ignore[no-redef]
+from . import host_capabilities as caps
+from . import process_capture
+from . import process_control
+from . import structured_output
+from .llm_client import (
+    _resolve_executable,
+    expand_env_home,
+    provider_dispatch_context,
+)
+from . import landlock_dispatch
+from .providers.base import (
+    CODEX_HOME_CHECK_MARKER,
+    HOST_POSTURE_FULL_ACCESS,
+    INCIDENTAL_LANE_EXECUTOR,
+    JailContext,
+    JailRequest,
+    WRITE_SCOPE_REPO_WIDE,
+    WRITE_SCOPES_BY_CONSENT,
+    WRITE_SCOPES_ON_RUNG,
+    WritePostureConsent,
+    PROFILE_AGENT_WRITE,
+    SandboxRung,
+    build_child_env,
+)
+from .subagent_tasks import WRITE_KINDS
+from . import task_outcome as _task_outcome
+from . import task_result as _task_result
+from . import runner_selection as _runner_selection
+from . import probe_state as _probe_state
+from . import sandbox_walk as _sandbox_walk
 
 
 # ---------------------------------------------------------------------------
@@ -180,13 +150,6 @@ def _host_env_guards() -> Tuple[List[str], List[str]]:
     cannot answer falls back to the adapter's own list rather than failing a
     dispatch.
     """
-    try:
-        from . import host_capabilities as caps
-    except ImportError:  # pragma: no cover - direct script runs
-        try:
-            import host_capabilities as caps  # type: ignore
-        except ImportError:
-            return [], []
     try:
         declared = caps.env_guards(caps.resolve_host_id(sys.argv[1:]))
     except Exception:  # pragma: no cover - unknown host / missing data

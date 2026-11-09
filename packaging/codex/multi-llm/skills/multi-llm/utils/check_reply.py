@@ -53,18 +53,29 @@ swapped against its own verdicts (live run 11, Claude Code review-plan batch 5).
 
 from __future__ import annotations
 
+if __name__ == "__main__" and not __package__:
+    # Run by path: put the skill root on sys.path, found from this file's real
+    # location as Python finds sys.path[0], then call the package module's entry
+    # point with sys.argv untouched, so the program name stays the one typed
+    # (docs/development/dispatcher.md#import-safety).
+    import os
+    import sys
+
+    _UTILS_DIR = os.path.dirname(os.path.realpath(__file__))
+    sys.path[:] = [os.path.dirname(_UTILS_DIR)] + [
+        p for p in sys.path if os.path.realpath(p) != _UTILS_DIR]
+    from utils.check_reply import main
+
+    sys.exit(main())
+
 import argparse
 import json
 import os
 import sys
 from typing import Any, Dict, List, Optional, Sequence
 
-try:
-    from .schema_validator import validation_reply_problems
-    from .stream_bootstrap import bootstrap_streams
-except ImportError:  # pragma: no cover - direct-script import shim
-    from schema_validator import validation_reply_problems
-    from stream_bootstrap import bootstrap_streams
+from .schema_validator import validation_reply_problems
+from .stream_bootstrap import bootstrap_streams
 
 _GROUP_KINDS = ("validation", "revalidation")
 

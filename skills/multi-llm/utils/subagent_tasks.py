@@ -34,30 +34,19 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-try:  # pragma: no cover - import shim mirrors the rest of utils/
-    from .schema_validator import (
-        TASKS_SCHEMA_VERSION,
-        validate_subagent_task,
-        validate_subagent_task_file,
-    )
-    from .llm_client import (
-        CMDLINE_CAP_UTF16_BATCH,
-        CMDLINE_CAP_UTF16_NATIVE,
-        CMDLINE_UTF16_HEADROOM,
-        _utf16_code_units,
-    )
-except ImportError:  # pragma: no cover
-    from utils.schema_validator import (
-        TASKS_SCHEMA_VERSION,
-        validate_subagent_task,
-        validate_subagent_task_file,
-    )
-    from utils.llm_client import (
-        CMDLINE_CAP_UTF16_BATCH,
-        CMDLINE_CAP_UTF16_NATIVE,
-        CMDLINE_UTF16_HEADROOM,
-        _utf16_code_units,
-    )
+from . import provider_registry as _provider_registry
+from .subagent_prompts import build_salvage_prompt
+from .schema_validator import (
+    TASKS_SCHEMA_VERSION,
+    validate_subagent_task,
+    validate_subagent_task_file,
+)
+from .llm_client import (
+    CMDLINE_CAP_UTF16_BATCH,
+    CMDLINE_CAP_UTF16_NATIVE,
+    CMDLINE_UTF16_HEADROOM,
+    _utf16_code_units,
+)
 
 
 __all__ = [
@@ -994,8 +983,6 @@ def write_salvage_task_file(
     Returns:
         The path of the task file written.
     """
-    from .subagent_prompts import build_salvage_prompt  # local: avoid cycles
-
     output_name = os.path.basename(salvage_request.get("output_path", "") or "")
     suggestion_id = os.path.splitext(output_name)[0] or "unknown"
     task = make_task(
@@ -1137,20 +1124,13 @@ def preferred_prompt_transport(provider_name: Optional[str]) -> str:
     if not provider_name:
         return "argv"
     base = provider_name.split(":", 1)[0]
-    try:  # ask the adapter itself; fall back to the known-good list
-        from .provider_registry import get_provider  # local: avoids a cycle
-    except ImportError:  # pragma: no cover
-        try:
-            from utils.provider_registry import get_provider
-        except ImportError:
-            get_provider = None  # type: ignore[assignment]
-    if get_provider is not None:
-        provider = get_provider(base)
-        if provider is not None:
-            for candidate in ("stdin", "file"):
-                if provider.supports_prompt_transport(candidate):
-                    return candidate
-            return "argv"
+    # Through the module, at each call: tests patch `provider_registry.get_provider`.
+    provider = _provider_registry.get_provider(base)
+    if provider is not None:
+        for candidate in ("stdin", "file"):
+            if provider.supports_prompt_transport(candidate):
+                return candidate
+        return "argv"
     return "stdin" if base in _NON_ARGV_TRANSPORT_PROVIDERS else "argv"
 
 

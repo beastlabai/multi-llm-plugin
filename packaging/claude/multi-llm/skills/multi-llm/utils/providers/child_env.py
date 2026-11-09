@@ -15,10 +15,7 @@ import sys
 from dataclasses import dataclass
 from typing import Any, Collection, Dict, List, Mapping, Optional, Tuple
 
-try:  # pragma: no cover - import shim mirrors the rest of utils/
-    from ..process_state import process_cache
-except ImportError:  # pragma: no cover - direct-script import shim
-    from utils.process_state import process_cache
+from ..process_state import process_cache
 
 from . import types
 
@@ -245,10 +242,7 @@ def _merged_config(anchor: Optional[str] = None) -> Dict[str, Any]:
     path, so every failure resolves to "no configuration", i.e. the documented
     defaults. ``claude_code``'s fallback-list read raises instead, on purpose.
     """
-    try:  # pragma: no cover - import shim mirrors the rest of utils/
-        from ..provider_registry import load_config
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.provider_registry import load_config  # type: ignore[no-redef]
+    from ..provider_registry import load_config
     try:
         config = load_config(anchor=anchor)
     except Exception:  # noqa: BLE001 - a config read may not break a dispatch
@@ -574,10 +568,7 @@ def env_allowlist_matrix(
     ``len(registry) × len(platforms) × len(capabilities)``, computed, not typed.
     """
     if provider_names is None:
-        try:  # pragma: no cover - import shim mirrors the rest of utils/
-            from ..provider_registry import _PROVIDERS
-        except ImportError:  # pragma: no cover - direct-script import shim
-            from utils.provider_registry import _PROVIDERS  # type: ignore[no-redef]
+        from ..provider_registry import _PROVIDERS
         provider_names = sorted(_PROVIDERS)
     return {
         (name, platform, capability): ENV_ALLOWLIST_MEASURED.get(

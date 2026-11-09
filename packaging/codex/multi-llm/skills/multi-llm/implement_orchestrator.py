@@ -29,19 +29,11 @@ from typing import (
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
-from utils import (
-    TaskDecomposer,
-    TaskStatus,
-    Task,
-    StateManager,
-    get_or_create_state,
-    load_prompt,
-    get_output_paths,
-    get_relative_output_path,
-    get_modified_files,
-    get_staged_files,
-    head_or_empty_tree,
-)
+from utils.git_utils import get_modified_files, get_staged_files, head_or_empty_tree
+from utils.output_handler import get_output_paths, get_relative_output_path
+from utils.prompt_loader import load_prompt
+from utils.state_manager import StateManager, get_or_create_state
+from utils.task_decomposer import Task, TaskDecomposer, TaskStatus
 from utils import metrics as metrics_mod
 from utils.stream_bootstrap import bootstrap_streams
 from utils.text_clip import clip, join_clauses

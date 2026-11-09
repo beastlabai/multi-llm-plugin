@@ -51,16 +51,14 @@ VERIFY_TAIL_CHARS = 2000
 
 
 def load_finalize_tracking():
-    """The top-level ``finalize_tracking`` module, or ``None`` if unimportable."""
+    """The top-level ``finalize_tracking`` module, or ``None`` if unimportable.
+
+    ``None`` keeps a batch record from failing on a census it cannot run.
+    """
     try:
         import finalize_tracking  # type: ignore
-    except ImportError:  # pragma: no cover - direct-script import shim
-        import sys
-        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-        try:
-            import finalize_tracking  # type: ignore
-        except ImportError:
-            return None
+    except ImportError:  # pragma: no cover - the skill root is on sys.path
+        return None
     return finalize_tracking
 
 

@@ -16,11 +16,6 @@ The registry holds the very object the module's name is bound to. A cache is
 emptied in place (``.clear()``) and never rebound, neither by its module nor by
 a test; ``tests/test_process_state.py`` checks both, and that every
 module-level cache in ``utils/`` is registered.
-
-There is one registry per process, whichever name imported this module: the
-package route (``utils.process_state``) and the flat one the import shims fall
-back to when ``utils/`` itself is on ``sys.path`` (``process_state``). The
-second of the two to load hands back the first (see the bottom of this file).
 """
 
 from __future__ import annotations
@@ -174,30 +169,3 @@ def registered_names() -> Tuple[str, ...]:
     """Every registered name, in registration order (repeats included)."""
     with _ENTRIES_LOCK:
         return tuple(entry.name for entry in _ENTRIES)
-
-
-_ROUTES = ("utils.process_state", "process_state")
-
-
-def _loaded_under_the_other_name() -> Any:
-    """This file, already loaded under the other import route, or None."""
-    if __name__ not in _ROUTES:
-        return None
-    here = os.path.realpath(__file__)
-    for name in _ROUTES:
-        other = sys.modules.get(name)
-        if name == __name__ or other is None or other is sys.modules.get(__name__):
-            continue
-        source = getattr(other, "__file__", None)
-        if source and os.path.realpath(source) == here and hasattr(other, "_ENTRIES"):
-            return other
-    return None
-
-
-# The second import route to load this file returns the module the first one
-# loaded (the import system hands back what ``sys.modules`` holds once the body
-# has run), so both routes share one registry and the definitions above stay
-# unused in this copy.
-_FIRST = _loaded_under_the_other_name()
-if _FIRST is not None:
-    sys.modules[__name__] = _FIRST

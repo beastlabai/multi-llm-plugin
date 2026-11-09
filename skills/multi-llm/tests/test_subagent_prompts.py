@@ -507,12 +507,12 @@ class TestRenderedReferenceSections:
         current = extract_reference_section(document, name)
         assert current is not None, (
             f"{rel_path} carries no BEGIN/END GENERATED markers for {name!r}. "
-            f"Run `python utils/subagent_prompts.py` after adding them."
+            f"Run `python -m utils.subagent_prompts` after adding them."
         )
         assert current == render_reference_section(name), (
             f"{rel_path}'s {name!r} block has diverged from "
             f"utils/subagent_prompts.py. Edit the constant, then run "
-            f"`python utils/subagent_prompts.py` to re-render."
+            f"`python -m utils.subagent_prompts` to re-render."
         )
 
     def test_judge_rules_travel_inside_the_prompt_verbatim(self):

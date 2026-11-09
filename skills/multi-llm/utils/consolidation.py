@@ -18,63 +18,32 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 # Import state_manager's generate_group_id for reference (both coexist)
 # Also import CURRENT_FORMAT_VERSION and load_groups_payload for v2 envelope support
-try:
-    from .state_manager import (
-        generate_group_id as _state_generate_group_id,
-        stamped_group_id as _stamped_group_id,
-        CURRENT_FORMAT_VERSION,
-        load_groups_payload,
-    )
-except ImportError:
-    from utils.state_manager import (
-        generate_group_id as _state_generate_group_id,
-        stamped_group_id as _stamped_group_id,
-        CURRENT_FORMAT_VERSION,
-        load_groups_payload,
-    )
+from .state_manager import (
+    generate_group_id as _state_generate_group_id,
+    stamped_group_id as _stamped_group_id,
+    CURRENT_FORMAT_VERSION,
+    load_groups_payload,
+)
 
 # Import report_parser functions for consolidated decision loading
-try:
-    from . import report_markdown as _rm
-    from .report_parser import (
-        parse_consolidated_skipped_groups,
-        parse_consolidated_validation_overrides,
-        load_consolidated_html_selections,
-        merge_consolidated_selections,
-    )
-except ImportError:
-    from utils import report_markdown as _rm
-    from utils.report_parser import (
-        parse_consolidated_skipped_groups,
-        parse_consolidated_validation_overrides,
-        load_consolidated_html_selections,
-        merge_consolidated_selections,
-    )
+from . import report_markdown as _rm
+from .report_parser import (
+    parse_consolidated_skipped_groups,
+    parse_consolidated_validation_overrides,
+    load_consolidated_html_selections,
+    merge_consolidated_selections,
+)
 
-try:
-    from . import cli_common
-    from .prompt_loader import load_prompt
-    from .subagent_prompts import build_consolidation_prompt
-    from .subagent_tasks import PromptBudget, build_inputs, make_task, make_task_file
-except ImportError:
-    from utils import cli_common
-    from utils.prompt_loader import load_prompt
-    from utils.subagent_prompts import build_consolidation_prompt
-    from utils.subagent_tasks import (
-        PromptBudget,
-        build_inputs,
-        make_task,
-        make_task_file,
-    )
+from . import cli_common
+from .prompt_loader import load_prompt
+from .schema_validator import load_schema, validate_against_schema
+from .subagent_prompts import build_consolidation_prompt
+from .subagent_tasks import PromptBudget, build_inputs, make_task, make_task_file
 
 logger = logging.getLogger(__name__)
 
-try:
-    from . import scope_report as _scope_report
-    from . import importance as _importance
-except ImportError:  # pragma: no cover - direct script import
-    from utils import scope_report as _scope_report
-    from utils import importance as _importance
+from . import scope_report as _scope_report
+from . import importance as _importance
 
 
 # ---------------------------------------------------------------------------
@@ -648,10 +617,7 @@ def prepare_consolidation_tasks(
     writing invocation's own selection flags (D2), so the merge is retried
     under the panel the caller asked for.
     """
-    try:
-        from .validation import host_views_lock
-    except ImportError:  # pragma: no cover - direct script runs
-        from utils.validation import host_views_lock  # type: ignore
+    from .validation import host_views_lock
 
     # One views transaction: the old index goes, the sidecars and the task file
     # are written, and the index is rebuilt from that file
@@ -672,18 +638,11 @@ def _prepare_consolidation_tasks(
     prompt_budget: Optional[PromptBudget],
 ) -> Dict[str, Any]:
     """:func:`prepare_consolidation_tasks`, inside the phase's views lock."""
-    try:
-        from .validation import (
-            invalidate_host_index,
-            refresh_host_index,
-            write_prompt_sidecars,
-        )
-    except ImportError:  # pragma: no cover - direct script runs
-        from utils.validation import (  # type: ignore
-            invalidate_host_index,
-            refresh_host_index,
-            write_prompt_sidecars,
-        )
+    from .validation import (
+        invalidate_host_index,
+        refresh_host_index,
+        write_prompt_sidecars,
+    )
 
     phase_path = Path(phase_dir)
     tasks_path = phase_path / "consolidation_tasks.json"
@@ -1411,12 +1370,6 @@ def generate_consolidated_json(
     Raises:
         ValueError: If the output fails schema validation.
     """
-    # Lazy import to avoid circular imports at module level
-    try:
-        from .schema_validator import load_schema, validate_against_schema
-    except ImportError:
-        from utils.schema_validator import load_schema, validate_against_schema
-
     phase_path = Path(phase_dir)
 
     # --- <10% reduction check ---
@@ -1783,18 +1736,11 @@ def _failure_report_fields(phase_dir: str,
     imports this package, and the consolidated page is generated long after
     both are loaded.
     """
-    try:
-        from .html_report_generator import build_report_notices
-        from .review_orchestrator_base import (
-            remaining_failed_models,
-            salvage_requested_models,
-        )
-    except ImportError:
-        from utils.html_report_generator import build_report_notices
-        from utils.review_orchestrator_base import (
-            remaining_failed_models,
-            salvage_requested_models,
-        )
+    from .html_report_generator import build_report_notices
+    from .review_orchestrator_base import (
+        remaining_failed_models,
+        salvage_requested_models,
+    )
 
     failures, requested = remaining_failed_models(str(phase_dir))
     requested_count = len(requested) if requested is not None else None
@@ -1876,30 +1822,17 @@ def generate_consolidated_html(
 
     # The report page's own helpers: one template loader, one embedder, one
     # badge builder and one title rule for every page.
-    try:
-        from .html_report_generator import (
-            CONSOLIDATED_REPORT_DATA,
-            derive_aggregate_validation_status,
-            build_sort_config,
-            embed_report_data,
-            load_report_template,
-            sidecar_json,
-            sum_usage,
-        )
-        from .metrics import describe_usage
-        from .report_view import build_model_metadata, plan_title, read_plan
-    except ImportError:
-        from utils.html_report_generator import (
-            CONSOLIDATED_REPORT_DATA,
-            derive_aggregate_validation_status,
-            build_sort_config,
-            embed_report_data,
-            load_report_template,
-            sidecar_json,
-            sum_usage,
-        )
-        from utils.metrics import describe_usage
-        from utils.report_view import build_model_metadata, plan_title, read_plan
+    from .html_report_generator import (
+        CONSOLIDATED_REPORT_DATA,
+        derive_aggregate_validation_status,
+        build_sort_config,
+        embed_report_data,
+        load_report_template,
+        sidecar_json,
+        sum_usage,
+    )
+    from .metrics import describe_usage
+    from .report_view import build_model_metadata, plan_title, read_plan
 
     phase_path = Path(phase_dir)
     plan_file = Path(plan_path)

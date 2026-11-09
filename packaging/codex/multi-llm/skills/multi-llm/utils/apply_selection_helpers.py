@@ -9,12 +9,8 @@ import copy
 import sys
 from typing import Any, Dict, List, Set, Tuple
 
-try:
-    from .scope_policy import attach_verdict
-    from .state_manager import group_join_ids, records_by_unique_id
-except ImportError:
-    from utils.scope_policy import attach_verdict
-    from utils.state_manager import group_join_ids, records_by_unique_id
+from .scope_policy import attach_verdict
+from .state_manager import group_join_ids, records_by_unique_id
 
 
 def _is_user_skipped(group: Dict[str, Any], skipped_ids: Set[str]) -> bool:

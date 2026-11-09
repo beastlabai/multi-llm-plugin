@@ -30,10 +30,7 @@ from typing import IO, Any, Dict, Optional, Tuple, Union
 
 import yaml
 
-try:  # pragma: no cover - import shim mirrors the rest of utils/
-    from .process_state import process_cache
-except ImportError:  # pragma: no cover - direct script runs with utils/ on path
-    from process_state import process_cache  # type: ignore
+from .process_state import process_cache
 
 #: The loader :func:`safe_load` and :func:`load_file` use (see module docstring).
 SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)

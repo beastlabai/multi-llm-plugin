@@ -9,13 +9,7 @@ from .judge_vocab import JUDGE_DECIDE, JUDGE_DECIDE_ITEM_IDS, upgrade_legacy
 from . import importance as _importance
 from .importance import get_highest_importance
 
-# Import error type constants (will be added to validation.py)
-try:
-    from .validation import ERROR_TYPE_AMBIGUOUS, RECOVERABLE_ERROR_TYPES
-except ImportError:
-    # Fallback if validation module not yet updated
-    ERROR_TYPE_AMBIGUOUS = "real_ambiguity"
-    RECOVERABLE_ERROR_TYPES = frozenset({"parsing_error", "timeout", "rate_limited"})
+from .validation import ERROR_TYPE_AMBIGUOUS, RECOVERABLE_ERROR_TYPES
 
 
 def resolve_bulk_option_conflicts(

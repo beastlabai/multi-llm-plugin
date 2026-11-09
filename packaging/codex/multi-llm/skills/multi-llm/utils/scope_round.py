@@ -31,10 +31,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
-try:
-    from . import scope_policy as sp
-except ImportError:  # pragma: no cover - script-style import
-    from utils import scope_policy as sp  # type: ignore
+from . import scope_policy as sp
 
 #: The task-file key holding one validation round's scope block.
 TASK_SCOPE_KEY = "scope"
@@ -500,10 +497,7 @@ def groups_by_hash(groups: Optional[Sequence[Any]]) -> Dict[str, Dict[str, Any]]
     """``{stamped group id: host group}`` for a list of groups."""
     if not groups:
         return {}
-    try:
-        from .state_manager import stamped_group_id
-    except ImportError:  # pragma: no cover
-        from utils.state_manager import stamped_group_id  # type: ignore
+    from .state_manager import stamped_group_id
     table: Dict[str, Dict[str, Any]] = {}
     for group in groups:
         data = group_dict(group)
@@ -570,10 +564,7 @@ def record_decisions(phase_dir: Optional[str], counts: Optional[Mapping[str, int
         print(line)
     if not phase_dir:
         return
-    try:
-        from .status_file import remove_status_keys, update_status
-    except ImportError:  # pragma: no cover
-        from utils.status_file import remove_status_keys, update_status  # type: ignore
+    from .status_file import remove_status_keys, update_status
     try:
         if counts:
             update_status(str(phase_dir), {DECISIONS_METADATA_KEY: dict(counts)})
@@ -593,10 +584,7 @@ def attach_verdicts(groups: Optional[List[Dict[str, Any]]],
     """
     if not groups:
         return
-    try:
-        from .state_manager import group_join_ids, records_by_unique_id
-    except ImportError:  # pragma: no cover
-        from utils.state_manager import group_join_ids, records_by_unique_id  # type: ignore
+    from .state_manager import group_join_ids, records_by_unique_id
     by_hash = records_by_unique_id(records or [], "group_id", "group_hash")
     dict_groups = [group for group in groups if isinstance(group, dict)]
     for group, ids in zip(dict_groups, group_join_ids(dict_groups)):

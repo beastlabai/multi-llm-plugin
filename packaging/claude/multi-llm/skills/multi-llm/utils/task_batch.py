@@ -16,6 +16,7 @@ only: patch one here, never through the executor
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import hashlib
 import json
 import sys
@@ -23,58 +24,37 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
-try:  # pragma: no cover - import shim mirrors the rest of utils/
-    from .provider_registry import (
-        SESSION_LAYER,
-        get_max_concurrent_subagents,
-        get_provider,
-        get_provider_max_concurrent,
-        get_subagent_timeout,
-        parse_model_spec,
-    )
-    from .providers.base import JailRequest
-    from .retry_ladder import (
-        FATAL_STATUSES,
-        STATUS_INCOMPLETE,
-        STATUS_OK,
-        STATUS_RATE_LIMITED,
-        STATUS_REJECTED,
-        STATUS_SCHEMA_INVALID,
-        STATUS_UNPARSEABLE,
-    )
-    from . import task_outcome as _task_outcome
-    from . import task_result as _task_result
-    from . import runner_selection as _runner_selection
-    from . import probe_state as _probe_state
-    from . import dispatch_spawn as _dispatch_spawn
-    from . import runner_preflight as _runner_preflight
-    from . import task_dispatch as _task_dispatch
-except ImportError:  # pragma: no cover - direct-script import shim
-    from utils.provider_registry import (
-        SESSION_LAYER,
-        get_max_concurrent_subagents,
-        get_provider,
-        get_provider_max_concurrent,
-        get_subagent_timeout,
-        parse_model_spec,
-    )
-    from utils.providers.base import JailRequest
-    from utils.retry_ladder import (
-        FATAL_STATUSES,
-        STATUS_INCOMPLETE,
-        STATUS_OK,
-        STATUS_RATE_LIMITED,
-        STATUS_REJECTED,
-        STATUS_SCHEMA_INVALID,
-        STATUS_UNPARSEABLE,
-    )
-    from utils import task_outcome as _task_outcome  # type: ignore[no-redef]
-    from utils import task_result as _task_result  # type: ignore[no-redef]
-    from utils import runner_selection as _runner_selection  # type: ignore[no-redef]
-    from utils import probe_state as _probe_state  # type: ignore[no-redef]
-    from utils import dispatch_spawn as _dispatch_spawn  # type: ignore[no-redef]
-    from utils import runner_preflight as _runner_preflight  # type: ignore[no-redef]
-    from utils import task_dispatch as _task_dispatch  # type: ignore[no-redef]
+from . import host_capabilities as caps
+from .provider_registry import (
+    SESSION_LAYER,
+    get_max_concurrent_subagents,
+    get_provider,
+    get_provider_max_concurrent,
+    get_subagent_timeout,
+    parse_model_spec,
+)
+from . import status_file as _status_file
+from . import subagent_tasks as _subagent_tasks
+from .providers.base import JailRequest
+from .retry_ladder import (
+    FATAL_STATUSES,
+    STATUS_INCOMPLETE,
+    STATUS_OK,
+    STATUS_RATE_LIMITED,
+    STATUS_REJECTED,
+    STATUS_SCHEMA_INVALID,
+    STATUS_UNPARSEABLE,
+)
+from .review_round import record_batch_provenance
+from .subagent_tasks import task_round
+from .write_safety import AuditLog
+from . import task_outcome as _task_outcome
+from . import task_result as _task_result
+from . import runner_selection as _runner_selection
+from . import probe_state as _probe_state
+from . import dispatch_spawn as _dispatch_spawn
+from . import runner_preflight as _runner_preflight
+from . import task_dispatch as _task_dispatch
 
 
 #: Statuses mirrored into ``.status.json`` under ``progress`` (display only).
@@ -97,13 +77,6 @@ def _host_ceiling() -> Optional[int]:
     cannot answer must not turn a dispatch into a hard failure — the driver and
     provider legs of the minimum still apply.
     """
-    try:
-        from . import host_capabilities as caps
-    except ImportError:  # pragma: no cover - direct script runs
-        try:
-            import host_capabilities as caps  # type: ignore
-        except ImportError:
-            return None
     try:
         return caps.max_concurrent_subagents(caps.resolve_host_id(sys.argv[1:]))
     except Exception:  # pragma: no cover - unknown host / missing data
@@ -485,8 +458,6 @@ def run_tasks(
     )
     # The credit belongs to the bytes this dispatch holds: a round bound to it
     # merges from these rows, never from the report file.
-    from .review_round import record_batch_provenance
-
     record_batch_provenance(phase_dir, kind, report.batch_provenance)
 
     if write_report:
@@ -575,10 +546,6 @@ def _batch_provenance(
     crediting this executor with a file it never wrote
     (docs/development/review-results.md, "Consuming checked bytes").
     """
-    try:
-        from .subagent_tasks import file_bytes_sha256, task_round
-    except ImportError:  # pragma: no cover
-        from utils.subagent_tasks import file_bytes_sha256, task_round
     round_id = task_round(tasks)
     task_kinds = {
         str(task.get("task_id", index)): str(task.get("kind") or kind)
@@ -613,7 +580,8 @@ def _batch_provenance(
                  if str(t.get("task_id", i)) == task_id),
                 None,
             )
-            digest = file_bytes_sha256(
+            # Through the module, at each call: tests patch `subagent_tasks.file_bytes_sha256`.
+            digest = _subagent_tasks.file_bytes_sha256(
                 task.get("output_path") if isinstance(task, dict) else None
             )
         if row.get("sha256") and digest == row["sha256"]:
@@ -637,8 +605,6 @@ def _run_sync(coro):
         asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(coro)
-    import concurrent.futures
-
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         return pool.submit(asyncio.run, coro).result()
 
@@ -848,10 +814,6 @@ def _judge_audit_before_attempt(
     was the only record, and (before the filename split above) the write phase
     that follows it in the same phase dir promptly overwrote that file.
     """
-    try:
-        from .write_safety import AuditLog
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.write_safety import AuditLog
     audit = AuditLog(phase_dir)
 
     def before_attempt(context: Dict[str, Any]) -> None:
@@ -882,10 +844,6 @@ def _judge_audit_completed(phase_dir: str, outcome: _task_outcome.TaskOutcome) -
     """
     if not outcome.attempts:
         return
-    try:
-        from .write_safety import AuditLog
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.write_safety import AuditLog
     last = outcome.attempts[-1]
     AuditLog(phase_dir).completed(
         task_id=outcome.task_id, kind=outcome.kind, attempt=last.index,
@@ -914,10 +872,10 @@ async def _gather(
     skipped or refused by the fatal gate alike — from this loop and nowhere
     else, which is what lets :func:`run_tasks` mirror progress without a lock.
     """
-    try:
-        from .review_orchestrator_base import run_tasks_concurrent
-    except ImportError:  # pragma: no cover
-        from utils.review_orchestrator_base import run_tasks_concurrent
+    # Imported here: `review_orchestrator_base` sits a layer above (an edge in
+    # tests/test_import_layers.py KNOWN_UPWARD), and a top-level import would load
+    # the review stack with the executor.
+    from .review_orchestrator_base import run_tasks_concurrent
 
     # One flag for the whole batch, consulted at slot-acquisition time — so a
     # task already inside `dispatch_task` when it flips runs to its own verdict,
@@ -1086,10 +1044,6 @@ def _pin_sha256(tasks: Sequence[Dict[str, Any]]) -> str:
     code) say what they were judged against. A forced re-review that changes
     either is a new dispatch, not a re-dispatch.
     """
-    try:
-        from .subagent_tasks import task_round
-    except ImportError:  # pragma: no cover
-        from utils.subagent_tasks import task_round
     first_inputs = next(
         (t.get("inputs") for t in tasks if isinstance(t, dict) and t.get("inputs")),
         None,
@@ -1209,10 +1163,6 @@ def _mirror_status(
     outcomes present, so the mirror a finished batch writes is byte-identical to
     the one this wrote before it took the argument.
     """
-    try:
-        from . import status_file as _status_file
-    except ImportError:  # pragma: no cover
-        from utils import status_file as _status_file
     try:
         _status_file.update_status(phase_dir, {
             "progress": {

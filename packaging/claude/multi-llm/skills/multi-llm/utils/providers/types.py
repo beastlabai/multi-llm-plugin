@@ -15,10 +15,7 @@ from typing import Any, Dict, Optional, TYPE_CHECKING, Tuple
 if TYPE_CHECKING:  # the annotation only: base imports this module
     from .base import LLMProvider
 
-try:  # pragma: no cover - import shim mirrors the rest of utils/
-    from ..retry_ladder import STATUS_AUTH_FAILED
-except ImportError:  # pragma: no cover - direct-script import shim
-    from utils.retry_ladder import STATUS_AUTH_FAILED
+from ..retry_ladder import STATUS_AUTH_FAILED
 
 
 #: The three invocation profiles (D3e). ``generate`` is today's callee path (no

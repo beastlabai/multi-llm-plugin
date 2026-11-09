@@ -36,12 +36,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Optional, Sequence, Tuple, Union
 
-try:
-    from .atomic_io import DIR_FD_SUPPORTED, atomic_write_bytes
-    from .process_state import process_cache
-except ImportError:  # pragma: no cover - direct script runs with utils/ on path
-    from atomic_io import DIR_FD_SUPPORTED, atomic_write_bytes  # type: ignore[no-redef]
-    from process_state import process_cache  # type: ignore[no-redef]
+from .atomic_io import DIR_FD_SUPPORTED, atomic_write_bytes
+from .process_state import process_cache
 
 PathLike = Union[str, "os.PathLike[str]"]
 

@@ -25,12 +25,8 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-try:
-    from .process_state import process_cache
-    from .validation_context import SELECTION_CITED
-except ImportError:  # pragma: no cover - flat-import fallback
-    from utils.process_state import process_cache  # type: ignore[no-redef]
-    from utils.validation_context import SELECTION_CITED  # type: ignore[no-redef]
+from .process_state import process_cache
+from .validation_context import SELECTION_CITED
 
 #: The environment switch. Unset, every batch embeds the whole plan and a
 #: review-code batch carries the code windows its own issues cite; ``cited``

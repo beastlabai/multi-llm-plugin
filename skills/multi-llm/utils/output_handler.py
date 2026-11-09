@@ -8,10 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-try:
-    from .held_folder import anchor_plan_dir
-except ImportError:  # pragma: no cover - direct script runs with utils/ on path
-    from held_folder import anchor_plan_dir  # type: ignore[no-redef]
+from .held_folder import anchor_plan_dir
 
 # Phase-to-subdirectory mapping (kebab-case for on-disk directories)
 PHASE_DIRECTORIES = {
@@ -377,10 +374,7 @@ def workflow_file_entries(plan_path, *, root, output_dirs=()) -> list:
     if plan is not None:
         folders.insert(0, output_dir_path(plan))
         files.append(plan)
-        try:
-            from .plan_updater import get_tasks_file_path
-        except ImportError:  # pragma: no cover - direct-script import shim
-            from utils.plan_updater import get_tasks_file_path  # type: ignore
+        from .plan_updater import get_tasks_file_path
         try:
             named = get_tasks_file_path(plan.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError):
@@ -403,14 +397,8 @@ def workflow_file_entries(plan_path, *, root, output_dirs=()) -> list:
 
 
 def _mode_phase_names() -> tuple:
-    """``modes.phase_names()``, importable from ``utils/`` and from a script run."""
-    try:
-        import modes  # type: ignore
-    except ImportError:  # pragma: no cover - only when utils/ is sys.path[0]
-        import sys
-
-        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-        import modes  # type: ignore
+    """``modes.phase_names()``."""
+    import modes  # type: ignore
     return tuple(modes.phase_names())
 
 

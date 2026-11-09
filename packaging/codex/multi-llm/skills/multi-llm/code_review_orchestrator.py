@@ -38,18 +38,16 @@ from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Sequence, Set
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
-from utils import (
-    get_or_create_state,
-    load_prompt,
-    get_output_paths,
-    drop_non_record_entries,
-    validate_code_review_issues,
+from utils.git_utils import (
     get_files_changed_since_ref,
-    group_similar_suggestions,
-    sanitize_prefix,
     intent_to_add_untracked,
     subtract_baseline,
 )
+from utils.output_handler import get_output_paths, sanitize_prefix
+from utils.prompt_loader import load_prompt
+from utils.schema_validator import drop_non_record_entries, validate_code_review_issues
+from utils.state_manager import get_or_create_state
+from utils.suggestion_processor import group_similar_suggestions
 from utils.stream_bootstrap import bootstrap_streams
 from utils import cli_common
 from utils import prior_changes

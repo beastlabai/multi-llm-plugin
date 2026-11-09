@@ -19,24 +19,15 @@ import sys
 import threading
 from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
 
-try:  # pragma: no cover - import shim mirrors the rest of utils/
-    from .process_state import process_cache
-    from . import landlock_dispatch
-    from .providers.base import (
-        SANDBOX_WRITE_FALLBACK_PROFILES,
-        WritePostureConsent,
-        host_write_posture_consent,
-        SANDBOX_RUNG_UNSANDBOXED,
-    )
-except ImportError:  # pragma: no cover - direct-script import shim
-    from utils.process_state import process_cache  # type: ignore
-    from utils import landlock_dispatch  # type: ignore[no-redef]
-    from utils.providers.base import (
-        SANDBOX_WRITE_FALLBACK_PROFILES,
-        WritePostureConsent,
-        host_write_posture_consent,
-        SANDBOX_RUNG_UNSANDBOXED,
-    )
+from . import host_capabilities as caps
+from .process_state import process_cache
+from . import landlock_dispatch
+from .providers.base import (
+    SANDBOX_WRITE_FALLBACK_PROFILES,
+    WritePostureConsent,
+    host_write_posture_consent,
+    SANDBOX_RUNG_UNSANDBOXED,
+)
 
 
 #: Process-local version cache: detected once per *distinct* runner, never per
@@ -378,20 +369,13 @@ def _current_host_id() -> str:
 def _host_nested_exec() -> Optional[Tuple[str, Dict[str, str], str]]:
     """``(host_id, {leg: state}, notes)`` for the running host, or ``None``.
 
-    ``None`` means the capability data could not be read at all (a partial
-    install, a direct script run without ``utils`` importable). That is the one
+    ``None`` means the capability data could not be read at all (an unknown
+    host, missing data). That is the one
     case where the nested-exec leg is skipped outright rather than probed: a
     throwaway dispatch is a real billed turn, and "I do not know which host I am
     on" is not a reason to spend one — nor to refuse, since the legs it would
     have answered are exactly the ones the reactive D3k ladder still catches.
     """
-    try:
-        from . import host_capabilities as caps
-    except ImportError:  # pragma: no cover - direct script runs
-        try:
-            import host_capabilities as caps  # type: ignore
-        except ImportError:
-            return None
     try:
         host_id = caps.resolve_host_id(sys.argv[1:])
         declared = caps.nested_exec(host_id)

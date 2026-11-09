@@ -1062,10 +1062,7 @@ def is_refused_result_envelope(data: Any) -> bool:
     """
     if not isinstance(data, dict):
         return False
-    try:
-        from .providers.result_envelope import envelope_verdict
-    except ImportError:  # the flat import style ``utils/llm_client._redact`` also allows
-        from utils.providers.result_envelope import envelope_verdict
+    from .providers.result_envelope import envelope_verdict
     return bool(envelope_verdict(data))
 
 
