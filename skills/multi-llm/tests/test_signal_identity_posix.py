@@ -819,8 +819,8 @@ class TestTheLaunchRecord:
         assert not recording.exists()
 
 
-# runner_env, from the executor's own tests: mock provider CLIs on PATH.
-from tests.test_subagent_executor import runner_env  # noqa: E402,F401
+# runner_env (mock provider CLIs on PATH) comes from tests.support, through
+# conftest's pytest_plugins.
 
 
 # ---------------------------------------------------------------------------
