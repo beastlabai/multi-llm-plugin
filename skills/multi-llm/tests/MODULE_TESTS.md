@@ -200,13 +200,16 @@ cannot be narrowed by this map: choose by the file names or run the CI command.
 | `utils/validation_sections.py` | 1 | `test_validation_sections.py` |
 | `utils/verification_lines.py` | 1 | `test_write_batch_scheduler_moved_names.py` |
 | `utils/wakeup_check.py` | 3 | `test_wakeup_check.py`, `test_hook_transcript_settle.py`, `test_report_check_composite.py` |
-| `utils/write_batch_scheduler.py` | 56 | **hub**, cannot narrow: `test_write_batch_scheduler_moved_names.py`, `test_accepted_check_rerun.py`, `test_accepted_finding_note.py`, `test_accepted_finding_restate.py`, `test_accepted_findings_scope.py`, `test_applied_without_changes.py`, `test_apply_fix_known_checks.py`, `test_apply_orchestrator_base.py`, `test_batch_own_check.py`, `test_check_always_reported.py`, `test_check_repeats_finding.py`, `test_code_fix_prior_batches.py`, +44 more |
+| `utils/write_batch_scheduler.py` | 56 | **hub**, cannot narrow: `test_write_batch_scheduler_moved_names.py`, `test_accepted_check_rerun.py`, `test_accepted_finding_note.py`, `test_accepted_finding_restate.py`, `test_accepted_findings_scope.py`, `test_apply_fix_known_checks.py`, `test_apply_orchestrator_base.py`, `test_batch_own_check.py`, `test_check_always_reported.py`, `test_check_repeats_finding.py`, `test_code_fix_prior_batches.py`, `test_commit_apply.py`, +44 more |
+| `utils/write_context.py` | 1 | `test_write_batch_scheduler_moved_names.py` |
 | `utils/write_outcomes.py` | 2 | `test_write_outcomes.py`, `test_write_batch_scheduler_moved_names.py` |
 | `utils/write_phase_bridge.py` | 45 | **hub**, cannot narrow: `test_apply_code_fixes_unit.py`, `test_apply_fix_known_checks.py`, `test_apply_suggestions_integration.py`, `test_batch_done.py`, `test_batch_snapshot.py`, `test_clipped_previews.py`, `test_code_fix_prior_batches.py`, `test_commit_write_policy.py`, `test_implement_continues_a_started_run.py`, `test_implement_orchestrator.py`, `test_native_apply_count_over_the_run.py`, `test_native_apply_view_names_declined_items.py`, +33 more |
 | `utils/write_prompt.py` | 11 | `test_write_prompt.py`, `test_selected_tasks_and_check_trees.py`, `test_apply_fix_known_checks.py`, `test_apply_suggestions_integration.py`, `test_batch_snapshot.py`, `test_code_fix_prior_batches.py`, `test_commit_write_policy.py`, `test_prior_batches_named_by_id.py`, `test_prompt_files_stay_inside.py`, `test_scope_policy_apply.py`, `test_write_executor_orchestrators.py` |
 | `utils/write_record.py` | 1 | `test_write_record.py` |
 | `utils/write_safety.py` | 25 | `test_batch_ledger.py`, `test_check_gate_fixture.py`, `test_commit_apply.py`, `test_commit_write_policy.py`, `test_cursor_auth_probe.py`, `test_implement_continues_a_started_run.py`, `test_next_step_relay_rules.py`, `test_plugin_landlock_acceptance.py`, `test_policy_way_forward.py`, `test_probe_output_redaction.py`, `test_redaction.py`, `test_redaction_pem_scanner.py`, +13 more |
+| `utils/write_sweep.py` | 5 | `test_applied_without_changes.py`, `test_commit_write_policy.py`, `test_stop_resume_wording.py`, `test_write_batch_scheduler_moved_names.py`, `test_write_executor.py` |
 | `utils/write_verdict.py` | 1 | `test_write_verdict_table.py` |
+| `utils/write_verify.py` | 1 | `test_write_batch_scheduler_moved_names.py` |
 | `utils/yaml_io.py` | 3 | `test_yaml_io.py`, `test_process_state.py`, `test_read_only_modes.py` |
 
 ## Declared routes

@@ -475,7 +475,7 @@ def copy_protected(paths: Iterable[str], *, cwd: str, dest: str,
     A path ``driver.write_paths.deny`` names (``.env``, ``**/*.pem``,
     ``**/.ssh/**``, ``.multi-llm/**``) is never copied, and a copy an earlier
     run left of it is removed, as the executor's rollback store never retains
-    one (``write_batch_scheduler._retain``): the deny list exists to keep that
+    one (``write_sweep.ContainmentSweep.retain``): the deny list exists to keep that
     material out of the run's artifacts, and a copy here would put a
     credential under ``apply-fixes/protected/`` whether or not a batch ever
     touches it. Such a path stays protected and watched, so a batch that

@@ -181,11 +181,11 @@ the whole phase (F13, 2026-09-16): `_begin_sweep` used to union every dispatch's
 set for the run's lifetime, so once any task declared a path a LATER task's undeclared write to that
 same path stayed invisible for the rest of the phase — it only ever needed to cover a co-scheduled
 sibling declaring its own files while THIS task is being classified, so
-`_begin_sweep`/`_undeclared_writes` now add a task's declared set on dispatch and remove
+`ContainmentSweep.begin`/`undeclared_writes` now add a task's declared set on dispatch and remove
 it on classification instead.
 
 **The rollback store reads each file once, through the descriptor the policy was asked about**
-(Codex review of U57, 2026-11-08). The retention pass (`_store_blob`) keeps its resolving policy
+(Codex review of U57, 2026-11-08). The retention pass (`ContainmentSweep.store_blob`) keeps its resolving policy
 check, then opens the file with `WritePolicy.open_permitted` and hashes and copies from that one
 read, so a blob always holds the bytes its name is the digest of. Before, the resolving check asked
 about the root on its first resolution only, and the default `allow: ["**"]` matches any path, so
@@ -475,7 +475,7 @@ name taken and was refused. Now:
   its name, is not the restore's and is never recorded.
 - `restore_leftovers(root)` reads the record; `RestoreLeftovers.holds(path)` is true only for a
   recorded path whose entry, never followed, has the recorded identity. The scheduler's census
-  (`WriteBatchScheduler._census`) skips those entries and hands back the paths it skipped, and the
+  (`ContainmentSweep.census`) skips those entries and hands back the paths it skipped, and the
   differences between a batch's first and final census (`_swept_moves`) leave those paths out on
   both sides: a file the first census saw before the restore recorded it is then neither a new nor
   a deleted file, never adopted (with `existed=True`, which would send it to the replace leg) and
@@ -504,7 +504,7 @@ the first census retained. The porcelain write check, taken in the same instant,
 later absence from its snapshot as a write of the slot's (detection only, nothing is removed). A
 `CopyFile2` copy, made by its name, has no identity from before it was made.
 
-**The store's discard removes it whole, or names what it cannot.** `_discard_rollback_store` used
+**The store's discard removes it whole, or names what it cannot.** `ContainmentSweep.discard_store` used
 `shutil.rmtree(..., ignore_errors=True)`, and Windows will not delete a read-only file, which a blob
 is when its file was (`CopyFile2` keeps the attribute), so there the store outlived the run, silently.
 `write_safety.remove_tree` removes each entry itself, never what a link there leads to
@@ -557,7 +557,7 @@ base commit — created, then removed — is left out and said, fix round 8; one
 kept as `deleted` under the phase whose census found it, fix round 9), a path they hold
 is not claimed again, any other label is replaced.
 
-It is recorded as each code batch finishes (`WriteBatchScheduler._record_batch_tracking`, in memory through the run's own
+It is recorded as each code batch finishes (`VerifyStep.record_batch_tracking`, in memory through the run's own
 `StateManager`; `util batch-done` on the native leg, census only), so a run that stops
 part-way has recorded its finished batches, and a resume's `--touched` set carries the
 earlier runs' `ok` report rows (`ApplyPhaseReport.touched_files`).

@@ -594,16 +594,16 @@ def test_a_batch_that_changed_its_declared_file_walks_the_tree_twice(env):
     the answer is already "applied", so it takes no census of its own: the
     sweep's census before the dispatch and its census after are the only two
     walks (WRITE-14)."""
-    from utils.write_batch_scheduler import WriteBatchScheduler
+    from utils.write_sweep import ContainmentSweep
 
     walks = []
-    census = WriteBatchScheduler._census
+    census = ContainmentSweep.census
 
     def counted(self, *args, **kwargs):
         walks.append(1)
         return census(self, *args, **kwargs)
 
-    env.monkeypatch.setattr(WriteBatchScheduler, "_census", counted)
+    env.monkeypatch.setattr(ContainmentSweep, "census", counted)
     env.edits([_patch_edit(env.plan)], result=APPLIED_S0)
     outcome = env.scheduler([env.apply_task(0)], finalize=False).run().outcomes[0]
     assert outcome.status == executor.STATUS_OK, outcome.reason

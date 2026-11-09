@@ -275,7 +275,7 @@ def native_stop_unverified_line(plan_path: Union[str, Path]) -> Optional[str]:
 
     Fix round 18 (live run 7, Claude Code stop 01): the native leg's stop
     printed no "Nothing ran this repository's tests" line at all — the
-    executor leg's stop says it (:meth:`WriteBatchScheduler._note_unverified_on_stop`),
+    executor leg's stop says it (``write_verify.VerifyStep.note_unverified_on_stop``),
     and the Claude Code host wrote its own from the instructions. ``util
     next-command`` prints this one as ``[TESTS_NOT_RUN]`` beside a stopped
     implement's ``--resume``. The executor's rule, read from ``state.json``

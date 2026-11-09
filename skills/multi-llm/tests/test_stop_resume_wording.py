@@ -235,11 +235,11 @@ class TestAMoveWithNoRollbackPointIsStillAMove:
         )
 
     def test_a_partial_that_moved_only_an_unrestorable_file_says_so(self, env):
-        from utils import write_batch_scheduler as wbs
+        from utils import write_sweep
 
         # The store keeps no bytes for a file over the per-file cap; a small
         # cap stands in for a 16 MB file.
-        env.monkeypatch.setattr(wbs, "MAX_SNAPSHOT_BYTES", 64)
+        env.monkeypatch.setattr(write_sweep, "MAX_SNAPSHOT_BYTES", 64)
         big = env.root / "big.bin"
         big.write_bytes(b"x" * 100)
         env.edits([_patch_edit(big, "more\n")],

@@ -246,9 +246,9 @@ an implement task's failing own check is also on record in `state.json`'s
 review-code's implementation record read it through `StateManager.implementation_batch_check_findings`, fix round 15).
 
 A code phase that finished with no `driver.verify_command` — or, since fix round 16, stopped after
-one of its tasks applied an edit (`_note_unverified_on_stop`, every stop path; run 6's stop 01 said
+one of its tasks applied an edit (`VerifyStep.note_unverified_on_stop`, every stop path; run 6's stop 01 said
 nothing; fix round 17: an edit, so a check or a task answered `=done` alone does not
-count, and `_run_verification` asks the same `_phase_has_applied_batches` question) — carries
+count, and `VerifyStep.run` asks the same `phase_has_applied_batches` question) — carries
 `SchedulerResult.unverified` (`unverified_line`: nothing ran the tests, add `verify_command`
 under `driver:`, naming `verify_command_candidate`'s command — package.json
 `scripts.test` by lockfile, a Makefile `test:` target, Cargo, Go, pytest

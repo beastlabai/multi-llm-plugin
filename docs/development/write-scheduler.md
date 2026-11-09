@@ -22,11 +22,13 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 
 ## Where the scheduler's helpers live
 
-**`utils/write_batch_scheduler.py` is the loop; what both legs share lives in seven modules below
-it.** The scheduler holds `WriteBatchScheduler`, `SchedulerResult`, `run_write_phase` and the
-constants and helpers only the loop reads. The helpers that the executor's loop, `util
-write-prompt`, `util batch-done`, implement's native handoff and `status` all call live in seven
-modules, lowest first. Each imports only the ones before it, and none imports the scheduler:
+**`utils/write_batch_scheduler.py` is the loop; what both legs share, and the parts of the loop
+that stand on their own, live in ten modules below it.** The scheduler holds `WriteBatchScheduler`,
+`SchedulerResult`, `run_write_phase` and the constants and helpers only the loop reads. The helpers
+that the executor's loop, `util write-prompt`, `util batch-done`, implement's native handoff and
+`status` all call live in the first seven modules, lowest first; the last three are the
+scheduler's collaborators (below the table). Each imports only the ones before it, and none
+imports the scheduler:
 
 | Module | What it owns |
 |--------|--------------|
@@ -37,6 +39,9 @@ modules, lowest first. Each imports only the ones before it, and none imports th
 | `utils/stop_answers.py` | A stop's answers and the resume's why on both legs (`compose_stop_answers`, `native_stop_answers`, `compose_resume_why`, `native_resume_why`) and its headline (`fit_stop_headline`). |
 | `utils/batch_prompt.py` | The dispatched prompt: `bind_prior_changes`, `with_result_contract` and the contract texts it appends, where a dispatched prompt is kept, and the code write kinds. |
 | `utils/write_outcomes.py` | The partial-application and resume rules around the verdict table, pure over `TaskOutcome`: the outcome of a dispatch the table never saw (`classify_attempt`, `partial_when_bytes_moved`), whether a `--human-task <batch>=skip` answer can keep a stopped batch (`check_partial_skips`, `partial_skip_refusal`), and what a stop's plain `--resume` does (`resume_why` over a `ResumeContext`). The scheduler reads what is on disk and passes it in, lazily. |
+| `utils/write_context.py` | `RunContext`, the frozen record of one run a collaborator may read (kind, phase, folders, repository root, anchor, tasks, the run's `StateManager`, write policy, audit log, log, summary file, dry run). |
+| `utils/write_verify.py` | `VerifyStep`: whether a task of the phase applied an edit still owed a check (`phase_has_applied_batches`), `driver.verify_command` after the last batch (`run`, `verification_message`), the "nothing ran the tests" line on a stop (`note_unverified_on_stop`), and `tracked_files` after each batch and at the end (`record_batch_tracking`, `finalize_tracking`, `touched_files`). Stateless. |
+| `utils/write_sweep.py` | `ContainmentSweep`, the post-run containment sweep and its rollback store (D3l, [write safety](write-safety.md)): each dispatch's census, retained bytes and declared set (`begin`), the undeclared writes it closes with (`undeclared_writes`), the read-only peek (`moved_since_dispatch`), the store's closing line and discard; `UndeclaredWrites` and the sweep's budgets (`SWEEP_MAX_FILES`, `SWEEP_RETAIN_MAX_BYTES`). Its state and lock are its own. |
 
 **The scheduler re-exports every moved name for reading only** (`write_batch_scheduler._MOVED`, the
 contract `git_utils` and `run_status` already follow): `write_batch_scheduler.X` returns the owner's
@@ -44,8 +49,37 @@ current object, and a patch of `write_batch_scheduler.X` reaches no code. The sc
 helper modules read a moved name through its owner at each call (`_check_records.decomposition_graph`),
 never a copy, so one patch of the owner reaches them all. Patch the owner:
 `tests/test_write_batch_scheduler_moved_names.py` fails a test that patches a moved name on the
-scheduler, and holds the layering. `tests/test_import_layers.py` puts all seven at L3, and
+scheduler, and holds the layering. `tests/test_import_layers.py` puts all ten at L3, and
 `utils/batch_ledger.py` beside them ([A batch's records](#a-batchs-records)).
+
+**The scheduler composes its collaborators; it does not share `self` with them** (WRITE-5). It
+builds one `RunContext` in `__init__` and hands it to each collaborator it owns: `self._verify`
+(`VerifyStep`) and `self._sweep` (`ContainmentSweep`). The context holds the scheduler's own
+objects, not copies. Four rules hold across the split:
+
+- **One writer of `state.json`.** `ctx.state` is the run's one `StateManager`. A collaborator
+  writes through it under the lock the scheduler hands it (`VerifyStep` gets `_effects_lock`) and
+  never reloads it; `_finalize` still owns `_reload_state` after `finalize_tracking`.
+- **The order of the effects is the loop's.** The collaborators are called from the same places,
+  in the same order, as the methods they replace: `_record_batch_effects`, `_dispatch_one`'s
+  `finally` (`ContainmentSweep.abandon`), `_finalize` and `_end_run` are unchanged around them.
+- **The sweep's lock is the sweep's.** Census registration and closing stay atomic under it;
+  the scheduler reads in-flight dispatches through `in_flight()`, `has_census()` and
+  `clear_in_flight()`, never its dictionaries.
+- **What the collaborator calls back is named.** `VerifyStep` gets the scheduler's
+  `_run_verify_command`, `_unverified_text`, `_set_stop_headline` and `_task_by_id` as callables
+  bound at each call (`WriteBatchScheduler._late`), and `ctx.log` reaches the scheduler's current
+  `log`, so `_dispatch_walk`'s quieted log quiets them too.
+
+A test that drives the sweep through the scheduler can still call `_begin_sweep`, `_census`,
+`_retain`, `_blob_path`, `_undeclared_writes`, `_moved_since_dispatch` and
+`_discard_rollback_store`, which forward to `self._sweep`. A patch belongs on the collaborator
+(`scheduler._sweep`, `write_sweep.ContainmentSweep`, `write_sweep.SWEEP_MAX_FILES`): the
+collaborator's own calls never pass through the scheduler. `_begin_sweep` and
+`_undeclared_writes` stay the scheduler's seams: `_begin_sweep` publishes the dispatch in flight
+after the census, and `_classify` calls `_undeclared_writes`, which
+`tests/test_write_verdict_table.py` stands in for. The command runner (`_run_verify_command`,
+`_kill_verify_tree`) stays on the scheduler for now.
 
 ## Write scheduler contract
 
@@ -315,7 +349,7 @@ A resume skip also moves the task's `task_status` to `completed` (reason
 `failed`/`in_progress` tasks beside `pending` ones (F2: a
 cleanly failed task was dropped from the resumed run and the phase completed without it), and
 `driver.verify_command` re-runs on a resume that dispatched nothing whenever `state.json`
-records an applied batch for the phase (`_phase_has_applied_batches`, F3: the `--resume` the
+records an applied batch for the phase (`VerifyStep.phase_has_applied_batches`, F3: the `--resume` the
 exit-3 message prescribes after a failed check used to stamp the phase completed without running
 it).
 
@@ -390,7 +424,7 @@ under the state home, racing run 4), so degradation toward the cap is visible be
 being skipped rather than only once they are, and the wording no longer claims the bytes are still
 there one statement after they are deleted (F12, 2026-09-16).
 
-That total is honest across an inherited store too (F12, 2026-09-16): `_store_blob` used to
+That total is honest across an inherited store too (F12, 2026-09-16): `ContainmentSweep.store_blob` used to
 return early for a blob already on disk — this run's own earlier copy, or one a killed run's store
 left behind — without adding its size to the running total, so a run that reused a killed run's
 store reported `0.1 MB of 64 MB` for a directory that measured 47 MB and the cap went
@@ -781,7 +815,7 @@ recorded), so all seven stay.
   survive the round trip.
 - **What a phase changed.** `touched_files(rows, include_partial=...)` is the one reader of
   `files_touched`, over report rows or `TaskOutcome`s, and its call states the filter:
-  `tracked_files` (`WriteBatchScheduler._touched_files`) and implement's handed-back files take the
+  `tracked_files` (`VerifyStep.touched_files`) and implement's handed-back files take the
   `ok` rows only, so a stopped batch's half-applied edits are never recorded as the phase's code;
   an apply's handed-back files (`ApplyPhaseReport.touched_files`, the improve workflow's summary)
   include the partial applications, whose edits the stop keeps. `BatchLedger(phase_dir)` reads the

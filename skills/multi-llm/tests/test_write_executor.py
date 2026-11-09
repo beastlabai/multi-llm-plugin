@@ -1708,8 +1708,8 @@ class TestVerificationOnlyImplementTask:
         so with no census it is refused and the runner never starts."""
         index = env.root / "index.html"
         index.write_text("<p>orig</p>\n", encoding="utf-8")
-        import utils.write_batch_scheduler as wbs
-        monkeypatch.setattr(wbs, "SWEEP_MAX_FILES", 0)
+        import utils.write_sweep as write_sweep
+        monkeypatch.setattr(write_sweep, "SWEEP_MAX_FILES", 0)
         env.edits([_patch_edit(index, "<p>rewritten</p>\n")],
                   result={"status": "applied", "ids": ["T009"],
                           "files_touched": ["index.html"], "summary": "did it"})
@@ -1730,10 +1730,10 @@ class TestVerificationOnlyImplementTask:
         itself pushed the tree past the cap (an `npm install`), so the
         post-run census is None. "Could not look" is a failed batch, never
         VERIFIED."""
-        import utils.write_batch_scheduler as wbs
+        import utils.write_sweep as write_sweep
         scheduler = env.scheduler([self._task(env)], kind="implement",
                                   finalize=False)
-        monkeypatch.setattr(wbs, "SWEEP_MAX_FILES", len(scheduler._census()))
+        monkeypatch.setattr(write_sweep, "SWEEP_MAX_FILES", len(scheduler._census()))
         env.edits([{"path": str(env.root / "node_modules" / "x.js"),
                     "mode": "create", "content": "x\n"}],
                   result={"status": "applied", "ids": ["T009"],
@@ -4939,10 +4939,10 @@ class TestTheRollbackStoreWarningNamesItsFiles:
     design)."""
 
     def test_a_file_past_the_cap_is_named_with_its_reason(self, env, monkeypatch):
-        import utils.write_batch_scheduler as scheduler_module
+        import utils.write_sweep as write_sweep
 
         (env.root / "big.bin").write_bytes(b"x" * 64)
-        monkeypatch.setattr(scheduler_module, "MAX_SNAPSHOT_BYTES", 32)
+        monkeypatch.setattr(write_sweep, "MAX_SNAPSHOT_BYTES", 32)
         lines = []
         env.edits([_patch_edit(env.plan)],
                   result={"status": "applied", "ids": ["s0"],
@@ -5069,14 +5069,14 @@ class TestTheRollbackStoreBudgetCountsBlobsAlreadyOnDisk:
         shutil.copy2(absolute, blob)
         assert scheduler._retained_bytes == 0
 
-        returned = scheduler._store_blob(relative, stamp)
+        returned = scheduler._sweep.store_blob(relative, stamp)
         assert returned == digest
         assert scheduler._retained_bytes == info.st_size
 
         # A second call for the same content (a re-hash after an edit then a
         # revert, or a second relative path with identical bytes) must not
         # double-count it — the store is content-addressed once.
-        again = scheduler._store_blob(relative, stamp)
+        again = scheduler._sweep.store_blob(relative, stamp)
         assert again == digest
         assert scheduler._retained_bytes == info.st_size
 
@@ -5089,10 +5089,10 @@ class TestTheRollbackStoreBudgetCountsBlobsAlreadyOnDisk:
         stamp = (info.st_size, info.st_mtime_ns)
 
         scheduler = env.scheduler([env.apply_task(0)])
-        digest = scheduler._store_blob(relative, stamp)
+        digest = scheduler._sweep.store_blob(relative, stamp)
         assert digest is not None
         assert scheduler._retained_bytes == info.st_size
-        assert scheduler._store_blob(relative, stamp) == digest
+        assert scheduler._sweep.store_blob(relative, stamp) == digest
         assert scheduler._retained_bytes == info.st_size
 
     def test_a_run_that_inherits_a_killed_runs_store_counts_its_bytes_too(
@@ -5124,7 +5124,7 @@ class TestTheRollbackStoreBudgetCountsBlobsAlreadyOnDisk:
         second = env.scheduler(
             [env.apply_task(1, expected_ids=["s0"])], log=lines.append,
         )
-        second._discard_rollback_store = lambda: None
+        second._sweep.discard_store = lambda: None
         result = second.run()
         assert result.exit_code == 0, result.messages
         assert second._retained_bytes >= inherited_bytes

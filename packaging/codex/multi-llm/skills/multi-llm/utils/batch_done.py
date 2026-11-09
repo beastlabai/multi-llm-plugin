@@ -510,7 +510,7 @@ def _tracked_after_batch(
     phases edit are never tracked. Never fatal: the batch record is this
     command's job.
     """
-    from .write_batch_scheduler import load_finalize_tracking
+    from .write_verify import load_finalize_tracking
     from .batch_prompt import CODE_WRITE_KINDS
     if kind not in CODE_WRITE_KINDS:
         return None

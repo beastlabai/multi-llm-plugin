@@ -311,7 +311,7 @@ def test_a_phase_path_swapped_inside_the_retention_pass_stops_it_at_the_next_fil
     saved = env.phase_dir.with_name("saved-phase")
     forged = tmp_path / "forged"
     forged.mkdir()
-    store = scheduler._store_blob
+    store = scheduler._sweep.store_blob
     copied = []
 
     def store_then_swap(relative, stamp):
@@ -326,7 +326,7 @@ def test_a_phase_path_swapped_inside_the_retention_pass_stops_it_at_the_next_fil
             saved.rename(env.phase_dir)
         return result
 
-    monkeypatch.setattr(scheduler, "_store_blob", store_then_swap)
+    monkeypatch.setattr(scheduler._sweep, "store_blob", store_then_swap)
     with pytest.raises(write_safety.WriteSafetyError, match="trusted phase identity"):
         scheduler._retain(census)
     assert copied == ["p.md", "a.py"]
@@ -454,7 +454,7 @@ def test_a_file_changed_between_its_hash_and_its_copy_stores_the_bytes_hashed(
     digest = hashlib.sha256(target.read_bytes()).hexdigest()
     secret = tmp_path / "outside" / "between.txt"
     secret.write_bytes(b"bytes linked in between the hash and the copy\n")
-    blob_path = scheduler._blob_path
+    blob_path = scheduler._sweep.blob_path
     fired = []
 
     def name_the_blob(name: str) -> str:
@@ -469,7 +469,7 @@ def test_a_file_changed_between_its_hash_and_its_copy_stores_the_bytes_hashed(
                 target.symlink_to(secret)
         return blob_path(name)
 
-    monkeypatch.setattr(scheduler, "_blob_path", name_the_blob)
+    monkeypatch.setattr(scheduler._sweep, "blob_path", name_the_blob)
     kept = scheduler._retain(census)
 
     assert fired

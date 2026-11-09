@@ -156,12 +156,15 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.verification_lines",
         "utils.wakeup_check",
         "utils.write_batch_scheduler",
+        "utils.write_context",
         "utils.write_phase_bridge",
         "utils.write_prompt",
         "utils.write_record",
         "utils.write_outcomes",
         "utils.write_safety",
+        "utils.write_sweep",
         "utils.write_verdict",
+        "utils.write_verify",
     )),
     4: ("domain", (
         "utils",  # the re-export barrel
@@ -277,8 +280,8 @@ KNOWN_UPWARD: Dict[Tuple[str, str], str] = {
         "belong in routes, manual-tasks and command-words modules",
     ("full_workflow_orchestrator", "utils.next_phase"):
         "commit_mode_word, commit_view_for: belong in a command-words module at L4",
-    # The scheduler reaches up for tracking, its commit-guard helpers for the guard.
-    ("utils.write_batch_scheduler", "finalize_tracking"):
+    # The scheduler's verify step reaches up for tracking, its commit-guard helpers for the guard.
+    ("utils.write_verify", "finalize_tracking"):
         "the tracking body: belongs in a utils module; the script stays a thin CLI",
     ("utils.commit_write_guard", "utils.commit_apply"):
         "save_guard, recheck_files, repin_after_batch and the rest of the commit guard: "
