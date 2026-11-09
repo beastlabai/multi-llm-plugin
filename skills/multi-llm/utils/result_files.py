@@ -97,6 +97,15 @@ UNCHECKED_MODELS_KEY = "models_unchecked"
 #: outranks checks that never finished.
 WITHHELD_KEYS = (REJECTED_MODELS_KEY, UNCHECKED_MODELS_KEY)
 
+#: The ``models_unchecked`` reason of an ask slot whose checks passed but whose
+#: run failed, leaving an unfinished answer at its answer path that could be
+#: neither moved nor copied aside: withheld like an unchecked answer until a
+#: later slot replaces it or ``--accept-partial`` counts it
+#: (docs/development/workflows.md#ask-mode).
+UNFINISHED_ANSWER_REASON = (
+    "its run failed, and its unfinished answer could not be set aside"
+)
+
 #: ``{name: (mtime_ns, size)}`` of a phase dir's candidate files.
 Snapshot = Dict[str, Tuple[int, int]]
 
@@ -361,6 +370,8 @@ class Withheld(NamedTuple):
         if self.rejected:
             return "failed its safety checks"
         if self.key == UNCHECKED_MODELS_KEY:
+            if self.reason == UNFINISHED_ANSWER_REASON:
+                return "left an unfinished answer"
             return "ended before its safety checks passed"
         return "cannot be shown to have passed its safety checks"
 
@@ -518,6 +529,34 @@ def clear_unchecked_model(phase_dir: os.PathLike | str, model_spec: str) -> bool
         return model_spec not in unchecked_models(phase_dir)
     except CheckpointUnreadable:
         return False
+
+
+def clear_withheld_model(phase_dir: os.PathLike | str, model_spec: str) -> bool:
+    """Take *model_spec* out of both withheld maps; whether it is out of both
+    now (read back). For the operator's own choice only, never a slot's: ask's
+    ``--accept-partial`` counting a withheld model's partial. ``True`` with no
+    checkpoint; ``False``, writing nothing, over one that cannot be read."""
+    phase_dir = str(phase_dir)
+    with _status_file.checkpoint_lock(phase_dir):
+        try:
+            status = _status_file.load_status(phase_dir)
+        except CheckpointUnreadable:
+            return False
+        if status is None:
+            return True
+        rejected = _recorded_in(status, REJECTED_MODELS_KEY)
+        unchecked = _recorded_in(status, UNCHECKED_MODELS_KEY)
+        if model_spec in rejected or model_spec in unchecked:
+            rejected.pop(model_spec, None)
+            unchecked.pop(model_spec, None)
+            _status_file.update_status(phase_dir, {
+                REJECTED_MODELS_KEY: rejected, UNCHECKED_MODELS_KEY: unchecked,
+            })
+    try:
+        recorded = recorded_withheld(phase_dir)
+    except CheckpointUnreadable:
+        return False
+    return not any(model_spec in recorded[key] for key in WITHHELD_KEYS)
 
 
 def rejected_result_note(model_spec: str, reason: str) -> str:

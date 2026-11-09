@@ -99,7 +99,7 @@ from utils.detach import (
     record_output_files,
     report_progress,
 )
-from utils.progress_tracker import FanoutProgress, PhaseProgress
+from utils.progress_tracker import DEADLINE_ERROR, FanoutProgress, PhaseProgress
 from utils.review_orchestrator_base import (
     backfill_deadline_losses,
     flip_map_entries_to_done,
@@ -113,7 +113,19 @@ from utils.review_orchestrator_base import (
     update_status,
     write_status,
 )
+from utils import result_files as _result_files
+from utils import status_file as _status_file
+from utils.review_lane import (
+    CHECKED_KEY,
+    REJECTED_KEY,
+    UNRECORDED_REASON,
+    arm_slot,
+    clear_unchecked_slot,
+    slot_results,
+    withheld_record,
+)
 from utils.slot_guard import Refused, SlotGuard
+from utils.text_clip import plain_line
 
 # Prompt template filename
 ASK_PROMPT_FILE = "ask.txt"
@@ -874,20 +886,169 @@ def set_violated_answer_aside(model_spec: str, answer_path: str) -> bool:
     the operator's evidence. Returns whether the answer path no longer holds
     the file. ``False`` (with a ``WARNING``) means the move failed and the file
     is still there: the caller adds the spec to ``answers_left_in_place``, so
-    the scan withholds it and the slot stays failed.
+    the scan withholds it and the slot stays failed, and the ``models_rejected``
+    record the caller wrote first keeps it out of every later run.
+
+    The move is attempted directly, with no existence check first: only the
+    rename's own ``FileNotFoundError`` shows the path free. Any other error,
+    a metadata one included, says nothing about whether the file is there
+    (docs/development/workflows.md#ask-mode).
     """
-    if not os.path.exists(answer_path):
-        return True
     target = answer_path + ".violated"
     try:
         os.replace(answer_path, target)
+    except FileNotFoundError:
         return True
     except OSError as e:
         print(f"WARNING: could not move {model_spec}'s answer file, from a slot "
               f"that failed its checks, to {os.path.basename(target)}: {e}. It "
-              "was left in place and is not counted; move it aside by hand "
-              "before a resume, which would count it as an answer.")
+              "was left in place and is not counted.")
         return False
+    return True
+
+
+def reject_answer(question_dir: str, model_spec: str, reason: str, answer_path: str) -> bool:
+    """A slot the guard's checks failed: its answer refused for good, ask's
+    copy of ``review_lane.reject_slot_answer`` (no salvage pair here).
+
+    The model is recorded under ``models_rejected`` first
+    (``result_files.record_rejected_model``, read back), so whatever fails
+    next, a resume and every later closing scan refuse its file; then the
+    file is set aside (:func:`set_violated_answer_aside`). Returns whether the
+    answer path no longer holds the file. When it still does and nothing
+    durable records the model (this record failed, and the one the slot armed
+    before its dispatch is gone), the close stops the run before ``answers.md``
+    (``AskRun.close``). Never raises: the slot's own failed ending follows.
+    """
+    recorded = False
+    try:
+        recorded = _result_files.record_rejected_model(question_dir, model_spec, reason)
+    except Exception:  # noqa: BLE001 - another record, or the warning below
+        pass
+    if set_violated_answer_aside(model_spec, answer_path):
+        return True
+    if not recorded:
+        try:
+            recorded = _result_files.withheld_models(question_dir).recorded(model_spec)
+        except Exception:  # noqa: BLE001 - nothing durable, said below
+            recorded = False
+    if not recorded:
+        print(f"WARNING: nothing durable records that {model_spec}'s slot failed "
+              f"its safety checks either, so the run stops before answers.md")
+    return False
+
+
+def set_withheld_answer_aside(
+    model_spec: str, answer_path: str, withheld: "_result_files.Withheld",
+) -> bool:
+    """Before a withheld model is asked again: the answer file an earlier slot
+    left, one whose checks failed or never finished, set aside so that only
+    this slot's own can be read at that path (docs/development/workflows.md#ask-mode).
+
+    A rejected model's file goes to ``answer_<model>.md.violated``
+    (:func:`set_violated_answer_aside`), an unchecked one's to
+    ``answer_<model>.md.unchecked``; never deleted. Returns whether the path
+    is shown free of it: renamed, or shown absent by the rename's own
+    ``FileNotFoundError``. Nothing reads the file's metadata first, so no
+    metadata error can pass for an absence; any other error returns
+    ``False``, and so does a checkpoint that cannot be read (nothing is
+    renamed then), so the slot is not dispatched."""
+    if withheld.rejected:
+        return set_violated_answer_aside(model_spec, answer_path)
+    if withheld.key != _result_files.UNCHECKED_MODELS_KEY:
+        return False
+    name = os.path.basename(answer_path)
+    target = answer_path + ".unchecked"
+    try:
+        os.replace(answer_path, target)
+    except FileNotFoundError:
+        return True
+    except OSError as e:
+        print(f"WARNING: could not move {name}, from {model_spec}'s slot that "
+              f"{withheld.phrase}, to {os.path.basename(target)}: {e}.")
+        return False
+    print(f"  {model_spec}: {name} is from a slot that {withheld.phrase}; "
+          f"set aside as {os.path.basename(target)} (nothing was deleted)")
+    return True
+
+
+def withheld_answer_in_place(model_spec: str, withheld: "_result_files.Withheld") -> str:
+    """The error of a withheld model's slot not dispatched because the answer
+    file its earlier slot left could not be set aside
+    (:func:`set_withheld_answer_aside`)."""
+    stem = sanitize_model_name(model_spec)
+    return (
+        f"not dispatched: answer_{stem}.md may still hold the answer of a slot "
+        f"that {withheld.phrase}, and it could not be set aside; move it out of "
+        f"the question folder, then ask again"
+    )
+
+
+def remove_withheld_partial(
+    question_dir: str, model_spec: str, withheld: "_result_files.Withheld",
+) -> bool:
+    """Before a withheld model is asked again: the ``partial_<model>.md`` an
+    earlier slot left, one whose checks failed or never finished, removed, as
+    the dispatch removes every model's stale partial (D3.2). Here a removal
+    that fails stops the dispatch: the slot would supersede the model's
+    records, and a later ``--accept-partial`` would then count that text with
+    no warning (docs/development/workflows.md#ask-mode). Returns whether the
+    partial is shown gone: removed, or ``FileNotFoundError``."""
+    path = partial_file_path(question_dir, sanitize_model_name(model_spec))
+    try:
+        os.remove(path)
+    except FileNotFoundError:
+        return True
+    except OSError as e:
+        print(f"WARNING: could not remove {os.path.basename(path)}, the text of "
+              f"{model_spec}'s slot that {withheld.phrase}: {e}.")
+        return False
+    return True
+
+
+def withheld_partial_in_place(model_spec: str, withheld: "_result_files.Withheld") -> str:
+    """The error of a withheld model's slot not dispatched because the partial
+    its earlier slot left could not be removed (:func:`remove_withheld_partial`)."""
+    stem = sanitize_model_name(model_spec)
+    return (
+        f"not dispatched: partial_{stem}.md holds the text of a slot that "
+        f"{withheld.phrase}, and it could not be removed; a slot asked over it "
+        f"would let --accept-partial count it without saying why it was "
+        f"withheld. Move it out of the question folder, then ask again"
+    )
+
+
+def withhold_unfinished_answer(question_dir: str, model_spec: str) -> None:
+    """A slot whose checks passed but whose run failed, leaving an unfinished
+    answer at its answer path that could not be set aside (D3.3): recorded
+    under ``models_unchecked`` with ``UNFINISHED_ANSWER_REASON`` in place of
+    the record its arm wrote, so a resume asks the model again rather than
+    count the draft, and only ``--accept-partial`` counts it, with a
+    ``WARNING`` (docs/development/workflows.md#ask-mode). When the write
+    fails, the armed record stays; the close's last resort covers both being
+    gone (:func:`stop_unless_withheld`). Never raises."""
+    try:
+        recorded = _result_files.record_unchecked_model(
+            question_dir, model_spec, _result_files.UNFINISHED_ANSWER_REASON,
+        )
+    except Exception:  # noqa: BLE001 - warned below
+        recorded = False
+    if not recorded:
+        print(f"WARNING: could not record in .status.json that {model_spec}'s "
+              "unfinished answer is withheld; the record its slot wrote before "
+              "its dispatch still withholds it")
+
+
+def checked_ending(
+    question_dir: str, model_spec: str, answer_path: str, ending: Dict[str, Any],
+) -> Dict[str, Any]:
+    """The ending of a slot whose checks passed and that leaves nothing
+    unfinished at its answer path: out of ``models_unchecked`` now
+    (``review_lane.clear_unchecked_slot``, in the question folder whatever
+    the answer path resolves to), and marked ``checks_passed``, so it
+    supersedes the model's records at the close (``withheld_record``)."""
+    clear_unchecked_slot(model_spec, Path(answer_path), phase_dir=question_dir)
+    return {**ending, CHECKED_KEY: True}
 
 
 def _copy_answer_file_aside(
@@ -1453,6 +1614,100 @@ def set_aside_unreturned_answers(
     return moved
 
 
+def withhold_lost_slots(question_dir: str, lost: Iterable[str]) -> None:
+    """The dispatched slots that never returned (the deadline cut them, or
+    they raised): their checks never finished, so each stays recorded under
+    ``models_unchecked``. The record its slot armed before the dispatch is
+    kept; one gone is written again, with the deadline's reason, whether or
+    not an answer file exists. Unlike the review lanes' close there is no
+    unjoined provider to account for: :func:`stop_unreturned_provider_calls`
+    waits for every call it stops, its own timeout bounding the wait."""
+    for spec in lost:
+        if not _result_files.withheld_models(question_dir).recorded(spec):
+            _result_files.record_unchecked_model(question_dir, spec, DEADLINE_ERROR)
+
+
+def withheld_after_run(
+    model_specs: Iterable[str],
+    results: Dict[str, Any],
+    maps: Optional[Dict[str, Dict[str, str]]],
+) -> Dict[str, "_result_files.Withheld"]:
+    """The models whose answer files the closing scan leaves unread, and why:
+    every model in the maps the run's close writes (``review_lane.withheld_record``),
+    a model in both named by its rejection. With no maps (the checkpoint cannot
+    be read) every model is withheld but the ones this run vouched for itself:
+    a slot whose checks passed, and a resume skip, which found the model
+    withheld by nothing."""
+    if maps is None:
+        vouched = {
+            spec for spec, res in results.items()
+            if isinstance(res, dict)
+            and (res.get(CHECKED_KEY) is True or res.get("source") == "resume")
+        }
+        return {spec: _result_files.UNREADABLE for spec in model_specs if spec not in vouched}
+    withheld: Dict[str, _result_files.Withheld] = {}
+    for key in reversed(_result_files.WITHHELD_KEYS):
+        withheld.update(
+            {spec: _result_files.Withheld(key, reason) for spec, reason in maps[key].items()}
+        )
+    return withheld
+
+
+def stop_unless_withheld(
+    question_dir: str,
+    results: Dict[str, Any],
+    lost: Iterable[str],
+    failed_models: Dict[str, str],
+    left_in_place: Iterable[str] = (),
+) -> None:
+    """The last resort, ask's copy of the review lanes' check, for a record
+    that vanished after the slot armed and read it back: stop the run when an
+    answer file this run refused (a rejected slot), never checked (a lost
+    one) or left unfinished in place (*left_in_place*, its own move having
+    failed) is still at its answer path and ``.status.json`` records none of
+    them, even after one more try here. Exit 3, ``needs-human``, before
+    ``answers.md`` is written, naming the files to move."""
+    rejected = {
+        spec: res[REJECTED_KEY] for spec, res in results.items()
+        if isinstance(res, dict) and res.get(REJECTED_KEY)
+    }
+    lost = list(lost)
+    durable = _result_files.withheld_models(question_dir)
+    left: List[str] = []
+    for spec in dict.fromkeys([*rejected, *lost, *left_in_place]):
+        if durable.recorded(spec):
+            continue
+        try:
+            if spec in rejected:
+                again = _result_files.record_rejected_model(question_dir, spec, rejected[spec])
+            elif spec in lost:
+                again = _result_files.record_unchecked_model(question_dir, spec, DEADLINE_ERROR)
+            else:
+                again = _result_files.record_unchecked_model(
+                    question_dir, spec, _result_files.UNFINISHED_ANSWER_REASON,
+                )
+        except Exception:  # noqa: BLE001 - stopped below
+            again = False
+        name = f"answer_{sanitize_model_name(spec)}.md"
+        if not again and os.path.lexists(os.path.join(question_dir, name)):
+            left.append(f"  - {spec}: {name}")
+    if not left:
+        return
+    update_status(question_dir, {"state": "failed", "models_failed": failed_models})
+    advice = (
+        f"{_status_file.status_path(question_dir)} cannot be read. "
+        f"{_status_file.unreadable_checkpoint_advice(question_dir)}"
+        if durable.unreadable else
+        "Move these files out of the folder before any resume reads them."
+    )
+    print_closing_summary(question_dir)
+    sys.exit(unattended_mod.fail_closed(
+        f"ERROR: answers this run refused, or never finished checking, are still "
+        f"in {question_dir}, and .status.json could not record that they are "
+        f"withheld:\n" + "\n".join(left) + f"\nThe run stops before answers.md. {advice}"
+    ))
+
+
 def reconcile_failed_map(
     model_specs: List[str], completed: Iterable[str], failed_models: Dict[str, str]
 ) -> None:
@@ -1562,16 +1817,6 @@ def close_ask_run(
     return row3
 
 
-def _read_question_status(question_dir: str) -> Dict[str, Any]:
-    """The question dir's ``.status.json`` as a dict (``{}`` when unreadable)."""
-    try:
-        with open(os.path.join(question_dir, ".status.json"), "r", encoding="utf-8") as f:
-            status = json.load(f)
-    except (OSError, ValueError):
-        return {}
-    return status if isinstance(status, dict) else {}
-
-
 # ---------------------------------------------------------------------------
 # The question dir's lock: one writer at a time, whatever the lane
 # ---------------------------------------------------------------------------
@@ -1643,13 +1888,19 @@ def accept_partials(
        while ``detach.classify_run`` reports this question's run as live.
     2. Checks **every** named model first: each must be a model this question
        was last asked (``models_requested``), with a non-empty
-       ``partial_<model>.md`` and no usable ``answer_<model>.md``. Any failure
-       refuses and changes nothing.
+       ``partial_<model>.md`` and no usable ``answer_<model>.md`` (nor any
+       answer file of a model the question withholds). Any failure refuses
+       and changes nothing, and so does a checkpoint that cannot be read.
     3. Moves each partial to ``answer_<model>.md`` (``os.replace``) and records
-       its origin ``accepted`` (D7.1).
+       its origin ``accepted`` (D7.1). A model the question withholds (its
+       last slot failed its safety checks, or they never finished:
+       ``models_rejected``, ``models_unchecked``) is counted only with a
+       ``WARNING`` naming why, once both its records are cleared; when they
+       cannot be, its partial stays where it is.
     4. Regenerates ``answers.md`` and runs the closing report from the disk scan,
-       with the last run's ``models_failed`` less the accepted models. From then
-       on it is an ordinary answer: resume skips it, ``--rerun-all`` replaces it.
+       with the last run's ``models_failed`` less the accepted models, and no
+       model still withheld counted. From then on it is an ordinary answer:
+       resume skips it, ``--rerun-all`` replaces it.
     """
     if args.rerun_all:
         return unattended_mod.fail_closed(
@@ -1699,7 +1950,23 @@ def _accept_partials_locked(
             "it), then accept."
         )
 
-    status = _read_question_status(question_dir)
+    # The checkpoint names the roster, and withholds the answers whose checks
+    # failed or never finished: one that cannot be read refuses, changing
+    # nothing, as a run's start does over it.
+    try:
+        status = _status_file.load_status(
+            question_dir, attempts=_status_file.CHECKPOINT_READ_ATTEMPTS,
+        ) or {}
+        withheld = _result_files.withheld_models(question_dir)
+    except _status_file.CheckpointUnreadable:
+        withheld = _result_files.WithheldModels(unreadable=True)
+    if withheld.unreadable:
+        return unattended_mod.fail_closed(
+            f"ERROR: --accept-partial refused: {_status_file.status_path(question_dir)} "
+            f"could not be read, so nothing shows which answers this question "
+            f"withholds. Nothing was changed. "
+            f"{_status_file.unreadable_checkpoint_advice(question_dir)}"
+        )
     roster = [s for s in (status.get("models_requested") or []) if isinstance(s, str)]
     accepted: List[str] = []
     problems: List[str] = []
@@ -1713,6 +1980,11 @@ def _accept_partials_locked(
             )
             continue
         if spec in accepted:
+            continue
+        if spec in withheld and os.path.lexists(answer_file_path(question_dir, stem)):
+            problems.append(f"{name}: answer_{stem}.md is from a slot that "
+                            f"{withheld[spec].phrase}; move it out of the question "
+                            "folder first")
             continue
         if read_nonempty_answer(answer_file_path(question_dir, stem)) is not None:
             problems.append(f"{name}: already has an answer (answer_{stem}.md); "
@@ -1734,6 +2006,19 @@ def _accept_partials_locked(
         stem = sanitize_model_name(spec)
         partial = partial_file_path(question_dir, stem)
         answer = answer_file_path(question_dir, stem)
+        # The operator's own choice, never automatic: a partial of a model the
+        # question withholds is counted only once its records are cleared,
+        # and the warning names why it was withheld.
+        why = withheld.get(spec)
+        if why is not None:
+            print(f"WARNING: {spec}'s last slot {why.phrase} "
+                  f"({plain_line(why.reason)}); its partial_{stem}.md is counted "
+                  "only because --accept-partial names it")
+            if not _result_files.clear_withheld_model(question_dir, spec):
+                print(f"ERROR: could not clear {spec} from the withheld models in "
+                      f"{_status_file.status_path(question_dir)}; its partial was "
+                      "not counted")
+                continue
         try:
             os.replace(partial, answer)
         except OSError as e:
@@ -1751,7 +2036,12 @@ def _accept_partials_locked(
         spec: str(reason) for spec, reason in prior_failed.items()
         if spec in roster and spec not in moved
     }
-    completed = [spec for spec, _ in collect_completed(question_dir, roster)]
+    # A model the question still withholds is not counted, as at a run's close.
+    still = _result_files.withheld_models(question_dir)
+    unread = {spec for spec in roster if spec in still}
+    completed = [
+        spec for spec, _ in collect_completed(question_dir, roster) if spec not in unread
+    ]
     reconcile_failed_map(roster, completed, failed_models)
     # A slot the last run never dispatched (its progress row reads
     # `not-dispatched`) kept an earlier run's partial.
@@ -1765,7 +2055,7 @@ def _accept_partials_locked(
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     answers_md, completed = write_answers_md(
         question_dir, question, plan_path, roster, failed_models, timestamp,
-        earlier_partials=earlier_partials,
+        earlier_partials=earlier_partials, withheld=unread,
     )
     record_output_files(question_dir, answers=answers_md)
     # The accepted models' progress rows move with the rest of the record: a
@@ -1839,7 +2129,9 @@ async def _main(argv: Optional[List[str]], held: contextlib.ExitStack) -> int:
     refused = _hold_question_dir(args, setup.question_dir, held)
     if refused is not None:
         return refused
-    _record_launch(setup)
+    refused = _record_launch(setup)
+    if refused is not None:
+        return refused
 
     run = AskRun.start(setup)
     results = await run.fan_out()
@@ -2068,29 +2360,76 @@ def _hold_question_dir(
     return None
 
 
-def _record_launch(setup: AskSetup) -> None:
-    """The launch's checkpoint: the run's identity, its D6 resolution, the counters."""
+def _record_launch(setup: AskSetup) -> Optional[int]:
+    """The launch's checkpoint: the run's identity, its D6 resolution, the counters.
+
+    The withheld models (``models_rejected``, ``models_unchecked``) survive the
+    write, as ``review_lane.open_round`` carries them: both maps are read whole
+    under the lock the write holds, every model's, selected or not, and the
+    slots read them (docs/development/workflows.md#ask-mode). Returns the exit
+    code of a stop, ``None`` once the checkpoint is written and read back. It
+    stops at exit 3, ``needs-human``, before anything is dispatched, when the
+    checkpoint cannot be read even after ``CHECKPOINT_READ_ATTEMPTS`` reads (a
+    rebuilt one would drop every earlier refusal), or when none can be read
+    back after the write (a slot then has nowhere to record that its answer is
+    withheld until its checks pass).
+    """
     args = setup.inputs.args
     question_dir = setup.question_dir
     model_specs = setup.model_specs
-    write_status(question_dir, {
-        "phase": "ask",
-        "state": "models_running",
-        "started_at": datetime.now().isoformat(),
-        "models_requested": list(model_specs),
-        "question": setup.inputs.question,
-        "question_slug": setup.slug,
-        "plan_hash": setup.inputs.plan_hash,
-        "answers_md": os.path.join(question_dir, "answers.md"),
-        # Drop the predecessor's per-model map with the same move `claim_run`
-        # makes on the detached lane, and for the reason spelled out in the
-        # review base's copy of this write (F1, 2026-09-20): on the foreground
-        # lane nothing else ever drops it, so a re-asked question opened on the
-        # last run's rows and `just finished:` could never announce a model that
-        # the stale map already called terminal. `report_progress` below rebuilds
-        # it.
-        "progress": None,
-    })
+    withheld: Optional[Dict[str, Dict[str, str]]] = None
+    with _status_file.checkpoint_lock(question_dir):
+        try:
+            withheld = _result_files.recorded_withheld(
+                question_dir, attempts=_status_file.CHECKPOINT_READ_ATTEMPTS,
+            )
+        except _status_file.CheckpointUnreadable:
+            pass
+        else:
+            rejected = withheld[_result_files.REJECTED_MODELS_KEY]
+            unchecked = withheld[_result_files.UNCHECKED_MODELS_KEY]
+            write_status(question_dir, {
+                "phase": "ask",
+                "state": "models_running",
+                "started_at": datetime.now().isoformat(),
+                "models_requested": list(model_specs),
+                "question": setup.inputs.question,
+                "question_slug": setup.slug,
+                "plan_hash": setup.inputs.plan_hash,
+                "answers_md": os.path.join(question_dir, "answers.md"),
+                # Drop the predecessor's per-model map with the same move
+                # `claim_run` makes on the detached lane, and for the reason
+                # spelled out in the review base's copy of this write (F1,
+                # 2026-09-20): on the foreground lane nothing else ever drops
+                # it, so a re-asked question opened on the last run's rows and
+                # `just finished:` could never announce a model that the stale
+                # map already called terminal. `report_progress` below
+                # rebuilds it.
+                "progress": None,
+                **({_result_files.REJECTED_MODELS_KEY: rejected} if rejected else {}),
+                **({_result_files.UNCHECKED_MODELS_KEY: unchecked} if unchecked else {}),
+            })
+    path = _status_file.status_path(question_dir)
+    if withheld is None:
+        return unattended_mod.fail_closed(
+            f"ERROR: {path} could not be read when this ask started, so the "
+            f"records of the answers this question withholds (models whose "
+            f"safety checks failed or never finished) could not be carried "
+            f"over; nothing was dispatched. "
+            f"{_status_file.unreadable_checkpoint_advice(question_dir)}"
+        )
+    try:
+        written = _status_file.load_status(question_dir)
+    except _status_file.CheckpointUnreadable:
+        written = None
+    if written is None:
+        return unattended_mod.fail_closed(
+            f"ERROR: {path} could not be written and read back when this ask "
+            f"started, so nothing could record which answers are withheld until "
+            f"their safety checks pass; nothing was dispatched. Check that the "
+            f"question folder is writable. "
+            f"{_status_file.unreadable_checkpoint_advice(question_dir)}"
+        )
     if setup.unattended and not args.models and not args.quick:
         # D6 row 2, recorded rather than merely applied (see review base).
         unattended_mod.record_resolution(
@@ -2106,6 +2445,7 @@ def _record_launch(setup: AskSetup) -> None:
         question_dir, step="fanout",
         models_total=len(model_specs), models_done=0, models_succeeded=0,
     )
+    return None
 
 
 @dataclass
@@ -2139,6 +2479,12 @@ class AskRun:
     #: Not ``--rerun-all``: a model with a non-empty answer is not asked again.
     skip_existing: bool
     tracker: FanoutProgress
+    #: The launch wrote the question folder's checkpoint and read it back
+    #: (``_record_launch``; set by :meth:`start`): a slot with nowhere to
+    #: record that its answer is withheld until its checks pass is not
+    #: dispatched. ``False`` only for a direct construction, whose folder may
+    #: have no checkpoint at all and keeps no record.
+    checkpoint_required: bool = False
     # ---
     #: Every spec `ask_one` got past the sandbox gate to dispatch (where it drops
     #: the model's stale partial and origin record). Only a dispatched slot can
@@ -2199,6 +2545,7 @@ class AskRun:
             unattended=setup.unattended,
             skip_existing=not args.rerun_all,
             tracker=tracker,
+            checkpoint_required=True,
         )
 
     async def fan_out(self) -> Dict[str, Any]:
@@ -2240,6 +2587,16 @@ class AskRun:
             return None
         sanitized = sanitize_model_name(model_spec)
         answer_path = os.path.realpath(os.path.join(self.question_dir, f"answer_{sanitized}.md"))
+        withheld = _result_files.withheld_models(self.question_dir).get(model_spec)
+        if withheld is not None:
+            # No checked slot has superseded one that failed its safety checks
+            # or ended before they passed: a file still there may be that
+            # answer, never reused (docs/development/workflows.md#ask-mode).
+            # `ask_one` sets it aside before it asks again.
+            if os.path.lexists(answer_path):
+                print(f"[{model_spec}] answer_{sanitized}.md is from a slot that "
+                      f"{withheld.phrase}; asking again")
+            return None
         if read_nonempty_answer(answer_path) is not None:
             print(f"[SKIP] {model_spec} - already has a non-empty answer")
             return {"model": model_spec, "success": True, "error": None, "source": "resume"}
@@ -2283,10 +2640,41 @@ class AskRun:
         answer_path = os.path.realpath(os.path.join(question_dir, f"answer_{sanitized}.md"))
         log_file = os.path.join(question_dir, f"log_{sanitized}.txt")
 
+        # The answer is withheld until the checks pass, as on the review lanes
+        # (docs/development/workflows.md#ask-mode): the model is recorded
+        # under `models_unchecked` before anything is dispatched or removed,
+        # and a slot whose record cannot be written and read back is not
+        # dispatched. The record goes into the question folder's checkpoint,
+        # never one found beside the resolved answer path (a link may point
+        # anywhere), and a slot the launch opened needs that checkpoint: only
+        # a direct call of `ask_one` runs with no record. A model already
+        # withheld has its earlier answer file set aside and its earlier
+        # partial removed first (read before the arm, which adds its own
+        # record), so only this slot's can be read under either name; one
+        # where either fails is not dispatched either. These endings destroy
+        # nothing of an answer that is still withheld.
+        withheld = _result_files.withheld_models(question_dir).get(model_spec)
+        if arm_slot(model_spec, Path(answer_path), phase_dir=question_dir,
+                    required=self.checkpoint_required) is False:
+            print(f"[{model_spec}] {UNRECORDED_REASON}")
+            return {"model": model_spec, "success": False, "error": UNRECORDED_REASON,
+                    "source": "not-dispatched"}
+        if withheld is not None:
+            error = None
+            if not set_withheld_answer_aside(model_spec, answer_path, withheld):
+                error = withheld_answer_in_place(model_spec, withheld)
+            elif not remove_withheld_partial(question_dir, model_spec, withheld):
+                error = withheld_partial_in_place(model_spec, withheld)
+            if error is not None:
+                print(f"[{model_spec}] {error}")
+                return {"model": model_spec, "success": False, "error": error,
+                        "source": "not-dispatched"}
+
         if skip_existing:
             # The pre-stagger skip_predicate already short-circuited models with a
-            # usable answer; reaching here means the file is missing/empty, so the
-            # model re-runs (warn if a stale empty file is present).
+            # usable answer; reaching here means the file is missing/empty (or was
+            # a withheld answer, set aside above), so the model re-runs (warn if a
+            # stale empty file is present).
             if os.path.exists(answer_path):
                 print(f"WARNING: answer_{sanitized}.md is empty/unreadable; re-running model")
         else:
@@ -2405,20 +2793,31 @@ class AskRun:
         if violated is not None:
             write_error_log(question_dir, model_spec, violated, result)
             # `collect_completed` reads the answer files, not this return, so
-            # an answer this slot wrote is set aside (never deleted: it is
-            # still the operator's evidence) under a name the scan does not
-            # read, or withheld from the scan when it cannot be, or the
-            # failed slot would be counted as completed.
-            if not set_violated_answer_aside(model_spec, answer_path):
+            # an answer this slot wrote is refused for good: recorded under
+            # `models_rejected`, then set aside (never deleted: it is still
+            # the operator's evidence) under a name the scan does not read,
+            # or withheld from the scan when it cannot be, or the failed slot
+            # would be counted as completed (`reject_answer`).
+            if not reject_answer(question_dir, model_spec, violated, answer_path):
                 answers_left_in_place.add(model_spec)
             # The same holds for an answer this slot gave on stdout (D3.2):
             # kept as evidence, or what survives a violation would depend on
             # which channel the model answered on. The slot still fails with
-            # its violation; `--accept-partial` can count it.
+            # its violation; `--accept-partial` can count it, and says the
+            # checks failed when it does.
             if answer_text.strip():
                 write_partial(question_dir, model_spec, answer_text)
             return {"model": model_spec, "success": False,
-                    "error": violated, "source": failed_source}
+                    "error": violated, "source": failed_source,
+                    REJECTED_KEY: violated}
+
+        # The checks passed, and nothing of an earlier withheld answer is left
+        # at the path or as the partial (set aside or removed before the
+        # dispatch): whatever this slot leaves is its own and checked, so its
+        # ending supersedes the model's records, this one now and both maps
+        # at the close (`checked_ending`, `withheld_record`), unless it
+        # leaves an unfinished answer in place (step 3). No await from here
+        # on, so the deadline cannot cut the slot between this and its ending.
 
         # Steps 1 and 2 count an answer only from a run that ended by itself at
         # exit 0 with a finished answer (D3.1): success, or the PARSE_ERROR a
@@ -2430,8 +2829,9 @@ class AskRun:
             #    can be cut mid-write, an outline or a draft (D3.3).
             if read_nonempty_answer(answer_path) is not None:
                 write_origin(question_dir, model_spec, ORIGIN_FILE)
-                return {"model": model_spec, "success": True, "error": None,
-                        "source": "file"}
+                return checked_ending(question_dir, model_spec, answer_path, {
+                    "model": model_spec, "success": True, "error": None,
+                    "source": "file"})
 
             # 2. The adapter's reduced answer text (D2.3), persisted so resume
             #    skips this model next time. Success requires the text to land
@@ -2445,8 +2845,9 @@ class AskRun:
                 except (OSError, IOError) as e:
                     error = f"Recovered answer but failed to persist it: {e}"
                     write_error_log(question_dir, model_spec, error, result)
-                    return {"model": model_spec, "success": False, "error": error,
-                            "source": "failed"}
+                    return checked_ending(question_dir, model_spec, answer_path, {
+                        "model": model_spec, "success": False, "error": error,
+                        "source": "failed"})
                 # D7.1: `stdout` when this adapter is asked for stdout (the
                 # same capability, off the same provider_name, that picked the
                 # prompt variant), `fallback` when it was asked for the file
@@ -2456,24 +2857,31 @@ class AskRun:
                     question_dir, model_spec,
                     ORIGIN_STDOUT if answers_on_stdout(provider_name) else ORIGIN_FALLBACK,
                 )
-                return {"model": model_spec, "success": True, "error": None,
-                        "source": "fallback"}
+                return checked_ending(question_dir, model_spec, answer_path, {
+                    "model": model_spec, "success": True, "error": None,
+                    "source": "fallback"})
 
         # 3. Failure, with the run's own error: a timeout, a non-zero exit, an
         #    incomplete answer, a clean run with nothing to recover, or the
         #    call's exception. Any text it left is kept as partial evidence
         #    (D3.2) — its answer file when there is one (the file takes the
         #    name, D3.3), else a non-empty stdout answer text — and never
-        #    counted.
+        #    counted. An answer file that can be neither moved nor copied
+        #    aside stays withheld: this run leaves it out of the scan, and the
+        #    model stays under `models_unchecked`, with its own reason, until
+        #    a later slot replaces it or `--accept-partial` counts it.
         error = result.get("error") or "No usable answer produced"
         write_error_log(question_dir, model_spec, error, result)
+        ending = {"model": model_spec, "success": False, "error": error,
+                  "source": failed_source}
         if read_nonempty_answer(answer_path) is not None:
             if not set_answer_file_aside(question_dir, model_spec, answer_path):
                 answers_left_in_place.add(model_spec)
+                withhold_unfinished_answer(question_dir, model_spec)
+                return ending
         elif answer_text.strip():
             write_partial(question_dir, model_spec, answer_text)
-        return {"model": model_spec, "success": False, "error": error,
-                "source": failed_source}
+        return checked_ending(question_dir, model_spec, answer_path, ending)
 
     async def close(self, results: Dict[str, Any]) -> AskClosing:
         """Set the deadline's answers aside, resolve the failed map, write answers.md."""
@@ -2527,17 +2935,38 @@ class AskRun:
             # spec stays failed (`DEADLINE_ERROR`, from the backfill below). Its
             # provider call was stopped and joined above, so nothing writes the
             # file after this.
+            # Its checks never finished either: it keeps the `models_unchecked`
+            # record it armed before its dispatch (one is written now if that
+            # record is gone), so a resume asks it again and `--accept-partial`
+            # names it when it counts the partial.
+            lost = [spec for spec in model_specs
+                    if spec not in results and spec in dispatched_specs]
+            withhold_lost_slots(question_dir, lost)
             set_aside_unreturned_answers(
                 question_dir, model_specs, results, dispatched_specs,
                 left_in_place=answers_left_in_place,
             )
+            # Both withheld maps, as the review lanes' close writes them
+            # (`review_lane.withheld_record`): every entry stays until a checked
+            # slot of its model supersedes it, and this run's rejections are
+            # added. `None`: the checkpoint cannot be read, so the maps on it
+            # stay as they are.
+            maps = withheld_record(question_dir, slot_results(results))
+            if maps:
+                update_status(question_dir, maps)
+            withheld = withheld_after_run(model_specs, results, maps)
+            unread = answers_left_in_place | set(withheld)
 
             # Read-only scan to determine which models succeeded, so we can build the
             # failed map before writing answers.md exactly once (no transient on-disk
-            # version missing the ## Failed Models section).
+            # version missing the ## Failed Models section). Neither an answer file
+            # left in place by a failed slot this run nor one of a model the
+            # question withholds is read: a slot that failed its safety checks, or
+            # whose checks never finished, and no checked slot since (a model this
+            # run refused or never reached among them).
             completed = [
                 spec for spec, _ in collect_completed(question_dir, model_specs)
-                if spec not in answers_left_in_place
+                if spec not in unread
             ]
             completed_set = set(completed)
 
@@ -2587,6 +3016,20 @@ class AskRun:
                         f"in place as answer_{sanitize_model_name(spec)}.md "
                         "(not counted)"
                     )
+            for spec, why in withheld.items():
+                stem = sanitize_model_name(spec)
+                if (spec in failed_models and spec not in answers_left_in_place
+                        and os.path.lexists(answer_file_path(question_dir, stem))):
+                    failed_models[spec] += (
+                        f" — answer_{stem}.md is from a slot that {why.phrase}, "
+                        "so it is withheld (not counted)"
+                    )
+            # The last resort, as on the review lanes: a refused or unchecked
+            # answer still in place that nothing durable withholds stops the run
+            # here, before answers.md.
+            stop_unless_withheld(
+                question_dir, results, lost, failed_models, answers_left_in_place,
+            )
 
             # Write answers.md once, with the resolved failed-models section. A
             # failed spec this run never dispatched (a sandbox refusal) kept any
@@ -2594,7 +3037,7 @@ class AskRun:
             earlier_partials = [s for s in failed_models if s not in dispatched_specs]
             answers_md, completed = write_answers_md(
                 question_dir, question, plan_path, model_specs, failed_models, timestamp,
-                earlier_partials=earlier_partials, withheld=answers_left_in_place,
+                earlier_partials=earlier_partials, withheld=unread,
             )
 
             state = ask_run_state(completed, failed_models)

@@ -627,7 +627,9 @@ Not rejected: a `[SANDBOX_BYPASSED]` fallback notice, or a tree change the slot'
 stream cleared (`not attributed`): neither fails the slot. The apply phases read `grouped.json`
 and `validation.json` without re-checking a slot's verdict; the grouping is the choke point, and
 neither the fan-out nor a reaggregate lets a withheld answer into it.
-`tests/test_rejected_slot_answers.py` holds both lanes.
+`tests/test_rejected_slot_answers.py` holds both lanes. Ask mode keeps the same maps on its
+question folder, with the rules its single-shot slot shares
+([workflows](workflows.md#ask-mode), "Withheld answers").
 
 ## Round identity
 

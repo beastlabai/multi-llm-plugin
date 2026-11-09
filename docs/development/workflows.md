@@ -585,6 +585,52 @@ name the closing scan never reads. When that move fails the file stays where it 
 evidence, and the scan withholds it (`answers_left_in_place`): the slot stays failed, and its
 failure line says the file was left in place.
 
+**Withheld answers.** An answer is reused only from a slot whose safety checks passed, as on
+the review lanes ([Withheld slot answers](review-results.md#withheld-slot-answers)): the
+question folder's `.status.json` keeps the same two maps, `models_rejected` and
+`models_unchecked`, through the same `result_files` helpers. `_record_launch` carries both maps
+across its opening write, every model's, read whole under the lock that write holds, then reads
+the checkpoint back; over a checkpoint it cannot read (after `CHECKPOINT_READ_ATTEMPTS` reads),
+or one it cannot read back, the run stops at exit 3 before anything is dispatched, with
+`status_file.unreadable_checkpoint_advice`. Each slot that passes the sandbox gate is recorded
+under `models_unchecked` before anything is dispatched or removed (`review_lane.arm_slot`), in
+the question folder's checkpoint whatever its resolved answer path points into; one whose
+record cannot be written and read back, or whose launched run has no checkpoint left to record
+in, ends `not-dispatched` with `[WITHHOLD_NOT_RECORDED]` (only a direct call of `ask_one`, with
+no checkpoint at all, runs unrecorded). A model already withheld has its earlier answer file set
+aside first (`answer_<model>.md.violated` for a rejection, `.unchecked` otherwise) and its
+earlier `partial_<model>.md` removed. The rename is attempted directly: only its own
+`FileNotFoundError` shows the file absent, so a metadata error never passes for one. When
+either step fails, the slot ends `not-dispatched` and asks nothing over it; a partial left
+behind would otherwise outlive the records the slot supersedes, and `--accept-partial` would
+count it without a warning. A slot the checks fail records `models_rejected` before it sets
+its file aside (`reject_answer`). One whose checks pass leaves `models_unchecked` as it ends
+and is marked `checks_passed`: since the earlier answer was set aside before its dispatch,
+whatever it leaves is its own, so it supersedes the model's records, succeeded or not. The
+exception is a failed run whose unfinished answer can be neither moved nor copied aside: it
+stays under `models_unchecked` with `result_files.UNFINISHED_ANSWER_REASON` ("left an
+unfinished answer"), so a resume asks the model again and only `--accept-partial` counts that
+text. A dispatched slot that never returns (the deadline cut it, or it raised outside the
+provider call) keeps its record, and `close` writes one again when it is gone; a provider
+call that raises is not such an ending, because its checks still run. So does a slot
+cancelled at its launch turn, after its record and before any provider call: nothing
+supersedes it. The close writes both maps (`review_lane.withheld_record`).
+
+Every reader honours them. The resume skip asks a withheld model again rather than count its
+file; the closing scan leaves the file of every model the maps name unread, a model this run
+refused at the sandbox gate or never reached included, and its failure line says so; over a
+checkpoint that cannot be read, only this run's checked slots and resume skips are counted.
+When a refused, unchecked or unfinished answer is still at its answer path and no record of
+it can be written, the close stops at exit 3, `needs-human`, before `answers.md`. Two review-lane rules
+have no ask counterpart: there is no salvage pair to retire, and no unjoined provider call,
+since `stop_unreturned_provider_calls` waits for every call it stops (its own timeout bounds
+the wait). `--accept-partial` stays the operator's opt-in: it refuses over a checkpoint it
+cannot read, and while a withheld model's answer file is in place; a withheld model's partial is
+counted only with a `WARNING` naming why it was withheld, once both its records are cleared
+(`result_files.clear_withheld_model`). A readable checkpoint written before these maps
+withholds nothing, so an older question resumes as it did. `tests/test_ask_withheld_answers.py`
+holds the cases.
+
 ## Implementation artifacts and state
 
 **`implement`'s write phase closes the artifact/resolution/denominator gaps the apply

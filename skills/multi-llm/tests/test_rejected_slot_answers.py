@@ -461,15 +461,15 @@ def test_a_slot_is_armed_only_over_a_checkpoint_it_can_read(tmp_path):
     phase_dir.mkdir()
     result_path = phase_dir / f"{STEM}.json"
     # A direct call: no round opened the folder, so nothing is recorded.
-    assert review_lane._arm_slot(SPEC, result_path) is None
+    assert review_lane.arm_slot(SPEC, result_path) is None
     assert not (phase_dir / ".status.json").exists()
     # A checkpoint that cannot be read: refused, and kept as it is.
     (phase_dir / ".status.json").write_text('{"models_rejected": {"a:b"')
-    assert review_lane._arm_slot(SPEC, result_path) is False
+    assert review_lane.arm_slot(SPEC, result_path) is False
     assert (phase_dir / ".status.json").read_text() == '{"models_rejected": {"a:b"'
     # A readable one: recorded and read back.
     status_file.write_status(str(phase_dir), {"phase": "review-plan"})
-    assert review_lane._arm_slot(SPEC, result_path) is True
+    assert review_lane.arm_slot(SPEC, result_path) is True
     assert result_files.unchecked_models(phase_dir) == {SPEC: review_lane.ARMED_REASON}
 
 

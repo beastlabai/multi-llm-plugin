@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import ask_orchestrator  # noqa: E402
 from ask_orchestrator import ASK_PROMPT_FILE, AskRun  # noqa: E402
 from utils import review_orchestrator_base as rob  # noqa: E402
+from utils import status_file  # noqa: E402
 from utils.json_extractor import sanitize_model_name  # noqa: E402
 from utils.progress_tracker import FanoutProgress  # noqa: E402
 from utils.prompt_loader import load_prompt  # noqa: E402
@@ -31,11 +32,16 @@ SANDBOXED = rob.SandboxVerdict(rob.SANDBOX_DISPATCH, None)
 
 @pytest.fixture
 def slot(tmp_path, monkeypatch):
-    """A run over an empty question dir; ``slot["invoke"]`` answers the call."""
+    """A run over a question dir holding only the checkpoint the launch writes
+    (``_record_launch``); ``slot["invoke"]`` answers the call."""
     plan = tmp_path / "plan.md"
     plan.write_text("# plan\n\nBuild a widget.\n", encoding="utf-8")
     question_dir = tmp_path / "ask" / "q-12345678"
     question_dir.mkdir(parents=True)
+    status_file.write_status(str(question_dir), {
+        "phase": "ask", "state": "models_running", "models_requested": [SPEC],
+        "question": "Is it sound?",
+    })
     state = {"calls": [], "invoke": lambda **_: {"success": True, "error": None}}
 
     def invoke(**kwargs):
@@ -74,7 +80,8 @@ def test_an_answer_file_the_model_wrote_counts(slot):
     slot["invoke"] = invoke
     run = slot["make"]()
     result = _ask(run)
-    assert result == {"model": SPEC, "success": True, "error": None, "source": "file"}
+    assert result == {"model": SPEC, "success": True, "error": None, "source": "file",
+                      "checks_passed": True}
     assert run.dispatched_specs == {SPEC}
     assert SPEC in run.provider_calls
     assert slot["calls"][0]["timeout"] == 60
@@ -96,7 +103,7 @@ def test_a_failed_run_keeps_its_text_as_a_partial(slot):
     run = slot["make"]()
     result = _ask(run)
     assert result == {"model": SPEC, "success": False, "error": "timed out",
-                      "source": "failed"}
+                      "source": "failed", "checks_passed": True}
     assert not slot["answer"].exists()
     assert "Half an answer." in slot["partial"].read_text(encoding="utf-8")
     assert not run.answers_left_in_place

@@ -613,7 +613,7 @@ async def run_slot(slot: ReviewSlot, *, start_time: float) -> SlotResult:
                 **steps.sandbox_fallback_kwargs(sandbox),
             )
 
-        armed = _arm_slot(slot.model_spec, result_path)
+        armed = arm_slot(slot.model_spec, result_path)
         if armed is False:
             # Nothing would tell a later reader this answer was never checked.
             print(f"[{slot.display_name}] {UNRECORDED_REASON}")
@@ -656,7 +656,7 @@ async def run_slot(slot: ReviewSlot, *, start_time: float) -> SlotResult:
         # salvage request (review-code's does).
         checked = violation is None and not file_left and not _salvage_pair_left(result_path)
         if checked:
-            _clear_unchecked(slot.model_spec, result_path)
+            clear_unchecked_slot(slot.model_spec, result_path)
         if file_left and _answer_read_from_result_file(run.result):
             # Nothing shows the answer is not the earlier one, which may be
             # withheld: failed before the lane parses it, and still withheld.
@@ -699,7 +699,10 @@ UNRECORDED_REASON = (
 )
 
 
-def _arm_slot(model_spec: str, result_path: Path) -> Optional[bool]:
+def arm_slot(
+    model_spec: str, result_path: Path, *,
+    phase_dir: Optional[str] = None, required: bool = False,
+) -> Optional[bool]:
     """Record *model_spec* under ``models_unchecked`` before its dispatch.
 
     ``True`` when the record is there now (read back); ``False`` when the
@@ -709,11 +712,21 @@ def _arm_slot(model_spec: str, result_path: Path) -> Optional[bool]:
     checked. ``None`` when the folder has no checkpoint at all: only a direct
     call of a slot function, which no round opened, gets there (a fan-out's
     :func:`open_round` writes it, and its round stamp is read back first), and
-    such a call keeps no record."""
-    phase_dir = str(result_path.parent)
+    such a call keeps no record. With *required* (a slot whose launch wrote
+    the checkpoint) no checkpoint is ``False`` too.
+
+    The record goes into *phase_dir*'s checkpoint, by default the folder of
+    *result_path*, the file the slot asks for: the review lanes build that
+    path inside the phase folder (``generate_output_path``) and never resolve
+    it. Ask's slots arm through here too and name their question folder,
+    because their ``answer_<model>.md`` is resolved through links, and a link
+    must not take the record, or the no-checkpoint exemption, elsewhere
+    (``ask_orchestrator._record_launch`` writes and reads back that folder's
+    checkpoint)."""
+    phase_dir = str(phase_dir if phase_dir is not None else result_path.parent)
     try:
         if _status_file.load_status(phase_dir) is None:
-            return None
+            return False if required else None
     except _status_file.CheckpointUnreadable:
         return False
     try:
@@ -782,18 +795,23 @@ def _unshown_answer(ending: SlotResult) -> SlotResult:
     return replace(ending, details={**ending.details, SALVAGE_TEXT_KEY: ""})
 
 
-def _clear_unchecked(model_spec: str, result_path: Path) -> None:
+def clear_unchecked_slot(
+    model_spec: str, result_path: Path, *, phase_dir: Optional[str] = None,
+) -> None:
     """Take a slot whose checks passed out of ``models_unchecked`` now, so a
     run that stops before its fan-out closes still reuses its answer;
-    :func:`close_fanout` tries again for one this write misses."""
+    :func:`close_fanout` tries again for one this write misses. In the
+    checkpoint :func:`arm_slot` recorded it in (*phase_dir*, by default the
+    folder of *result_path*)."""
+    folder = Path(phase_dir) if phase_dir is not None else result_path.parent
     try:
-        cleared = _result_files.clear_unchecked_model(result_path.parent, model_spec)
+        cleared = _result_files.clear_unchecked_model(folder, model_spec)
     except Exception:  # noqa: BLE001 - warned below
         cleared = False
     if not cleared:
         print(
             f"Warning: {model_spec}: its safety checks passed, but "
-            f"models_unchecked in {result_path.parent}/.status.json could not be "
+            f"models_unchecked in {folder}/.status.json could not be "
             f"cleared yet; the fan-out's close tries again",
             file=sys.stderr,
         )
@@ -802,7 +820,7 @@ def _clear_unchecked(model_spec: str, result_path: Path) -> None:
 def _withhold_unfinished_slot(model_spec: str, result_path: Path, reason: str) -> None:
     """A dispatched slot that ended before its verdict (cancelled, or an
     exception): its answer was never checked. Recorded with *reason* (the
-    record :func:`_arm_slot` wrote stays when this write fails), and its file
+    record :func:`arm_slot` wrote stays when this write fails), and its file
     set aside as ``.json.unchecked``. Synchronous, so nothing cancels it
     part-way; the fan-out's close stops a cancelled slot's provider thread and
     sets aside what it wrote later. Never raises: the slot's own ending
