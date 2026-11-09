@@ -977,7 +977,7 @@ def _probe_object(text: str) -> Optional[Dict[str, Any]]:
 def redact_probe_output(text: str) -> str:
     """§4.5's redaction, applied at the probe boundary (§5.2).
 
-    Imported late for the same reason ``failure_capture._redact`` does it: the
+    Imported late for the same reason ``provider_outcome._redact`` does it: the
     redaction module must never become an import-time dependency of an adapter.
     A redactor that cannot be imported must not silently return the raw
     envelope, so the fallback drops the text rather than leaking it.

@@ -4810,7 +4810,11 @@ def report_jail_outcome(display_name: str, details: Optional[Dict[str, Any]], su
     (built by the invoker, noted for the closing summary) and the count and
     first three paths of the writes the jail denied inside the model's own
     commands — which fail nothing: that is the jail stopping a stray write,
-    and it lets a review that calls a tool broken be traced to the jail."""
+    and it lets a review that calls a tool broken be traced to the jail.
+    The count is read back as a ``JailDenials`` and worded by
+    ``landlock_dispatch.jail_denials_text``, the executor's renderer too."""
+    from .landlock_dispatch import as_jail_denials, jail_denials_text
+
     details = details or {}
     failure = details.get("jail_failure")
     if isinstance(failure, dict) and failure.get("notice"):
@@ -4818,14 +4822,12 @@ def report_jail_outcome(display_name: str, details: Optional[Dict[str, Any]], su
         print(f"[{display_name}] {line}")
         note_for_closing_summary(summary_key, line)
     denials = details.get("jail_denials")
-    if isinstance(denials, dict) and denials.get("total"):
-        paths = [_render_home(p) for p in denials.get("paths") or () if p]
-        total = int(denials["total"])
-        print(
-            f"[{display_name}] the plugin's Landlock jail denied {total} "
-            f"write{'s' if total != 1 else ''} inside the model's own commands "
-            f"(not a failure)" + (f": {', '.join(paths)}" if paths else "")
-        )
+    said = jail_denials_text(
+        as_jail_denials(denials) if isinstance(denials, dict) else None,
+        lane=INCIDENTAL_LANE_FANOUT,
+    )
+    if said:
+        print(f"[{display_name}] {said}")
 
 
 #: ``details["failure_reason"]`` for a jailed slot whose jail could not be set

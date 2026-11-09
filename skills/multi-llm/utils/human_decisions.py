@@ -47,7 +47,7 @@ try:
         canonical_value,
     )
     from . import importance as _importance
-    from .schema_validator import validate_human_decision_verdicts
+    from .schema_validator import schema_version_supplied, validate_human_decision_verdicts
     from .subagent_prompts import build_human_decision_judge_prompt
     from .subagent_tasks import (
         PromptBudget,
@@ -68,7 +68,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         canonical_value,
     )
     from utils import importance as _importance
-    from utils.schema_validator import validate_human_decision_verdicts
+    from utils.schema_validator import schema_version_supplied, validate_human_decision_verdicts
     from utils.subagent_prompts import build_human_decision_judge_prompt
     from utils.subagent_tasks import (
         PromptBudget,
@@ -383,14 +383,6 @@ def _supply_verdict_version(document: Any) -> Optional[str]:
     return supply_schema_version(document, "human_decision_verdicts.schema.json")
 
 
-def _schema_version_supplied(subject: str, version: str) -> str:
-    try:
-        from .schema_validator import schema_version_supplied
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.schema_validator import schema_version_supplied
-    return schema_version_supplied(subject, version)
-
-
 def read_verdict_files(phase_dir: str) -> List[Tuple[str, Any, List[str]]]:
     """Read and schema-validate every verdict file in ``phase_dir``.
 
@@ -413,7 +405,7 @@ def read_verdict_files(phase_dir: str) -> List[Tuple[str, Any, List[str]]]:
         if version:
             print(
                 "[human-decision] "
-                + _schema_version_supplied(os.path.basename(path), version)
+                + schema_version_supplied(os.path.basename(path), version)
                 + ".",
                 file=sys.stderr,
             )

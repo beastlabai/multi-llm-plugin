@@ -46,6 +46,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import ask_orchestrator  # noqa: E402
 import code_review_orchestrator as cro  # noqa: E402
 from ask_orchestrator import ASK_PROMPT_FILE, AskRun  # noqa: E402
+from utils import landlock_dispatch  # noqa: E402
 from utils import review_orchestrator_base as base  # noqa: E402
 from utils import slot_guard  # noqa: E402
 from utils.json_extractor import sanitize_model_name  # noqa: E402
@@ -103,7 +104,12 @@ HOME_CHANGE = {
     "foreign_trust": [], "other_live_children": 1,
 }
 JAIL_NOTICE = f"{JAIL_DENIED_MARKER} codex: simulated denial of /elsewhere/x"
-JAIL_DENIALS = {"total": 2, "paths": ["/elsewhere/a", "/elsewhere/b"]}
+#: ``details["jail_denials"]`` as ``llm_client`` records it: the denials'
+#: ``to_dict()`` plus their total and the paths they name.
+_DENIED = landlock_dispatch.JailDenials(
+    out_of_scope_count=2, out_of_scope_paths=["/elsewhere/a", "/elsewhere/b"],
+)
+JAIL_DENIALS = {**_DENIED.to_dict(), "total": _DENIED.total, "paths": _DENIED.named_paths()}
 ANSWER = "An answer."
 FINDINGS = [{
     "title": "Add input validation",

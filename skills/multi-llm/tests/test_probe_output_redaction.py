@@ -6,7 +6,7 @@ stdout/stderr into their message so a human can see *why* the runner was
 refused. Those messages are printed to a terminal and to
 ``orchestrator-run.log``; they reach **neither** of §4.5.3's redacting write
 sinks (``subagent_batch_report.json``'s ``_redact_json``, ``failure_summary``'s
-``_redact``), because a ``RunnerRejected`` is raised before any batch report
+``redact_text``), because a ``RunnerRejected`` is raised before any batch report
 exists. They were the one path that quoted a probe verbatim.
 
 M13 made that concrete: ``cursor-agent status --format json`` answers with an
@@ -263,7 +263,7 @@ class TestTheProbeTailHelper:
         def _boom(_text):
             raise RuntimeError("write_safety is unavailable")
 
-        monkeypatch.setattr(failure_capture, "_redact", _boom)
+        monkeypatch.setattr(failure_capture, "redact_text", _boom)
         tail = subagent_executor._redact_probe_tail(PROBE_ENVELOPE, 500)
         assert tail == "<redacted:probe-output>"
         for value in IDENTITY_VALUES:
@@ -315,7 +315,7 @@ class TestTheNotAuthenticatedRefusal:
     ):
         monkeypatch.setattr(
             failure_capture,
-            "_redact",
+            "redact_text",
             lambda _text: (_ for _ in ()).throw(RuntimeError("no redactor")),
         )
         message = _detect_auth_refusal(monkeypatch, PROBE_ENVELOPE)
@@ -351,7 +351,7 @@ class TestTheNestedExecCredentialsRefusal:
         self, monkeypatch
     ):
         # `_classify_failed_run` is stubbed rather than driven: it has its own
-        # `_redact` call, whose message reaches only §4.5.3's redacting sinks,
+        # `redact_text` call, whose message reaches only §4.5.3's redacting sinks,
         # and letting a raising redactor abort *there* would test a different
         # site than the refusal boundary this asserts.
         monkeypatch.setattr(
@@ -361,7 +361,7 @@ class TestTheNestedExecCredentialsRefusal:
         )
         monkeypatch.setattr(
             failure_capture,
-            "_redact",
+            "redact_text",
             lambda _text: (_ for _ in ()).throw(RuntimeError("no redactor")),
         )
         message = _nested_refusal(
@@ -392,7 +392,7 @@ class TestTheNestedExecNetworkRefusal:
     ):
         monkeypatch.setattr(
             failure_capture,
-            "_redact",
+            "redact_text",
             lambda _text: (_ for _ in ()).throw(RuntimeError("no redactor")),
         )
         stream = f"{NETWORK_DENIAL}\n{PROBE_ENVELOPE}"
@@ -441,7 +441,7 @@ def _callee(func):
 #: rendering)`` and valued by how many times that exact site occurs. It builds
 #: ``outcome.reason`` in ``task_dispatch.finish_ok``, which is written through
 #: §4.5.3's redacting sinks — ``BatchReport.write``'s ``_redact_json`` and
-#: ``failure_summary``'s ``_redact`` — never straight to a terminal, which is
+#: ``failure_summary``'s ``redact_text`` — never straight to a terminal, which is
 #: what separates it from the three refusals above. An entry earns its place by
 #: naming the sink that redacts it; a new bare tail with no such sink is the
 #: leak this module exists to stop.
@@ -494,8 +494,8 @@ class TestNoRefusalQuotesAStreamRaw:
                     owner_of[id(node)] = function.name
             for node in ast.walk(tree):
                 # `_redact_probe_tail` is the boundary itself: its own `_tail` runs
-                # on text `_redact` has already returned, one statement earlier,
-                # which no single-expression rule can see.
+                # on text `redact_text` has already returned, one statement
+                # earlier, which no single-expression rule can see.
                 owner = owner_of.get(id(node), "<module>")
                 if owner == "_redact_probe_tail":
                     continue
@@ -506,9 +506,9 @@ class TestNoRefusalQuotesAStreamRaw:
                 if not node.args:
                     continue
                 first = node.args[0]
-                redacted = (
-                    isinstance(first, ast.Call)
-                    and (_callee(first.func) or "").startswith("_redact")
+                redacted = isinstance(first, ast.Call) and (
+                    (_callee(first.func) or "").startswith("_redact")
+                    or _callee(first.func) == "redact_text"
                 )
                 if not redacted:
                     found.append((f"{path}:{node.lineno}", owner, ast.unparse(node)))

@@ -39,6 +39,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         STATUS_UNPARSEABLE,
     )
     from .schema_validator import (
+        schema_version_supplied,
         validate_human_decision_verdicts,
         validate_with_schema_file,
         validation_reply_problems,
@@ -64,6 +65,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         STATUS_UNPARSEABLE,
     )
     from utils.schema_validator import (
+        schema_version_supplied,
         validate_human_decision_verdicts,
         validate_with_schema_file,
         validation_reply_problems,
@@ -752,7 +754,7 @@ def _report_normalized(
     if version:
         print(
             f"[exec-subagents] {kind}: "
-            + _schema_version_supplied("the reply", version)
+            + schema_version_supplied("the reply", version)
             + ", before validating."
         )
     if notes:
@@ -787,14 +789,6 @@ def supply_result_version(kind: str, data: Any) -> Optional[str]:
     except ImportError:  # pragma: no cover - direct-script import shim
         from utils.schema_validator import supply_schema_version
     return supply_schema_version(data, schema)
-
-
-def _schema_version_supplied(subject: str, version: str) -> str:
-    try:
-        from .schema_validator import schema_version_supplied
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.schema_validator import schema_version_supplied
-    return schema_version_supplied(subject, version)
 
 
 def validate_result(kind: str, data: Any) -> List[str]:

@@ -59,6 +59,7 @@ from utils import subagent_executor as executor  # noqa: E402
 from utils.provider_registry import get_provider  # noqa: E402
 from utils.providers.base import (  # noqa: E402
     CODEX_HOME_CHECK_MARKER,
+    INCIDENTAL_LANE_FANOUT,
     JAIL_DENIED_MARKER,
     MODE_CHECK_MARKER,
     SANDBOX_BYPASSED_MARKER,
@@ -1280,10 +1281,17 @@ class TestTheOtherTwoLanes:
         assert SANDBOX_INCIDENTAL_MARKER in out and SANDBOX_BYPASSED_MARKER not in out
 
 
+def _fanout_notice(evidence, allow_list, installed):
+    """The fan-out lane's ``[JAIL_DENIED]`` line, as ``llm_client`` builds it."""
+    return landlock_dispatch.jail_denied_text(
+        spec=SPEC, rung=PLUGIN_LANDLOCK_RUNG, evidence=evidence,
+        allow_list=allow_list, installed=installed, lane=INCIDENTAL_LANE_FANOUT,
+    )
+
+
 class TestTheJailDeniedLine:
     def _notice(self, installed, path="/elsewhere/x"):
-        return llm_client.jail_denied_notice(
-            "codex", SPEC, PLUGIN_LANDLOCK_RUNG,
+        return _fanout_notice(
             {"where": "stderr", "line": "Permission denied (os error 13)", "path": path,
              "class": "jail"},
             "dir:~/.codex", installed,
@@ -1298,8 +1306,7 @@ class TestTheJailDeniedLine:
         assert "the likely cause" in self._notice(f"codex-cli {major}.{int(minor) + 1}.0")
 
     def test_an_unnamed_path_is_a_probable_denial(self):
-        notice = llm_client.jail_denied_notice(
-            "codex", SPEC, PLUGIN_LANDLOCK_RUNG,
+        notice = _fanout_notice(
             {"where": "event", "line": "Permission denied", "path": None, "class": "probable"},
             "", "",
         )
@@ -1310,8 +1317,7 @@ class TestTheJailDeniedLine:
         """The line is codex's raw stderr; the notice reaches stdout, the run
         log and the closing summary, so it goes through the redaction boundary."""
         key = "sk-proj-" + "A1b2C3d4" * 6
-        notice = llm_client.jail_denied_notice(
-            "codex", SPEC, PLUGIN_LANDLOCK_RUNG,
+        notice = _fanout_notice(
             {"where": "stderr", "path": "/elsewhere/x", "class": "jail",
              "line": f"Permission denied (os error 13) /elsewhere/x token {key}"},
             "", "",
@@ -1322,8 +1328,7 @@ class TestTheJailDeniedLine:
         """The evidence comes redacted, but the notice reaches stdout, the run
         log and the closing summary, so it goes through the boundary itself."""
         key = "sk-proj-" + "A1b2C3d4" * 6
-        notice = llm_client.jail_denied_notice(
-            "codex", SPEC, PLUGIN_LANDLOCK_RUNG,
+        notice = _fanout_notice(
             {"where": "stderr", "path": f"/srv/{key}/x", "class": "jail",
              "line": "Permission denied (os error 13)"},
             f"dir:/srv/{key}", "",

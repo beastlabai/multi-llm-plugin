@@ -46,6 +46,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import task_result as _task_result
     from . import runner_selection as _runner_selection
     from . import probe_state as _probe_state
+    from . import dispatch_spawn as _dispatch_spawn
     from . import runner_preflight as _runner_preflight
     from . import task_dispatch as _task_dispatch
 except ImportError:  # pragma: no cover - direct-script import shim
@@ -71,6 +72,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
     from utils import task_result as _task_result  # type: ignore[no-redef]
     from utils import runner_selection as _runner_selection  # type: ignore[no-redef]
     from utils import probe_state as _probe_state  # type: ignore[no-redef]
+    from utils import dispatch_spawn as _dispatch_spawn  # type: ignore[no-redef]
     from utils import runner_preflight as _runner_preflight  # type: ignore[no-redef]
     from utils import task_dispatch as _task_dispatch  # type: ignore[no-redef]
 
@@ -781,27 +783,42 @@ def _narrow_on_rate_limited_attempt(
 
 
 def _judge_dispatch_argv_preview(
-    runner: str, prompt: str, profile: str, anchor: Optional[str]
+    runner: str, prompt: str, profile: str, anchor: Optional[str],
+    *, task: Optional[Dict[str, Any]] = None, kind: str = "human_decision_judge",
+    cwd: Optional[str] = None,
 ) -> List[str]:
     """A best-effort argv for the F6 audit line — never the real dispatch's own.
 
-    Mirrors ``write_batch_scheduler._render_argv``: the provider's own command
-    builder, called directly and never executed. Deliberately not
-    :func:`_preview_argv` (the ``--dry-run-subagents`` renderer), which enters
-    the full dispatch context and materializes a schema sidecar per call — a
-    judge task carries no schema, so that machinery would only double the
-    per-attempt setup this hook runs beside for no more accurate an argv. A
-    render failure falls back to naming the runner: an audit hook must never
-    fail the dispatch it is watching.
+    Rendered as ``write_batch_scheduler._render_argv`` renders its own
+    (``dispatch_spawn.audit_argv``): the provider's own command builder, called
+    directly and never executed, on the rung the dispatch takes. The judge is
+    a read kind dispatched with no grant, so its rung and request are the ones
+    ``dispatch_spawn._dispatch_grant`` replays for it (the recorded rung, a
+    request built from ``cwd``): the audit line never shows a sandbox the
+    child did not get. Deliberately not :func:`_preview_argv` (the
+    ``--dry-run-subagents`` renderer), which enters the full dispatch context
+    and materializes a schema sidecar per call — a judge task carries no
+    schema, so that machinery would only double the per-attempt setup this
+    hook runs beside for no more accurate an argv. A render failure falls back
+    to naming the runner: an audit hook must never fail the dispatch it is
+    watching.
     """
     provider_name, model = parse_model_spec(runner, anchor=anchor)
     provider = get_provider(provider_name)
     if provider is None:
         return [runner]
     try:
-        return list(provider.build_agent_command(prompt, model, profile))
+        refusal, request, rung = _dispatch_spawn._dispatch_grant(
+            task or {}, kind=kind, profile=profile, runner=runner, cwd=cwd,
+            provider=provider, jail_request=None,
+        )
     except Exception:  # noqa: BLE001 - an audit preview must never fail a dispatch
-        return [provider_name, "<profile unsupported>"]
+        refusal, request, rung = None, None, None
+    if refusal is not None:
+        request, rung = None, None
+    return _dispatch_spawn.audit_argv(
+        provider, provider_name, model, profile, prompt, rung=rung, jail_request=request,
+    )
 
 
 def _judge_audit_before_attempt(
@@ -834,6 +851,7 @@ def _judge_audit_before_attempt(
             sandbox_root=str(context["cwd"] or ""),
             argv=_judge_dispatch_argv_preview(
                 context["runner"], context["prompt"], context["profile"], anchor,
+                task=context["task"], kind=context["kind"], cwd=context["cwd"],
             ),
             prompt=context["prompt"], declared_files=[],
         )

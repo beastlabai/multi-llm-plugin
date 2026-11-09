@@ -28,6 +28,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     )
     from . import batch_reply as _batch_reply
     from . import failure_capture as _failure_capture
+    from .write_safety import redact_text
 except ImportError:  # pragma: no cover - direct-script import shim
     from utils.providers.base import PROFILE_AGENT_READONLY
     from utils.retry_ladder import (  # noqa: F401 - re-exported, see below
@@ -37,6 +38,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
     )
     from utils import batch_reply as _batch_reply  # type: ignore[no-redef]
     from utils import failure_capture as _failure_capture  # type: ignore[no-redef]
+    from utils.write_safety import redact_text  # type: ignore[no-redef]
 
 
 # ---------------------------------------------------------------------------
@@ -556,7 +558,7 @@ class BatchReport:
         for outcome in self.failed:
             rung = outcome.rung
             rung_text = f"rung {rung}" if rung is not None else "no rung"
-            lines.append(_failure_capture._redact(
+            lines.append(redact_text(
                 f"  - {outcome.task_id}: {outcome.status} ({rung_text}, "
                 f"{len(outcome.attempts)} attempt(s), runner {outcome.runner}) "
                 f"{outcome.reason or ''}".rstrip()

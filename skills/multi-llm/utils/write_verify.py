@@ -42,17 +42,12 @@ from .provider_registry import get_verify_command, get_verify_settings
 from .batch_reply import WRITE_APPLIED, WRITE_PARTIAL
 from .dispatch_spawn import _host_env_guards
 from .subagent_tasks import PHASE_BY_WRITE_KIND
+from .write_safety import redact_text
 
 #: How much of the verification command's output travels in the result payload,
 #: the summary and `.status.json`. A tail rather than the whole capture: a failing
 #: build prints megabytes and what names the failure is the end of it.
 VERIFY_TAIL_CHARS = 2000
-
-
-def _redacted_text(text: str) -> str:
-    """``write_safety.redact_text``, imported on first use."""
-    from .write_safety import redact_text
-    return redact_text(text)
 
 
 def load_finalize_tracking():
@@ -212,7 +207,7 @@ class VerifyStep:
         # reports the exit code and the duration.
         self._ctx.log(
             f"[write-subagents] verification ({source}): running "
-            f"`{_redacted_text(command)}` (timeout {timeout}s)"
+            f"`{redact_text(command)}` (timeout {timeout}s)"
         )
         started = time.monotonic()
         exit_code, output = self._run_verify_command(command, timeout)
@@ -221,11 +216,11 @@ class VerifyStep:
         # that echoes a token into its log would otherwise put it in
         # `.status.json`, `write_batch_report.json` and `summary.md` at once.
         result.verification = {
-            "command": _redacted_text(command),
+            "command": redact_text(command),
             "source": source,
             "exit_code": exit_code,
             "duration_seconds": round(duration, 1),
-            "output_tail": _redacted_text(output).strip()[-VERIFY_TAIL_CHARS:],
+            "output_tail": redact_text(output).strip()[-VERIFY_TAIL_CHARS:],
         }
         self._ctx.log(
             f"[write-subagents] verification ({source}): "

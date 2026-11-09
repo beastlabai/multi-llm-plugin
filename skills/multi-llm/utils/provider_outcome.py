@@ -171,11 +171,14 @@ MAX_LOG_STREAM_BYTES = 45 * 1024
 
 
 def _redact(text: str) -> str:
-    """§4.5's one redaction boundary, imported late.
+    """§4.5's one redaction boundary (``write_safety.redact_text``), imported late.
 
-    ``write_safety`` reaches this module through ``subagent_tasks``, so a
-    module-level import here would close an import cycle. The call is on a
-    per-invocation path, not a per-line one.
+    ``write_safety`` reaches this module through ``subagent_tasks`` and
+    ``llm_client``, so a module-level import here would close an import cycle;
+    this is the late import for the modules on that path (``llm_client`` and
+    the fan-out lanes read it from here). A module off that path imports
+    ``redact_text`` directly. Callers redact before any tail or cut. The call
+    is on a per-invocation path, not a per-line one.
     """
     try:  # pragma: no cover - import shim mirrors the rest of utils/
         from .write_safety import redact_text

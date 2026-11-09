@@ -40,11 +40,11 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         STATUS_SPAWN_FAILED,
         STATUS_TIMEOUT,
     )
-    from . import failure_capture as _failure_capture
     from . import task_outcome as _task_outcome
     from . import task_result as _task_result
     from . import runner_selection as _runner_selection
     from . import dispatch_spawn as _dispatch_spawn
+    from .write_safety import redact_text
 except ImportError:  # pragma: no cover - direct-script import shim
     from utils import structured_output
     from utils.json_extractor import describe_syntax_error
@@ -64,11 +64,11 @@ except ImportError:  # pragma: no cover - direct-script import shim
         STATUS_SPAWN_FAILED,
         STATUS_TIMEOUT,
     )
-    from utils import failure_capture as _failure_capture  # type: ignore[no-redef]
     from utils import task_outcome as _task_outcome  # type: ignore[no-redef]
     from utils import task_result as _task_result  # type: ignore[no-redef]
     from utils import runner_selection as _runner_selection  # type: ignore[no-redef]
     from utils import dispatch_spawn as _dispatch_spawn  # type: ignore[no-redef]
+    from utils.write_safety import redact_text  # type: ignore[no-redef]
 
 
 def _classify_pre_parse(capture: _dispatch_spawn._Capture) -> Tuple[str, str]:
@@ -163,7 +163,7 @@ def _parse_and_validate(
         kind, _task_result.normalize_result(kind, data), _task_result.supply_result_version(kind, data))
     errors = _task_result.validate_result(kind, data)
     if errors:
-        syntax = _failure_capture._redact(describe_syntax_error(fragment)) if fragment else None
+        syntax = redact_text(describe_syntax_error(fragment)) if fragment else None
         capture.reply_syntax_error = syntax
         if syntax:
             # The errors are the fragment's, not the reply's: say so first
@@ -328,21 +328,21 @@ _VERDICT_QUOTE_LEAD = 400
 
 
 def _redact_tracking(text: str, offset: int) -> Tuple[str, int]:
-    """``_redact(text)`` plus where ``offset`` lands in the redacted text.
+    """``redact_text(text)`` plus where ``offset`` lands in the redacted text.
 
-    The redacted text is always :func:`_redact` of the **unmodified** stream:
+    The redacted text is always ``redact_text`` of the **unmodified** stream:
     nothing is inserted into it to carry the position, because any inserted
     character can split a credential so that no redaction pattern recognizes it
     (a marker inserted into the middle of a bearer-token credential left the
     part after the marker unredacted). The position is carried alongside instead, by
     replaying ``write_safety``'s own passes and shifting it by each
     replacement's length change; an offset inside a redacted span moves to the
-    span's start. Should the replay ever disagree with :func:`_redact`, the
+    span's start. Should the replay ever disagree with ``redact_text``, the
     position falls back to the redacted length of the prefix — the returned
     text is still the canonical redaction, so only the window's placement can
     be off, never what it contains.
     """
-    redacted = _failure_capture._redact(text)
+    redacted = redact_text(text)
     offset = min(max(0, offset), len(text))
     try:
         try:  # pragma: no cover - import shim mirrors the rest of utils/
@@ -373,7 +373,7 @@ def _redact_tracking(text: str, offset: int) -> Tuple[str, int]:
             return redacted, min(max(0, pos), len(redacted))
     except Exception:  # noqa: BLE001 - the quote must never raise
         pass
-    return redacted, min(len(_failure_capture._redact(text[:offset])), len(redacted))
+    return redacted, min(len(redact_text(text[:offset])), len(redacted))
 
 
 def _unlowered_offset(text: str, lowered_offset: int) -> int:
@@ -420,7 +420,7 @@ def _quote_verdict(
     stderr line that said nothing of the kind.
 
     Redaction runs on the whole reduced channel **before** the window is cut,
-    for the reason ``_redact`` gives; the match position is carried beside it by
+    for the reason ``failure_capture._tail`` gives; the match position is carried beside it by
     :func:`_redact_tracking`, never by a character inserted into the stream.
     """
     try:  # pragma: no cover - import shim mirrors the rest of utils/
@@ -456,7 +456,7 @@ def _quote_verdict(
         start = min(start, len(redacted) - _VERDICT_QUOTE_CHARS)
         return redacted[start:start + _VERDICT_QUOTE_CHARS]
     head = stdout if not stderr else (f"{stdout}\n{stderr}" if stdout else stderr)
-    return _failure_capture._redact(head)[:_VERDICT_QUOTE_CHARS]
+    return redact_text(head)[:_VERDICT_QUOTE_CHARS]
 
 
 def _classify_failed_run(
@@ -565,7 +565,7 @@ def _classify_failed_run(
             isinstance(found, tuple) and len(found) == 2
             and found[0] == STATUS_RUNNER_ERROR and found[1]
         ):
-            return STATUS_RUNNER_ERROR, _failure_capture._redact(str(found[1]))
+            return STATUS_RUNNER_ERROR, redact_text(str(found[1]))
         return None
     # T2.5: the quote is cut from the VENDOR-reduced capture, around the text
     # that decided the verdict. This is the one application of `vendor_text`

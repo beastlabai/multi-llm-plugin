@@ -2073,8 +2073,9 @@ def _prompt_over_budget(
     codex-sandbox-unavailable §6 F1 "Dispatch shape" item 4, 2026-09-30) the
     argv measured is the WRAPPED one — the interpreter, the wrapper, the
     ``--allow`` entries and the rung's in-CLI atoms — rendered with
-    placeholder paths (``landlock_dispatch.preview_wrap_argv``), creating
-    nothing.
+    placeholder paths, creating nothing: ``dispatch_spawn.render_audit_argv``,
+    the renderer the audit record uses, with the executable resolved where the
+    spawn resolves it.
     """
     try:
         from .subagent_tasks import prompt_budget_utf16, utf16_units
@@ -2083,29 +2084,34 @@ def _prompt_over_budget(
 
     if transport in ("stdin", "file"):
         return None
-    wrap = _dispatch_spawn._wrapping_rung(provider, profile, sandbox_fallback)
+    shim = {"batch": False}
+
+    def resolve(executable: str) -> List[str]:
+        try:
+            launcher, shim["batch"] = _resolve_executable(executable)
+        except OSError:  # pragma: no cover - PATH probe failure is not a refusal
+            launcher, shim["batch"] = [executable], False
+        return launcher
+
+    # Only a wrapping rung is measured: the callers hand one over for the jail
+    # alone (`DispatchPlan.budget_kwargs`).
+    wrapping = _dispatch_spawn._wrapping_rung(provider, profile, sandbox_fallback)
     try:
-        argv = provider.build_agent_command(prompt, model, profile)
-        if wrap is not None and jail_request is not None:
-            argv = provider.apply_sandbox_fallback(
-                argv, profile, wrap.name,
-                context=landlock_dispatch.preview_context(jail_request),
-            )
+        rendered = _dispatch_spawn.render_audit_argv(
+            provider, model, profile, prompt,
+            sandbox_fallback if wrapping is not None else None, jail_request,
+            launcher=resolve,
+        )
     except Exception:  # noqa: BLE001 - a budget probe must not mask a refusal
         return None
-    try:
-        launcher, is_batch_shim = _resolve_executable(argv[0])
-    except OSError:  # pragma: no cover - PATH probe failure is not a refusal
-        launcher, is_batch_shim = [argv[0]], False
-    if wrap is not None and jail_request is not None:
-        launcher = landlock_dispatch.preview_wrap_argv(launcher, wrap, jail_request)
+    is_batch_shim = shim["batch"]
     if is_batch_shim:
         unsafe = sorted(set(prompt) & _CMD_UNSAFE_CHARS)
         if unsafe:
             chars = ", ".join(repr(ch) for ch in unsafe)
             return (
                 f"{provider.name} resolves to a cmd.exe batch shim "
-                f"({launcher[0]}) and delivers the prompt on argv, but the "
+                f"({rendered[0]}) and delivers the prompt on argv, but the "
                 f"prompt contains cmd.exe metacharacters ({chars}). cmd.exe "
                 f"reparses the shim's command line, so these characters could "
                 f"corrupt the prompt or escape into executed commands "
@@ -2116,7 +2122,6 @@ def _prompt_over_budget(
             )
     # Measure the argv `_spawn` will actually run: the resolved launcher, not the
     # adapter's bare command name.
-    rendered = [*launcher, *argv[1:]]
     non_prompt = [arg for arg in rendered if arg != prompt]
     ceiling = prompt_budget_utf16(
         transport=transport,

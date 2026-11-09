@@ -1,6 +1,7 @@
 """The one version gate (M14, §5.4) and the help-token gate.
 
-:func:`version_tuple` is the one parse-and-compare rule; :func:`version_verdict`
+:func:`version_tuple` is the one parse-and-compare rule (:func:`version_newer`
+applies it to an installed version read); :func:`version_verdict`
 reads an adapter's floor and ceiling together; :func:`read_help_tokens` reads a
 CLI's help once per process for the flags an adapter gates. ``base`` re-exports
 every name here for reading (docs/development/providers.md#the-provider-base-modules).
@@ -41,12 +42,9 @@ def _version_token(text: str) -> str:
 def _version_below(version: str, minimum: str) -> bool:
     """``version < minimum``, through the one shared comparison.
 
-    **M14 (§5.4) merged the twin away.** This used to carry its own copy of
-    ``subagent_executor._version_tuple``'s component-wise parse, with a comment
-    saying M14 owned the merge; it now calls :func:`version_tuple`, which is the
-    single rule both the availability label here and the executor's preflight
-    refusal are computed from. One rule, one owner — a build can no longer be
-    "too old" for the refusal and fine for the report, and
+    :func:`version_tuple` is the single rule both the availability label here
+    and the executor's preflight refusal are computed from, so a build can
+    never be "too old" for the refusal and fine for the report;
     ``tests/test_version_gate.py`` pins the two against each other.
     """
     return version_tuple(version) < version_tuple(minimum)
@@ -55,21 +53,13 @@ def _version_below(version: str, minimum: str) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 # M14 (§5.4, §5.4.1) — ONE version gate.
 #
-# Before this section the same rule lived in several places at once, on purpose
-# and with the reason written down each time: `_version_below` above carried a
-# copy of `subagent_executor._version_tuple`'s comparison, and L7, M1 and M7
-# each shipped their own per-flag help sniff *inside the task*, because §11.1
-# needs those tasks severable from §11.2. Absorbing them is what this section
-# is. It was never a precondition for any of them — each one-off worked on its
-# own, and each is deleted only once its replacement is here and its own tests
-# point at it.
-#
 # What "one gate" means concretely:
 #
 #   * **One parse-and-compare rule** — :func:`version_tuple`, used by
-#     `_version_below` (the availability *label*) and by the executor's
-#     preflight *refusal*. A build can no longer be too old for one and fine for
-#     the other.
+#     `_version_below` (the availability *label*), by the executor's
+#     preflight *refusal* and, through :func:`version_newer`, by both lanes'
+#     jail-denial wording. A build can no longer be too old for one and fine
+#     for the other.
 #   * **Floors and ceilings, both declared** — `min_version` and
 #     `max_version_exclusive` (§5.4), read together by :func:`version_verdict`.
 #     Every floor and ceiling carries a comment naming the **feature** that
@@ -142,6 +132,24 @@ def version_tuple(text: str) -> Tuple[int, ...]:
         match = re.match(r"^(\d+)", chunk)
         parts.append(int(match.group(1)) if match else 0)
     return tuple(parts) or (0,)
+
+
+def version_newer(installed: str, measured: str) -> bool:
+    """Whether the version read from ``installed`` (the first dotted-numeric
+    token: ``codex-cli 0.167.0`` reads ``0.167.0``) is newer than ``measured``,
+    through :func:`version_tuple`.
+
+    ``False`` when ``installed`` names no dotted version, when ``measured`` is
+    empty, or when the comparison fails: it only chooses wording (the "likely
+    cause" clause of a jail denial), and wording never ends a refusal.
+    """
+    found = re.search(r"\d+(?:\.\d+)+", installed or "")
+    if not found or not measured:
+        return False
+    try:
+        return version_tuple(found.group(0)) > version_tuple(measured)
+    except Exception:  # noqa: BLE001 - a wording choice never ends a refusal
+        return False
 
 
 #: A ceiling value that is safe to compare, matched **whole**: dotted integers,

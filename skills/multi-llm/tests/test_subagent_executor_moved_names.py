@@ -371,7 +371,7 @@ class TestTheGuardSeesTheExecutor:
          'mock.patch.object(executor, "sandbox_verdict")', "sandbox_verdict"),
         ('import utils.subagent_executor as ex\n'
          'ex.MAX_RESULT_BYTES = 1', "MAX_RESULT_BYTES"),
-        ('mock.patch("utils.subagent_executor._redact")', "_redact"),
+        ('mock.patch("utils.subagent_executor._redact_probe_tail")', "_redact_probe_tail"),
         ('mock.patch(target="utils.subagent_executor._atomic_write_json")',
          "_atomic_write_json"),
         ('monkeypatch.setattr(target="utils.subagent_executor.persist_result", name=None)',

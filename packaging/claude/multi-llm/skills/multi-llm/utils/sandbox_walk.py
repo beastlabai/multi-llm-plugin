@@ -19,7 +19,6 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import os
-import re
 import subprocess
 import sys
 import tempfile
@@ -47,7 +46,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         rung_is_incidental,
         sandbox_incidental_notice_text,
         skip_rung_requested,
-        version_tuple,
+        version_newer,
         write_consent_allows,
         write_rung_allowed,
         PROFILE_AGENT_READONLY,
@@ -93,7 +92,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         rung_is_incidental,
         sandbox_incidental_notice_text,
         skip_rung_requested,
-        version_tuple,
+        version_newer,
         write_consent_allows,
         write_rung_allowed,
         PROFILE_AGENT_READONLY,
@@ -1218,22 +1217,11 @@ def _installed_cli_version(provider_name: str, verdict: _probe_state.SandboxProb
     return ""
 
 
-def _newer_than(installed: str, measured: str) -> bool:
-    """Whether ``installed`` is a newer version than ``measured``."""
-    found = re.search(r"\d+(?:\.\d+)+", installed or "")
-    if not found or not measured:
-        return False
-    try:
-        return version_tuple(found.group(0)) > version_tuple(measured)
-    except Exception:  # noqa: BLE001 - a wording choice never ends a refusal
-        return False
-
-
 def _jail_versions_clause(provider_name: str, rung: SandboxRung, verdict: _probe_state.SandboxProbeResult) -> str:
     """" Codex X is installed, newer than Y …" when it is, else ``""``."""
     measured = (getattr(rung, "measured_through", None) or ("",))[0]
     installed = _installed_cli_version(provider_name, verdict)
-    if measured and _newer_than(installed, measured):
+    if measured and version_newer(installed, measured):
         return (
             f" Codex {installed} is installed, newer than {measured}, the "
             f"version the jail was measured through; a changed start-up write "

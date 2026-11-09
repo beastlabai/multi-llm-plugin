@@ -1,8 +1,9 @@
 """What the executor writes about a run, and the redaction every one of
 those writes goes through first.
 
-:func:`_redact` and :func:`_redact_json` (the one redactor, applied before
-any tail or cut), :func:`_redact_probe_tail` (the boundary a probe's
+``write_safety.redact_text`` (the one redactor, imported here and applied
+before any tail or cut) and :func:`_redact_json` (the same over a JSON
+payload), :func:`_redact_probe_tail` (the boundary a probe's
 stream crosses before it reaches a message), :func:`_atomic_write_json`
 (owner-only, same-directory temp file, ``os.replace``) and the
 per-attempt diagnostic captures under ``failed/``
@@ -26,11 +27,13 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     from .retry_ladder import (  # noqa: F401 - re-exported, see below
         RUNG_BY_STATUS,
     )
+    from .write_safety import redact_text
 except ImportError:  # pragma: no cover - direct-script import shim
     from utils.held_folder import plan_dir_of, write_in_plan_dir  # type: ignore
     from utils.retry_ladder import (  # noqa: F401 - re-exported, see below
         RUNG_BY_STATUS,
     )
+    from utils.write_safety import redact_text  # type: ignore[no-redef]
 
 
 #: Per-attempt diagnostic captures (D3k). A directory, so the reaggregation glob
@@ -56,29 +59,17 @@ def _atomic_write_json(path: str, data: Any) -> None:
 
 
 def _tail(text: str, limit: int = MAX_CAPTURE_BYTES) -> str:
-    """The last ``limit`` bytes of ``text``, decoded leniently for diagnostics."""
+    """The last ``limit`` bytes of ``text``, decoded leniently for diagnostics.
+
+    **Every caller redacts first (``redact_text``), then tails, never the
+    reverse.** This keeps the *last* bytes, so a cut landing inside
+    ``aws_secret_access_key=`` leaves ``_access_key=<value>`` — a shape
+    ``SECRET_KEY`` does not match, so no later pass could recover it.
+    """
     encoded = (text or "").encode("utf-8", errors="replace")
     if len(encoded) <= limit:
         return text or ""
     return encoded[-limit:].decode("utf-8", errors="replace")
-
-
-def _redact(text: str) -> str:
-    """§4.5's one redaction boundary, imported late.
-
-    ``write_safety`` is imported lazily everywhere in this module (it reaches
-    back here through ``subagent_tasks``), and this keeps that convention.
-
-    **Every caller runs this before ``_tail``, never after.** ``_tail`` keeps the
-    *last* bytes, so a cut landing inside ``aws_secret_access_key=`` leaves
-    ``_access_key=<value>`` — a shape ``SECRET_KEY`` does not match, so no later
-    pass could recover it. That ordering is why §4.4 and §4.5 land together.
-    """
-    try:  # pragma: no cover - import shim mirrors the rest of utils/
-        from .write_safety import redact_text
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.write_safety import redact_text
-    return redact_text(text)
 
 
 def _redact_probe_tail(text: str, limit: int = MAX_CAPTURE_BYTES) -> str:
@@ -90,7 +81,7 @@ def _redact_probe_tail(text: str, limit: int = MAX_CAPTURE_BYTES) -> str:
 
     The refusal-message counterpart to
     ``providers.cursor_agent.redact_probe_output``, and the same §4.5 boundary as
-    :func:`_redact` — not a second mechanism, a wrapper that fixes the two things
+    ``redact_text`` — not a second mechanism, a wrapper that fixes the two things
     a refusal needs on top of it.
 
     **Diagnostic value is the point.** A refusal quotes a probe so the reader can
@@ -101,16 +92,16 @@ def _redact_probe_tail(text: str, limit: int = MAX_CAPTURE_BYTES) -> str:
     runs stay diffable. Dropping the whole tail would trade one regression for
     another.
 
-    Redaction runs **before** ``_tail`` for the reason :func:`_redact` states: the
+    Redaction runs **before** ``_tail`` for the reason :func:`_tail` states: the
     tail keeps the *last* bytes, so a cut landing inside a keyword leaves a value
     no later pass can match.
 
-    **Fail safe.** A redactor that cannot be imported, or that raises, must never
+    **Fail safe.** A redactor that raises must never
     fall back to the raw stream — the fallback drops the text exactly the way
     M13's probe boundary does.
     """
     try:
-        redacted = _redact(text or "")
+        redacted = redact_text(text or "")
     except Exception:  # noqa: BLE001 - a diagnostic never leaks on failure
         return "<redacted:probe-output>"
     return _tail(redacted, limit).strip()
@@ -124,7 +115,7 @@ def _redact_json(value: Any) -> Any:
     the payload cannot fall behind one.
     """
     if isinstance(value, str):
-        return _redact(value)
+        return redact_text(value)
     if isinstance(value, dict):
         return {key: _redact_json(item) for key, item in value.items()}
     if isinstance(value, list):
@@ -248,8 +239,8 @@ def _write_failure_capture(
             "prompt_bytes": len((prompt or "").encode("utf-8")),
             # §4.5 before §4.4: redact the whole stream, then tail it. Tailing
             # first would keep a value whose key name the cut had just removed.
-            "stdout_tail": _tail(_redact(stdout)),
-            "stderr_tail": _tail(_redact(stderr)),
+            "stdout_tail": _tail(redact_text(stdout)),
+            "stderr_tail": _tail(redact_text(stderr)),
             # Only on the schema-repair re-ask, so every other capture keeps
             # exactly the keys it always had.
             **({"repair": repair} if repair else {}),

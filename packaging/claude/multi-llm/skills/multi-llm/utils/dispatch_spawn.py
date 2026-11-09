@@ -5,8 +5,10 @@ jail, the timeout kill, and the grant a write dispatch gets.
 schema leg (:func:`_spawn_with_schema`), the child's environment
 (:func:`dispatch_child_env`, which the auth probe reads too) and cached
 version (:func:`_preflight_version`), the process tree, the plugin's
-Landlock jail and what it reported (:func:`_read_jailed_outcome`,
-:func:`jail_denied_line`), and the timeout kill (:func:`_kill_timed_out`,
+Landlock jail and what it reported (:func:`_read_jailed_outcome`, its
+``[JAIL_DENIED]`` line from ``landlock_dispatch.jail_denied_text``), the
+argv an audit record shows (:func:`render_audit_argv`, :func:`audit_argv`),
+and the timeout kill (:func:`_kill_timed_out`,
 :func:`_unconfirmed_kill`, :func:`_drain_after_kill`). The grant a write
 dispatch's jail gets is derived from its kind (:func:`_dispatch_grant`,
 ``runner_selection.WRITE_SCOPE_BY_KIND``), never from the task JSON.
@@ -24,7 +26,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, FrozenSet, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import process_capture
@@ -39,23 +41,18 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     from .providers.base import (
         CODEX_HOME_CHECK_MARKER,
         HOST_POSTURE_FULL_ACCESS,
-        HOST_SANDBOX_POSTURE_ENV,
-        JAIL_DENIED_MARKER,
+        INCIDENTAL_LANE_EXECUTOR,
         JailContext,
         JailRequest,
-        SANDBOX_WRITE_FALLBACK_PROFILES,
-        SKIP_RUNG_ENV,
         WRITE_SCOPE_REPO_WIDE,
         WRITE_SCOPES_BY_CONSENT,
         WRITE_SCOPES_ON_RUNG,
         WritePostureConsent,
         PROFILE_AGENT_WRITE,
-        SANDBOX_FALLBACK_AUTO,
         SandboxRung,
         build_child_env,
     )
     from .subagent_tasks import WRITE_KINDS
-    from . import failure_capture as _failure_capture
     from . import task_outcome as _task_outcome
     from . import task_result as _task_result
     from . import runner_selection as _runner_selection
@@ -74,23 +71,18 @@ except ImportError:  # pragma: no cover - direct-script import shim
     from utils.providers.base import (
         CODEX_HOME_CHECK_MARKER,
         HOST_POSTURE_FULL_ACCESS,
-        HOST_SANDBOX_POSTURE_ENV,
-        JAIL_DENIED_MARKER,
+        INCIDENTAL_LANE_EXECUTOR,
         JailContext,
         JailRequest,
-        SANDBOX_WRITE_FALLBACK_PROFILES,
-        SKIP_RUNG_ENV,
         WRITE_SCOPE_REPO_WIDE,
         WRITE_SCOPES_BY_CONSENT,
         WRITE_SCOPES_ON_RUNG,
         WritePostureConsent,
         PROFILE_AGENT_WRITE,
-        SANDBOX_FALLBACK_AUTO,
         SandboxRung,
         build_child_env,
     )
     from utils.subagent_tasks import WRITE_KINDS
-    from utils import failure_capture as _failure_capture  # type: ignore[no-redef]
     from utils import task_outcome as _task_outcome  # type: ignore[no-redef]
     from utils import task_result as _task_result  # type: ignore[no-redef]
     from utils import runner_selection as _runner_selection  # type: ignore[no-redef]
@@ -287,6 +279,79 @@ def _wrapping_rung(provider: Any, profile: str, rung_id: Optional[str]) -> Optio
     return None
 
 
+def render_audit_argv(
+    provider: Any,
+    model: str,
+    profile: str,
+    prompt: str,
+    rung: Optional[str] = None,
+    jail_request: Optional[JailRequest] = None,
+    consent: Optional[WritePostureConsent] = None,
+    *,
+    launcher: Optional[Callable[[str], List[str]]] = None,
+) -> List[str]:
+    """The argv a dispatch on ``rung`` runs, for a record or a measure: never
+    executed, and nothing is made (no scratch directory, no context, no
+    allow-list resolution; F1 "Task-specific paths stay out of shared state").
+
+    Built in the spawn's order (:func:`_spawn_in_context`): the adapter's
+    command for ``profile``; ``rung`` rendered onto it; the executable resolved
+    (``launcher``, given ``argv[0]``, when the caller measures what runs); and
+    on the plugin's Landlock jail the wrapper prefix
+    (``landlock_dispatch.preview_wrap_argv``). On the jail (a wrapping rung,
+    :func:`_wrapping_rung`) the rung is rendered with ``jail_request``'s
+    context and placeholder paths for the per-attempt scratch directory and
+    ``$CODEX_HOME``; with no ``jail_request`` nothing of the rung is rendered
+    (the spawn refuses that dispatch). Any other rung (F5's uncontained one,
+    plan step 6) is rendered with ``consent`` as the dispatch renders it, so a
+    record never shows a sandbox the child did not get.
+
+    Raises what the adapter raises (a profile or a rung it will not render):
+    each caller says what it records instead (:func:`audit_argv`).
+    """
+    argv = list(provider.build_agent_command(prompt, model, profile))
+    wrap = _wrapping_rung(provider, profile, rung)
+    if wrap is not None:
+        if jail_request is None:
+            wrap = None
+        else:
+            argv = list(provider.apply_sandbox_fallback(
+                argv, profile, wrap.name,
+                context=landlock_dispatch.preview_context(jail_request),
+            ))
+    elif rung:
+        argv = list(provider.apply_sandbox_fallback(argv, profile, rung, consent=consent))
+    if launcher is not None:
+        argv = [*launcher(argv[0]), *argv[1:]]
+    if wrap is not None:
+        argv = landlock_dispatch.preview_wrap_argv(argv, wrap, jail_request)
+    return argv
+
+
+def audit_argv(
+    provider: Any,
+    provider_name: str,
+    model: str,
+    profile: str,
+    prompt: str,
+    rung: Optional[str] = None,
+    jail_request: Optional[JailRequest] = None,
+    consent: Optional[WritePostureConsent] = None,
+) -> List[str]:
+    """:func:`render_audit_argv` for an audit record or a dry run, which must
+    never fail the dispatch it describes: a rung the adapter will not render
+    leaves the bare command, and a profile it will not render names the runner
+    (``[provider_name, "<profile unsupported>"]``)."""
+    try:
+        return render_audit_argv(provider, model, profile, prompt, rung, jail_request, consent)
+    except Exception:  # noqa: BLE001 - a record must never fail a dispatch
+        pass
+    try:
+        return render_audit_argv(provider, model, profile, prompt)
+    except Exception:  # noqa: BLE001 - a record must never fail a dispatch
+        return [provider_name, "<profile unsupported>"]
+
+
 def _carries_full_access(argv: Sequence[str]) -> bool:
     """Whether ``argv`` renders codex's ``danger-full-access`` value — as the
     ``--sandbox`` value or a ``sandbox_mode`` override, never as prose inside
@@ -467,98 +532,14 @@ def _spawn_child(
         )
 
 
-def _codex_versions_text(provider_name: str, rung: SandboxRung) -> Tuple[str, bool]:
-    """``("codex X installed, jail measured through Y", newer)``."""
-    measured = (getattr(rung, "measured_through", None) or ("",))[0] or "unknown"
-    installed = (
-        _probe_state._VERSION_CACHE.get(provider_name) or _probe_state._PROBE_VERSION_CACHE.get(provider_name)
+def _jail_installed_version(provider_name: str) -> str:
+    """The version a ``[JAIL_DENIED]`` line names as installed: the
+    preflight's read, else the sandbox probe's, else ``unknown`` — read from
+    the caches, never a spawn."""
+    return (
+        _probe_state._VERSION_CACHE.get(provider_name)
+        or _probe_state._PROBE_VERSION_CACHE.get(provider_name)
         or "unknown"
-    )
-    newer = _sandbox_walk._newer_than(installed, measured)
-    text = (
-        f"{provider_name} {installed} installed, the jail measured through "
-        f"{measured}"
-    )
-    if newer:
-        text += (
-            "; Codex is newer than the jail was measured with, the likely cause"
-        )
-    return text, newer
-
-
-def _render_home_text(text: str) -> str:
-    """``text`` with every ``$HOME`` prefix shown as ``~`` (paste-ready)."""
-    home = os.path.expanduser("~")
-    if not home or home in ("~", os.sep):
-        return text
-    return text.replace(home + os.sep, "~" + os.sep).replace(home + "'", "~'")
-
-
-def jail_denied_line(
-    *,
-    spec: str,
-    rung: SandboxRung,
-    path: Optional[str],
-    excerpt: str,
-    allow_list: str,
-    profile: Optional[str] = None,
-    write_scope: Optional[str] = None,
-) -> str:
-    """The one ``[JAIL_DENIED]`` line for a dispatch the plugin's jail failed
-    (plan codex-sandbox-unavailable §6 F1 item 6, 2026-09-30).
-
-    It names the runner and spec, the rung, the denied path (or "path not
-    named"), the redacted ≤300-char excerpt, the allow-list, the installed and
-    measured-through Codex versions — adding "Codex is newer than the jail was
-    measured with, the likely cause" when it is — and the next steps. ``$HOME``
-    renders as ``~``, so the line can be pasted into an issue as it is. The
-    whole line goes through the redaction boundary too, whatever its caller
-    already redacted: it reaches stdout, the run log and the closing summary.
-
-    The skip step is worded per lane (``profile``/``write_scope``): for a read
-    dispatch, skipping the rung runs the job on the next rung for one run; for
-    an ``agent-write`` dispatch the jail is the only write rung, so skipping it
-    is a refusal unless F5's consent (the chat's own ``danger-full-access``
-    posture, under ``sandbox_fallback=auto``) is present — the line says so
-    rather than advising a switch that does not run the job.
-    """
-    provider_name = spec.split(":", 1)[0]
-    versions, _newer = _codex_versions_text(provider_name, rung)
-    where = (
-        landlock_dispatch.render_home(path) if path
-        else "path not named (Codex did not name the path; a probable jail denial)"
-    )
-    # The excerpt quotes codex's raw stderr or error event, and this line
-    # reaches stdout, the detached run log and the closing summary: redacted
-    # before the cut (`_redact`), as the fan-out lane's notice is, then `$HOME`
-    # rendered as `~`.
-    shown = _render_home_text(" ".join(_failure_capture._redact(excerpt or "").split())[:300])
-    if profile in SANDBOX_WRITE_FALLBACK_PROFILES:
-        skip = (
-            f"to run the job anyway, set `driver.subagent_runner` to a runner "
-            f"that is not Codex (F6). Setting {SKIP_RUNG_ENV}={rung.name} does "
-            f"not run it: this is a write dispatch (scope "
-            f"{write_scope or 'none'}) and {rung.name!r} is its only write "
-            f"rung, so with it skipped the write is refused unless the chat "
-            f"itself runs in {HOST_POSTURE_FULL_ACCESS} "
-            f"({HOST_SANDBOX_POSTURE_ENV}; F5, under "
-            f"sandbox_fallback={SANDBOX_FALLBACK_AUTO}), which then runs it with "
-            f"no OS boundary."
-        )
-    else:
-        skip = (
-            f"to run the job anyway, set `driver.subagent_runner` to a runner "
-            f"that is not Codex (F6), or else set {SKIP_RUNG_ENV}={rung.name} "
-            f"for one run."
-        )
-    return _failure_capture._redact(
-        f"{JAIL_DENIED_MARKER} {spec} on rung {rung.name!r}: denied {where}; "
-        f"excerpt: {shown!r}; allow-list: {allow_list or '(not computed)'}; "
-        f"{versions}. This is a jail failure, not a model error, and is not "
-        f"retried on another rung. Next: compare with `multi_llm.py doctor`'s "
-        f"`{rung.name}` row; report it at "
-        f"github.com/beastlabai/multi-llm-plugin/issues with this line and that "
-        f"row; {skip}"
     )
 
 
@@ -686,10 +667,12 @@ def _spawn_in_context(
                 "path": landlock_dispatch.redacted_excerpt(exc.path) or None,
                 "class": landlock_dispatch.JAIL_CLASS_JAIL, "reason": exc.reason,
             }
-            capture.jail_denied_line = jail_denied_line(
-                spec=spec, rung=jail.rung, path=exc.path, excerpt=exc.message,
-                allow_list="", profile=profile,
-                write_scope=jail.request.write_scope,
+            capture.jail_denied_line = landlock_dispatch.jail_denied_text(
+                spec=spec, rung=jail.rung,
+                evidence={"path": exc.path, "line": exc.message},
+                allow_list="", installed=_jail_installed_version(spec.split(":", 1)[0]),
+                profile=profile, write_scope=jail.request.write_scope,
+                lane=INCIDENTAL_LANE_EXECUTOR,
             )
             return capture
         capture.argv = list(argv)
@@ -873,10 +856,11 @@ def _read_jailed_outcome(
                 )
             except landlock_dispatch.JailRefused:
                 allow = ""
-            capture.jail_denied_line = jail_denied_line(
-                spec=spec, rung=jail.rung, path=evidence.path, excerpt=evidence.line,
-                allow_list=allow, profile=profile,
-                write_scope=jail.request.write_scope,
+            capture.jail_denied_line = landlock_dispatch.jail_denied_text(
+                spec=spec, rung=jail.rung, evidence=capture.jail_evidence,
+                allow_list=allow, installed=_jail_installed_version(spec.split(":", 1)[0]),
+                profile=profile, write_scope=jail.request.write_scope,
+                lane=INCIDENTAL_LANE_EXECUTOR,
             )
     capture.jail_denials = landlock_dispatch.jail_denied_edits(
         capture.stdout, context, cwd=cwd,
@@ -1168,26 +1152,9 @@ def _report_jail_outcome(task_id: str, capture: Any) -> None:
     line = getattr(capture, "jail_denied_line", None)
     if line:
         _probe_state._record_jail_line(line)
-    denials = getattr(capture, "jail_denials", None)
-    if denials is None:
-        return
-    stray = getattr(denials, "out_of_scope_count", 0) or 0
-    failed = len(getattr(denials, "failed_file_changes", ()) or ())
-    if not stray and not failed:
-        return
-    shown = ", ".join(
-        landlock_dispatch.render_home(p)
-        for p in (getattr(denials, "out_of_scope_paths", ()) or ())[:3]
+    said = landlock_dispatch.jail_denials_text(
+        landlock_dispatch.as_jail_denials(getattr(capture, "jail_denials", None)),
+        lane=INCIDENTAL_LANE_EXECUTOR,
     )
-    parts = []
-    if stray:
-        parts.append(
-            f"{stray} command write(s) outside the grant denied"
-            + (f" ({shown})" if shown else "")
-        )
-    if failed:
-        parts.append(f"{failed} failed file_change item(s)")
-    print(
-        f"[exec-subagents] {task_id}: the plugin's Landlock jail stopped "
-        f"{'; '.join(parts)} — stray writes stopped by the jail"
-    )
+    if said:
+        print(f"[exec-subagents] {task_id}: {said}")

@@ -49,6 +49,7 @@ from utils import sandbox_walk  # noqa: E402
 from utils.llm_client import _resolve_executable  # noqa: E402
 from utils.providers.base import (  # noqa: E402
     HOST_SANDBOX_POSTURE_ENV,
+    INCIDENTAL_LANE_EXECUTOR,
     PROFILE_AGENT_READONLY,
     PROFILE_AGENT_WRITE,
     SANDBOX_FALLBACK_PROFILES,
@@ -1287,15 +1288,24 @@ class TestTheGrant:
         assert off == {"sandbox_rung": None, "jail_denials": None, "jail_evidence": None}
 
 
+def _executor_line(*, path, excerpt, allow_list, profile=None, write_scope=None):
+    """The executor lane's ``[JAIL_DENIED]`` line, as ``dispatch_spawn`` builds it."""
+    return landlock_dispatch.jail_denied_text(
+        spec="codex:gpt-5.5", rung=PLUGIN_LANDLOCK_RUNG,
+        evidence={"path": path, "line": excerpt}, allow_list=allow_list,
+        installed=dispatch_spawn._jail_installed_version("codex"),
+        profile=profile, write_scope=write_scope, lane=INCIDENTAL_LANE_EXECUTOR,
+    )
+
+
 class TestTheJailDeniedNextStep:
     """The `[JAIL_DENIED]` skip step is worded per lane: skipping the only
     write rung refuses a write unless F5's consent is present."""
 
     @staticmethod
     def _line(**lane):
-        return executor.jail_denied_line(
-            spec="codex:gpt-5.5", rung=PLUGIN_LANDLOCK_RUNG, path=None,
-            excerpt="Permission denied", allow_list="", **lane,
+        return _executor_line(
+            path=None, excerpt="Permission denied", allow_list="", **lane,
         )
 
     def test_a_read_dispatch_keeps_the_one_run_skip(self):
@@ -1317,9 +1327,9 @@ class TestTheJailDeniedNextStep:
         """The evidence comes redacted, but the line reaches stdout, the run
         log and the closing summary, so it goes through the boundary itself."""
         key = "sk-proj-" + "A1b2C3d4" * 6
-        line = executor.jail_denied_line(
-            spec="codex:gpt-5.5", rung=PLUGIN_LANDLOCK_RUNG, path=f"/srv/{key}/x",
-            excerpt="Permission denied", allow_list=f"dir:/srv/{key}",
+        line = _executor_line(
+            path=f"/srv/{key}/x", excerpt="Permission denied",
+            allow_list=f"dir:/srv/{key}",
         )
         assert line.startswith("[JAIL_DENIED] codex:gpt-5.5 on rung 'plugin-landlock'")
         assert "denied /srv/<redacted:sk-family>/x;" in line

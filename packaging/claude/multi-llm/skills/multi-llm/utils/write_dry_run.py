@@ -3,7 +3,7 @@
 :class:`DryRunReport` walks the phase's batches as the loop would and writes
 ``subagent_dry_run.json`` (:meth:`DryRunReport.write`): per task, the runner it
 resolves to, the exact argv rendered (the prompt replaced by its hash,
-:func:`_redacted_argv`), the prompt transport, the profile, its co-schedule
+``write_safety.redact_argv``), the prompt transport, the profile, its co-schedule
 group under the disjointness admission, the runner preflight under the phase's
 grant and the rung it recorded, and the write policy's verdict on its declared
 files, then the ceilings. It starts no child and writes nothing else, which is
@@ -37,6 +37,7 @@ from .write_safety import (
     DRY_RUN_FILENAME,
     PolicyViolation,
     admit_disjoint_groups,
+    redact_argv,
     relative_to_root,
 )
 
@@ -153,7 +154,7 @@ class DryRunReport:
                     entry["reason"] = exc.message
                     entries.append(entry)
                     continue
-                entry["argv"] = _redacted_argv(
+                entry["argv"] = redact_argv(
                     self._render_argv(runner, prompt, entry["profile"]), prompt
                 )
                 try:
@@ -186,8 +187,3 @@ class DryRunReport:
             "tasks": entries,
         })
         return path
-
-
-def _redacted_argv(argv: Sequence[str], prompt: str) -> List[str]:
-    from .write_safety import redact_argv
-    return redact_argv(argv, prompt)

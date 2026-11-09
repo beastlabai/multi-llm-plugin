@@ -77,6 +77,7 @@ from . import landlock_dispatch as _landlock
 from . import metrics as _metrics
 from . import prior_changes as _prior_changes
 from . import batch_reply as _batch_reply
+from . import dispatch_spawn as _dispatch_spawn
 from . import runner_selection as _runner_selection
 from . import commit_write_guard as _commit_write_guard  # noqa: F401 - `_MOVED` reads it
 from . import check_records as _check_records
@@ -472,7 +473,6 @@ _MOVED: Dict[str, Tuple[str, ...]] = {
         "VERIFY_TAIL_CHARS",
         "VerifyCommand",
         "VerifyStep",
-        "_redacted_text",
         "_verify_timeout_note",
         "load_finalize_tracking",
     ),
@@ -521,7 +521,6 @@ _MOVED: Dict[str, Tuple[str, ...]] = {
     ),
     "write_dry_run": (
         "DryRunReport",
-        "_redacted_argv",
     ),
 }
 _MOVED_TO: Dict[str, str] = {
@@ -593,36 +592,12 @@ def _tighter_cap(first: Optional[int], second: Optional[int]) -> Optional[int]:
     return min(first, second)
 
 
-def _as_jail_denials(value: Any) -> Any:
-    """``after_result``'s ``jail_denials`` as a ``landlock_dispatch.JailDenials``.
-
-    The executor hands the dataclass itself; a dict (its ``to_dict()`` shape,
-    e.g. read back from a record) is rebuilt so ``_classify`` reads one type.
-    ``None`` — a dispatch that was not on the rung, or carried no write scope —
-    stays ``None``.
-    """
-    if value is None or isinstance(value, _landlock.JailDenials):
-        return value
-    if hasattr(value, "failed_file_changes") and hasattr(value, "denied_paths"):
-        # The same dataclass reached through another import path of the
-        # module (a duplicate module object fails `isinstance`, not the shape).
-        return value
-    if isinstance(value, dict):
-        return _landlock.JailDenials(
-            failed_file_changes=[
-                [str(p) for p in group]
-                for group in (value.get("failed_file_changes") or [])
-            ],
-            in_scope_paths=[str(p) for p in (value.get("in_scope_paths") or [])],
-            replacement_paths=[
-                str(p) for p in (value.get("replacement_paths") or [])
-            ],
-            out_of_scope_count=int(value.get("out_of_scope_count") or 0),
-            out_of_scope_paths=[
-                str(p) for p in (value.get("out_of_scope_paths") or [])
-            ],
-        )
-    return None
+#: ``after_result``'s ``jail_denials`` as a ``landlock_dispatch.JailDenials``
+#: (the executor's dataclass, or a dict in its ``to_dict()`` shape read back
+#: from a record), ``None`` for a dispatch not on the rung or carrying no write
+#: scope: ``_classify`` reads one type. The shared normaliser, read under this
+#: name at each call.
+_as_jail_denials = _landlock.as_jail_denials
 
 
 # ---------------------------------------------------------------------------
@@ -2599,50 +2574,25 @@ class WriteBatchScheduler:
     def _render_argv(self, runner: str, prompt: str, profile: str) -> List[str]:
         """The rendered argv for the audit record / dry run, never executed here.
 
-        Plan step 3 (2026-09-30): when the preflight recorded the
-        plugin-landlock rung for this runner and scope, the argv is the wrapped
-        shape — the rung's atoms and developer instructions, then
-        ``landlock_dispatch.preview_wrap_argv``'s prefix — with placeholder
-        paths for the per-attempt scratch directory and ``$CODEX_HOME``. It
-        creates nothing: no scratch directory, no context, no allow-list
-        resolution (F1 "Task-specific paths stay out of shared state").
+        The rung the preflight recorded for this runner and scope, rendered as
+        the dispatch will render it (``dispatch_spawn.audit_argv``): on the
+        plugin-landlock rung the wrapped shape with placeholder paths, on any
+        other recorded rung (F5's uncontained one) the rung with this run's
+        consent, so the audit record never shows a sandbox the child did not
+        get. It creates nothing (F1 "Task-specific paths stay out of shared
+        state").
         """
         from .provider_registry import get_provider
         provider_name, model = parse_model_spec(runner, anchor=self.anchor)
         provider = get_provider(provider_name)
         if provider is None:
             return [runner]
-        try:
-            argv = list(provider.build_agent_command(prompt, model, profile))
-        except Exception:  # noqa: BLE001 - a log must never fail a dispatch
-            return [provider_name, "<profile unsupported>"]
-        rung_id = self._grant.recorded_rung(runner, profile)
-        if rung_id and rung_id != SANDBOX_RUNG_PLUGIN_LANDLOCK:
-            # Any other recorded rung (F5's uncontained one, plan step 6) is
-            # rendered as the dispatch will render it, so the audit record
-            # never shows a sandbox the child did not get; a render the adapter
-            # refuses leaves today's argv.
-            try:
-                consent = host_write_posture_consent(write_scope=self.write_scope)
-                return list(provider.apply_sandbox_fallback(
-                    list(argv), profile, rung_id, consent=consent,
-                ))
-            except Exception:  # noqa: BLE001 - a preview must never fail a dispatch
-                return argv
-        if rung_id != SANDBOX_RUNG_PLUGIN_LANDLOCK or self.jail_request is None:
-            return argv
-        try:
-            rung = next(
-                candidate for candidate in provider.sandbox_fallback_rungs(profile)
-                if candidate.name == rung_id
-            )
-            rendered = provider.apply_sandbox_fallback(
-                list(argv), profile, rung_id,
-                context=_landlock.preview_context(self.jail_request),
-            )
-            return _landlock.preview_wrap_argv(rendered, rung, self.jail_request)
-        except Exception:  # noqa: BLE001 - a preview must never fail a dispatch
-            return argv
+        return _dispatch_spawn.audit_argv(
+            provider, provider_name, model, profile, prompt,
+            rung=self._grant.recorded_rung(runner, profile),
+            jail_request=self.jail_request,
+            consent=host_write_posture_consent(write_scope=self.write_scope),
+        )
 
     # -- D3g: the classification ----------------------------------------
 

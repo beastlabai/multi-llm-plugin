@@ -27,18 +27,15 @@ from .metrics import describe_usage as _describe_usage
 from .retry_ladder import STATUS_UNPARSEABLE
 from .provider_registry import parse_model_spec, get_provider, get_provider_timeout
 from .providers.base import (
-    JAIL_DENIED_MARKER,
+    INCIDENTAL_LANE_FANOUT,
     PROFILE_GENERATE,
-    SANDBOX_RUNG_PLUGIN_LANDLOCK,
     SANDBOX_RUNG_UNSANDBOXED,
-    SKIP_RUNG_ENV,
     JailContext,
     JailRequest,
     ReadOnlyInvocationRefused,
     StructuredOutputUnavailable,
     build_child_env,
     sandbox_rung_id,
-    version_tuple,
 )
 # What a run means — the result dict, its error codes and every `details` key
 # a child that ran carries — is read in `provider_outcome`. The names callers
@@ -81,10 +78,6 @@ from .provider_outcome import (  # noqa: F401 - re-exported, see above
     outcome_from_capture,
     rejected_answer_category,
 )
-
-
-#: Where a ``[JAIL_DENIED]`` line sends the reader (F1 item 6, "Next steps").
-JAIL_DENIED_ISSUES_URL = "github.com/beastlabai/multi-llm-plugin/issues"
 
 
 def sandbox_record_word(value: Any) -> Optional[str]:
@@ -1019,75 +1012,6 @@ def _cached_cli_version(provider_name: str) -> str:
     return ""
 
 
-def _version_newer(installed: str, measured: str) -> bool:
-    match = re.search(r"\d+(?:\.\d+)+", installed or "")
-    if not match or not measured:
-        return False
-    return version_tuple(match.group(0)) > version_tuple(measured)
-
-
-def _render_home_text(text: str) -> str:
-    """``text`` with every ``$HOME/`` prefix shown as ``~/`` (a line pasted
-    into an issue as it is)."""
-    home = os.path.expanduser("~")
-    if not text or not home or home in ("~", os.sep):
-        return text or ""
-    return text.replace(home + os.sep, "~" + os.sep)
-
-
-def jail_denied_notice(
-    provider_name: str,
-    model_spec: str,
-    rung: Any,
-    evidence: Dict[str, Any],
-    allow_list: str,
-    installed: str,
-) -> str:
-    """The one ``[JAIL_DENIED]`` line for a slot the plugin's jail failed
-    (F1 "Where it sits" item 6, "What prints").
-
-    The runner and spec, the rung, the denied path or "path not named", the
-    excerpt, the allow-list, the installed and measured-through versions —
-    with "the likely cause" when codex is newer — and the next steps. ``$HOME``
-    renders as ``~`` throughout. The whole notice goes through the redaction
-    boundary too, whatever the evidence already had: it reaches stdout, the
-    run log and the closing summary.
-    """
-    rung_name = getattr(rung, "name", SANDBOX_RUNG_PLUGIN_LANDLOCK)
-    measured = (getattr(rung, "measured_through", None) or ("",))[0] or "unknown"
-    path = evidence.get("path")
-    where = evidence.get("where") or "stderr"
-    # The quoted line is codex's raw stderr or error event, and this notice
-    # reaches stdout, the detached run log and the closing summary: redacted
-    # first, as `describe_failure`'s text is, then `$HOME` rendered as `~`.
-    said = _render_home_text(" ".join(_redact(str(evidence.get("line") or "")).split()))
-    if path:
-        denied = _landlock.render_home(path)
-    elif evidence.get("class") == _landlock.JAIL_CLASS_PROBABLE:
-        denied = "path not named (Codex did not name the path; a probable jail denial)"
-    else:
-        denied = "path not named"
-    versions = f"{provider_name} installed {installed or 'unknown'}, jail measured through {measured}"
-    if _version_newer(installed, measured):
-        versions += (
-            f"; {provider_name.capitalize()} is newer than the jail was measured "
-            f"with, the likely cause"
-        )
-    return _redact(
-        f"{JAIL_DENIED_MARKER} {provider_name} ({model_spec}): the plugin's "
-        f"Landlock jail (fallback rung {rung_name!r}) denied a write "
-        f"{provider_name} itself needed, so the turn failed: {denied}; "
-        f"{where}: \"{said}\"; allow list: {allow_list or '(unavailable)'}; "
-        f"{versions}; next steps: (1) compare with `multi_llm.py doctor` (its "
-        f"{rung_name} row lists the allow-list, both versions and the switch); "
-        f"(2) report it at {JAIL_DENIED_ISSUES_URL} with this line and that row "
-        f"(the allow-list is not configurable); (3) to run the job anyway, set "
-        f"this key to a runner that is not Codex (for example "
-        f"claude-code:<model>) in .multi-llm/providers.yaml, or for one run set "
-        f"{SKIP_RUNG_ENV}={rung_name}"
-    )
-
-
 def _toml_tree(text: Optional[str]) -> Optional[Dict[str, Any]]:
     if text is None:
         return None
@@ -1182,9 +1106,10 @@ def _jail_refused_result(
         "retryable": False,
     }
     if failure_reason == FAILURE_JAIL_DENIED:
-        evidence["notice"] = jail_denied_notice(
-            provider_name, f"{provider_name}:{model}", rung, evidence, "",
-            _cached_cli_version(provider_name),
+        evidence["notice"] = _landlock.jail_denied_text(
+            spec=f"{provider_name}:{model}", rung=rung, evidence=evidence,
+            allow_list="", installed=_cached_cli_version(provider_name),
+            lane=INCIDENTAL_LANE_FANOUT,
         )
         evidence["rung"] = getattr(rung, "name", None)
         details["jail_failure"] = evidence
@@ -1357,11 +1282,7 @@ def _jail_after_child(
         denials = _landlock.jail_denied_edits(stdout or "", context, cwd=jail.cwd)
         record = denials.to_dict()
         record["total"] = denials.total
-        named: List[str] = []
-        for group in denials.failed_file_changes:
-            named.extend(group)
-        named.extend(denials.out_of_scope_paths)
-        record["paths"] = [p for i, p in enumerate(named) if p not in named[:i]][:3]
+        record["paths"] = denials.named_paths()
         details["jail_denials"] = record
     except Exception:  # noqa: BLE001 - a count never ends a slot
         pass
@@ -1388,9 +1309,10 @@ def _jail_after_child(
         "installed_version": installed,
         "measured_through": (getattr(jail.rung, "measured_through", None) or ("",))[0],
         "allow_list": allow,
-        "notice": jail_denied_notice(
-            provider_name, f"{provider_name}:{model}", jail.rung,
-            evidence.to_dict(), allow, installed,
+        "notice": _landlock.jail_denied_text(
+            spec=f"{provider_name}:{model}", rung=jail.rung,
+            evidence=evidence.to_dict(), allow_list=allow, installed=installed,
+            lane=INCIDENTAL_LANE_FANOUT,
         ),
     })
     details["jail_failure"] = record

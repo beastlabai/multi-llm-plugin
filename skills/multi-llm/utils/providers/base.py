@@ -255,6 +255,7 @@ _MOVED: Dict[str, Tuple[str, ...]] = {
         "read_help_tokens",
         "reset_flag_gate_cache",
         "version_ceiling",
+        "version_newer",
         "version_tuple",
         "version_verdict",
         "warn_gate_once",
