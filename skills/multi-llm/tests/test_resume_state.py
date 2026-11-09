@@ -360,40 +360,43 @@ def _primary_guard_completed(plan: Path, phase: str) -> bool:
 def _dispatched(plan: Path, phase: str, models, scope_id: Optional[str]) -> Set[str]:
     """The models the phase's real fan-out hands to a provider when launched
     with *models*: ``run_all_reviews`` or the base ``run_all_models``, with
-    only the per-model provider call stubbed (nothing reaches a provider)."""
+    only the per-model provider call stubbed (nothing reaches a provider).
+    Both run on the base's ``run_models_concurrent``, whose provider caps and
+    launch spacing are switched off here."""
+    from utils import review_orchestrator_base as base
+
     called: List[str] = []
     out_dir = plan.parent / plan.stem
-    if phase == "code-review":
-        import code_review_orchestrator as review_code
+    mechanics = (
+        patch.object(base, "get_provider_max_concurrent", return_value=None),
+        patch.object(base, "plan_launch_limiter", return_value=(None, 0)),
+        patch.object(base, "slot_launch",
+                     side_effect=lambda *a, **k: contextlib.nullcontext()),
+    )
+    with contextlib.ExitStack() as stack:
+        for mechanic in mechanics:
+            stack.enter_context(mechanic)
+        if phase == "code-review":
+            import code_review_orchestrator as review_code
 
-        async def fake_review(spec, *_args, **_kwargs):
-            called.append(spec)
-            return True, [], None
+            async def fake_review(spec, *_args, **_kwargs):
+                called.append(spec)
+                return True, [], None
 
-        with patch.object(review_code, "run_single_review", fake_review), \
-                patch.object(review_code, "get_provider_max_concurrent", return_value=None), \
-                patch.object(review_code, "plan_launch_limiter", return_value=(None, 0)), \
-                patch.object(review_code, "slot_launch",
-                             side_effect=lambda *a, **k: contextlib.nullcontext()):
-            asyncio.run(review_code.run_all_reviews(
-                list(models), plan, out_dir, 10, 2, scope_id=scope_id))
-    else:
-        from utils import review_orchestrator_base as base
+            with patch.object(review_code, "run_single_review", fake_review):
+                asyncio.run(review_code.run_all_reviews(
+                    list(models), plan, out_dir, 10, 2, scope_id=scope_id))
+        else:
+            async def fake_model(spec, *_args, **_kwargs):
+                called.append(spec)
+                return {"success": True, "output": "[]", "error": None, "prompt": "",
+                        "stdout": "", "stderr": "", "duration_seconds": 0.0,
+                        "model_spec": spec}
 
-        async def fake_model(spec, *_args, **_kwargs):
-            called.append(spec)
-            return {"success": True, "output": "[]", "error": None, "prompt": "",
-                    "stdout": "", "stderr": "", "duration_seconds": 0.0,
-                    "model_spec": spec}
-
-        with patch.object(base, "run_single_model", fake_model), \
-                patch.object(base, "get_provider_max_concurrent", return_value=None), \
-                patch.object(base, "plan_launch_limiter", return_value=(None, 0)), \
-                patch.object(base, "slot_launch",
-                             side_effect=lambda *a, **k: contextlib.nullcontext()):
-            asyncio.run(base.run_all_models(
-                list(models), str(plan), "", lambda spec: {}, phase, "plan_review",
-                10, 2, out_dir=str(out_dir), prefix=plan.stem))
+            with patch.object(base, "run_single_model", fake_model):
+                asyncio.run(base.run_all_models(
+                    list(models), str(plan), "", lambda spec: {}, phase, "plan_review",
+                    10, 2, out_dir=str(out_dir), prefix=plan.stem))
     return set(called)
 
 

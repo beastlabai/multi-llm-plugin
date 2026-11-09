@@ -1282,20 +1282,26 @@ class FanoutProgress:
         return, so a call site that has the result in hand does not have to
         re-derive which of :meth:`done` / :meth:`failed` it means — and cannot
         get the ``source`` pass-through wrong, which is the value the resume and
-        salvage renderers read.
+        salvage renderers read. A typed outcome carrying the same three
+        attributes (``review_lane.SlotResult``) reads the same way.
         """
-        if not isinstance(result, Mapping):
+        if isinstance(result, Mapping):
+            success = result.get("success")
+            source = result.get("source")
+            error = result.get("error")
+        elif all(hasattr(result, name) for name in ("success", "source", "error")):
+            success, source, error = result.success, result.source, result.error
+        else:
             # A lane that returned `None` (or a bare tuple) still has to retire
             # its slot; leaving it live would strand it until the sweep.
             self.failed(spec, error="no result recorded", source=None)
             return
-        source = result.get("source")
-        if result.get("success"):
+        if success:
             self.done(spec, source=source)
         else:
             self.failed(
                 spec,
-                error=result.get("error") or "failed with no error recorded",
+                error=error or "failed with no error recorded",
                 source=source,
             )
 

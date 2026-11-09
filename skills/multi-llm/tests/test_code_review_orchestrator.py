@@ -1455,10 +1455,10 @@ class TestASlotWaitingOnTheSemaphoreReadsQueuedOnThisFanout:
 class TestTheStaggeringRowCarriesItsCountdownOnThisFanout:
     """2026-09-21, this lane's copy: `run_all_reviews` names the sleep it takes.
 
-    The base's `run_models_concurrent` reaches nothing here, so this fan-out
-    has to hand its own tracker to its slots' launch turns (`slot_launch`) —
-    without it the row reads `staggering` with no `starts in Ns`, on the
-    one lane a user watching a `--review-code` launch would see.
+    Its slots run on the base's `run_models_concurrent`, which hands the
+    fan-out's tracker to each launch turn (`slot_launch`): without it the row
+    reads `staggering` with no `starts in Ns`, on the one lane a user watching
+    a `--review-code` launch would see.
     """
 
     # One provider: launch spacing is per provider, so only repeated slots of

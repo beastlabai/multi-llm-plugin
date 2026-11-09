@@ -259,50 +259,93 @@ under-report.
 The review base runs review-plan and review-tasks; `code_review_orchestrator.py` runs
 review-code. `utils/review_lane.py` holds what the two lanes share, so a fix made once
 reaches both, and `tests/test_review_lane_parity.py` runs each scenario below on both
-lanes offline (real phase dirs, grouping, rounds and reports; only the model slots
-stubbed). A scenario that passes on one lane and fails on the other is drift.
+lanes offline (real phase dirs, fan-out mechanics, grouping, rounds and reports; only the
+model slots stubbed). A scenario that passes on one lane and fails on the other is drift.
 
+- **`ReviewLane`** is what a lane supplies where the lanes legitimately differ:
+  `retry_command` (review-code spells a commit review's command in its commit mode),
+  `save_slot` (the base writes a losing slot's salvage request there; review-code's slot
+  already did), `adopt_salvaged` (review-code folds a repaired model's issues back into
+  the round it aggregates from its slots), `fanout_steps`, and `reuse_checks_inputs`
+  (whether reused verdicts are held to the task file's inputs, below). The base's lane is
+  `BaseReviewLane`, configured by the review-plan and review-tasks orchestrators;
+  review-code's is `CodeLane`. The review base's own functions reach the shared stages as
+  `FanoutSteps` and `RoundSteps`, built by each lane from the names its module binds, so a
+  test that patches one there reaches the shared code, and `review_lane` never imports
+  the base.
 - **`SlotResult`** is one model slot's outcome: `model_spec`, `success`, `payload`,
   `error`, `source`, `details` and the salvage `failure` kind. `payload` is only ever the
-  answer of a completed run; a losing run's text stays in `details` for salvage. Both
-  fan-outs' save loops read their slots through `slot_results`, which takes review-plan's
-  record dict and review-code's `(success, issues, error)` triple; the slots themselves
-  still return their lane's own shape.
+  answer of a completed run; a losing run's text stays in `details` for salvage.
+  `slot_results` reads review-plan's record dict and review-code's `(success, issues,
+  error)` triple alike; review-code's slot wrapper returns one, and
+  `FanoutProgress.record_result` reads it as it reads a record dict.
+- **The fan-out's mechanics** are `run_models_concurrent` on both lanes (review-code's
+  `run_all_reviews` stays the entry point and still returns its triples): the semaphores,
+  the launch spacing, the seeded map, the deadline that harvests finished slots before
+  cancelling the rest, and the sweep. A slot that raises is a failed slot with its own
+  redacted text (`raised_slot_record`, source `exception`), never a deadline loss; one
+  whose own coroutine was cancelled is left to the sweep and the deadline backfill.
+- **`close_fanout`** is what follows the fan-out up to grouping: each slot saved, the
+  deadline's losses named in `failed_models` and the map, the round checked, the slots
+  that ran unsandboxed mirrored for the poller, salvage run in-process under
+  `--exec-subagents` (only a file the dispatch names as repaired is adopted), then either
+  the exit 3 of a run where no model answered, which still records `models_failed` and
+  `models_served`, or the partial results and `models_complete` with the served models
+  and usage.
+- **`bind_grouping`** is the grouping a `--reaggregate` reports. A `grouped.json` that a
+  `validation_tasks.json` beside it binds (whatever the flags), or a `validation.json`
+  this run will use, is reused rather than rewritten, since the task file hashes its
+  bytes; zero findings bind nothing. A result that landed after grouping retires the
+  round and regroups (`grouped_coverage_gap`). review-code's commit attribution is its
+  `annotate` pass: in memory on a reused grouping, into the file on a regroup.
 - **`resolve_validation_round`** is what a `--reaggregate` does with the validation round
-  beside its grouping. Zero groups retire the previous round and write `validation.json`
-  as `[]`. `--skip-validation` reads and writes nothing, and the report then shows the
-  groups in `grouped.json`. A `validation_tasks.json` on disk is refused (exit 3) when its
-  inputs or snapshots moved, its prompt sidecars are rebound and persisted, and a whole
-  round is merged while a partial one is dispatched under `--exec-subagents` or handed to
-  the host with the phase reopened. With no task file a new round is built, stamped with
-  `format_version`, published, the phase reopened and `progress.subagents` cleared before
-  the dispatch or the hand-off. Each lane passes what is its own: the task file's current
-  inputs (`current_inputs`) and its round builder (`build_round`). The review base's steps
-  come in as a `RoundSteps` built from the calling lane's own module, so a test that
-  patches one of them there reaches the shared code, and the module never imports the
-  base. The base lane keeps one branch in front of it: a `validation.json` bound to the
-  grouping beside it is reused rather than re-merged.
+  beside its grouping. A round built from truncated context (contract 1) is retired
+  whole. A `validation.json` bound to the grouping and to the batch bytes it merged
+  (`validation_source_decision`) is reused: its round's snapshots are re-hashed (exit 3
+  on a changed one), its verdicts applied and their scope decisions re-derived, and
+  nothing is merged again. review-code's verdicts are also held to the inputs its prompts
+  embed and no snapshot covers (`reuse_checks_inputs`): the task file is first read
+  against `current_inputs` as a resume reads it, so a reviewed line edited since
+  validation (`reviewed_code_sha256`), an edited plan or a commit review's changed frozen
+  context plan (`context_plan_sha256`) refuses the reaggregate with the resume's exit 3.
+  A review pinned to a commit cuts that excerpt at its recorded head, so a working-tree
+  edit moves nothing. Verdicts that no task file binds to every one of those inputs (the
+  task file is gone, or records fewer) are not reused, and the round goes on as if there
+  were no `validation.json`. The base lane's reuse compares no live input: its verdicts
+  are bound by the round's snapshots, which an edit to the live plan leaves as they were.
+  A `validation.json` that does not bind is retired (renamed) and the batch files
+  decide. Zero groups retire the previous round and write `validation.json` as `[]`.
+  `--skip-validation` reads and writes nothing, and the report then shows the groups in
+  `grouped.json`. A
+  `validation_tasks.json` on disk is refused (exit 3) when its inputs or snapshots moved,
+  its prompt sidecars are rebound and persisted, and a whole round is merged while a
+  partial one is dispatched under `--exec-subagents` or handed to the host with the phase
+  reopened. With no task file a new round is built, stamped with `format_version`,
+  published, the phase reopened and `progress.subagents` cleared before the dispatch or
+  the hand-off. Each lane passes what is its own: the task file's current inputs
+  (`current_inputs`) and its round builder (`build_round`).
 
 Both lanes also record these the same way:
 
-- a fan-out whose every slot failed records `models_served` and
-  `progress.sandbox_bypassed` before its exit 3: a slot that ran unsandboxed did so
-  whether or not it then failed;
 - the host hand-off that ends a fan-out records `stdout_markers`, `validation_tasks_path`
   and the follow-up in its durable form (`reaggregate_mode`, `plan_file`,
   `replay_flags`, `cli_common.durable_reaggregate_fields`), so `status` names the
   `--reaggregate` that advances the phase;
-- a `--detach` launcher writes no `state.json` before its boundary, neither a first
-  run's file nor a `--force` clear of the phase's completion: a launch refused at the
-  boundary leaves the file as it found it, and the worker runs the same pre-flight and
-  writes it.
+- a `--detach` launcher writes nothing before its boundary: neither a first run's
+  `state.json`, nor a `--force` clear of the phase's completion, nor the copy of the
+  reviewed document (review-plan's `backup.md`, review-tasks' `tasks-backup.md`). A launch
+  refused at the boundary leaves them as it found them, and the worker runs the same
+  pre-flight and writes them.
 
 What stays different between the lanes, as the lane's own code: the code-review scope,
-diff set and pinned ranges; commit templates; the scope-ledger resume rule; the `model`
-then `source_model` stamp order on reaggregated issues (`grouped_sha256` hashes the
-file's bytes); the per-issue report with its numbering footer, and `issues.json`; the
-stale-implement guard; consolidation (review-plan) and the tasks document
-(review-tasks). review-code's partial-completion guard has no base counterpart.
+diff set and pinned ranges; commit templates; the scope-ledger resume rule (review-code's
+skip predicate); the `model` then `source_model` stamp order on reaggregated issues
+(`grouped_sha256` hashes the file's bytes); the per-issue report with its numbering
+footer, and `issues.json`; the stale-implement guard; consolidation (review-plan) and the
+tasks document (review-tasks). review-code's partial-completion guard has no base
+counterpart. Still written once per lane: the slot functions (`run_single_model`,
+`run_single_review`), the fan-out's grouping-to-report stretch, round opening and model
+selection, and the loading half of a reaggregate.
 
 ## Reaggregation and result identity
 

@@ -69,7 +69,7 @@ from utils import commit_spelling
 from utils.commit_attribution import attribute_review_groups
 from utils.atomic_io import atomic_write_text
 from utils.state_manager import (
-    load_groups_payload,
+    load_groups_payload,  # noqa: F401 - the module's name for grouped.json's reader
     match_issues_to_suggestions,
     save_groups_payload,
     stamp_stable_ids,
@@ -79,7 +79,7 @@ from utils.output_handler import (
     get_phase_dir, output_dir_path, phase_dir_path, workflow_file_entries,
 )
 from utils.detach import PhaseRun, record_output_files, report_progress
-from utils.progress_tracker import DEADLINE_ERROR, FanoutProgress, PhaseProgress
+from utils.progress_tracker import FanoutProgress, PhaseProgress
 from utils import importance as _importance
 from utils import review_lane as _review_lane
 from utils import review_round as _review_round
@@ -87,8 +87,8 @@ from utils import scope_policy as _sp
 from utils import scope_round as _scope_round
 from utils.review_orchestrator_base import (
     RETIRE_SUPERSEDED,
-    plan_launch_limiter,
-    slot_launch,
+    raised_slot_record,
+    run_models_concurrent,
     round_results_exist,
     retire_scope_round_results,
     resolve_scope_round,
@@ -139,7 +139,6 @@ from utils.review_orchestrator_base import (
     salvage_requested_models,
     sandbox_fallback_kwargs,
     slot_exception_error,
-    spawn_fanout_slot,
     update_status,
     write_model_result,
     write_status,
@@ -164,7 +163,6 @@ from utils.validation import (
     decode_document,
     excerpt_context_reported,
     host_views_lock,
-    legacy_context_round_reason,
     PLAN_CONTEXT_LABEL,
     ContextBlock,
     RoundProvenance,
@@ -186,7 +184,6 @@ from utils.provider_registry import (
     get_collapse_paths,
     parse_model_spec,
     get_provider_timeout,
-    get_provider_max_concurrent,
     set_run_anchor,
 )
 from utils.json_extractor import (
@@ -389,6 +386,79 @@ def save_model_result(
         print(f"[{model}] Error logged to: {error_path}")
         return False
     return False
+
+
+class CodeLane:
+    """review-code's :class:`~utils.review_lane.ReviewLane`.
+
+    What it holds is what legitimately differs from the review base's lane: a
+    commit review's commands are spelled in its commit mode, a slot's issues
+    are saved without a salvage request (``emit_salvage_task`` wrote that in
+    the slot), and a salvaged model's repaired issues rejoin the round, which
+    review-code aggregates from its slots rather than from the files
+    (docs/development/review-results.md, "The shared review lane").
+    """
+
+    mode = "review-code"
+    phase_name = "code-review"
+    # Reused verdicts stay bound to the reviewed-code excerpt and a commit
+    # review's frozen context plan (`ReviewLane.reuse_checks_inputs`).
+    reuse_checks_inputs = True
+
+    def __init__(self, *, plan_path: Path, phase_dir: Path, prefix: str) -> None:
+        self.plan_path = plan_path
+        self.phase_dir = phase_dir
+        self.prefix = prefix
+
+    def retry_command(self, *flags: str) -> str:
+        return commit_spelling.spell_retry_command(
+            self.mode, self.plan_path, *flags,
+            flags=cli_common.current_replay_flags(mode=self.mode),
+        )
+
+    def save_slot(self, slot: "_review_lane.SlotResult") -> bool:
+        return save_model_result(
+            self.prefix, slot.model_spec, slot.success, slot.payload, slot.error,
+            self.phase_dir,
+        )
+
+    def adopt_salvaged(
+        self, model_spec: str, path: Path,
+    ) -> Optional["_review_lane.SlotResult"]:
+        if not (path.exists() and path.stat().st_size > 0):
+            return None
+        try:
+            repaired_issues = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as read_error:
+            print(
+                f"[{model_spec}] salvage output unreadable, leaving failed: "
+                f"{read_error}",
+                file=sys.stderr,
+            )
+            return None
+        if not isinstance(repaired_issues, list):
+            print(
+                f"[{model_spec}] salvage output is not a JSON array, "
+                f"leaving failed: {path}",
+                file=sys.stderr,
+            )
+            return None
+        return _review_lane.SlotResult(
+            model_spec, True, payload=repaired_issues, source="salvage",
+        )
+
+    def fanout_steps(self) -> "_review_lane.FanoutSteps":
+        return _review_lane.FanoutSteps(
+            backfill_deadline_losses=backfill_deadline_losses,
+            record_sandbox_bypassed=record_sandbox_bypassed,
+            announce_retired_rungs=announce_retired_rungs,
+            exec_subagents_requested=exec_subagents_requested,
+            dispatch_in_round=dispatch_in_round,
+            dispatch_salvage_tasks=dispatch_salvage_tasks,
+            record_models_salvaged=record_models_salvaged,
+            sanitize_model_name=sanitize_model_name,
+            print_closing_summary=print_closing_summary,
+        )
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -4033,42 +4103,18 @@ async def run_all_reviews(
     Returns:
         Dict mapping model spec to tuple of (success, issues_list, error)
     """
-    semaphore = asyncio.Semaphore(max_parallel)
-    # Per-provider semaphores for concurrency limiting
-    provider_semaphores: Dict[str, asyncio.Semaphore] = {}
-    for spec in model_specs:
-        prov, _ = parse_model_spec(spec, anchor=str(plan_path))
-        if prov not in provider_semaphores:
-            limit = get_provider_max_concurrent(prov, anchor=str(plan_path))
-            if limit is not None:
-                provider_semaphores[prov] = asyncio.Semaphore(limit)
-    # Launch spacing, shared by every slot and retry (see `plan_launch_limiter`).
-    launcher, stagger_overhead = plan_launch_limiter(
-        [parse_model_spec(spec, anchor=str(plan_path))[0] for spec in model_specs]
-    )
-    results: Dict[str, Tuple[bool, Optional[List[Dict]], Optional[str]]] = {}
-    # F6, and the counter this replaces. `progress.models_done` was written `0`
-    # before dispatch and recomputed only after the last model returned, so a
-    # mid-run poll read `models 0/3` beside three finished reviewers (measured
-    # 2026-09-16: 646 s of an 833 s run); D4a's `fanout_slot_counter`, borrowed
-    # from the base fan-out, fixed the *number* and nothing else — no names, no
-    # states, no timings, no attempt.
-    #
-    # The tracker carries that counter's documented meaning with it —
-    # `models_done` counts **finished slots, not successful ones**, because a
-    # failed or skipped model has finished its slot, and which ones produced a
-    # usable result is `models_succeeded`'s job — and adds the per-model map
-    # beside it. The counter itself is *deleted* rather than left ticking beside
-    # the map: two writers for one key can only disagree, since the counter
-    # ticked at slot exit while the map turns terminal at the completion print,
-    # so a lane running both flickers between counter-order and map-order.
+    # The tracker carries the slots' map: `models_done` counts finished slots,
+    # not successful ones (a failed or skipped model has finished its slot),
+    # and `models_succeeded` the ones with a usable result. Built here and
+    # handed back through `tracker_out`, because F11's backfill runs one level
+    # up and gives the map the treatment it gives `failed_models`.
     tracker = FanoutProgress(
         str(get_phase_dir(plan_path, 'code-review')),
         model_specs,
         anchor=str(plan_path),
         # This fan-out's per-model override. `None` leaves each slot's budget to
-        # `get_provider_timeout`, which is the same call the total deadline
-        # below is sized from, so the table's denominator and the deadline agree.
+        # `get_provider_timeout`, which is the same call the total deadline is
+        # sized from, so the table's denominator and the deadline agree.
         timeout=timeout,
     )
     if tracker_out is not None:
@@ -4081,235 +4127,87 @@ async def run_all_reviews(
         if _sp.effective(scope_policy) != _sp.DEFAULT_POLICY else {}
     )
 
-    async def run_with_semaphore(model_spec: str, index: int) -> Tuple[str, Tuple[bool, Optional[List[Dict]], Optional[str]]]:
+    def display_name_of(model_spec: str) -> str:
         provider_name, model_name = parse_model_spec(model_spec, anchor=str(plan_path))
-        display_name = f"{provider_name}:{model_name}"
+        return f"{provider_name}:{model_name}"
 
-        # Skip models that already have results (resume after partial failure)
-        if skip_existing:
-            sanitized = sanitize_model_name(model_spec)
-            phase_dir = get_phase_dir(plan_path, 'code-review')
-            # D2.2: a result is reused only when it reviewed the diff set this
-            # run's reviewers are shown. One written against an earlier change
-            # — or before the ledger existed, which is `unknown` — re-runs, and
-            # `run_single_review` retires the old file at its attempt start.
-            # The alternative reports a review of another change as a review of
-            # this one. `util resume-state` applies the same test.
-            existing = existing_result_reuse(phase_dir, sanitized, scope_id)
-            if existing.verdict == "corrupt":
-                print(f"[{display_name}] Existing result file corrupt, re-running...")
-            elif existing.verdict == "scope_changed":
-                print(
-                    f"[SCOPE_CHANGED] {display_name}: result reviewed "
-                    f"scope {existing.reviewed_scope or SCOPE_UNKNOWN}, this "
-                    f"run's is {scope_id}; re-running"
-                )
-            elif existing.verdict == "reuse":
-                existing_data = existing.issues
-                print(f"[SKIP] {display_name} - already has results ({len(existing_data)} issues)")
-                # Stage U: the result is reused, so what it cost is reused
-                # with it. Nothing else can refill this entry — no adapter
-                # runs for a skipped slot — and without it the run's own
-                # `models_complete` write drops a number an earlier attempt
-                # really paid for.
-                if usage is not None:
-                    spent = (prior_usage or {}).get(model_spec)
-                    if isinstance(spent, dict) and spent:
-                        usage[model_spec] = spent
-                # A slot answered from disk is terminal the moment it is
-                # seeded — no attempt is ever dispatched, so `attempt: 0` and
-                # `elapsed_s: 0` — and it counts in `models_done` *and* in
-                # `models_succeeded`, because it has a usable result. A resumed
-                # run of four models that finds three on disk therefore reads
-                # `3/4` at the first poll rather than `0/4`, which is D4a
-                # itself landing on the one lane where nothing dispatches at
-                # all. The `source` is supplied here because this branch's
-                # return tuple carries none of its own; there is no `skipped`
-                # state, so a renderer labels the row from
-                # `source in RESUME_SOURCES`.
-                tracker.done(model_spec, source="existing_file")
-                return (model_spec, (True, existing_data, None))
-
-        # Acquire provider semaphore first (if any), then global semaphore.
-        # This order prevents capped providers from hogging global slots while
-        # waiting for their provider-specific turn. The provider's launch turn
-        # comes last, as on the base's fan-out: a slot parked on a semaphore
-        # reads `queued`, one waiting for its turn `staggering`, and the wait
-        # lands in `queued_s`, never in the slot's run time.
-        #
-        # No `finally` here any more. `slot_finished()` used to tick from one,
-        # because a slot that raised — or was cancelled by the overall
-        # deadline — has stopped occupying the fan-out just as surely as one
-        # that returned a result. The map keeps that promise in three better
-        # places: the terminal transitions sit at `run_single_review`'s own
-        # completion and failure sites, where the reason and the `source` are
-        # known; a slot that raises past them is retired by the `except` below
-        # with its own message and `source: "exception"` (F5, 2026-09-20 — it
-        # used to fall through to the sweep and be labelled `cancelled`, which
-        # is the wording reserved for a slot that has no ending of its own);
-        # and every slot that reaches none of the three is retired by the sweep
-        # in this function's own `finally`, which runs whichever way the fan-out
-        # ends. A transition here as well would be the second writer.
-        prov_sem = provider_semaphores.get(provider_name)
-        turn = slot_launch(launcher, provider_name, model_spec, display_name, tracker)
-        try:
-            if prov_sem:
-                async with prov_sem:
-                    async with semaphore, turn:
-                        result = await run_single_review(
-                            model_spec, plan_path, out_dir, timeout, changed_files,
-                            base_ref, served_models=served_models, usage=usage,
-                            tracker=tracker, scope_source=scope_source,
-                            task_ids=task_ids, scope_file=scope_file,
-                            diff_dir=diff_dir, scope_id=scope_id,
-                            diff_coverage=diff_coverage,
-                            run_model_specs=list(model_specs),
-                            **pinned_kwargs,
-                            **scope_kwargs,
-                        )
-            else:
-                async with semaphore, turn:
-                    result = await run_single_review(
-                        model_spec, plan_path, out_dir, timeout, changed_files,
-                        base_ref, served_models=served_models, usage=usage,
-                        tracker=tracker, scope_source=scope_source,
-                        task_ids=task_ids, scope_file=scope_file,
-                        diff_dir=diff_dir, scope_id=scope_id,
-                        diff_coverage=diff_coverage,
-                        run_model_specs=list(model_specs),
-                        **pinned_kwargs,
-                        **scope_kwargs,
-                    )
-        except Exception as exc:
-            # An exception IS this slot's ending: it is recorded as a failed
-            # result with its own type and message (redacted), as the review
-            # base's `run_single_model` records it, so `failed_models`, the
-            # error log and the map name one cause. Re-raised, it would be
-            # dropped by the gather below and `backfill_deadline_losses` would
-            # call it a deadline loss.
-            #
-            # `Exception` and deliberately not `BaseException`: a
-            # `CancelledError` arriving here is the deadline's own
-            # `task.cancel()`, and the sweep's wording is the one for it.
-            error = slot_exception_error(exc)
-            print(f"[{display_name}] {error}")
-            tracker.failed(model_spec, error=error, source="exception")
-            return (model_spec, (False, None, error))
-        return (model_spec, result)
-
-    # Seeded before the coroutines exist, so a poller reads a *complete* map
-    # from its first read instead of one that fills in as models start — and the
-    # write that claims the phase dir drops the predecessor's `progress`
-    # wholesale, so a model missing from this map is a bug and never a leftover.
-    # (`claim_run` does that on the detached lane; on the foreground one the
-    # launch write does — nothing did until F1, 2026-09-20.)
-    tracker.seed()
-
-    # Create tasks for all models with staggered starts.
-    #
-    # `create_task`, not bare coroutines (F2, 2026-09-20). `gather` wraps
-    # coroutines into tasks of its own that nothing out here can reach, which
-    # cost this fan-out both halves of its deadline path: the cancel loop below
-    # raised `AttributeError` on the first `task.done()` — so the deadline
-    # branch *crashed* out of the orchestrator instead of returning what had
-    # been collected — and there was no handle to harvest the finished slots
-    # from either. Scheduling is unchanged: nothing between here and the
-    # `gather` awaits, and `gather` would have scheduled them at the same point.
-    tasks = [
-        spawn_fanout_slot(model_specs, run_with_semaphore(spec, idx))
-        for idx, spec in enumerate(model_specs)
-    ]
-
-    # Calculate total timeout based on longest provider timeout
-    if timeout is not None:
-        base_timeout = timeout
-    else:
-        # Use maximum of all provider timeouts
-        base_timeout = max(
-            get_provider_timeout(
-                parse_model_spec(spec, anchor=str(plan_path))[0], anchor=str(plan_path)
+    def skip_existing_result(model_spec: str, index: int) -> Optional[_review_lane.SlotResult]:
+        """A resumed slot answered from its ``<model>.json``, or ``None`` to run it."""
+        if not skip_existing:
+            return None
+        display_name = display_name_of(model_spec)
+        sanitized = sanitize_model_name(model_spec)
+        phase_dir = get_phase_dir(plan_path, 'code-review')
+        # D2.2: a result is reused only when it reviewed the diff set this
+        # run's reviewers are shown. One written against an earlier change —
+        # or before the ledger existed, which is `unknown` — re-runs, and
+        # `run_single_review` retires the old file at its attempt start. The
+        # alternative reports a review of another change as a review of this
+        # one. `util resume-state` applies the same test.
+        existing = existing_result_reuse(phase_dir, sanitized, scope_id)
+        if existing.verdict == "corrupt":
+            print(f"[{display_name}] Existing result file corrupt, re-running...")
+        elif existing.verdict == "scope_changed":
+            print(
+                f"[SCOPE_CHANGED] {display_name}: result reviewed "
+                f"scope {existing.reviewed_scope or SCOPE_UNKNOWN}, this "
+                f"run's is {scope_id}; re-running"
             )
-            for spec in model_specs
-        )
+        elif existing.verdict == "reuse":
+            existing_data = existing.issues
+            print(f"[SKIP] {display_name} - already has results ({len(existing_data)} issues)")
+            # Stage U: the result is reused, so what it cost is reused with
+            # it. Nothing else can refill this entry: no adapter runs for a
+            # skipped slot.
+            if usage is not None:
+                spent = (prior_usage or {}).get(model_spec)
+                if isinstance(spent, dict) and spent:
+                    usage[model_spec] = spent
+            # Terminal the moment it is seeded (`attempt: 0`, `elapsed_s: 0`),
+            # counted in `models_done` and `models_succeeded`; the renderer
+            # labels the row from `source in RESUME_SOURCES`.
+            return _review_lane.SlotResult(
+                model_spec, True, payload=existing_data, source="existing_file",
+            )
+        return None
 
-    total_timeout = base_timeout * 2 + stagger_overhead
+    async def review_slot(model_spec: str, index: int) -> _review_lane.SlotResult:
+        # The slot's terminal transitions sit at `run_single_review`'s own
+        # completion and failure sites, where the reason and the `source` are
+        # known; the fan-out's `record_result` behind them is then a no-op.
+        try:
+            result = await run_single_review(
+                model_spec, plan_path, out_dir, timeout, changed_files,
+                base_ref, served_models=served_models, usage=usage,
+                tracker=tracker, scope_source=scope_source,
+                task_ids=task_ids, scope_file=scope_file,
+                diff_dir=diff_dir, scope_id=scope_id,
+                diff_coverage=diff_coverage,
+                run_model_specs=list(model_specs),
+                **pinned_kwargs,
+                **scope_kwargs,
+            )
+        except Exception as exc:
+            # An exception IS this slot's ending, recorded with its own text
+            # as on the review base's lane; re-raised, the gather would drop
+            # it and `backfill_deadline_losses` would call it a deadline loss.
+            return _review_lane.SlotResult.from_record(
+                model_spec, raised_slot_record(model_spec, exc, anchor=str(plan_path)),
+            )
+        return _review_lane.SlotResult.coerce(model_spec, result)
 
-    # One `[PROGRESS]` line per `progress.interval_s`, computed from the map this
-    # function holds; `None` at `interval_s: 0`, where the lines are silenced and
-    # every event-driven transition is still written.
-    tracker.start_ticker()
-
-    try:
-        completed = await asyncio.wait_for(
-            asyncio.gather(*tasks, return_exceptions=True),
-            timeout=total_timeout
-        )
-
-        for item in completed:
-            if isinstance(item, Exception):
-                print(f"Review exception: {item}")
-                continue
-            model_spec, result = item
-            results[model_spec] = result
-
-    except asyncio.TimeoutError:
-        print(f"Total timeout ({total_timeout}s) exceeded for all models")
-        # F2, 2026-09-20: **harvest before cancelling.** `asyncio.wait_for`
-        # raises instead of assigning `completed`, so this branch used to leave
-        # `results` empty even for the slots that had already returned a review
-        # — while the tracker, which recorded each of those slots `done` inside
-        # `run_single_review`, said so in the same checkpoint. The report then
-        # named every model a deadline loss (`backfill_deadline_losses` walks
-        # `results`) beside a `<model>.json` already on disk, and
-        # `models_succeeded` was restated to 0 over a map counting real
-        # successes. `cancelled()` is asked before `exception()`, which raises
-        # on a cancelled task; a task that raised keeps the terminal transition
-        # its own `except` above gave it and is deliberately not keyed into
-        # `results`.
-        for task in tasks:
-            if not task.done() or task.cancelled() or task.exception() is not None:
-                continue
-            model_spec, result = task.result()
-            results[model_spec] = result
-        # Name the cause *before* anything sweeps. The reason is stored on the
-        # tracker rather than passed to `sweep()` because there are two sweepers
-        # — the `finally` below and the ticker's own — and a reason passed at one
-        # call site would let them disagree about the wording for one ending.
-        # `DEADLINE_ERROR` is the same string `backfill_deadline_losses` writes
-        # into `failed_models`, so the table and the report's failure list name
-        # one cause.
-        tracker.set_sweep_reason(DEADLINE_ERROR)
-        # Cancel remaining tasks
-        for task in tasks:
-            if not task.done():
-                task.cancel()
-    finally:
-        # The sweep goes here, beside where `slot_finished()` used to tick, and
-        # deliberately *not* on the timeout branch above. That branch used to be
-        # unable to finish at all — `tasks` held bare coroutines, so its first
-        # `task.done()` raised `AttributeError` — and the sweep surviving that
-        # is exactly why it was put here; the coroutines are real tasks now
-        # (F2, 2026-09-20) and the branch runs to the end, but the placement is
-        # still the right one. This `finally` runs whichever way the fan-out
-        # ends — the clean return, the deadline, a `KeyboardInterrupt`, an exception
-        # out of the machinery itself — which is what makes "no entry is left
-        # `queued`, `staggering`, `running` or `retrying` after this function
-        # returns" a property of the code rather than of the happy path.
-        # It does NOT cover `--abort` (F1, 2026-09-20): that is SIGTERM to the
-        # worker, whose handler calls `os._exit` after `finish()`, so no
-        # `finally` anywhere runs. The map is retired on disk instead, by
-        # `progress_tracker.retire_live_entries` called from `finish()`.
-        #
-        # Order is fixed: **cancel and await the ticker, then sweep, then
-        # return.** Awaiting is the point rather than politeness — the caller's
-        # per-model summary follows immediately, and a ticker merely cancelled
-        # could still emit a line into the middle of it; and because the map is
-        # written whole on every transition, a write landing after the sweep
-        # would resurrect the very entries the sweep had just retired.
-        await tracker.stop_ticker()
-        tracker.sweep()
-
-    return results
+    # The concurrency mechanics are the base fan-out's, shared by both review
+    # lanes (utils/review_lane.py): the semaphores (a provider's before the
+    # global one), the launch spacing, the seeded map, the overall deadline
+    # that harvests finished slots before it cancels the rest, and the
+    # ticker's teardown and sweep in its `finally`.
+    slots = await run_models_concurrent(
+        model_specs, review_slot, timeout, max_parallel,
+        skip_predicate=skip_existing_result,
+        anchor=str(plan_path),
+        tracker=tracker,
+    )
+    return {spec: slot.as_review() for spec, slot in slots.items()}
 
 
 def generate_review_report(
@@ -5302,171 +5200,58 @@ async def reaggregate_from_existing_files(
             json.dump(all_issues, f, indent=2)
         print(f"Issues JSON saved to: {issues_path}")
 
-        # Group similar issues — or, on the path where it matters most, do not.
-        #
-        # This function is the one that *checks* `grouped.json`'s bytes: a few
-        # lines below it hands `build_inputs(..., grouped_file=grouped_path)` to
-        # `read_task_file`, which compares the hash against the
-        # `inputs.grouped_sha256` `validation_tasks.json` was materialized with
-        # (`check_task_file_inputs`, `utils/subagent_tasks.py`). Regrouping
-        # unconditionally meant it broke that binding and then audited it — the
-        # file it hashes is the file it has just rewritten — so
-        #
-        #     ERROR: Refusing task file .../validation_tasks.json: the inputs it
-        #     was materialized from have changed (grouped_sha256: ...)
-        #
-        # was this command refusing itself, and review-code's documented
-        # validate-then-reaggregate flow could not complete at all.
-        #
-        # Making the round trip byte-identical (the canonical
-        # `model`-then-`source_model` insertion order stamped above) fixes the
-        # instance, not the class: it holds only while regrouping is perfectly
-        # reproducible out of two separate dict literals in two functions. A
-        # field added to an issue on one path, a reorder inside
-        # `SuggestionGroup.to_dict` (`utils/suggestion_processor.py`), a changed
-        # argument to this `json.dump`, or a grouping change that reorders the
-        # array re-opens it — and none of those reads as a hash-binding change at
-        # review time, which is how the original got in. So the bound file is not
-        # rewritten at all, and byte-identity survives as the regression guard it
-        # is good at being rather than as the thing the flow rests on.
-        #
-        # The branch is `utils/review_orchestrator_base.reaggregate_from_existing_files`'s,
-        # ported — "preserves validation alignment", in its own printed words —
-        # with each half of its guard meaning here what it means there:
-        #
-        #   * `validation.json` counts only when this run will *use* it, hence
-        #     the `--skip-validation` half: a run told to ignore validation has
-        #     no alignment to preserve. In this phase that disjunct is close to
-        #     subsumed, since code-review only ever writes `validation.json`
-        #     after merging batches and so `validation_tasks.json` was there
-        #     first; it is kept because a hand-copied or partially cleaned dir
-        #     carrying only the merged file is still a dir whose groups are
-        #     spoken for.
-        #   * `validation_tasks.json` counts *regardless* of the flag, and that
-        #     asymmetry is deliberate: it is a binding on this file's bytes that
-        #     outlives the invocation. A `--skip-validation` reaggregate that
-        #     rewrote `grouped.json` would leave the refusal armed for the next
-        #     run that does consume validation — the same defect, one command
-        #     later, with nothing on screen to connect them.
-        #
-        # Both are ANDed with `grouped.json` actually existing, because
-        # `--reaggregate` is also the path that completes a run interrupted
-        # *before* grouping: `main` sends exactly that dir here ("Found N
-        # per-model result file(s) but no grouped.json"). With nothing on disk
-        # there is nothing bound and nothing to preserve, so that run groups and
-        # writes as it always did.
         grouped_path = get_output_paths(plan_path, "code_review_grouped", phase='code-review')
         validation_path = get_output_paths(plan_path, "code_review_validation", phase='code-review')
-        validation_tasks_path = phase_dir / "validation_tasks.json"
-
-        has_existing_validation = (
-            (validation_path.exists() and not args.skip_validation)
-            or validation_tasks_path.exists()
-        )
-
-        reuse_bound_grouping = (
-            all_issues and has_existing_validation and grouped_path.exists()
-        )
-        if reuse_bound_grouping:
-            with open(grouped_path, 'r', encoding='utf-8') as f:
-                raw_data = json.load(f)
-            grouped = load_groups_payload(raw_data)
-            # The premise of reuse is that the bound file still describes the
-            # results on disk. A per-model file that landed after grouping — a
-            # salvage the host ran once the fan-out had returned at the
-            # validation marker, or a result obtained out of band for a slot
-            # the fan-out recorded as failed — falsifies it, and reusing the
-            # file then excluded that model from every group while `results`
-            # still listed it (measured 2026-09-17: three of eight issues in no
-            # group, and no line on screen saying so). The round is retired,
-            # not deleted, and the regroup branch below re-materializes
-            # validation for the grouping that does cover the dir.
-            gap = grouped_coverage_gap(
-                grouped, {m: issues for m, (_ok, issues, _err) in results.items()}
-            )
-            if gap:
-                print(
-                    "grouped.json does not cover the model results on disk; "
-                    "regrouping and retiring the validation round bound to it:"
-                )
-                for line in gap:
-                    print(f"  {line}")
-                retire_stale_validation_round(
-                    str(phase_dir), reason="grouped.json did not cover the results on disk"
-                )
-                reuse_bound_grouping = False
-
-        if reuse_bound_grouping:
-            print("Using existing grouped.json (preserves validation alignment)")
-            # §2.6 on a reaggregate: attributed again in memory for the
-            # report; the bound file keeps its bytes (and its own pass's fields).
-            commit_attribution_pass = attribute_review_groups(
-                grouped, state, repo_root=git_root or project_root
-            )
-        else:
-            raw_grouped = group_similar_suggestions(all_issues)
-            # The two branches are made to agree on shape *here* rather than at
-            # each consumer: `load_groups_payload` yields plain dicts (a v1 bare
-            # array, or the v2 envelope's `groups`), so the regroup branch hands
-            # on its stamped dict list too instead of the `SuggestionGroup`s it
-            # used to. Everything below already tolerates dicts — `len(grouped)`,
-            # the `[g.to_dict() if hasattr(g, 'to_dict') else g ...]` re-entries,
-            # `merge_validation_batches` — and passing the stamped list moves no
-            # group id, because `generate_group_id` reads `theme` and each
-            # suggestion's `type`/`section`/`details` and never the stamped keys.
-            grouped = [g.to_dict() if hasattr(g, 'to_dict') else g for g in raw_grouped]
-            # Stamp stable content-based hashes on groups and suggestions
-            stamp_stable_ids(grouped)
-            # §2.6: the regrouped file carries the attribution (off the hash).
-            commit_attribution_pass = attribute_review_groups(
-                grouped, state, repo_root=git_root or project_root
-            )
-            # D7: a re-group orphans any verdicts on disk, so they leave with it,
-            # in the same step as the new grouped.json (replaced whole).
-            with claim.held("retire the previous validation and regroup"):
-                retire_stale_validation(str(phase_dir), reason="grouped.json rewritten by reaggregate")
-                _review_round.replace_file(
-                    grouped_path, json.dumps(save_groups_payload(grouped), indent=2))
-            print(f"Grouped issues saved to: {grouped_path}")
-
-        # Task 2.10: a contract-1 round built from an over-limit plan is never
-        # reused — retired whole (renamed, kept) and rematerialized below.
-        legacy_round = (
-            None if args.skip_validation
-            else legacy_context_round_reason(str(phase_dir))
-        )
-        if legacy_round:
-            print(f"\n{legacy_round}")
-            retire_stale_validation_round(
-                str(phase_dir),
-                reason="validation built from truncated context (contract 1)",
-            )
-
-        # Zero groups, `--skip-validation`, a materialized round to merge or
-        # resume, or a new round: one resolution for every review lane
-        # (utils/review_lane.py).
+        # The review base's steps the shared stages call, from this module's
+        # names (utils/review_lane.py).
         steps = _review_lane.RoundSteps(
+            group_similar_suggestions=group_similar_suggestions,
+            stamp_stable_ids=stamp_stable_ids,
+            grouped_coverage_gap=grouped_coverage_gap,
             verify_round_context=verify_round_context,
             bind_plan_for_validation=bind_plan_for_validation,
             reopen_phase_for_validation=reopen_phase_for_validation,
+            retire_stale_validation=retire_stale_validation,
             retire_stale_validation_round=retire_stale_validation_round,
             dispatch_in_round=dispatch_in_round,
             dispatch_subagent_tasks=dispatch_subagent_tasks,
             merge_validation_batches=merge_validation_batches,
         )
+        # The bound grouped.json reused (this function checks its bytes against
+        # the task file below, so a rewrite would refuse its own round), or
+        # the issues regrouped: one rule for every review lane. A
+        # `--reaggregate` completing a run interrupted before grouping finds no
+        # grouped.json and groups as the fan-out would. §2.6: attributed again
+        # in memory on a reused grouping, into the file on a regroup.
+        bound = _review_lane.bind_grouping(
+            claim, steps, phase_dir=str(phase_dir), grouped_path=str(grouped_path),
+            validation_path=str(validation_path), records=all_issues,
+            records_by_model={m: issues for m, (_ok, issues, _err) in results.items()},
+            skip_validation=bool(args.skip_validation), noun="issues",
+            annotate=lambda groups: attribute_review_groups(
+                groups, state, repo_root=git_root or project_root
+            ),
+        )
+        grouped = bound.groups
+        commit_attribution_pass = bound.annotation
+
+        # A round built from truncated context, verdicts bound to this
+        # grouping, zero groups, `--skip-validation`, a materialized round to
+        # merge or resume, or a new round: one resolution for every review lane.
         outcome = await _review_lane.resolve_validation_round(
             claim, args, steps,
             phase_name="code-review", phase_dir=str(phase_dir),
             plan_path=str(plan_path), grouped=grouped,
+            grouped_path=str(grouped_path),
             validation_path=str(validation_path),
             current_inputs=lambda: build_inputs(
                 plan_file=str(plan_path),
                 grouped_file=str(grouped_path),
                 # Recut from the same groups and the files as they are now: a
-                # reviewed file edited between fan-out and this merge moves
-                # this hash, and only this hash — `diff_base` names the ref the
-                # diff was taken against and sits still for any edit on the
-                # near side of it.
+                # reviewed file edited between fan-out and this reaggregate
+                # moves this hash, and only this hash — `diff_base` names the
+                # ref the diff was taken against and sits still for any edit on
+                # the near side of it.
                 reviewed_code=build_reviewed_code_excerpt(
                     grouped, project_root=project_root, **pinned_kw,
                 ),
@@ -5479,6 +5264,8 @@ async def reaggregate_from_existing_files(
                     if plan_snapshot and plan_sha256 else {}
                 ),
             ),
+            # Reused verdicts are held to these inputs too.
+            reuse_checks_inputs=CodeLane.reuse_checks_inputs,
             build_round=lambda plan_document: code_review_validation_round(
                 [g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
                 args=args, plan_path=plan_path, phase_dir=phase_dir,
@@ -5487,6 +5274,10 @@ async def reaggregate_from_existing_files(
                 plan_snapshot=plan_snapshot, plan_sha256=plan_sha256,
                 scope_round_policy=scope_round_policy, state=state,
                 round_id=claim.round_id,
+            ),
+            scope_round_policy=scope_round_policy,
+            scope_baseline=_scope_round.round_baseline(
+                getattr(state, "state", {}) or {}, "code-review"
             ),
             findings="issues",
         )
@@ -6495,216 +6286,25 @@ async def _main(argv: Optional[List[str]], run: PhaseRun) -> int:
         phase_dir = get_phase_dir(plan_path, 'code-review')
         phase_dir.mkdir(parents=True, exist_ok=True)
 
-        # Save per-model results
-        failed_models: Dict[str, str] = {}
-        for model_spec, slot in _review_lane.slot_results(results).items():
-            if not save_model_result(
-                prefix, model_spec, slot.success, slot.payload, slot.error, phase_dir,
-            ):
-                failed_models[model_spec] = slot.error or "Unknown error"
-                # The round is aggregated from `results`, not from the files:
-                # issues that could not be saved are failed there too, or the
-                # report would count a failed model's issues.
-                results[model_spec] = (False, None, failed_models[model_spec])
-
-        # F11: a model `run_all_reviews`'s deadline cancelled has no result
-        # and, so far, no failure entry either — in the report *or* in the map.
-        # One pass writes both facts off one wording (`DEADLINE_ERROR`), so a
-        # reader polling afterwards can never see a slot the report calls failed
-        # while the table still calls it `running`. Idempotent against the
-        # fan-out's own `finally` sweep, which normally got there first: both
-        # touch only non-terminal entries, so whoever arrives first records the
-        # real ending and this is the belt that catches a fan-out which returned
-        # by a path the sweep missed.
-        backfill_deadline_losses(
-            model_specs, results, failed_models,
+        # Everything between the fan-out and grouping, written once for both
+        # review lanes (utils/review_lane.py): each slot saved, the deadline's
+        # losses named, the round checked, the bypassed slots recorded, salvage
+        # run in-process under `--exec-subagents` (a repaired model's issues
+        # join the round), and the exit 3 of a run where no model answered.
+        closed = await _review_lane.close_fanout(
+            CodeLane(plan_path=plan_path, phase_dir=phase_dir, prefix=prefix),
+            claim, args,
+            model_specs=model_specs, results=results,
+            served_models=served_models, usage=usage, prior_served=prior_served,
             tracker=fanout_trackers[0] if fanout_trackers else None,
-        )
-
-        # The model results are saved (a later `--force` reuses them);
-        # everything after this belongs to the round, so a run whose round
-        # another run replaced while its models ran stops here
-        # (utils/review_round.py).
-        claim.check("record its models and group their results")
-
-        # The slots that ran without a sandbox, mirrored for the poller before
-        # any ending below, the all-failed exit included: every slot failing
-        # does not make them sandboxed (docs/development/review-results.md,
-        # "The shared review lane"). `models_served` is the durable copy.
-        record_sandbox_bypassed(str(phase_dir), served_models)
-        announce_retired_rungs(prior_served, served_models, anchor=str(plan_path))
-
-        # D3b: a salvage task exists for every model whose output would not parse
-        # (emit_salvage_task materialized it above). With --exec-subagents this
-        # run repairs them itself, exactly as the fan-out path in
-        # review_orchestrator_base does — otherwise review-code would print
-        # [REAGGREGATE_AFTER_SALVAGE] and hand the host salvage subagents it may
-        # not have. A recovered model's issues are folded back into `results` so
-        # grouping, validation and the report all see the post-salvage truth
-        # rather than the pre-salvage one. Deliberately non-fatal: a salvage that
-        # fails leaves that model failed, which is the ordinary partial-results
-        # outcome.
-        salvaged_models = set()
-        salvaged_specs: List[str] = []
-        if failed_models and exec_subagents_requested(args):
-            # T5, the sibling of review_orchestrator_base's own salvage window:
-            # salvage is the first stretch of the post-fan-out window and was
-            # the one stretch nothing narrated. `run_all_reviews`'s ticker is
-            # cancelled and awaited by the time it returns (lifetime rule 1),
-            # and the phase-scoped ticker below does not start until grouping —
-            # so a salvage dispatch, which is a real subagent run and can last
-            # minutes, sat between them emitting no `[PROGRESS]` line at all
-            # while `progress.step` still read `fanout`. Both halves of the cure
-            # are the ones the validation window already uses: publish the step
-            # *before* the dispatch (so the ticker's lines and a `--poll` both
-            # name the work), and reach the dispatch off the loop (`phase_thread`)
-            # — it ends in `subagent_executor._run_sync`'s
-            # `pool.submit(asyncio.run, …).result()` and would otherwise pin
-            # this loop and starve the ticker for the whole window, which is
-            # exactly the F6 failure one stretch over.
-            report_progress(str(phase_dir), step="salvage")
-            salvage_ticker = PhaseProgress(str(phase_dir), anchor=str(plan_path))
-            salvage_ticker.start_ticker()
-            try:
-                repaired = await dispatch_in_round(
-                    claim, dispatch_salvage_tasks,
-                    args,
-                    phase_dir=str(phase_dir),
-                    phase='code-review',
-                    plan_path=str(plan_path),
-                )
-            finally:
-                await salvage_ticker.stop_ticker()
-            repaired_paths = {os.path.abspath(path) for path in repaired}
-            for model_spec in list(failed_models):
-                sanitized = sanitize_model_name(model_spec)
-                recovered = phase_dir / f"{sanitized}.json"
-                # The dispatcher's own outcome decides, not the mere presence of
-                # the file: under --rerun-all a stale result from an earlier run
-                # is still sitting there and must never be read as a repair.
-                if os.path.abspath(str(recovered)) not in repaired_paths:
-                    continue
-                if not (recovered.exists() and recovered.stat().st_size > 0):
-                    continue
-                try:
-                    repaired_issues = json.loads(recovered.read_text(encoding="utf-8"))
-                except (OSError, ValueError) as read_error:
-                    print(
-                        f"[{model_spec}] salvage output unreadable, leaving failed: "
-                        f"{read_error}",
-                        file=sys.stderr,
-                    )
-                    continue
-                if not isinstance(repaired_issues, list):
-                    print(
-                        f"[{model_spec}] salvage output is not a JSON array, "
-                        f"leaving failed: {recovered}",
-                        file=sys.stderr,
-                    )
-                    continue
-                print(f"[{model_spec}] recovered by salvage: {recovered}")
-                results[model_spec] = (True, repaired_issues, None)
-                salvaged_models.add(sanitized)
-                del failed_models[model_spec]
-                salvaged_specs.append(model_spec)
-            # F3, 2026-09-20: the per-model map has to move with
-            # `failed_models`. Deleting the entry above is what makes the write
-            # below list this model under `models_completed` and count it in
-            # `models_succeeded`, and the map — frozen `failed` by the fan-out,
-            # and immune to a plain `tracker.done()` because terminal
-            # transitions are idempotent — went on saying the opposite in the
-            # same file. `record_models_salvaged` writes the flip through
-            # `update_progress` exactly as `record_models_present` does for the
-            # `--reaggregate` path, and carries no counters, so the restatement
-            # below composes with it instead of overwriting it.
-            if salvaged_specs:
-                record_models_salvaged(str(phase_dir), salvaged_specs)
-
-        # D6 row 3: partial results are usable output, so a run that lost *some*
-        # models prints [PARTIAL_RESULTS: …], reports `state: "partial"` and
-        # carries on to group, validate and report what exists — never a
-        # question, never `--rerun-all`. A run where *no* model produced a result
-        # has nothing to aggregate: exit 3 naming the retry command, taken here
-        # (before the report is written and before mark_phase_completed) so a
-        # total failure is never recorded as a completed phase. Same accounting
-        # as review_orchestrator_base's fan-out, on the post-salvage truth.
-        completed_models = [m for m in model_specs if m not in failed_models]
-        if not completed_models:
-            # Record the failure map before exiting (plan
-            # review-run-scope-salvage-and-failure-visibility, D5.2): a later
-            # `--reaggregate` of this dir reads `models_failed` back to name
-            # each loss and to exit 3 when every requested reviewer failed.
-            # Without it that reaggregate finds no recorded failure and names
-            # the models only with the "no result file" gap reason, at exit 0.
-            # `models_served` too: a slot that ran without a sandbox did so
-            # whether or not it then failed.
-            update_status(str(phase_dir), {
-                "models_completed": [],
-                "models_failed": failed_models,
-                **({"models_served": served_models} if served_models else {}),
-            })
-            print("\nERROR: All models failed")
-            for model_spec, reason in failed_models.items():
-                print(f"  - {model_spec}: {reason}")
-            # The home check's and the jail's lines, repeated (F1): this exit
-            # is the run's last word.
-            print_closing_summary(str(phase_dir))
-            sys.exit(unattended_mod.report_partial_results(
-                completed=completed_models,
-                failed=list(failed_models),
-                phase_dir=str(phase_dir),
-                # D2 row 5: shape 3 by construction (no reviewer produced a
-                # result), so --force stays a command — with the caller's flags.
-                retry_command=commit_spelling.spell_retry_command(
-                    "review-code", plan_path, "--force",
-                    flags=cli_common.current_replay_flags(mode="review-code"),
-                ),
-            ))
-        unattended_mod.report_partial_results(
-            completed=completed_models,
-            failed=list(failed_models),
-            phase_dir=str(phase_dir),
             unattended=unattended,
         )
-
-        # The base fan-out's completion fields, on the same post-salvage truth.
-        # Two things read them and neither is optional here: `status --view run`
-        # prints the top-level `state` on its own line, so a review-code run left
-        # at `models_running` reports as still fanning out forever; and
-        # `build_unsanitize_map` unions `models_requested` with
-        # `models_completed`, so writing only the first would leave this phase's
-        # checkpoint a different document from the base's for the one reader that
-        # has to treat both alike.
-        update_status(str(phase_dir), {
-            "state": "models_complete",
-            "models_completed": completed_models,
-            "models_failed": failed_models,
-            # Added only when something was attributed, so a default run's
-            # `.status.json` gains no key.
-            **({"models_served": served_models} if served_models else {}),
-            # Same rule, one field over: absent means no adapter reported a
-            # cost, never that the run was free. This is the copy
-            # `--reaggregate` reads back.
-            **({"usage": usage} if usage else {}),
-        })
-        # Both counters, restated on the post-salvage truth. `models_done` is
-        # the *terminal* count — every slot has finished by now, which is what
-        # the retired slot counter meant by "done" and what a live progress line
-        # needs, since a numerator that walks backwards at the end of a lossy run
-        # can never reach `3/3`. What this site used to write into `models_done`
-        # is the success count, and it lives on under its own name, so "one model
-        # was lost" survives as `3/3 done, 2 ok, 1 failed` rather than as a
-        # shrinking numerator.
-        #
-        # Counters only: no `models` key, so the map the fan-out's sweep froze is
-        # left exactly as it is (`progress` merges key by key at its top level,
-        # and only a write carrying `models` replaces the map wholesale).
-        report_progress(
-            str(phase_dir), step="grouping",
-            models_total=len(model_specs),
-            models_done=len(model_specs),
-            models_succeeded=len(model_specs) - len(failed_models),
-        )
+        failed_models = closed.failed_models
+        # The round is aggregated from these slots, not from the files: a slot
+        # whose issues could not be saved is failed here, a salvaged one holds
+        # its repaired issues.
+        results = {spec: slot.as_review() for spec, slot in closed.slots.items()}
+        salvaged_models = {sanitize_model_name(spec) for spec in closed.salvaged}
 
         # T5: the fan-out is not the phase. `run_all_reviews` returned the
         # moment its last slot did, and everything below keeps this phase
