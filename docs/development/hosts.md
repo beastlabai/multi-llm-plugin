@@ -55,7 +55,7 @@ sniffed**), an unknown id is exit 3, `require_executor_runner()` makes `--exec-s
 host whose entry declares no `agent-readonly`/`agent-write` runner, and
 `verb_sentence()` renders the one fixed phrasing per enum value that a shim bakes in.
 
-`subagent_executor.effective_ceiling()` takes the host leg of D3i's minimum from the same entry.
+`task_batch.effective_ceiling()` takes the host leg of D3i's minimum from the same entry.
 `references/host-capabilities.md` is **generated** by `hosts/render_capabilities.py` (`--check` is the CI
 staleness guard, byte-compared); `hosts/snippets/*.md` are the host-independent shim partials (uv
 preflight, `--detach` poll loop) `install-host` interpolates into any template

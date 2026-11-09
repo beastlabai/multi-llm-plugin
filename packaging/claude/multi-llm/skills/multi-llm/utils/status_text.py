@@ -804,7 +804,7 @@ def _progress_text(progress: Dict[str, Any], *, phase: Optional[str] = None) -> 
         )
     if progress.get("failed_task_ids"):
         parts.append(f"failed {', '.join(map(str, progress['failed_task_ids']))}")
-    # The executor's mirrors (`subagent_executor._mirror_status` under
+    # The executor's mirrors (`task_batch._mirror_status` under
     # `subagents`, `write_batch_scheduler._mirror_status` under
     # `write_subagents`) are the only progress a dispatch-only phase such as
     # `generate-tasks` records — it never calls `report_progress(step=…)` before

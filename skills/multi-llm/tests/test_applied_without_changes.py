@@ -37,6 +37,7 @@ from tests.support.write_orchestrators import (  # noqa: E402
     orchestrator_repo,  # noqa: F401 - the repo fixture
 )
 from utils import subagent_executor as executor  # noqa: E402
+from utils import dispatch_spawn  # noqa: E402
 from utils import subagent_prompts  # noqa: E402
 from utils.retry_ladder import RESEND_NOTHING_CHANGED, RetryLadder  # noqa: E402
 
@@ -150,7 +151,7 @@ class TestTheReSend:
                     "summary": "already in the plan"}))
             return real(**kwargs)
 
-        env.monkeypatch.setattr(executor, "_spawn", spawn)
+        env.monkeypatch.setattr(dispatch_spawn, "_spawn", spawn)
         result = env.scheduler([env.apply_task(0)]).run()
 
         outcome = result.outcomes[0]
@@ -303,7 +304,7 @@ class TestTheReSend:
                 env.edits([_patch_edit(env.plan)], result=APPLIED_S0)
             return real(**kwargs)
 
-        env.monkeypatch.setattr(executor, "_spawn", spawn)
+        env.monkeypatch.setattr(dispatch_spawn, "_spawn", spawn)
         outcome = env.scheduler([env.apply_task(0)]).run().outcomes[0]
         assert outcome.status == executor.STATUS_OK, outcome.reason
         assert outcome.write_outcome == executor.WRITE_APPLIED

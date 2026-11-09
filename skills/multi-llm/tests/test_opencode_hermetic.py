@@ -58,6 +58,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import llm_client  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from utils import dispatch_spawn  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
 from utils.providers import opencode as oc  # noqa: E402
 from utils.providers.base import (  # noqa: E402
@@ -390,7 +391,7 @@ class TestGateBCustomProvider:
         def _must_not_run(**_kwargs):  # pragma: no cover - the point of the test
             raise AssertionError("a refused slot must never reach the spawn")
 
-        monkeypatch.setattr(executor, "_spawn_in_context", _must_not_run)
+        monkeypatch.setattr(dispatch_spawn, "_spawn_in_context", _must_not_run)
         capture = executor._spawn_child(
             provider=provider, model="only-in-user-config/private-model",
             prompt="hi", profile=PROFILE_AGENT_READONLY, transport="argv",
@@ -916,7 +917,7 @@ class TestGateECleanup:
             seen["active"] = oc._ACTIVE.get()
             raise RuntimeError("the dispatch blew up")
 
-        with patch.object(executor, "_spawn_in_context", _boom):
+        with patch.object(dispatch_spawn, "_spawn_in_context", _boom):
             with pytest.raises(RuntimeError):
                 executor._spawn_child(
                     provider=provider, model="opencode/sonnet", prompt="hi",

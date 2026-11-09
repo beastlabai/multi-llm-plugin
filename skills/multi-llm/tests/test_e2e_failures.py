@@ -37,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import code_review_orchestrator as cro
 from utils import subagent_executor as executor
+from utils import task_file_runner
 from tests.harness.native_invoker import simulate_native_invoker
 from utils.llm_client import invoke_with_provider
 from utils import review_orchestrator_base as base
@@ -2155,7 +2156,7 @@ class TestASalvageThatGaveUpIsNotAParticipant:
 
     def _run(self, tmp_path):
         with patch.object(
-            executor, "run_task_file", _native_salvage_reply(SALVAGE_SENTINEL)
+            task_file_runner, "run_task_file", _native_salvage_reply(SALVAGE_SENTINEL)
         ):
             return _run_cro_review(
                 tmp_path,
@@ -2318,7 +2319,7 @@ class TestATerminalSalvageIsNotReAdvertised:
 
     def _run(self, tmp_path, reply, **arg_overrides):
         with patch.object(
-            executor, "run_task_file", _native_salvage_reply(reply)
+            task_file_runner, "run_task_file", _native_salvage_reply(reply)
         ):
             return _run_cro_review(
                 tmp_path,
@@ -2525,7 +2526,7 @@ class TestTheHeaderNamesTheReviewerTheSalvageGaveUpOn:
         self, tmp_path, capsys
     ):
         with patch.object(
-            executor, "run_task_file", _native_salvage_reply(SALVAGE_SENTINEL)
+            task_file_runner, "run_task_file", _native_salvage_reply(SALVAGE_SENTINEL)
         ):
             plan, phase_dir, exit_code = _run_cro_review(
                 tmp_path, dict(_TWO_REVIEWERS), exec_subagents=True,
@@ -2585,7 +2586,7 @@ class TestATimedOutRunsSalvagedEmptyArrayIsNotAReview:
     """
 
     def _run(self, tmp_path, kilocode_reply):
-        with patch.object(executor, "run_task_file", _native_salvage_reply([])):
+        with patch.object(task_file_runner, "run_task_file", _native_salvage_reply([])):
             return _run_cro_review(
                 tmp_path,
                 {
@@ -2721,7 +2722,7 @@ class TestAStaleSalvagePairDoesNotSurviveTheNextAttempt:
         plan, phase_dir = self._first_run_leaves_a_salvage_pair(tmp_path, capsys)
         stem = cro.sanitize_model_name(KILOCODE_SPEC)
 
-        with patch.object(executor, "run_task_file", _never_dispatched), \
+        with patch.object(task_file_runner, "run_task_file", _never_dispatched), \
              patch.object(cro, "record_next") as next_command:
             _, _, exit_code = _run_cro_review(
                 tmp_path,

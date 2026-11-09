@@ -366,7 +366,7 @@ def bound(claim: Claim, func: Callable[..., Any]) -> Callable[..., Any]:
 @contextlib.contextmanager
 def persisting_result(phase_dir: PathLike, name: str) -> Iterator[bool]:
     """Around one result file the executor persists into *phase_dir*
-    (``subagent_executor.persist_result``): ``True`` to write it.
+    (``task_result.persist_result``): ``True`` to write it.
 
     A phase dir no dispatch is bound to writes as it always did. A bound one
     decides under the checkpoint mutex, held across the write: ``True`` only

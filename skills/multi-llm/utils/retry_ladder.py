@@ -1,7 +1,7 @@
 """The one retry policy both invocation lanes obey (§7.1.b, §7.5).
 
 Two lanes retry dispatches and until now they disagreed about everything that
-matters. Lane B (``subagent_executor._dispatch_task``) had the D3k rung ladder,
+matters. Lane B (``task_dispatch.dispatch_task``) had the D3k rung ladder,
 a monotonic per-task deadline and two separate retry counters; Lane A
 (``review_orchestrator_base.run_single_model``) had ``'429' in str(error)`` and
 a *recursive self-call that handed every attempt a fresh full timeout*, so a
@@ -41,7 +41,7 @@ deadline. The re-ask is a different request (the original prompt plus the
 validator's errors), so it is not the identical retry rung 6 forbids; what the
 caller sends is the caller's business, and the default of ``0`` leaves rung 6
 exactly as terminal as it was. Lane B grants one, for ``task_generation`` and
-the four write kinds (``subagent_executor.SCHEMA_REPAIRS_BY_KIND``; a write
+the four write kinds (``task_dispatch.SCHEMA_REPAIRS_BY_KIND``; a write
 kind's re-ask restates the batch's report and must move no file).
 
 Rule 8 is this module's own too (fix round 8): ``record(..., repeatable=False)``
@@ -338,7 +338,7 @@ class RetryLadder:
         self._schema_repairs_left = max(0, int(schema_repairs))
         self._schema_repairs_used = 0
         # Rule 9: a FOURTH counter, zero unless the caller grants it (Lane B:
-        # the write kinds, `subagent_executor.RESENDS_BY_KIND`).
+        # the write kinds, `task_dispatch.RESENDS_BY_KIND`).
         self._resends_left = max(0, int(resends))
         self._resends_used = 0
 

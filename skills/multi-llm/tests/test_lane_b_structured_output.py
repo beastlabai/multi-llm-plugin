@@ -52,6 +52,7 @@ import mock_llm  # noqa: E402 - the one definition of each CLI's stream shape
 from utils import structured_output as so  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
 from utils import sandbox_walk  # noqa: E402
+from utils import dispatch_spawn, runner_preflight, task_dispatch  # noqa: E402
 from utils.provider_registry import get_provider  # noqa: E402
 from utils.providers.base import PROFILE_AGENT_READONLY  # noqa: E402
 from utils.providers.claude_code import (  # noqa: E402
@@ -252,9 +253,10 @@ def lane(tmp_path, monkeypatch):
     reset_flag_gate_cache()
     so.reset_declined_cache()
     monkeypatch.setattr(executor.subprocess, "Popen", _CannedPopen)
-    monkeypatch.setattr(
-        executor, "_resolve_executable", lambda name: ([f"/usr/bin/{name}"], False)
-    )
+    for module in (dispatch_spawn, task_dispatch, runner_preflight):
+        monkeypatch.setattr(
+            module, "_resolve_executable", lambda name: ([f"/usr/bin/{name}"], False)
+        )
     monkeypatch.setattr(
         sandbox_walk, "_resolve_executable", lambda name: ([f"/usr/bin/{name}"], False)
     )
@@ -738,7 +740,7 @@ class TestAReplyThatIsNotJson:
             sent.append(kwargs)
             return real(kind, original, errors, **kwargs)
 
-        monkeypatch.setattr(executor, "build_schema_repair_prompt", spy)
+        monkeypatch.setattr(task_dispatch, "build_schema_repair_prompt", spy)
         lane.respond(_opencode_stream(self.BROKEN))
 
         outcome = lane.dispatch(

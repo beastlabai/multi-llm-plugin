@@ -289,7 +289,7 @@ directory is never written to; `--json`'s `version_cache.refused` says why, and 
 nothing. An entry needs a finite `probed_at` inside the 7-day window and a version the adapter's own
 `parse_version` reads back unchanged, so a planted `unknown` (which skips the floor) is a miss. A
 same-user forgery stays possible: that user can edit the CLI itself. **Doctor only:** the executor's `min_version` refusal
-(`subagent_executor._detect_version`) and every other runner check read the CLI live, and
+(`runner_preflight._detect_version`) and every other runner check read the CLI live, and
 `tests/test_cli_version_cache.py` holds that no other module imports the cache. `--json` rows say
 `version.source` (`probe` or `cache`) and the report carries `version_cache` (path, hits, written).
 

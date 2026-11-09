@@ -501,9 +501,9 @@ def judge_labels(
     every other verdict gets *fallback*.
     """
     try:
-        from .subagent_executor import batch_report_path
+        from .task_outcome import batch_report_path
     except ImportError:  # pragma: no cover
-        from utils.subagent_executor import batch_report_path
+        from utils.task_outcome import batch_report_path
     runner_by_path: Dict[str, str] = {}
     try:
         with open(batch_report_path(phase_dir, "human_decision_judge"),

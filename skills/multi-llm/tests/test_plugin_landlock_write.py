@@ -45,6 +45,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils import landlock_dispatch  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from utils import runner_selection  # noqa: E402
 from utils import probe_state, sandbox_walk  # noqa: E402
 from utils import write_batch_scheduler as wbs  # noqa: E402
 from utils.providers.base import (  # noqa: E402
@@ -377,7 +378,7 @@ class TestTheWriteScopeMap:
         assert wbs.write_scope_for_kind("validation") is None
 
     def test_the_executors_map_is_the_one_in_force(self, monkeypatch):
-        monkeypatch.setattr(executor, "WRITE_SCOPE_BY_KIND",
+        monkeypatch.setattr(runner_selection, "WRITE_SCOPE_BY_KIND",
                             {"apply_suggestions": "plan-file"})
         assert wbs.write_scope_for_kind("apply_suggestions") == "plan-file"
         assert wbs.write_scope_for_kind("implement") is None

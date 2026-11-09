@@ -442,7 +442,7 @@ def stand_in(double):
         def fake_dispatch(task, *, phase_dir, runner, after_attempt=None):
             ...
 
-        monkeypatch.setattr(executor, "_run_probe", stand_in(lambda argv: done))
+        monkeypatch.setattr(runner_preflight, "_run_probe", stand_in(lambda argv: done))
     """
     import functools
     import inspect

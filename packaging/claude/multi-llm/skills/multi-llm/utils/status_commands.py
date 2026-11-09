@@ -509,7 +509,7 @@ def _reason_explanation(reason_code: Optional[str]) -> Optional[str]:
     if not reason_code:
         return None
     try:
-        from .subagent_executor import _REASON_EXPLANATION
+        from .runner_selection import _REASON_EXPLANATION
     except Exception as exc:  # pragma: no cover - a broken install still prints the code
         note_swallowed("status: reason explanation import", exc)
         return None

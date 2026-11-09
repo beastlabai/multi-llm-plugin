@@ -1115,7 +1115,7 @@ def _runner_warning_lines(args: argparse.Namespace, target_dir: Path) -> "list[s
         from utils import host_capabilities, next_phase
         from utils import provider_registry
         from utils.provider_registry import resolve_subagent_runner
-        from utils.subagent_executor import repo_wide_write_refusal
+        from utils.sandbox_walk import repo_wide_write_refusal
         import check_workflow_prerequisites as prereq
 
         host_id = host_capabilities.resolve_host_id(explicit=getattr(args, "host", None))

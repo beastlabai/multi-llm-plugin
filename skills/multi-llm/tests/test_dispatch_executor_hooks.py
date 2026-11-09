@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from tests.harness.native_invoker import native_dispatcher  # noqa: E402
 from tests.test_write_executor import _patch_edit, env  # noqa: E402,F401
 from utils import subagent_executor as executor  # noqa: E402
+from utils import dispatch_spawn  # noqa: E402
 from utils import subagent_prompts  # noqa: E402
 from utils import write_batch_scheduler as wbs  # noqa: E402
 
@@ -40,7 +41,7 @@ def _spawns(monkeypatch):
         calls.append(kwargs)
         return real(**kwargs)
 
-    monkeypatch.setattr(executor, "_spawn", spawn)
+    monkeypatch.setattr(dispatch_spawn, "_spawn", spawn)
     return calls
 
 
@@ -128,7 +129,7 @@ class TestTheDispatchSeam:
             raise AssertionError("an injected dispatcher starts no runner")
 
         monkeypatch.setattr(wbs, "preflight_runner", no_runner)
-        monkeypatch.setattr(executor, "_spawn", no_runner)
+        monkeypatch.setattr(dispatch_spawn, "_spawn", no_runner)
 
         def respond(task, prompt):
             env.plan.write_text(env.plan.read_text() + "edit\n", encoding="utf-8")

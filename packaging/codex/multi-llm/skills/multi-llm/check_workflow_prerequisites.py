@@ -988,7 +988,7 @@ def repo_wide_sandbox_warning(
     try:
         from utils import host_capabilities
         from utils.provider_registry import resolve_subagent_runner
-        from utils.subagent_executor import repo_wide_write_refusal
+        from utils.sandbox_walk import repo_wide_write_refusal
 
         if host_id is None:
             host_id = host_capabilities.resolve_host_id(sys.argv[1:])

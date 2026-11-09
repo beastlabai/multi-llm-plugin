@@ -422,11 +422,8 @@ caching.
 
 ## Where the executor's helpers live
 
-**`utils/subagent_executor.py` is the dispatch; what it reads lives in seven modules below it.** The
-executor holds the kind tables, `preflight_runner` and its version, auth, model and nested-exec legs,
-the spawn, `dispatch_task` and its classification, `run_tasks`, `run_task_file`, the dry run and the
-continuation. The rest lives in seven modules, lowest first. Each imports only the ones before it,
-and none imports the executor:
+**`utils/subagent_executor.py` is a facade; the executor's code lives in thirteen modules below
+it.** Lowest first, each imports only the ones before it, and none imports the executor:
 
 | Module | What it owns |
 |--------|--------------|
@@ -434,22 +431,30 @@ and none imports the executor:
 | `utils/failure_capture.py` | The redaction every executor write goes through (`_redact`, `_redact_json`, the probe boundary `_redact_probe_tail`), the owner-only atomic JSON writer (`_atomic_write_json`) and the per-attempt captures under `failed/`. |
 | `utils/task_outcome.py` | The records: `Attempt`, `TaskOutcome`, `BatchReport` and its file name (`batch_report_path`), and `ExecutorError` with `RunnerRejected`, `ResultRejected` and `BatchFailed`. |
 | `utils/task_result.py` | A task's result file (D3f): `resolve_output_target`, `persist_result`, `extract_result`, `validate_result`, the salvage reads, `normalize_result` and `task_is_complete`. |
-| `utils/runner_selection.py` | `profile_for_kind`, `resolve_task_runner` and its source, the roster check (`eligible_runners`) and the refusal text a preflight leg raises. |
+| `utils/runner_selection.py` | `profile_for_kind` and the jail grant's kind table beside it (`WRITE_SCOPE_BY_KIND`), `resolve_task_runner` and its source, the roster check (`eligible_runners`) and the refusal text a preflight leg raises. |
 | `utils/probe_state.py` | What the process learned about its runners: the preflight caches, the sandbox decisions and the shared sandbox probe cache with their locks, the jail summary lines, the `reset_*` functions, and `sandbox_rung`. |
 | `utils/sandbox_walk.py` | The sandbox gate: `sandbox_verdict` and `cached_sandbox_verdict`, the fallback ladder walk, the policy, the preflight's sandbox leg (`_detect_sandbox`, `repo_wide_write_refusal`) and the lines it prints. |
+| `utils/dispatch_spawn.py` | One attempt's spawn (`_spawn`, returning a `_Capture`): the schema leg, the child environment (`dispatch_child_env`, which the auth probe reads too) and cached version, the process tree, the jail and what it reported (`jail_denied_line`), the timeout kill (`_kill_timed_out`, `_unconfirmed_kill`), and the grant a write dispatch gets (`_dispatch_grant`). |
+| `utils/attempt_classifier.py` | Which D3k rung an attempt lands on: `_classify_pre_parse` (rungs 1 and 2), `_parse_and_validate` and `_parse_with_schema_policy` (rungs 3 to 6), and `_classify_failed_run` with its redacted quote (`_quote_verdict`). Not `providers/failure_classifier.py`, the adapter-free stream rule it applies. |
+| `utils/runner_preflight.py` | `preflight_runner` and its version, auth, model and nested-exec legs (`_probe_nested_exec` spawns one dispatch and classifies it), and `probe_setup_metadata`. |
+| `utils/task_dispatch.py` | `dispatch_task`: its retry loop, the re-asks and write hooks around it, the prompt budget, each attempt's record, the kind tables it reads (`SCHEMA_PHASE_BY_KIND`, `SCHEMA_REPAIRS_BY_KIND`, `RESENDS_BY_KIND`, `RECLASSIFIABLE_STATUSES`) and the D3g verification statuses (`STATUS_PARTIAL`, `STATUS_POLICY_VIOLATION`, `STATUS_BATCH_FAILED`). |
+| `utils/task_batch.py` | `run_tasks`: the batch preflight, the D3i ceiling (`effective_ceiling`), the dispatch order, the concurrent fan-out (`_gather`) with provider backpressure and the judge audit, the recorded runners and provenance, and the `.status.json` mirror. |
+| `utils/task_file_runner.py` | The entry points: `run_task_file`, the dry run (`dry_run_report`, D3l) and the continuation (`continue_past_marker`, D3b). |
 
 `CHECK_FAILED_WITHOUT_FINDINGS` lives in `utils/known_checks.py`, which reads it and imports nothing
 from the executor or these modules.
 
 **The executor re-exports every moved name for reading only** (`subagent_executor._MOVED`, the
-contract `write_batch_scheduler`, `providers/base`, `git_utils` and `run_status` already follow):
-`subagent_executor.X` returns the owner's current object, and a patch of `subagent_executor.X`
-reaches no code. The executor and the modules read a moved name through its owner at each call
-(`_sandbox_walk.cached_sandbox_verdict`), never a copy, so one patch of the owner reaches them all.
-Patch the owner: `tests/test_subagent_executor_moved_names.py` fails a test that patches a moved name
-on the executor, and holds the layering. A name the executor imports from elsewhere (`get_provider`,
-`_resolve_executable`) is bound in each module that reads it, so a test patching one patches it in
-the module whose code it drives. `tests/test_import_layers.py` puts all seven at L3.
+contract `write_batch_scheduler`, `providers/base`, `git_utils` and `run_status` already follow),
+and the `retry_ladder` vocabulary: `subagent_executor.X` returns the owner's current object, and a
+patch of `subagent_executor.X` reaches no code, because none is left there. The modules read a
+moved name through its owner at each call (`_dispatch_spawn._spawn`), never a copy, so one patch of
+the owner reaches them all. Patch the owner: `tests/test_subagent_executor_moved_names.py` fails a
+test that writes any name on the executor, and holds the layering. A name the executor's modules
+import from elsewhere (`get_provider`, `_resolve_executable`) is bound in each module that reads it,
+so a test patching one patches it in the module whose code it drives, or in each of them.
+`tests/test_import_layers.py` puts all thirteen at L3. New code imports from the owner, not the
+facade.
 
 ## Read and analyze executor
 
@@ -515,7 +520,7 @@ declares `retries_rate_limit: true` gets no identical rate-limit re-dispatch, be
 a chain its own CLI already ran.
 
 The ladder is provider-free by construction (the envelope is read structurally) and each lane keeps
-only its own three-line loop: `subagent_executor._dispatch_task` blocks, `review_orchestrator_base.dispatch_with_ladder` awaits — the
+only its own three-line loop: `task_dispatch.dispatch_task` blocks, `review_orchestrator_base.dispatch_with_ladder` awaits — the
 latter because it runs inside `asyncio.gather` under two semaphores, where a blocking retry
 loop would serialize the whole fan-out. Each failed attempt writes `{phase}/failed/{task_id}.attemptN.json` with the
 prompt elided to its sha256; attempt numbering restarts per invocation, so an existing file of that

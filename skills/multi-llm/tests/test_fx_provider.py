@@ -10,6 +10,7 @@ import pytest
 
 from utils.providers.fx import FxProvider
 from utils.providers import fx
+from utils import dispatch_spawn
 
 
 def envelope(**overrides):
@@ -412,7 +413,7 @@ def test_lane_b_releases_home_on_error_and_cancellation(provider, monkeypatch, f
         assert home.is_dir()
         raise failure("dispatch interrupted")
 
-    monkeypatch.setattr(subagent_executor, "_spawn_in_context", spawn)
+    monkeypatch.setattr(dispatch_spawn, "_spawn_in_context", spawn)
     with pytest.raises(failure):
         subagent_executor._spawn_child(provider=provider, model="test/model", prompt="hi", profile="generate", transport="stdin", timeout=1, cwd=None)
     assert seen and not seen[0].exists()

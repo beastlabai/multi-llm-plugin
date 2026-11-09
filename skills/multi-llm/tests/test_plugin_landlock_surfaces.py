@@ -54,6 +54,7 @@ from utils import landlock_dispatch  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
 from utils import run_status  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from utils import dispatch_spawn  # noqa: E402
 from utils.providers import codex as codex_module  # noqa: E402
 from utils.providers.base import (  # noqa: E402
     SANDBOX_CANARY_DENIED,
@@ -122,7 +123,7 @@ def jailed(tmp_path, monkeypatch):
     def no_model_calls(*args, **kwargs):
         raise AssertionError("doctor dispatched a model call")
 
-    monkeypatch.setattr(executor, "_spawn", no_model_calls)
+    monkeypatch.setattr(dispatch_spawn, "_spawn", no_model_calls)
     from utils import llm_client
 
     monkeypatch.setattr(llm_client, "invoke_with_provider", no_model_calls)

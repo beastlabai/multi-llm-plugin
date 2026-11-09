@@ -28,6 +28,9 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         PROFILE_AGENT_READONLY,
         PROFILE_AGENT_WRITE,
         split_reasoning_effort,
+        WRITE_SCOPE_PLAN_FILE,
+        WRITE_SCOPE_REPO_WIDE,
+        WRITE_SCOPE_TASKS,
     )
     from .subagent_tasks import (
         READ_KINDS,
@@ -46,6 +49,9 @@ except ImportError:  # pragma: no cover - direct-script import shim
         PROFILE_AGENT_READONLY,
         PROFILE_AGENT_WRITE,
         split_reasoning_effort,
+        WRITE_SCOPE_PLAN_FILE,
+        WRITE_SCOPE_REPO_WIDE,
+        WRITE_SCOPE_TASKS,
     )
     from utils.subagent_tasks import (
         READ_KINDS,
@@ -61,6 +67,22 @@ except ImportError:  # pragma: no cover - direct-script import shim
 PROFILE_BY_KIND = {
     **{kind: PROFILE_AGENT_READONLY for kind in READ_KINDS},
     **{kind: PROFILE_AGENT_WRITE for kind in WRITE_KINDS},
+}
+
+#: Every write kind maps to ``agent-write`` above, so the profile cannot tell a
+#: plan edit from a code edit. The grant the plugin's Landlock jail gives a
+#: write dispatch is therefore keyed by the KIND here, beside the profile map
+#: and derived the same way — never read from the task JSON (plan
+#: codex-sandbox-unavailable §6 F1 "How a dispatch receives its grant",
+#: 2026-09-30). ``plan-file`` is one file rule on the plan, ``tasks`` the tasks
+#: directory (or file); ``repo-wide`` (step 3b, 2026-10-02; one dir rule on
+#: the repository root since 2026-10-05) the whole repository. A write kind
+#: missing from this map is refused, never widened.
+WRITE_SCOPE_BY_KIND = {
+    "apply_suggestions": WRITE_SCOPE_PLAN_FILE,
+    "apply_task_suggestions": WRITE_SCOPE_TASKS,
+    "apply_code_fixes": WRITE_SCOPE_REPO_WIDE,
+    "implement": WRITE_SCOPE_REPO_WIDE,
 }
 
 

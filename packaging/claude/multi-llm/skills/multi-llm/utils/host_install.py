@@ -1211,16 +1211,16 @@ def probe_runner(spec: str, *, anchor: Optional[str] = None) -> Dict[str, str]:
     }
     try:
         try:
-            from .subagent_executor import (
-                PROFILE_AGENT_READONLY,
-                RunnerRejected,
+            from .providers.base import PROFILE_AGENT_READONLY
+            from .task_outcome import RunnerRejected
+            from .runner_preflight import (
                 preflight_runner,
                 probe_setup_metadata,
             )
         except ImportError:  # pragma: no cover - direct script runs
-            from subagent_executor import (  # type: ignore
-                PROFILE_AGENT_READONLY,
-                RunnerRejected,
+            from providers.base import PROFILE_AGENT_READONLY  # type: ignore
+            from task_outcome import RunnerRejected  # type: ignore
+            from runner_preflight import (  # type: ignore
                 preflight_runner,
                 probe_setup_metadata,
             )

@@ -40,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tests.test_kill_tree_posix import _Host  # noqa: E402
 from utils import detach, process_control, run_registry, run_status, status_file  # noqa: E402
+from utils import dispatch_spawn  # noqa: E402
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
 
@@ -2052,7 +2053,7 @@ class TestAnExecutorTimeoutThatCouldNotStopItsRunner:
             proc.kill()  # the test's own child: stopped for real, said unresolved
             return "unresolved"
 
-        monkeypatch.setattr(executor, "_kill_timed_out", unresolved)
+        monkeypatch.setattr(dispatch_spawn, "_kill_timed_out", unresolved)
         capture = executor._spawn_in_context(
             provider=provider, model="gpt-5.5", prompt="p", profile=PROFILE_AGENT_READONLY,
             transport="argv", timeout=0.3, cwd=str(tmp_path))

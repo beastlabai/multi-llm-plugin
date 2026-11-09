@@ -27,6 +27,7 @@ sys.path.insert(0, str(SKILL_ROOT))
 from utils import cli_common, run_status, status_file  # noqa: E402
 from utils import review_orchestrator_base as rob  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from utils import task_batch, task_dispatch  # noqa: E402
 from utils import runner_selection  # noqa: E402
 from tests.conftest import stand_in  # noqa: E402
 from utils.subagent_tasks import batch_manifest, file_bytes_sha256  # noqa: E402
@@ -388,13 +389,13 @@ def _executor_round(tmp_path, monkeypatch, n_groups=8):
             status=executor.STATUS_OK, output_path=str(path),
         )
 
-    monkeypatch.setattr(executor, "dispatch_task", fake_dispatch)
+    monkeypatch.setattr(task_dispatch, "dispatch_task", fake_dispatch)
     monkeypatch.setattr(
         runner_selection, "_resolve_task_source",
         lambda task, **kwargs: (EXECUTOR_RUNNER, "env", "env"),
     )
     monkeypatch.setattr(
-        executor, "_preflight_batch_runners",
+        task_batch, "_preflight_batch_runners",
         lambda resolved, *a, **k: ({EXECUTOR_RUNNER: "0.156.1"}, None),
     )
     executor.run_tasks(

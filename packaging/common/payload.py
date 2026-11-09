@@ -978,10 +978,15 @@ DISTRIBUTION_BUDGETS: Dict[str, Tuple[int, int]] = {
     # claude-code 243 files / 10,527,413 bytes, codex 244 / 10,689,125. Raised
     # again the same day for the module splits (U42a's six scheduler modules, with
     # the provider and executor splits to come); measured at U42a: claude-code 272
-    # files, codex 273 / 10,793,263 bytes.
-    "claude-code": (310, 11_500_000),
-    "codex": (300, 11_300_000),
-    "opencode": (300, 11_400_000),     # unpacked; tracks the codex tree
+    # files, codex 273 / 10,793,263 bytes. File budgets raised 2026-11-09 for
+    # U44b's six executor modules (the executor is now a re-export facade);
+    # measured at U44b: claude-code 300 files / 11,043,439 bytes, codex 301 /
+    # 11,217,795. Byte budgets raised the same day: codex had 82 KB left, and the
+    # split modules each carry their docstrings; a development file leaking in
+    # still shows first in the file count.
+    "claude-code": (340, 12_200_000),
+    "codex": (330, 12_000_000),
+    "opencode": (330, 12_100_000),     # unpacked; tracks the codex tree
 }
 
 

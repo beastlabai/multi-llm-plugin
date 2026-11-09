@@ -27,6 +27,7 @@ import multi_llm  # noqa: E402
 from utils import doctor  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from utils import dispatch_spawn  # noqa: E402
 from utils import sandbox_walk  # noqa: E402
 
 MOCK_LLM = Path(__file__).parent / "mocks" / "mock_llm.py"
@@ -75,7 +76,7 @@ def clinic(tmp_path, monkeypatch):
     def no_model_calls(*args, **kwargs):
         raise AssertionError("doctor dispatched a model call")
 
-    monkeypatch.setattr(executor, "_spawn", no_model_calls)
+    monkeypatch.setattr(dispatch_spawn, "_spawn", no_model_calls)
     from utils import llm_client
 
     monkeypatch.setattr(llm_client, "invoke_with_provider", no_model_calls)

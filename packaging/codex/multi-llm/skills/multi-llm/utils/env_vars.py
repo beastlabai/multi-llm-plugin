@@ -252,7 +252,7 @@ ENV_VARS: Tuple[EnvVar, ...] = (
        "(`MULTI_LLM_RESULT: {json}`)."),
     _v(CORE_END, MARKER, "multi_llm.py", False,
        "Stdout marker that ends the instruction core a mode prints."),
-    _v(NESTED_EXEC_OK, MARKER, "utils/subagent_executor.py", False,
+    _v(NESTED_EXEC_OK, MARKER, "utils/runner_preflight.py", False,
        "The word the nested-exec probe asks a runner to print, searched for in "
        "its reply to decide whether it can start a nested exec."),
     # --- build, test, retired, reserved -----------------------------------

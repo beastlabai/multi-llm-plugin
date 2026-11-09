@@ -713,7 +713,7 @@ class TestTheAllowlistIsBuiltInsideTheSharedBuilder:
     """
 
     @pytest.mark.parametrize(
-        "module_name", ["llm_client.py", "subagent_executor.py"]
+        "module_name", ["llm_client.py", "dispatch_spawn.py"]
     )
     def test_neither_spawn_site_filters_the_env_itself(self, module_name):
         source = (SKILL_DIR / "utils" / module_name).read_text(encoding="utf-8")

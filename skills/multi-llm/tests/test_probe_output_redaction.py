@@ -41,6 +41,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import subagent_executor  # noqa: E402
+from utils import attempt_classifier, dispatch_spawn, runner_preflight  # noqa: E402
 from utils import failure_capture  # noqa: E402
 from tests.conftest import stand_in  # noqa: E402
 from utils.providers.cursor_agent import (  # noqa: E402
@@ -166,7 +167,7 @@ def _capture(stdout="", stderr=""):
 def _detect_auth_refusal(monkeypatch, stream, *, on_stderr=False):
     """Drive `_detect_auth` to its `not_authenticated` refusal."""
     monkeypatch.setattr(
-        subagent_executor, "get_provider", lambda name: _Provider()
+        runner_preflight, "get_provider", lambda name: _Provider()
     )
     completed = subprocess.CompletedProcess(
         args=list(_Provider.auth_check),
@@ -174,7 +175,7 @@ def _detect_auth_refusal(monkeypatch, stream, *, on_stderr=False):
         stdout="" if on_stderr else stream,
         stderr=stream if on_stderr else "",
     )
-    monkeypatch.setattr(subagent_executor, "_run_probe", stand_in(lambda argv: completed))
+    monkeypatch.setattr(runner_preflight, "_run_probe", stand_in(lambda argv: completed))
     with pytest.raises(subagent_executor.RunnerRejected) as excinfo:
         subagent_executor._detect_auth(
             "cursor-agent",
@@ -190,12 +191,12 @@ def _nested_refusal(monkeypatch, stream, *, reason_code):
     """Drive `_probe_nested_exec` to its credentials or network refusal."""
     failure = STATUS_AUTH_FAILED if reason_code == "nested_exec_credentials" else None
     monkeypatch.setattr(
-        subagent_executor,
+        runner_preflight,
         "get_provider",
         lambda name: _Provider(failure=failure),
     )
     monkeypatch.setattr(
-        subagent_executor, "_spawn", lambda **kwargs: _capture(stderr=stream)
+        dispatch_spawn, "_spawn", lambda **kwargs: _capture(stderr=stream)
     )
     with pytest.raises(subagent_executor.RunnerRejected) as excinfo:
         subagent_executor._probe_nested_exec(
@@ -354,7 +355,7 @@ class TestTheNestedExecCredentialsRefusal:
         # and letting a raising redactor abort *there* would test a different
         # site than the refusal boundary this asserts.
         monkeypatch.setattr(
-            subagent_executor,
+            attempt_classifier,
             "_classify_failed_run",
             lambda provider, capture, model="": (STATUS_AUTH_FAILED, "stubbed"),
         )

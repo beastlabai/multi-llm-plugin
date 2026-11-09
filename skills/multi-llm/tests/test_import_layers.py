@@ -125,6 +125,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.structured_output",
     )),
     3: ("execution", (
+        "utils.attempt_classifier",
         "utils.batch_done",
         "utils.batch_ledger",
         "utils.batch_prompt",
@@ -137,6 +138,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.commit_range",
         "utils.commit_write_guard",
         "utils.detach",
+        "utils.dispatch_spawn",
         "utils.failure_capture",
         "utils.human_decisions",
         "utils.human_task_plan",
@@ -147,6 +149,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.progress_tracker",
         "utils.report_check",
         "utils.restore_batch",
+        "utils.runner_preflight",
         "utils.runner_selection",
         "utils.sandbox_walk",
         "utils.scope_apply",
@@ -155,7 +158,10 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.subagent_prompts",
         "utils.subagent_tasks",
         "utils.suggestion_batcher",
+        "utils.task_batch",
         "utils.task_decomposer",
+        "utils.task_dispatch",
+        "utils.task_file_runner",
         "utils.task_outcome",
         "utils.task_result",
         "utils.tasks_file",
@@ -248,8 +254,10 @@ KNOWN_UPWARD: Dict[Tuple[str, str], str] = {
     ("utils.providers.cursor_agent", "utils.write_safety"):
         "redact_text: belongs in a leaf redaction module that write_safety re-imports",
     # Small helpers and constants in the wrong house.
-    ("utils.subagent_executor", "utils.review_orchestrator_base"):
-        "get_backoff_delay, run_tasks_concurrent: belong in a concurrency module at L3",
+    ("utils.task_dispatch", "utils.review_orchestrator_base"):
+        "get_backoff_delay: belongs in a concurrency module at L3",
+    ("utils.task_batch", "utils.review_orchestrator_base"):
+        "run_tasks_concurrent: belongs in a concurrency module at L3",
     ("utils.provider_registry", "utils.run_status"):
         "WAIT_POLL_INTERVAL_S: belongs in status_file (L1)",
     ("utils.output_handler", "utils.plan_updater"):

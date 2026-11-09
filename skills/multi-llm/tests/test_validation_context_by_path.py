@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils import review_orchestrator_base as rob  # noqa: E402
 from utils import status_file  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from utils import dispatch_spawn, task_dispatch  # noqa: E402
 from utils import runner_selection  # noqa: E402
 from utils.subagent_tasks import (  # noqa: E402
     PromptBudget,
@@ -550,7 +551,7 @@ class TestReadScopeOutsideCwd:
             seen.update(kwargs)
             raise Stop()
 
-        monkeypatch.setattr(executor, "_spawn", fake_spawn)
+        monkeypatch.setattr(dispatch_spawn, "_spawn", fake_spawn)
         with pytest.raises(Stop):
             executor.dispatch_task(
                 task, phase_dir=str(phase), runner="claude-code:sonnet",
@@ -579,8 +580,9 @@ class TestReadScopeOutsideCwd:
             supports_workspace_reads=True, reads_outside_cwd=False,
             read_scope_flag=None, supports_profile=lambda profile: True,
         )
-        monkeypatch.setattr(executor, "parse_model_spec", lambda spec, anchor=None: ("blind", "m"))
-        monkeypatch.setattr(executor, "get_provider", lambda name: blind)
+        monkeypatch.setattr(
+            task_dispatch, "parse_model_spec", lambda spec, anchor=None: ("blind", "m"))
+        monkeypatch.setattr(task_dispatch, "get_provider", lambda name: blind)
         outcome = executor.dispatch_task(
             task, phase_dir=str(phase), runner="blind:m", cwd=str(repo),
         )

@@ -801,7 +801,7 @@ class TestNoFalsePositivesOnBenignCorpora:
             "human_decisions.py, `token_count=token_count` and `token_count=args.tokens` in metrics.py, "
             "`ENV_GIT_CREDENTIAL_HELPER_VAR` in provider_registry.py and its inventory row "
             "`GIT_CREDENTIAL_HELPER` in env_vars.py, `nested_exec_credentials` in "
-            "subagent_executor.py, `OMP_CREDENTIAL_ENV` + `credential_helper=credential_helper` "
+            "runner_preflight.py, `OMP_CREDENTIAL_ENV` + `credential_helper=credential_helper` "
             "in providers/omp.py, and `FX_CREDENTIAL_ENV` in providers/fx.py). This corpus is a "
             "diagnostic rather than a gate, but a count that moved means a pattern got "
             "looser — investigate before shipping:\n  " + "\n  ".join(hits)

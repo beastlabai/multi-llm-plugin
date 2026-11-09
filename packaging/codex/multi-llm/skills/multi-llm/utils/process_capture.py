@@ -3,7 +3,7 @@ with the process rather than with its pipes.
 
 Both spawn lanes read a CLI through :class:`PipeCapture`: the review fan-out's
 ``llm_client._run_provider_cli`` and the executor's
-``subagent_executor._spawn_in_context``. Each lane keeps its own spawn
+``dispatch_spawn._spawn_in_context``. Each lane keeps its own spawn
 (``process_control.popen_tree``), process-group choice, timeout and teardown;
 this module only replaces what ``Popen.communicate`` did with the CLI's pipes.
 See ``docs/development/providers.md`` ("Capturing a CLI's streams").

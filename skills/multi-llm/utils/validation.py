@@ -1052,7 +1052,7 @@ def task_file_for_kind(phase_dir: str, kind: str) -> str:
     """Where a sidecar-carrying kind's task file lives: ``<kind>_tasks.json``.
 
     True of all four (``validation``, ``revalidation``, ``consolidation``,
-    ``task_generation``); ``subagent_executor.RESERVED_OUTPUT_SUFFIXES`` keys
+    ``task_generation``); ``task_result.RESERVED_OUTPUT_SUFFIXES`` keys
     on the same shape.
     """
     return os.path.join(phase_dir, f"{kind}_tasks.json")

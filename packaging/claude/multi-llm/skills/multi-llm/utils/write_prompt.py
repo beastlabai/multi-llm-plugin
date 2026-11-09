@@ -100,7 +100,7 @@ try:
         PROCESSED_LEG_NATIVE, record_batch_items_in_state, update_task_status_in_state,
     )
     from .stream_bootstrap import bootstrap_streams
-    from .subagent_executor import ExecutorError, ResultRejected
+    from .task_outcome import ExecutorError, ResultRejected
     from .subagent_tasks import (
         APPLY_WRITE_KINDS, PHASE_BY_WRITE_KIND, TASKS_SCHEMA_VERSION, declared_file_set,
     )
@@ -155,7 +155,7 @@ except ImportError:  # pragma: no cover - direct script invocation
         PROCESSED_LEG_NATIVE, record_batch_items_in_state, update_task_status_in_state,
     )
     from utils.stream_bootstrap import bootstrap_streams  # type: ignore
-    from utils.subagent_executor import ExecutorError, ResultRejected  # type: ignore
+    from utils.task_outcome import ExecutorError, ResultRejected  # type: ignore
     from utils.subagent_tasks import (  # type: ignore
         APPLY_WRITE_KINDS, PHASE_BY_WRITE_KIND, TASKS_SCHEMA_VERSION, declared_file_set,
     )

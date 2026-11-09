@@ -61,6 +61,7 @@ from utils.subagent_tasks import (  # noqa: E402
     content_hash,
 )
 from utils.validation import prepare_batched_revalidation_tasks  # noqa: E402
+from utils import task_batch  # noqa: E402
 
 GOLDEN = Path(__file__).parent / "golden" / "code_review_head_ref_prompt.txt"
 UPDATE_GOLDEN = os.environ.get("MULTI_LLM_UPDATE_GOLDEN") == "1"
@@ -604,7 +605,7 @@ class TestFrontedRecords:
         task_file = phase / "validation_tasks.json"
         doc = json.loads(task_file.read_text(encoding="utf-8"))
         calls = []
-        monkeypatch.setattr(executor, "run_tasks", lambda *a, **kw: calls.append(a))
+        monkeypatch.setattr(task_batch, "run_tasks", lambda *a, **kw: calls.append(a))
         kwargs = {"document": doc} if in_memory else {}
         executor.run_task_file(str(task_file), phase_dir=str(phase), **kwargs)
         assert len(calls) == 1

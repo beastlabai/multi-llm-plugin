@@ -37,6 +37,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import subagent_executor as executor  # noqa: E402
+from utils import dispatch_spawn, runner_preflight, task_batch, task_dispatch  # noqa: E402
+from utils import task_file_runner  # noqa: E402
 from utils import runner_selection, sandbox_walk, task_result  # noqa: E402
 from tests.conftest import stand_in  # noqa: E402
 from tests.harness.native_invoker import simulate_native_invoker  # noqa: E402
@@ -697,7 +699,7 @@ class TestFailureLadder:
             "$real" "$@"
             exit $?
             """)
-        monkeypatch.setattr(executor, "TIMEOUT_DRAIN_S", 1.0)
+        monkeypatch.setattr(dispatch_spawn, "TIMEOUT_DRAIN_S", 1.0)
         holder = None
         try:
             started = time.monotonic()
@@ -796,7 +798,7 @@ class TestFailureLadder:
                     retries_rate_limit=False,
                 )
 
-        monkeypatch.setattr(executor, "RetryLadder", Ladder)
+        monkeypatch.setattr(task_dispatch, "RetryLadder", Ladder)
 
         def oversleep(_seconds):
             clock["t"] += 30.0
@@ -2403,7 +2405,7 @@ class TestAdditiveUntilAsked:
             lambda phase_dir, **updates: seen.append((str(phase_dir), updates)),
         )
         monkeypatch.setattr(
-            executor, "continue_past_marker",
+            task_file_runner, "continue_past_marker",
             lambda *a, **k: (seen.append(("dispatched", {})), True)[1],
         )
         args = type("Args", (), {"exec_subagents": True, "yes": True})()
@@ -2510,7 +2512,7 @@ class TestLongestFirstDispatch:
                 output_path=str(Path(phase_dir) / task["output_name"]),
             )
 
-        monkeypatch.setattr(executor, "dispatch_task", recording_dispatch)
+        monkeypatch.setattr(task_dispatch, "dispatch_task", recording_dispatch)
         report = executor.run_tasks(
             tasks, phase_dir=str(tmp_path), kind="validation", resume=False,
         )
@@ -2562,7 +2564,8 @@ class TestTheBatchDeadline:
 
         runner_env.use("codex:gpt-5.5", max_concurrent_subagents=3)
         # Three tasks at a 0.1 s budget: the batch cap is 2 x 3 x 0.1 s, no stagger.
-        monkeypatch.setattr(executor, "get_subagent_timeout", lambda *_a, **_k: 0.1)
+        for module in (task_batch, task_dispatch):
+            monkeypatch.setattr(module, "get_subagent_timeout", lambda *_a, **_k: 0.1)
         monkeypatch.setattr(rob, "PROVIDER_STAGGER_DELAY", 0.0)
         tasks = [_validation_batch(tmp_path, i, hashes=(h,)) for i, h in enumerate(self.HASHES)]
 
@@ -2588,7 +2591,7 @@ class TestTheBatchDeadline:
                 status=executor.STATUS_OK, output_path=write_reply(task, phase_dir),
             )
 
-        monkeypatch.setattr(executor, "dispatch_task", dispatch)
+        monkeypatch.setattr(task_dispatch, "dispatch_task", dispatch)
         return executor.run_tasks(
             tasks, phase_dir=str(tmp_path), kind="validation", resume=resume,
         )
@@ -2630,7 +2633,8 @@ class TestTheBatchDeadline:
 
         runner_env.use("codex:gpt-5.5", max_concurrent_subagents=4)
         budget = 0.15
-        monkeypatch.setattr(executor, "get_subagent_timeout", lambda *_a, **_k: budget)
+        for module in (task_batch, task_dispatch):
+            monkeypatch.setattr(module, "get_subagent_timeout", lambda *_a, **_k: budget)
         monkeypatch.setattr(rob, "PROVIDER_STAGGER_DELAY", 0.0)
         tasks = [_validation_batch(tmp_path, i, hashes=(f"{i:04d}" + "0" * 12,))
                  for i in range(16)]
@@ -2652,7 +2656,7 @@ class TestTheBatchDeadline:
                 status=executor.STATUS_OK, output_path=str(path),
             )
 
-        monkeypatch.setattr(executor, "dispatch_task", dispatch)
+        monkeypatch.setattr(task_dispatch, "dispatch_task", dispatch)
         report = executor.run_tasks(tasks, phase_dir=str(tmp_path), kind="validation")
         out = capsys.readouterr().out
         assert "narrowing it to 1 in-flight slot(s)" in out
@@ -2934,7 +2938,7 @@ class TestRunnerAuthPreflight:
 
     def test_an_unreadable_probe_never_blocks(self, tmp_path, runner_env, monkeypatch):
         """A probe that cannot run at all is `unknown`, not a refusal."""
-        monkeypatch.setattr(executor, "_run_probe", stand_in(lambda argv: None))
+        monkeypatch.setattr(runner_preflight, "_run_probe", stand_in(lambda argv: None))
         runner_env.use("codex:gpt-5.5")
         info = executor.preflight_runner("codex:gpt-5.5")
         assert info["auth"] == "unknown"
@@ -3075,7 +3079,7 @@ class TestStructuralModelSpecRefusal:
         def _unreadable(*_args, **_kwargs):
             raise RuntimeError("catalog unreadable")
 
-        monkeypatch.setattr(executor, "is_model_valid", _unreadable)
+        monkeypatch.setattr(runner_preflight, "is_model_valid", _unreadable)
 
         with pytest.raises(executor.RunnerRejected) as excinfo:
             executor.preflight_runner(
@@ -3212,7 +3216,7 @@ class TestNestedExecPreflight:
             return self._Capture(**capture)
 
         monkeypatch.setenv("MULTI_LLM_HOST", host)
-        monkeypatch.setattr(executor, "_spawn", fake_spawn)
+        monkeypatch.setattr(dispatch_spawn, "_spawn", fake_spawn)
         executor.reset_version_cache()
         try:
             state = executor._detect_nested_exec(
@@ -3345,7 +3349,7 @@ class TestNestedExecPreflight:
         spawned = []
         monkeypatch.setenv("MULTI_LLM_HOST", "codex")
         monkeypatch.setattr(
-            executor, "_spawn",
+            dispatch_spawn, "_spawn",
             lambda **kwargs: spawned.append(kwargs) or self._Capture(stdout="ok"),
         )
         executor.reset_version_cache()
@@ -3762,7 +3766,7 @@ def test_fx_step_budget_is_terminal_in_dispatch(tmp_path, runner_env, monkeypatc
             stderr="Agent step limit reached\n", exit_code=1,
         )
 
-    monkeypatch.setattr(executor, "_spawn_child", spawn)
+    monkeypatch.setattr(dispatch_spawn, "_spawn_child", spawn)
     outcome = executor.dispatch_task(
         _validation_batch(tmp_path), phase_dir=str(tmp_path), runner="fx:test/model",
         sleep=lambda seconds: pytest.fail("terminal budget must not back off"),
@@ -3880,7 +3884,7 @@ class TestInvalidModelIsFatal:
             spawned.append(kwargs)
             return self._Capture(_INVALID_MODEL_STDOUT, _INVALID_MODEL_STDERR)
 
-        monkeypatch.setattr(executor, "_spawn", fake_spawn)
+        monkeypatch.setattr(dispatch_spawn, "_spawn", fake_spawn)
         with pytest.raises(executor.RunnerRejected) as excinfo:
             executor._detect_nested_exec(
                 "opencode", "opencode/sonnet",
@@ -4426,7 +4430,7 @@ class TestModelCatalogPreflight:
         executor.reset_version_cache()
         nested = []
         monkeypatch.setattr(
-            executor, "_detect_nested_exec",
+            runner_preflight, "_detect_nested_exec",
             lambda *a, **k: nested.append(a) or "unknown",
         )
         with pytest.raises(executor.RunnerRejected) as excinfo:
@@ -4577,7 +4581,7 @@ class TestModelCatalogPreflight:
         def _boom(*args, **kwargs):
             raise AssertionError("status reached a probe")
 
-        monkeypatch.setattr(executor, "_run_probe", _boom)
+        monkeypatch.setattr(runner_preflight, "_run_probe", _boom)
         monkeypatch.setattr(oc, "_list_models", _boom)
         monkeypatch.setattr(subprocess, "run", _boom)
         monkeypatch.setattr(subprocess, "Popen", _boom)
@@ -4813,7 +4817,7 @@ class TestCredentialFreeModels:
             args=["opencode", "auth", "list"], returncode=0,
             stdout=self._ZERO_CREDENTIALS, stderr="",
         )
-        monkeypatch.setattr(executor, "_run_probe", stand_in(lambda argv: completed))
+        monkeypatch.setattr(runner_preflight, "_run_probe", stand_in(lambda argv: completed))
 
     def test_the_default_declares_the_measured_id_and_nothing_else(self):
         provider = registry.get_provider("opencode")
@@ -4875,7 +4879,7 @@ class TestCredentialFreeModels:
             args=["opencode", "auth", "list"], returncode=fixture["exit"],
             stdout=fixture["stdout"], stderr=fixture["stderr"],
         )
-        monkeypatch.setattr(executor, "_run_probe", stand_in(lambda argv: completed))
+        monkeypatch.setattr(runner_preflight, "_run_probe", stand_in(lambda argv: completed))
         executor.reset_auth_cache()
         with pytest.raises(executor.RunnerRejected) as excinfo:
             executor._detect_auth(
@@ -4899,7 +4903,7 @@ class TestCredentialFreeModels:
             stdout="┌  Credentials\n│\n●  OpenRouter api\n│\n└  1 credentials\n",
             stderr="",
         )
-        monkeypatch.setattr(executor, "_run_probe", stand_in(lambda argv: completed))
+        monkeypatch.setattr(runner_preflight, "_run_probe", stand_in(lambda argv: completed))
         executor.reset_auth_cache()
         state = executor._detect_auth(
             "opencode", "opencode/big-pickle",
@@ -4965,7 +4969,7 @@ class TestSandboxUnavailable:
     def _no_dispatch(monkeypatch):
         def boom(**kwargs):
             raise AssertionError("a child was dispatched past a refused preflight")
-        monkeypatch.setattr(executor, "_spawn", boom)
+        monkeypatch.setattr(dispatch_spawn, "_spawn", boom)
 
     # -- step 4: the classifier row ---------------------------------------
 
@@ -5014,7 +5018,7 @@ class TestSandboxUnavailable:
             spawned.append(kwargs)
             return self._Capture("", _BWRAP_BROKEN_LINE + "\n")
 
-        monkeypatch.setattr(executor, "_spawn", fake_spawn)
+        monkeypatch.setattr(dispatch_spawn, "_spawn", fake_spawn)
         with pytest.raises(executor.RunnerRejected) as excinfo:
             executor._detect_nested_exec(
                 "codex", "gpt-5.5",
@@ -5207,7 +5211,7 @@ class TestSandboxUnavailable:
             spawned.append(kwargs)
             return self._Capture("", "boom\n", exit_code=1)
 
-        monkeypatch.setattr(executor, "_spawn", fake_spawn)
+        monkeypatch.setattr(dispatch_spawn, "_spawn", fake_spawn)
         phase_dir = tmp_path / "phase"
         phase_dir.mkdir()
         task = _validation_batch(phase_dir)
@@ -6825,7 +6829,7 @@ class TestEveryAttemptTakesALaunchTurn:
             spawned.append(time.monotonic())
             return self._Capture()
 
-        monkeypatch.setattr(executor, "_spawn", fake_spawn)
+        monkeypatch.setattr(dispatch_spawn, "_spawn", fake_spawn)
         limiter = LaunchLimiter({"codex": self.INTERVAL})
 
         async def in_a_slot():

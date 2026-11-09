@@ -25,7 +25,7 @@ from . import known_checks as _known_checks
 from .task_ledger import COMPLETED_MANUAL_REASON
 from .text_clip import plain_line
 from .provider_registry import get_verify_command
-from .subagent_executor import batch_check_could_not_run
+from .batch_reply import batch_check_could_not_run
 from .write_phase_bridge import WRITE_TASK_FILENAME
 from .write_safety import resolve_repo_root
 

@@ -54,7 +54,7 @@ class Capture:
     One ending holds: ``launch_error`` (nothing ran), ``timed_out`` (the
     deadline killed it; ``exit_code`` is ``None``), or an ``exit_code``. The
     streams are kept as the spawn returned them, never coerced: a stand-in
-    spawn may hand back ``None``. The executor's ``subagent_executor._Capture``
+    spawn may hand back ``None``. The executor's ``dispatch_spawn._Capture``
     carries the same stream fields, and its readers take this value too.
     """
 
@@ -666,7 +666,7 @@ def _attach_usage(
     """Put what the run spent on ``details`` as ``usage``, when the adapter can say.
 
     The adapter's own :meth:`~utils.providers.base.LLMProvider.parse_usage`,
-    under the same never-raise rule ``subagent_executor._safe_parse_usage``
+    under the same never-raise rule ``task_dispatch._safe_parse_usage``
     applies (D3j): metrics must not break a run, and an adapter that reports
     nothing leaves the key **absent** — a ``{}`` would read as "reported,
     free".

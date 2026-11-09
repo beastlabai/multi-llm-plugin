@@ -158,7 +158,7 @@ class TestLaneBSpawnSiteExpands:
         assert captured["env"]["MLLM_ABSOLUTE"] == "/etc/multi-llm"
 
     @pytest.mark.parametrize(
-        "module_name", ["llm_client.py", "subagent_executor.py"]
+        "module_name", ["llm_client.py", "dispatch_spawn.py"]
     )
     def test_every_spawn_site_wraps_its_env_block_in_the_expander(self, module_name):
         """Pin the invariant, not the spelling (§2.5: "exactly two spawn sites").

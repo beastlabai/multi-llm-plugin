@@ -29,7 +29,7 @@ from .task_ledger import (
     USER_DECLINED_REASON,
     is_declined_reason,
 )
-from .subagent_executor import ExecutorError
+from .task_outcome import ExecutorError
 from .state_manager import manual_task_gates
 
 

@@ -30,7 +30,7 @@ from . import write_context as _write_context
 from .batch_ledger import touched_files
 from .cli_common import EXIT_NEEDS_HUMAN
 from .provider_registry import get_verify_command, get_verify_settings
-from .subagent_executor import WRITE_APPLIED, WRITE_PARTIAL
+from .batch_reply import WRITE_APPLIED, WRITE_PARTIAL
 from .subagent_tasks import PHASE_BY_WRITE_KIND
 
 #: How much of the verification command's output travels in the result payload,

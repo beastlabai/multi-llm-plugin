@@ -74,9 +74,9 @@ plugin does not. They are public link targets, so those two paths stay where the
 ## Budgets
 
 `DISTRIBUTION_BUDGETS` in `packaging/common/payload.py` is the one place they live. The
-`claude-code` entry allows 310 files and 11,500,000 unpacked bytes, and `build()` refuses a tree
-over either before anything is swapped in. The tree measured 243 files and about 10.53 MB when
-the file budget was last raised (2026-11-08, for the code-health module splits). An over-budget tree usually means development files reached the allowlist, so
+`claude-code` entry allows 340 files and 12,200,000 unpacked bytes, and `build()` refuses a tree
+over either before anything is swapped in. The tree measured 300 files and about 11.04 MB when
+the file budget was last raised (2026-11-09, for the executor split). An over-budget tree usually means development files reached the allowlist, so
 find out what grew first. Raising the budget is a reviewed edit to that table.
 
 The budget counts installed bytes. It says nothing about what a marketplace clone downloads.

@@ -287,9 +287,9 @@ class ApplyPhaseReport:
         # rather than spelled out here (F6, 2026-09-17): it owns the naming
         # rule, and a hand-typed copy would drop this key on the day it moves.
         try:
-            from .subagent_executor import batch_report_path
+            from .task_outcome import batch_report_path
         except ImportError:  # pragma: no cover - direct script runs
-            from subagent_executor import batch_report_path  # type: ignore
+            from task_outcome import batch_report_path  # type: ignore
 
         judge_report = batch_report_path(phase_dir, "human_decision_judge")
         if os.path.exists(judge_report):
@@ -387,7 +387,7 @@ class ApplyPhaseReport:
         invocation, so that step never runs — the per-item reasons, which are the
         good part, existed only inside ``orchestrator_output.json``.
         """
-        from .subagent_executor import batch_check_could_not_run, row_batch_check_findings
+        from .batch_reply import batch_check_could_not_run, row_batch_check_findings
 
         result = self.write_result
         rows = self._phase_rows()
@@ -733,7 +733,7 @@ class ApplyPhaseReport:
         """``(declined, skipped)``: a row's items its batch declined and the
         items a ``--human-task <id>=skip`` answer recorded as skipped at the
         user's request, each ``{id: reason}`` (fix round 18). Never applied."""
-        from .subagent_executor import row_declined
+        from .batch_reply import row_declined
 
         return (
             row_declined(row),
@@ -792,7 +792,7 @@ class ApplyPhaseReport:
             from utils.verification_lines import verification_line  # type: ignore
             from utils.batch_prompt import CODE_WRITE_KINDS  # type: ignore
         from .commit_spelling import commit_view
-        from .subagent_executor import (
+        from .batch_reply import (
             DECLINED_SECTION_HEADING,
             SKIPPED_SECTION_HEADING,
             batch_check_could_not_run,
@@ -1061,9 +1061,9 @@ class ApplyPhaseReport:
             return
         report["summary_file"] = summary_path
         try:
-            from .subagent_executor import _atomic_write_json
+            from .failure_capture import _atomic_write_json
         except ImportError:  # pragma: no cover - direct script runs
-            from subagent_executor import _atomic_write_json  # type: ignore
+            from failure_capture import _atomic_write_json  # type: ignore
         try:
             _atomic_write_json(report_path, report)
         except OSError as exc:  # noqa: BLE001 - best-effort

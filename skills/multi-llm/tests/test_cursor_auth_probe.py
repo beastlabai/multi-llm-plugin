@@ -60,6 +60,7 @@ from utils.providers.cursor_agent import (  # noqa: E402
 from utils.provider_registry import _PROVIDERS  # noqa: E402
 from utils.write_safety import redact_text  # noqa: E402
 from tests.source_cache import source_text, source_tree
+from utils import runner_preflight
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 
@@ -691,7 +692,7 @@ class TestTheReadoutIsExecutedByTheStatusPath:
             spawned.append(list(argv))
             return SimpleNamespace(stdout=_about(), stderr="", returncode=0)
 
-        with patch.object(se, "_run_probe", _fake):
+        with patch.object(runner_preflight, "_run_probe", _fake):
             facts = se.probe_setup_metadata("cursor-agent")
 
         assert spawned == [list(CURSOR_ABOUT_ARGS)]
@@ -700,7 +701,7 @@ class TestTheReadoutIsExecutedByTheStatusPath:
     def test_a_readout_that_will_not_run_reports_nothing(self):
         from utils import subagent_executor as se
 
-        with patch.object(se, "_run_probe", lambda argv: None):
+        with patch.object(runner_preflight, "_run_probe", lambda argv: None):
             assert se.probe_setup_metadata("cursor-agent") == {}
 
     def test_an_adapter_declaring_no_readout_spawns_nothing(self):
@@ -714,7 +715,7 @@ class TestTheReadoutIsExecutedByTheStatusPath:
         ]
         assert silent, "every adapter declares a readout; this sweep is dead"
         with patch.object(
-            se, "_run_probe", lambda argv: spawned.append(list(argv))
+            runner_preflight, "_run_probe", lambda argv: spawned.append(list(argv))
         ):
             for name in silent:
                 assert se.probe_setup_metadata(name) == {}
@@ -743,10 +744,10 @@ class TestTheReadoutIsExecutedByTheStatusPath:
         from utils import subagent_executor as se
 
         with patch.object(
-            se, "preflight_runner",
+            runner_preflight, "preflight_runner",
             lambda *a, **kw: {"auth": "ok", "version": "2026.08.11"},
         ), patch.object(
-            se, "_run_probe",
+            runner_preflight, "_run_probe",
             lambda argv: SimpleNamespace(stdout=_about(), stderr="", returncode=0),
         ):
             facts = hi.probe_runner("cursor-agent:gpt-5.6-sol-xhigh")

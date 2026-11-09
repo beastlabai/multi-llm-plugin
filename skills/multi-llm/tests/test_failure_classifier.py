@@ -36,6 +36,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import subagent_executor as executor  # noqa: E402
+from utils import dispatch_spawn, runner_preflight  # noqa: E402
 from utils.providers import base as pbase  # noqa: E402
 from utils.provider_registry import get_provider  # noqa: E402
 from utils.retry_ladder import (  # noqa: E402
@@ -283,7 +284,7 @@ class TestContextOverflowSpawnsNothingTwice:
                 argv=["codex", "exec"],
             )
 
-        monkeypatch.setattr(executor, "_spawn", fake_spawn)
+        monkeypatch.setattr(dispatch_spawn, "_spawn", fake_spawn)
         task = make_task(
             kind="validation",
             task_id="validation-batch-0",
@@ -653,7 +654,7 @@ class TestConfigDeclaredProvidersOnThePin:
                 list(argv), self.debug_code, self.debug_stdout, ""
             )
 
-        monkeypatch.setattr(executor, "_run_probe", run_probe)
+        monkeypatch.setattr(runner_preflight, "_run_probe", run_probe)
         monkeypatch.setattr(oc, "_spawn_debug_config", spawn)
         yield
         oc.reset_hermetic_state()

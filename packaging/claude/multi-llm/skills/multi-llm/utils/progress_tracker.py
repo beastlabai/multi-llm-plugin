@@ -1656,7 +1656,7 @@ class PhaseProgress:
         [PROGRESS] step: validation | 2m30s | subagents 5/8 done (5 ok)
 
     Those counters are **read**, never recomputed into a second key:
-    ``subagent_executor._mirror_status`` already writes ``progress.subagents``
+    ``task_batch._mirror_status`` already writes ``progress.subagents``
     (and ``write_batch_scheduler._mirror_status`` ``write_subagents``) on every
     outcome, straight through ``update_status``, so they reach a foreground
     checkpoint today. A ``progress.validation`` beside them would be the

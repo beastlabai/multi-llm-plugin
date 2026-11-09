@@ -199,7 +199,7 @@ codex's configured default effort, since that metadata carries no effort key (me
 session's model).
 
 It is implicit — below an operator's opinion, above the credential-free host floor — and it is the
-one rung that **falls through at preflight instead of refusing**: `subagent_executor._preflight_batch_runners` prints
+one rung that **falls through at preflight instead of refusing**: `task_batch._preflight_batch_runners` prints
 `[exec-subagents] session model <spec> failed preflight (<reason_code>); falling back to <spec> (<layer>)`, resolves again with `skip_session=True`, and records
 `runner_fallback: {from, reason, to, layer}` in `subagent_batch_report.json`; every other rung's refusal is unchanged; the
 nested-exec probe's deadline is `NESTED_PROBE_TIMEOUT_S = 30 s` (was an unmeasured 120 s: the deadline only
@@ -683,7 +683,7 @@ assertion.
 
 Both spawn lanes read a provider CLI's stdout and stderr through one helper,
 `utils/process_capture.py` (`PipeCapture`): the review fan-out in `llm_client._run_provider_cli`
-and the executor in `subagent_executor._spawn_in_context`. Each lane still owns its spawn
+and the executor in `dispatch_spawn._spawn_in_context`. Each lane still owns its spawn
 (`process_control.popen_tree`), its process group (Lane A shares the terminal's so a Ctrl-C reaches
 the CLI; the executor gives each runner its own), its Windows Job Object, its timeout and its
 teardown. The capture only replaces what `Popen.communicate` did with the CLI's pipes:
@@ -799,7 +799,7 @@ to `outcome_from_capture`.
 - **The schema verdict** (`schema_phase`, W1: deferred by the owner, no production caller) sits
   behind `_phase_schema` before the spawn and `provider_outcome._schema_verdict` after it.
 
-The executor's `subagent_executor._Capture` carries the same stream fields but stays mutable (the
+The executor's `dispatch_spawn._Capture` carries the same stream fields but stays mutable (the
 spawn fills it in steps, the jail and the parse write to it afterwards), and its readers read a
 status, not this result, so it shares the fields and its readers accept a `Capture`
 (`tests/test_provider_outcome.py`). Every graded fixture row pins both lanes' ladder status as

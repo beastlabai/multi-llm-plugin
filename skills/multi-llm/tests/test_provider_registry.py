@@ -3037,6 +3037,10 @@ _SNAPSHOT_MODULES = (
     "utils/provider_registry.py",
     "utils/subagent_executor.py",
     "utils/runner_selection.py",
+    "utils/runner_preflight.py",
+    "utils/task_dispatch.py",
+    "utils/task_batch.py",
+    "utils/task_file_runner.py",
     "utils/write_batch_scheduler.py",
 )
 

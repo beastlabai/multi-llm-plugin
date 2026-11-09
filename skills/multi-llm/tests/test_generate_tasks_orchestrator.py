@@ -59,6 +59,7 @@ from tests.support.generate_tasks_world import (
     _valid_document,
 )
 from utils import task_result  # noqa: E402
+from utils import dispatch_spawn, runner_preflight, task_dispatch  # noqa: E402
 
 
 #: The reserved ``progress`` keys, as ``utils/status_file.py``'s module docstring
@@ -590,7 +591,7 @@ class TestRunnerRefusal:
                 )
             return real_preflight(spec, **kwargs)
 
-        monkeypatch.setattr(executor, "preflight_runner", preflight)
+        monkeypatch.setattr(runner_preflight, "preflight_runner", preflight)
         plan = _plan(tmp_path)
         code = multi_llm.main(
             ["generate-tasks", str(plan), "--yes", "--exec-subagents"]
@@ -1022,7 +1023,7 @@ def scripted_runner(monkeypatch):
             duration=0.01, argv=["codex", "exec", "--json"],
         )
 
-    monkeypatch.setattr(executor, "_spawn", fake_spawn)
+    monkeypatch.setattr(dispatch_spawn, "_spawn", fake_spawn)
 
     def play(*replies):
         script[:] = list(replies)
@@ -1240,7 +1241,7 @@ class TestSchemaRepairReAsk:
                     )
                 box["ladder"] = self
 
-        monkeypatch.setattr(executor, "RetryLadder", Ladder)
+        monkeypatch.setattr(task_dispatch, "RetryLadder", Ladder)
         scripted = executor._spawn
 
         def ticking_spawn(**kwargs):
@@ -1249,7 +1250,7 @@ class TestSchemaRepairReAsk:
                 clock["t"] += clock["tick"](box["ladder"].timeout)
             return capture
 
-        monkeypatch.setattr(executor, "_spawn", ticking_spawn)
+        monkeypatch.setattr(dispatch_spawn, "_spawn", ticking_spawn)
         return clock, box
 
     def test_a_re_ask_the_envelope_cannot_hold_keeps_the_attempts_own_status(

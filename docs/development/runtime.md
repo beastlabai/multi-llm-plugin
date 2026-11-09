@@ -166,7 +166,7 @@ recomputation at `models_complete` is what turns slots back into successes),
 `dispatch_subagent_tasks` reports the step its batch is on before it dispatches
 (`validating`, `revalidating`, `consolidating`, else `dispatching <label>`
 — `_DISPATCH_STEPS`), and both executor mirrors write per finished task rather than once at the
-end (`subagent_executor.run_tasks` counts against the batch's full size; `write_batch_scheduler._run_batch` takes its
+end (`task_batch.run_tasks` counts against the batch's full size; `write_batch_scheduler._run_batch` takes its
 `finished_in_batch` rows under a lock because a disjoint group dispatches on threads —
 `in_flight` in the same mirror now names the opposite, a dispatch started and not yet
 classified, F10).
@@ -686,7 +686,7 @@ say so rather than report the run cleanly stopped, and keep what they need to tr
   the CLI record go. A record that may miss a process stays incomplete for good: check by hand,
   then delete the entry's `.multi-llm/runs/<run_id>.json`.
 
-- The executor's timeout kill of its runner (`subagent_executor._kill_timed_out`) returns its
+- The executor's timeout kill of its runner (`dispatch_spawn._kill_timed_out`) returns its
   verdict. Only `killed` and `gone` confirm the runner stopped (the kill by number's `survived`
   over the child's own zombie becomes `killed` once its exit is confirmed, above). Every other
   outcome is never classified as killed: `survived` (still running after the SIGKILL window), `unresolved` or

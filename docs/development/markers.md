@@ -232,7 +232,7 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 | `[VALIDATION_PENDING]` | `code_review_orchestrator.py`<br>`utils/review_lane.py`<br>`utils/review_orchestrator_base.py` | `instructions/review-code.md`<br>`instructions/review-plan.md`<br>`instructions/review-tasks.md` | — |
 | `[VALIDATION_RETIRED]` | `utils/review_orchestrator_base.py` | not for the host: run-notice | — |
 | `[VALIDATION_TASKS_OVERSIZE]` | `utils/validation.py` | not for the host: run-notice | — |
-| `[WARN]` | `ask_orchestrator.py`<br>`utils/provider_outcome.py`<br>`utils/providers/claude_code.py` `warn_gate_once()`<br>`utils/providers/pi.py` `warn_gate_once()`<br>+2 more | `instructions/ask.md`<br>`references/summary-format.md` | — |
+| `[WARN]` | `ask_orchestrator.py`<br>`utils/attempt_classifier.py`<br>`utils/provider_outcome.py`<br>`utils/providers/claude_code.py` `warn_gate_once()`<br>+2 more | `instructions/ask.md`<br>`references/summary-format.md` | — |
 | `[WORKFLOW_COMPLETE]` | `utils/next_phase.py` `WORKFLOW_COMPLETE_MARKER` | `SKILL.md`<br>`references/summary-format.md` | — |
 | `[WRITE_ARTIFACT]` | `utils/write_prompt.py` `MARKER_ARTIFACT` | `instructions/apply-suggestions.md`<br>`instructions/apply-task-suggestions.md` | — |
 | `[WRITE_PHASE_NOT_EXECUTED]` | `full_workflow_orchestrator.py` | not for the host: phase-progress | — |

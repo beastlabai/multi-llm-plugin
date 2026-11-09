@@ -9,7 +9,7 @@ the spawn.
 The rules (docs/development/status.md, "doctor's version cache"):
 
 - **Doctor only.** The executor's ``min_version`` refusal
-  (``subagent_executor._detect_version``) and every other runner check read
+  (``runner_preflight._detect_version``) and every other runner check read
   the CLI live; nothing outside ``utils/doctor.py`` imports this module, and a
   test holds that.
 - **The key is the file, not its bytes.** Resolved executables are often

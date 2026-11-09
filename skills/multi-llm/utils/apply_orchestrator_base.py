@@ -3358,7 +3358,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         """
         if getattr(self.args, "resume", False):
             return True
-        from .subagent_executor import OUTPUT_NAME_PATTERN_BY_KIND
+        from .task_result import OUTPUT_NAME_PATTERN_BY_KIND
         from .write_batch_scheduler import WRITE_BATCH_REPORT_FILENAME
 
         reviewed_at = self._review_completed_at()
@@ -3474,7 +3474,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         if not self.batches:
             return None
 
-        from .subagent_executor import ExecutorError
+        from .task_outcome import ExecutorError
         from .write_safety import WriteSafetyError
         from .write_batch_scheduler import WriteBatchScheduler
         from .write_phase_bridge import (

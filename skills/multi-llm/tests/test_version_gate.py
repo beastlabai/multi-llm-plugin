@@ -43,6 +43,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tests.mock_launchers import launcher_file, write_launcher  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from utils import runner_preflight  # noqa: E402
 from utils.provider_registry import _PROVIDERS, load_base_config  # noqa: E402
 from utils.providers import base as base_module  # noqa: E402
 from utils.providers import child_env, version_gate  # noqa: E402
@@ -747,7 +748,7 @@ class TestThePreflightRefusalIsUnchanged:
     def _detect(self, provider_name, monkeypatch, streams):
         executor.reset_version_cache()
         monkeypatch.setattr(
-            executor, "_run_probe",
+            runner_preflight, "_run_probe",
             lambda argv: subprocess.CompletedProcess(argv, 0, *streams),
         )
         return executor._detect_version(

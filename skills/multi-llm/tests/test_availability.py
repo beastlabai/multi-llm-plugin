@@ -436,8 +436,8 @@ class TestIsAvailableKeepsItsBoolContract:
         "relative",
         [
             "utils/llm_client.py",
-            "utils/subagent_executor.py",
             "utils/runner_selection.py",
+            "utils/runner_preflight.py",
             "utils/provider_registry.py",
             "init_config.py",
             "utils/interactive.py",

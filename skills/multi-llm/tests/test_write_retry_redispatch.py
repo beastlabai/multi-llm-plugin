@@ -30,6 +30,7 @@ from tests.mock_launchers import install_mock_llm, mock_path  # noqa: E402
 from tests.test_write_executor import _patch_edit, env  # noqa: E402,F401
 from utils import provider_registry as registry  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from utils import dispatch_spawn  # noqa: E402
 from utils.output_handler import get_phase_dir  # noqa: E402
 from utils.state_manager import get_or_create_state  # noqa: E402
 from utils.subagent_tasks import PRIOR_CHANGES_TOKEN  # noqa: E402
@@ -120,7 +121,7 @@ class TestAnApplyBatchThatRepliedInProse:
                 return real(**kwargs)
             return executor._Capture(timed_out=True, argv=["codex"], duration=0.01)
 
-        monkeypatch.setattr(executor, "_spawn", spawn)
+        monkeypatch.setattr(dispatch_spawn, "_spawn", spawn)
         result = env.scheduler([env.apply_task(0)]).run()
 
         assert sum("Apply batch 0" in p for p in prompts) == 1
@@ -224,7 +225,7 @@ class TestEveryRetryableRungAsksFirst:
             spawns.append(kwargs.get("prompt"))
             return _capture(status)
 
-        monkeypatch.setattr(executor, "_spawn", fake_spawn)
+        monkeypatch.setattr(dispatch_spawn, "_spawn", fake_spawn)
         asked = []
         task = env.apply_task(0)
         outcome = executor.dispatch_task(
@@ -266,7 +267,7 @@ class TestEveryRetryableRungAsksFirst:
             raise OSError("gone")
 
         monkeypatch.setattr(
-            executor, "_spawn",
+            dispatch_spawn, "_spawn",
             lambda **kwargs: _capture(executor.STATUS_TIMEOUT),
         )
         task = env.apply_task(0)

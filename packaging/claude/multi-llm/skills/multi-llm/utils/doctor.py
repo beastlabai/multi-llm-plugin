@@ -312,7 +312,7 @@ def _auth_probe_env(
     untrue."""
     try:
         from .providers.base import PROFILE_AGENT_READONLY
-        from .subagent_executor import dispatch_child_env
+        from .dispatch_spawn import dispatch_child_env
 
         return dispatch_child_env(
             provider, "", PROFILE_AGENT_READONLY, anchor=anchor, cwd=cwd
@@ -429,7 +429,7 @@ def _sandbox_fallback_for(
     there is no rung, whatever the key says.
     """
     from .providers.base import PROFILE_GENERATE
-    from .subagent_executor import sandbox_fallback_rung
+    from .sandbox_walk import sandbox_fallback_rung
 
     hook = getattr(provider, "sandbox_fallback_policy", None)
     if not callable(hook):
@@ -523,9 +523,9 @@ def _run_verdict(
     cache key"). ``walk=False`` runs the profile's own probe and no rung.
     Each keyword is passed only where the walk takes it, so a stand-in walk
     with an older signature still answers."""
-    from . import subagent_executor as executor
+    from . import sandbox_walk
 
-    verdict_fn = executor.sandbox_verdict
+    verdict_fn = sandbox_walk.sandbox_verdict
     kwargs: Dict[str, Any] = {"cwd": cwd, "timeout": timeout}
     optional: Dict[str, Any] = {"walk_key": None}
     if jail_request is not None:
@@ -756,8 +756,12 @@ def _probe_fallback(
     (``plugin_landlock``) and the ``agent_write`` row are built from this walk.
     """
     from .providers.base import PROFILE_GENERATE
-    from .subagent_executor import (
-        RUNG_ABSENT, RUNG_REJECTED, RUNG_RETIRED, RUNG_SKIPPED, RUNG_UNAVAILABLE,
+    from .sandbox_walk import (
+        RUNG_ABSENT,
+        RUNG_REJECTED,
+        RUNG_RETIRED,
+        RUNG_SKIPPED,
+        RUNG_UNAVAILABLE,
     )
 
     rung_decl = _incidental_rung(provider)
@@ -1473,7 +1477,7 @@ def _jail_serves_here(sandbox: Dict[str, Any]) -> bool:
 
 
 def _probe_cwd(anchor: Optional[str]) -> Optional[str]:
-    from .subagent_executor import _probe_cwd as executor_probe_cwd
+    from .sandbox_walk import _probe_cwd as executor_probe_cwd
 
     return executor_probe_cwd(anchor)
 

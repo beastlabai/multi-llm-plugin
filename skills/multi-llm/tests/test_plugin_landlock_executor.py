@@ -44,6 +44,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils import landlock_dispatch  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from utils import dispatch_spawn, runner_selection  # noqa: E402
 from utils import sandbox_walk  # noqa: E402
 from utils.llm_client import _resolve_executable  # noqa: E402
 from utils.providers.base import (  # noqa: E402
@@ -1229,7 +1230,7 @@ class TestTheGrant:
         def boom(**kwargs):
             raise AssertionError("a dispatch with no complete grant was spawned")
 
-        monkeypatch.setattr(executor, "_spawn", boom)
+        monkeypatch.setattr(dispatch_spawn, "_spawn", boom)
 
     @pytest.mark.parametrize("case", ["none", "kind", "scope", "target"])
     def test_a_write_dispatch_without_its_grant_is_refused(self, repo, runner_env, no_spawn, case):
@@ -1253,7 +1254,7 @@ class TestTheGrant:
 
     def test_an_unmapped_write_kind_is_refused_never_widened(self, repo, runner_env, no_spawn, monkeypatch):
         runner_env.use("codex:gpt-5.5")
-        monkeypatch.setattr(executor, "WRITE_SCOPE_BY_KIND", {})
+        monkeypatch.setattr(runner_selection, "WRITE_SCOPE_BY_KIND", {})
         phase = repo / "phase"
         phase.mkdir()
         outcome = executor.dispatch_task(
@@ -1344,7 +1345,7 @@ class TestNoSpawnRejectionsCloseTheAudit:
         def refuse(**kwargs):
             raise exc
 
-        monkeypatch.setattr(executor, "_spawn", refuse)
+        monkeypatch.setattr(dispatch_spawn, "_spawn", refuse)
         dispatched, observed = [], []
         outcome = executor.dispatch_task(
             _write_task(phase), phase_dir=str(phase), runner="codex:gpt-5.5",

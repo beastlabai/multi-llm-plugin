@@ -23,7 +23,7 @@ from typing import Any, Callable, Collection, Dict, List, Mapping, Optional, Seq
 from . import check_records as _check_records
 from .task_ledger import ACCEPTED_AFTER_FAILING_LABEL, ACCEPTED_WITH_FINDINGS_LABEL
 from .text_clip import clip, without_closing_mark
-from .subagent_executor import row_check_findings
+from .batch_reply import row_check_findings
 from .write_verdict import findings_clause
 
 

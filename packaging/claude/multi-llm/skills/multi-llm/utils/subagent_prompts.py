@@ -1210,7 +1210,7 @@ WRITE_REPORT_REPAIR_KINDS = APPLY_REPORT_KINDS + ("implement",)
 
 #: The reply shape a schema-repair re-ask restates, per kind. A kind absent here
 #: has no repair prompt — which is also why the executor's grant
-#: (``subagent_executor.SCHEMA_REPAIRS_BY_KIND``) can name only kinds listed
+#: (``task_dispatch.SCHEMA_REPAIRS_BY_KIND``) can name only kinds listed
 #: here (a test pins it).
 SCHEMA_REPAIR_SHAPES: Dict[str, str] = {
     "task_generation": TASK_GENERATION_REPLY_SHAPE,

@@ -1563,7 +1563,7 @@ def resolve_subagent_runner(
     they configured, so it yields to any ``driver.*`` value a config layer really
     carries while still outranking a shipped floor nobody chose. It is also the
     one rung that is allowed to *fall through at preflight* rather than refuse —
-    see ``subagent_executor.run_tasks``, which re-resolves with
+    see ``task_batch.run_tasks``, which re-resolves with
     ``skip_session=True`` and prints what it fell back to. Every other rung keeps
     refusing, because an explicit opinion that cannot be served is a config error
     and silently substituting something else is how "I set it and nothing

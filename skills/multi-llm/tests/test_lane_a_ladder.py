@@ -48,6 +48,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import subagent_executor as executor  # noqa: E402
+from utils import dispatch_spawn  # noqa: E402
 from utils.retry_ladder import MIN_ATTEMPT_BUDGET_S  # noqa: E402
 from utils.subagent_tasks import build_inputs, make_task  # noqa: E402
 from tests.source_cache import source_tree
@@ -311,7 +312,7 @@ class TestBudgetExhaustedRefusesTheSpawn:
         otherwise read like an oversight instead of the capability fact it is.
         """
         monkeypatch.setattr(
-            executor, "_spawn",
+            dispatch_spawn, "_spawn",
             lambda **k: (_ for _ in ()).throw(AssertionError("no spawn")),
         )
         outcome = executor.dispatch_task(
@@ -404,7 +405,7 @@ class TestBudgetExhaustedRefusesTheSpawn:
         def _never(**kwargs):
             raise AssertionError("rule 4 must refuse before any spawn")
 
-        monkeypatch.setattr(executor, "_spawn", _never)
+        monkeypatch.setattr(dispatch_spawn, "_spawn", _never)
         outcome = executor.dispatch_task(
             _validation_batch(tmp_path),
             phase_dir=str(tmp_path),
@@ -425,7 +426,7 @@ class TestBudgetExhaustedRefusesTheSpawn:
         self, tmp_path, monkeypatch
     ):
         monkeypatch.setattr(
-            executor, "_spawn",
+            dispatch_spawn, "_spawn",
             lambda **k: (_ for _ in ()).throw(AssertionError("no spawn")),
         )
         outcome = executor.dispatch_task(
@@ -912,7 +913,7 @@ def _lane_b_dispatches(monkeypatch, phase_dir, provider_name, **capture):
         spawned.append(kwargs)
         return executor._Capture(argv=["/bin/true"], **capture)
 
-    monkeypatch.setattr(executor, "_spawn", fake_spawn)
+    monkeypatch.setattr(dispatch_spawn, "_spawn", fake_spawn)
     _patch_adapter(
         monkeypatch, get_provider(provider_name), "supports_profile", lambda _p: True
     )

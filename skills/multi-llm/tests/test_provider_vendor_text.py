@@ -160,7 +160,8 @@ class TestVendorTextContract:
         """§7.2 depends on `classify_streams` staying the adapter-free rule.
 
         Exactly two appliers (T2.5): `classify_failure`, to classify, and the
-        executor's `_classify_failed_run`, to quote — never to classify.
+        executor's `_classify_failed_run` (in `attempt_classifier.py`), to
+        quote — never to classify.
         """
         import ast
 
@@ -179,10 +180,10 @@ class TestVendorTextContract:
         )
 
         utils_dir = Path(base_module.__file__).parent.parent
-        executor_path = utils_dir / "subagent_executor.py"
+        executor_path = utils_dir / "attempt_classifier.py"
         executor_text = source_text(executor_path)
         assert executor_text.count("vendor_text(") == 1, (
-            "subagent_executor.py applies the hook more than once"
+            "attempt_classifier.py applies the hook more than once"
         )
         executor_tree = source_tree(executor_path)
         applier = next(
