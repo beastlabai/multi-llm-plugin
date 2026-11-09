@@ -432,7 +432,7 @@ RESULT_IDS_HEADING = "## Result ids (required in the JSON object above)"
 #: run 5 (2026-10-06): an apply-code-fixes batch said in its free-text
 #: `notes` that the bundled test failed, the repository's test failed
 #: afterwards, and the run reported "All 6 valid fixes were applied". Read by
-#: `subagent_executor.batch_check_findings`, never from `notes`. Fix round 17:
+#: `batch_reply.batch_check_findings`, never from `notes`. Fix round 17:
 #: the corrected run that replaces a failing one is pinned to the same check
 #: over the same scope, as :data:`CHECK_RESULT_CONTRACT` pins it to the task's
 #: own command; a narrower re-run passing never launders the failure.
@@ -441,7 +441,7 @@ RESULT_IDS_HEADING = "## Result ids (required in the JSON object above)"
 #: reason. "Required when you ran any" and "leave `check` out when you ran no
 #: check" let replies that had run ``npm test`` omit it (Claude Code racing
 #: T005, OpenCode stop T001); an empty ``ran`` is read as no check, never as
-#: a pass (``subagent_executor.batch_check_findings``; ``util batch-done
+#: a pass (``batch_reply.batch_check_findings``; ``util batch-done
 #: --own-check none`` on the native leg).
 WRITE_CHECK_CONTRACT = (
     "\n## Checks you ran (required in every reply)\n\n"
@@ -508,7 +508,7 @@ IMPLEMENT_WHICH_CHECKS = (
 
 #: Appended to the result contract of a check task (an ``implement`` task that
 #: declares no files): the structured check result the verdict reads
-#: (``subagent_executor.check_findings_from``). Racing re-run 4 (2026-10-05):
+#: (``batch_reply.check_findings_from``). Racing re-run 4 (2026-10-05):
 #: T007's ``npx html-validate`` reported two problems, the runner said
 #: ``no-op`` and wrote them only in ``notes``, and the task read VERIFIED.
 #: Fix round 11: a check that could not run is ``failed`` (it used to be asked

@@ -123,7 +123,7 @@ report added the heading).
 
 A task-generation or judge reply whose only schema error is a left-out `schema_version` is
 read as the one version its schema's `const` allows, with one plain line
-(`schema_validator.supply_schema_version`, through `subagent_executor.supply_result_version` on the executor's parse lane and in
+(`schema_validator.supply_schema_version`, through `task_result.supply_result_version` on the executor's parse lane and in
 `task_is_complete`, in generate-tasks' consume, which writes the key into the file, and in the
 verdict ingest); a present key keeps its value for the schema to judge (03's host dropped it copying
 the subagent's JSON).

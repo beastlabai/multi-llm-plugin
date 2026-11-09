@@ -3,7 +3,7 @@
 A module that memoises across calls declares its container through
 :func:`process_cache` instead of as a bare literal::
 
-    _VERSION_CACHE: Dict[str, str] = process_cache("utils.subagent_executor._VERSION_CACHE")
+    _VERSION_CACHE: Dict[str, str] = process_cache("utils.probe_state._VERSION_CACHE")
 
 Caching per process is deliberate. One interpreter runs several dispatch
 targets in turn, and a later one reuses what an earlier one measured: the

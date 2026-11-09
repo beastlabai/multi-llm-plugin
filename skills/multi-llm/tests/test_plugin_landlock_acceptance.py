@@ -50,6 +50,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import multi_llm  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from utils import sandbox_walk  # noqa: E402
 from utils.providers import codex as codex_module  # noqa: E402
 from utils.providers.base import (  # noqa: E402
     HOST_SANDBOX_POSTURE_ENV,
@@ -900,7 +901,7 @@ class TestNoRouteReachesUnsandboxed:
         if probe == "hang":
             # Room for the wrapper to start and record the probe before it hangs:
             # 0.8 s was not always enough on the macOS runner (2026-10-23).
-            monkeypatch.setattr(executor, "SANDBOX_PROBE_TIMEOUT_S", 2.5)
+            monkeypatch.setattr(sandbox_walk, "SANDBOX_PROBE_TIMEOUT_S", 2.5)
         before = _bytes(scratch.target(mode))
         code = scratch.run(mode)
         cap = capsys.readouterr()

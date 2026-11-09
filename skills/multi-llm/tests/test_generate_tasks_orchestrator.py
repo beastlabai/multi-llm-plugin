@@ -55,6 +55,7 @@ from tests.support.generate_tasks_world import (
     _tasks_md,
     _valid_document,
 )
+from utils import task_result  # noqa: E402
 
 
 #: The reserved ``progress`` keys, as ``utils/status_file.py``'s module docstring
@@ -562,6 +563,7 @@ class TestRunnerRefusal:
     def test_an_unavailable_session_model_uses_the_executor_fallback(
         self, tmp_path, exec_env, monkeypatch, capsys
     ):
+        from utils import runner_selection
         from utils import subagent_executor as executor
         from utils.provider_registry import HOST_DEFAULT_LAYER, SESSION_LAYER
 
@@ -569,7 +571,7 @@ class TestRunnerRefusal:
         session_spec = "codex:unavailable-session-model"
         fallback_spec = "codex:gpt-5.5"
         monkeypatch.setattr(
-            executor, "resolve_subagent_runner",
+            runner_selection, "resolve_subagent_runner",
             lambda *args, skip_session=False, **kwargs: (
                 (fallback_spec, HOST_DEFAULT_LAYER) if skip_session
                 else (session_spec, SESSION_LAYER)
@@ -1183,7 +1185,7 @@ class TestSchemaRepairReAsk:
         runner its reply "does not match the result shape" would be false."""
         from utils import subagent_executor as executor
 
-        monkeypatch.setattr(executor, "MAX_RESULT_BYTES", 512)
+        monkeypatch.setattr(task_result, "MAX_RESULT_BYTES", 512)
         exec_env("codex:gpt-5.5")
         big = _valid_document()
         big["tasks"][0]["description"] = "x" * 2000

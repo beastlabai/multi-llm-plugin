@@ -812,6 +812,7 @@ class TestStatusMode:
 
 import check_workflow_prerequisites as prereq  # noqa: E402
 from utils.output_handler import output_dir_path  # noqa: E402
+from utils import sandbox_walk  # noqa: E402
 
 
 def _fixture_clean_v2(plan):
@@ -1521,7 +1522,7 @@ class _JailHost:
                 kwargs.setdefault("budget_s", 30.0)
             return real_refusal(spec, **kwargs)
 
-        monkeypatch.setattr(executor, "repo_wide_write_refusal", refusal)
+        monkeypatch.setattr(sandbox_walk, "repo_wide_write_refusal", refusal)
         executor.reset_version_cache()
         self.reset()
 
@@ -1596,10 +1597,10 @@ class TestEarlySandboxWarning:
         from utils import subagent_executor as executor
         jailhost.configure(runner="codex:gpt-5.5")
         if leg == "standard-unreadable":
-            monkeypatch.setattr(executor, "_run_sandbox_probe", lambda *a, **k: None)
+            monkeypatch.setattr(sandbox_walk, "_run_sandbox_probe", lambda *a, **k: None)
         else:
             jailhost.wrapper.set(probe="hang")
-            monkeypatch.setattr(executor, "ADVISORY_PROBE_BUDGET_S", 0.5)
+            monkeypatch.setattr(sandbox_walk, "ADVISORY_PROBE_BUDGET_S", 0.5)
         capsys.readouterr()
         started = time.monotonic()
         payload = jailhost.status(host_id="claude-code")
@@ -1618,7 +1619,7 @@ class TestEarlySandboxWarning:
         from utils.providers.base import PROFILE_AGENT_WRITE, WRITE_SCOPE_REPO_WIDE, JailRequest
         jailhost.configure(runner="codex:gpt-5.5")
         jailhost.wrapper.set(probe="hang")
-        monkeypatch.setattr(executor, "ADVISORY_PROBE_BUDGET_S", 0.5)
+        monkeypatch.setattr(sandbox_walk, "ADVISORY_PROBE_BUDGET_S", 0.5)
         assert "warning" not in jailhost.status(host_id="claude-code")["phases"]["implement"]
         assert executor._SANDBOX_PROBE_CACHE == {} and executor._SANDBOX_DECISIONS == {}
         jailhost.wrapper.set(probe="deny")

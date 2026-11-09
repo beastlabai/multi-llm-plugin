@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tests.conftest import stand_in  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from utils import task_result  # noqa: E402
 from utils.subagent_tasks import build_inputs, make_task  # noqa: E402
 
 
@@ -145,7 +146,7 @@ class TestAfterAttemptSeam:
             lambda *a, **k: (executor.STATUS_OK, None, {"ok": True}, None),
         )
         monkeypatch.setattr(
-            executor, "persist_result",
+            task_result, "persist_result",
             lambda task, phase_dir, data: str(tmp_path / "validation_batch_0.json"),
         )
         seen = []

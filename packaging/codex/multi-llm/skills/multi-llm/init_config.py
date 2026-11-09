@@ -1107,7 +1107,7 @@ def _runner_warning_lines(args: argparse.Namespace, target_dir: Path) -> "list[s
     """The ``[RUNNER_WARNING]`` line when ``implement`` / ``apply-code-fixes``
     would be refused for the runner the config just written resolves to
     (racing-run issue #1, 2026-10-02): the dispatch's own decision
-    (``subagent_executor.repo_wide_write_refusal``, the model-free probes once),
+    (``sandbox_walk.repo_wide_write_refusal``, the model-free probes once),
     resolved for the host ``init`` ran from, so a Codex user learns at init
     and not at phase 6. Empty when the runner would run, or for a runner with
     no sandbox probe. Advisory: any failure prints nothing."""

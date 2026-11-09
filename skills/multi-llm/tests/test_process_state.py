@@ -823,11 +823,12 @@ def test_a_reset_never_drops_a_held_sandbox_probe_lock(monkeypatch):
     done. A reset that dropped the lock table there let the next slot on the
     key make a second lock and probe again, and the first probe's verdict
     land in the next test's cache."""
+    from utils import sandbox_walk
     from utils import subagent_executor as executor
 
     monkeypatch.setattr(process_state, "LOCK_WAIT_S", 0.2)
-    monkeypatch.setattr(executor, "_ladder_has_removed_at", lambda provider, profile: False)
-    monkeypatch.setattr(executor, "_fallback_rungs", lambda provider, profile: ())
+    monkeypatch.setattr(sandbox_walk, "_ladder_has_removed_at", lambda provider, profile: False)
+    monkeypatch.setattr(sandbox_walk, "_fallback_rungs", lambda provider, profile: ())
     probing, resume = threading.Event(), threading.Event()
     probes: List[str] = []
 
@@ -837,7 +838,7 @@ def test_a_reset_never_drops_a_held_sandbox_probe_lock(monkeypatch):
         resume.wait(10)
         return executor.SandboxProbeResult("ok", "")
 
-    monkeypatch.setattr(executor, "sandbox_verdict", probe)
+    monkeypatch.setattr(sandbox_walk, "sandbox_verdict", probe)
     answers: List[Any] = []
 
     def slot() -> None:
@@ -867,8 +868,8 @@ def test_a_reset_never_drops_a_held_sandbox_probe_lock(monkeypatch):
     assert probes == ["probing-slot"]
     assert len(answers) == 2 and answers[0] is answers[1]
     message = str(failure.value)
-    assert "utils.subagent_executor._SANDBOX_PROBE_KEY_LOCKS" in message
-    assert "utils.subagent_executor._SANDBOX_PROBE_CACHE" in message
+    assert "utils.probe_state._SANDBOX_PROBE_KEY_LOCKS" in message
+    assert "utils.probe_state._SANDBOX_PROBE_CACHE" in message
     process_state.reset_all()
     assert executor._SANDBOX_PROBE_CACHE == {} and executor._SANDBOX_PROBE_KEY_LOCKS == {}
 

@@ -1753,7 +1753,7 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
     failing = _mirror_ids(mirror, "batch_check_task_ids")
     if isinstance(failing, list) and failing:
         # Fix round 15: a check that could not run is named so (the prefix is
-        # `subagent_executor.BATCH_CHECK_COULD_NOT_RUN`, spelled here so this
+        # `batch_reply.BATCH_CHECK_COULD_NOT_RUN`, spelled here so this
         # sub-second path imports nothing heavy).
         could_not = {
             str(row.get("task_id")) for row in (mirror.get("tasks") or [])

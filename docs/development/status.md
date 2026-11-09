@@ -177,7 +177,7 @@ and only with the gate off: a finished phase not on record answers nothing.
 **An early warning for the refusal that waits at phase 6** (`check_workflow_prerequisites.repo_wide_sandbox_warning`): whenever
 `implement` / `apply-code-fixes` would be refused for the runner
 `driver.subagent_runner` resolves to on this host — computed from the dispatch's own decision
-(`subagent_executor.repo_wide_write_refusal`: `_detect_sandbox` with the `agent-write` profile and a
+(`sandbox_walk.repo_wide_write_refusal`: `_detect_sandbox` with the `agent-write` profile and a
 repo-wide `JailRequest`, the adapter's model-free probes once per process through the
 shared probe cache; since 2026-10-02 never a guess from an earlier phase's recorded rung, which
 after step 3b would say the opposite) — `implement` and `apply-code-fixes` carry a
@@ -343,13 +343,13 @@ lands with it), so the check reads it once the reply `last_assistant_message` na
 (`settled_turn`); `install-host --check` never reaches any of these probes, and
 `status` reaches only the model-free probes behind the early warning above — codex's
 standard `workspace-write` probe and then the write rung's — once per process and under
-`subagent_executor.ADVISORY_PROBE_BUDGET_S` (1 s: a hung or slow probe draws no warning, never a slow
+`sandbox_walk.ADVISORY_PROBE_BUDGET_S` (1 s: a hung or slow probe draws no warning, never a slow
 `status`, and a measurement the budget cut short is cached nowhere, so the dispatch's
 own 10 s probe and verdict do not move), and `provider_registry.py` stays subprocess-free.
 
 `sandbox_unavailable` is the same machine condition as a dispatch-time refusal:
 `preflight_runner`'s D6 leg runs the adapter's probe once per host/spec/profile (decision in
-`_SANDBOX_DECISIONS`; the measurement in `subagent_executor._SANDBOX_PROBE_CACHE`, the one probe cache the fan-out
+`_SANDBOX_DECISIONS`; the measurement in `probe_state._SANDBOX_PROBE_CACHE`, the one probe cache the fan-out
 shares, keyed by codex version and policy, one rung probe per version across both lanes —
 2026-09-24) before the first dispatch of that profile — **the read-only one included** (F2,
 2026-09-17): `codex exec --sandbox read-only` is the same bubblewrap, so codex answers a probe for

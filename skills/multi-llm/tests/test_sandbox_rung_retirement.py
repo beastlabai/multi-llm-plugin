@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import review_orchestrator_base as rob  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from utils import sandbox_walk  # noqa: E402
 from utils.providers.base import (  # noqa: E402
     PROFILE_AGENT_READONLY,
     PROFILE_GENERATE,
@@ -112,7 +113,7 @@ def lanes(monkeypatch):
         spawned.append(list(argv))
         return real(argv, **kwargs)
 
-    monkeypatch.setattr(executor, "_run_sandbox_probe", counting)
+    monkeypatch.setattr(sandbox_walk, "_run_sandbox_probe", counting)
     executor.reset_sandbox_cache()
     executor._VERSION_CACHE.pop("fakecodex", None)
 
@@ -123,7 +124,7 @@ def lanes(monkeypatch):
         def use(self, adapter):
             self.adapter = adapter
             monkeypatch.setattr(rob, "get_provider", lambda _name: adapter)
-            monkeypatch.setattr(executor, "get_provider", lambda _name: adapter)
+            monkeypatch.setattr(sandbox_walk, "get_provider", lambda _name: adapter)
             return self
 
         def fanout(self):
@@ -306,7 +307,7 @@ class TestBetweenDeprecatedAtAndRemovedAt:
         assert _retired_lines(capsys.readouterr().out) == []
 
     def test_a_timeout_is_named_as_itself(self, lanes, monkeypatch, capsys):
-        monkeypatch.setattr(executor, "SANDBOX_PROBE_TIMEOUT_S", 0.5)
+        monkeypatch.setattr(sandbox_walk, "SANDBOX_PROBE_TIMEOUT_S", 0.5)
         lanes.use(_Codexish(version="0.155.1", landlock=HANGS))
         verdict = lanes.fanout()
         assert verdict.refused
@@ -317,7 +318,7 @@ class TestBetweenDeprecatedAtAndRemovedAt:
         assert _retired_lines(capsys.readouterr().out) == []
 
     def test_a_canary_setup_failure_is_named_as_itself(self, lanes, monkeypatch, capsys):
-        monkeypatch.setattr(executor, "_prepare_probe_workdir", lambda cwd, workdir: None)
+        monkeypatch.setattr(sandbox_walk, "_prepare_probe_workdir", lambda cwd, workdir: None)
         adapter = _Codexish(version="0.155.1", landlock=CANARY_DENIED)
         rung = replace(_rung(CANARY_DENIED), probe_workdir=".multi-llm/tmp")
         monkeypatch.setattr(
@@ -434,7 +435,7 @@ class TestOneProbePerVersion:
         guard on real CLIs answers it and no real codex is spawned."""
         seen = []
         monkeypatch.setattr(
-            executor, "_run_sandbox_probe",
+            sandbox_walk, "_run_sandbox_probe",
             lambda argv, **kwargs: seen.append(list(argv)) or subprocess.CompletedProcess(
                 argv, 0, "codex-cli 0.156.1\n", ""
             ),

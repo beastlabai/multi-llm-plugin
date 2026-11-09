@@ -27,6 +27,7 @@ import multi_llm  # noqa: E402
 from utils import doctor  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from utils import sandbox_walk  # noqa: E402
 
 MOCK_LLM = Path(__file__).parent / "mocks" / "mock_llm.py"
 BWRAP_BROKEN_LINE = "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted"
@@ -279,7 +280,7 @@ class TestDoctorOnABrokenSandbox:
             profiles.append(profile)
             return real(provider, profile, **kwargs)
 
-        monkeypatch.setattr(executor, "sandbox_verdict", spy)
+        monkeypatch.setattr(sandbox_walk, "sandbox_verdict", spy)
         assert doctor.main(["--budget", "10"]) == 3
         out = capsys.readouterr().out
         assert (
@@ -349,7 +350,7 @@ class TestDoctorOnAHealthyMachine:
             pytest.fail("an exhausted report budget started a subprocess")
 
         monkeypatch.setattr(doctor.subprocess, "run", forbidden)
-        monkeypatch.setattr(executor, "sandbox_verdict", forbidden)
+        monkeypatch.setattr(sandbox_walk, "sandbox_verdict", forbidden)
         assert doctor._run(["unused"], timeout=0) is None
         from types import SimpleNamespace
 
@@ -478,7 +479,7 @@ def _fake_verdicts(monkeypatch, generate_verdict, calls=None):
             return generate_verdict
         return executor.SandboxProbeResult("unavailable", BWRAP_BROKEN_LINE)
 
-    monkeypatch.setattr(executor, "sandbox_verdict", fake)
+    monkeypatch.setattr(sandbox_walk, "sandbox_verdict", fake)
 
 
 def _codex_line(out):
@@ -695,7 +696,7 @@ class TestDoctorReportsTheLadder:
             clock.now += 0.25
             return executor.SandboxProbeResult("unavailable", BWRAP_BROKEN_LINE)
 
-        monkeypatch.setattr(executor, "sandbox_verdict", slow)
+        monkeypatch.setattr(sandbox_walk, "sandbox_verdict", slow)
         started = clock.monotonic()
         row = doctor._probe_sandbox(provider, 0.2, None)
         assert clock.monotonic() - started == pytest.approx(0.25)
@@ -718,7 +719,7 @@ class TestDoctorReportsTheLadder:
             clock.now += 0.25
             return executor.SandboxProbeResult("unavailable", BWRAP_BROKEN_LINE)
 
-        monkeypatch.setattr(executor, "sandbox_verdict", fake)
+        monkeypatch.setattr(sandbox_walk, "sandbox_verdict", fake)
         doctor._probe_sandbox(provider, 5.0, None)
         assert [profile for profile, _ in calls][-1] == PROFILE_GENERATE
         assert calls[-1][1] == pytest.approx(calls[0][1] - 0.25)
@@ -876,7 +877,7 @@ class TestDoctorNamesTheRetiredRung:
             seen.append(kwargs)
             return executor.SandboxProbeResult("unavailable", BWRAP_BROKEN_LINE)
 
-        monkeypatch.setattr(executor, "sandbox_verdict", spy)
+        monkeypatch.setattr(sandbox_walk, "sandbox_verdict", spy)
         from utils.provider_registry import get_provider
         from utils.providers import codex as codex_module
 

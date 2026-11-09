@@ -27,6 +27,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils import review_orchestrator_base as rob  # noqa: E402
 from utils import status_file  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from utils import runner_selection  # noqa: E402
 from utils.subagent_tasks import (  # noqa: E402
     PromptBudget,
     TaskFileError,
@@ -294,7 +295,7 @@ class TestRefusals:
 
     def test_e_materialization_resolves_the_executor_runner(self, monkeypatch):
         args = argparse.Namespace(exec_subagents=True, validation_model="auto")
-        monkeypatch.setattr(executor, "resolve_task_runner", lambda task, anchor=None: "blind:m")
+        monkeypatch.setattr(runner_selection, "resolve_task_runner", lambda task, anchor=None: "blind:m")
         import utils.provider_registry as registry
 
         monkeypatch.setattr(registry, "parse_model_spec", lambda spec, anchor=None: ("blind", "m"))

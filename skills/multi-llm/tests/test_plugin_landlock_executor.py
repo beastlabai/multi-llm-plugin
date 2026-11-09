@@ -44,6 +44,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils import landlock_dispatch  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from utils import sandbox_walk  # noqa: E402
 from utils.llm_client import _resolve_executable  # noqa: E402
 from utils.providers.base import (  # noqa: E402
     HOST_SANDBOX_POSTURE_ENV,
@@ -150,7 +151,7 @@ def gate(monkeypatch):
     """`_detect_sandbox` with a stand-in adapter and a clean cache."""
 
     def run(adapter, profile=PROFILE_AGENT_READONLY, request=None):
-        monkeypatch.setattr(executor, "get_provider", lambda _name: adapter)
+        monkeypatch.setattr(sandbox_walk, "get_provider", lambda _name: adapter)
         kwargs = {"jail_request": request} if request is not None else {}
         return executor._detect_sandbox(
             "fakecodex", key="driver.subagent_runner", spec="fakecodex:m",
@@ -255,7 +256,7 @@ class TestTheWalk:
         assert "unsandboxed" not in dict(walk)
 
     def test_an_unstartable_probe_stops_the_walk(self, repo, wrapper, monkeypatch):
-        monkeypatch.setattr(executor, "_run_sandbox_probe", lambda argv, **kw: None)
+        monkeypatch.setattr(sandbox_walk, "_run_sandbox_probe", lambda argv, **kw: None)
         rung, walk, _ = _walk(repo)
         assert (rung, walk) == (None, (("plugin-landlock", "unknown"),))
 
@@ -306,7 +307,7 @@ class TestTheWalk:
             seen.append((landlock_dispatch.is_wrapped(argv), kwargs["timeout"]))
             return real(argv, **kwargs)
 
-        monkeypatch.setattr(executor, "_run_sandbox_probe", spy)
+        monkeypatch.setattr(sandbox_walk, "_run_sandbox_probe", spy)
         adapter = _JailLadder(profile_probe=f"sleep 0.6; echo '{BWRAP_LINE}' >&2; exit 1")
         verdict = executor.sandbox_verdict(adapter, PROFILE_AGENT_READONLY, cwd=str(repo), timeout=2.0)
         assert verdict.rung == "plugin-landlock"
@@ -380,7 +381,7 @@ class TestTheReadOnlyGate:
         self, repo, wrapper, gate, monkeypatch,
     ):
         wrapper.set(probe="hang")
-        monkeypatch.setattr(executor, "SANDBOX_PROBE_TIMEOUT_S", 0.8)
+        monkeypatch.setattr(sandbox_walk, "SANDBOX_PROBE_TIMEOUT_S", 0.8)
         with pytest.raises(executor.RunnerRejected) as excinfo:
             gate(_JailLadder())
         assert "its probe gave no answer" in str(excinfo.value)
@@ -413,7 +414,7 @@ class TestTheWriteGate:
 
     def test_the_scheduler_s_notice_names_scope_and_target(self, repo, wrapper, gate, monkeypatch):
         request = _plan_request(repo)
-        monkeypatch.setattr(executor, "get_provider", lambda _name: _JailLadder())
+        monkeypatch.setattr(sandbox_walk, "get_provider", lambda _name: _JailLadder())
         gate(_JailLadder(), PROFILE_AGENT_WRITE, request)
         line = executor.write_rung_notice("fakecodex:m", request)
         assert line.startswith("[SANDBOX_INCIDENTAL] fakecodex:")
@@ -453,7 +454,7 @@ class TestTheWriteGate:
 
     def test_a_timed_out_rung_probe_refuses_the_write(self, repo, wrapper, gate, monkeypatch):
         wrapper.set(probe="hang")
-        monkeypatch.setattr(executor, "SANDBOX_PROBE_TIMEOUT_S", 0.8)
+        monkeypatch.setattr(sandbox_walk, "SANDBOX_PROBE_TIMEOUT_S", 0.8)
         with pytest.raises(executor.RunnerRejected) as excinfo:
             gate(_JailLadder(), PROFILE_AGENT_WRITE, _plan_request(repo))
         assert "its probe gave no answer" in str(excinfo.value)
@@ -545,7 +546,7 @@ class TestF5BelowTheRung:
 
     def test_never_on_a_walk_that_measured_nothing(self, repo, wrapper, gate, monkeypatch):
         wrapper.set(probe="hang")
-        monkeypatch.setattr(executor, "SANDBOX_PROBE_TIMEOUT_S", 0.8)
+        monkeypatch.setattr(sandbox_walk, "SANDBOX_PROBE_TIMEOUT_S", 0.8)
         monkeypatch.setenv(HOST_SANDBOX_POSTURE_ENV, "danger-full-access")
         with pytest.raises(executor.RunnerRejected):
             gate(_JailLadder(), PROFILE_AGENT_WRITE, _plan_request(repo))
@@ -1406,7 +1407,7 @@ class TestNoPathInSharedState:
         request = _plan_request(repo)
         gate(_JailLadder(), PROFILE_AGENT_WRITE, request)
         gate(_JailLadder())
-        monkeypatch.setattr(executor, "get_provider", registry.get_provider)
+        monkeypatch.setattr(sandbox_walk, "get_provider", registry.get_provider)
         _decide("codex:gpt-5.5", PROFILE_AGENT_READONLY, "plugin-landlock")
         phase = repo / "phase"
         phase.mkdir()

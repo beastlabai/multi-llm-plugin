@@ -10,6 +10,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [The host index](#the-host-index)
 - [Code-review validation context](#code-review-validation-context)
 - [Cited plan sections](#cited-plan-sections)
+- [Where the executor's helpers live](#where-the-executors-helpers-live)
 - [Read and analyze executor](#read-and-analyze-executor)
 - [In-process continuations](#in-process-continuations)
 - [Validation model capability](#validation-model-capability)
@@ -418,6 +419,37 @@ round −35.0%) from the code windows alone, by default. `cited` changes nothing
 issues cite files rather than plan sections. These are prompt sizes, not spend: a validator that
 reads the snapshot pays for that read, and per-batch prompts share a shorter prefix for provider
 caching.
+
+## Where the executor's helpers live
+
+**`utils/subagent_executor.py` is the dispatch; what it reads lives in seven modules below it.** The
+executor holds the kind tables, `preflight_runner` and its version, auth, model and nested-exec legs,
+the spawn, `dispatch_task` and its classification, `run_tasks`, `run_task_file`, the dry run and the
+continuation. The rest lives in seven modules, lowest first. Each imports only the ones before it,
+and none imports the executor:
+
+| Module | What it owns |
+|--------|--------------|
+| `utils/batch_reply.py` | How a write reply is read, with no I/O: a check task's `check` (`read_check_reply`, `check_findings_from`), a code batch's own check and what it ran (`batch_check_findings`, `ran_check_outcomes`, `ran_no_check`), the items it declined (`declined_items`), the `WRITE_*` outcome words and labels, and the `row_*` readers of a recorded row. |
+| `utils/failure_capture.py` | The redaction every executor write goes through (`_redact`, `_redact_json`, the probe boundary `_redact_probe_tail`), the owner-only atomic JSON writer (`_atomic_write_json`) and the per-attempt captures under `failed/`. |
+| `utils/task_outcome.py` | The records: `Attempt`, `TaskOutcome`, `BatchReport` and its file name (`batch_report_path`), and `ExecutorError` with `RunnerRejected`, `ResultRejected` and `BatchFailed`. |
+| `utils/task_result.py` | A task's result file (D3f): `resolve_output_target`, `persist_result`, `extract_result`, `validate_result`, the salvage reads, `normalize_result` and `task_is_complete`. |
+| `utils/runner_selection.py` | `profile_for_kind`, `resolve_task_runner` and its source, the roster check (`eligible_runners`) and the refusal text a preflight leg raises. |
+| `utils/probe_state.py` | What the process learned about its runners: the preflight caches, the sandbox decisions and the shared sandbox probe cache with their locks, the jail summary lines, the `reset_*` functions, and `sandbox_rung`. |
+| `utils/sandbox_walk.py` | The sandbox gate: `sandbox_verdict` and `cached_sandbox_verdict`, the fallback ladder walk, the policy, the preflight's sandbox leg (`_detect_sandbox`, `repo_wide_write_refusal`) and the lines it prints. |
+
+`CHECK_FAILED_WITHOUT_FINDINGS` lives in `utils/known_checks.py`, which reads it and imports nothing
+from the executor or these modules.
+
+**The executor re-exports every moved name for reading only** (`subagent_executor._MOVED`, the
+contract `write_batch_scheduler`, `providers/base`, `git_utils` and `run_status` already follow):
+`subagent_executor.X` returns the owner's current object, and a patch of `subagent_executor.X`
+reaches no code. The executor and the modules read a moved name through its owner at each call
+(`_sandbox_walk.cached_sandbox_verdict`), never a copy, so one patch of the owner reaches them all.
+Patch the owner: `tests/test_subagent_executor_moved_names.py` fails a test that patches a moved name
+on the executor, and holds the layering. A name the executor imports from elsewhere (`get_provider`,
+`_resolve_executable`) is bound in each module that reads it, so a test patching one patches it in
+the module whose code it drives. `tests/test_import_layers.py` puts all seven at L3.
 
 ## Read and analyze executor
 

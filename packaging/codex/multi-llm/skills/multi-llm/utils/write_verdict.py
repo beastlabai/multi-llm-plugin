@@ -166,7 +166,7 @@ class WriteFacts:
     jail: Optional[JailFacts] = None
     #: An implement task that declares no files.
     verification_only: bool = False
-    #: Its reply's ``check`` (``subagent_executor.read_check_reply``).
+    #: Its reply's ``check`` (``batch_reply.read_check_reply``).
     check: Optional[Tuple[str, ...]] = None
     check_listed: bool = False
     check_could_not_run: bool = False

@@ -64,6 +64,7 @@ from tests.support.reaggregate_world import (  # noqa: E402
     _run_cro_reaggregate,
     _suggestions,
 )
+from utils import failure_capture  # noqa: E402
 
 
 def _aggregated_suggestions(phase_dir):
@@ -153,7 +154,7 @@ class TestReaggregatePromptSidecars:
         def cannot_write(*args):
             raise PermissionError("task file is locked")
 
-        monkeypatch.setattr(subagent_executor, "_atomic_write_json", cannot_write)
+        monkeypatch.setattr(failure_capture, "_atomic_write_json", cannot_write)
         with patch.object(rob, "dispatch_subagent_tasks") as dispatch:
             with pytest.raises(SystemExit) as exc:
                 _reaggregate(plan, out_dir, phase_dir)

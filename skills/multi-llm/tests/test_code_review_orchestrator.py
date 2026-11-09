@@ -2348,7 +2348,7 @@ class TestTheCodeReviewFanoutGatesOnTheSandboxProbe:
             probes.append(list(argv))
             return real(argv, **kwargs)
 
-        monkeypatch.setattr(executor, "_run_sandbox_probe", counting)
+        monkeypatch.setattr(sandbox_walk, "_run_sandbox_probe", counting)
 
         success, issues, error = asyncio.run(cro.run_single_review(
             "fakebwrap:m1", plan_path, tmp_path / "out",
@@ -3927,6 +3927,7 @@ from utils.git_utils import (
     REVIEW_SCOPE_FILENAME as _MANIFEST,
     read_review_scope as _read_review_scope,
 )
+from utils import sandbox_walk
 
 _HERMETIC_GIT = {
     "GIT_CONFIG_GLOBAL": _os.devnull,

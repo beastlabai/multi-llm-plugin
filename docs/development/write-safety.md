@@ -45,7 +45,7 @@ as an empty set, the undeclared-write sweep is its whole verdict (`write_verdict
 moved is `no-op`/`VERIFIED`, any path moved is a partial application
 naming the fix — declare the files under `Files to modify` and `--resume`; its
 rows, verdict stamp and mirror row add `verification_only` + `outcome_label`
-(`verified` / `partial-application`, `subagent_executor.write_outcome_label`) and summary.md, the batch
+(`verified` / `partial-application`, `batch_reply.write_outcome_label`) and summary.md, the batch
 log line and `status` show the label, while `write_outcome` stays
 `no-op` for resume and older readers, 2026-10-05), and the apply kinds are still
 refused with nothing to snapshot, and so is a verification-only task whose pre-run census is

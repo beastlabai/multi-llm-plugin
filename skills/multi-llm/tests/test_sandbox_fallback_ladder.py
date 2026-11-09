@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import review_orchestrator_base as rob  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from utils import sandbox_walk  # noqa: E402
 from utils.providers import base as base_module  # noqa: E402
 from utils.providers import codex as codex_module  # noqa: E402
 from utils.providers.base import (  # noqa: E402
@@ -592,7 +593,7 @@ class TestTheWalkTable:
                 return None
             return real(argv, **kwargs)
 
-        monkeypatch.setattr(executor, "_run_sandbox_probe", unspawnable_rung)
+        monkeypatch.setattr(sandbox_walk, "_run_sandbox_probe", unspawnable_rung)
         verdict = executor.sandbox_verdict(_Ladder(landlock=CANARY_DENIED), PROFILE_GENERATE)
         assert verdict.rung is None
         assert verdict.walk == (("landlock", "unknown"),)
@@ -691,7 +692,7 @@ class TestTheWalkTable:
             calls.append(list(argv))
             return real(argv, **kwargs)
 
-        monkeypatch.setattr(executor, "_run_sandbox_probe", counting)
+        monkeypatch.setattr(sandbox_walk, "_run_sandbox_probe", counting)
         verdict = executor.sandbox_verdict(
             _Ladder(profile_probe=profile_probe), PROFILE_GENERATE,
         )
@@ -762,7 +763,7 @@ class TestTheWalkSharesOneDeadline:
     def test_a_rung_with_no_time_left_is_not_started(self, monkeypatch):
         started = []
         monkeypatch.setattr(
-            executor, "_run_sandbox_probe",
+            sandbox_walk, "_run_sandbox_probe",
             lambda argv, **kwargs: started.append(argv),
         )
         rung, walk = executor._walk_fallback_rungs(
@@ -782,8 +783,8 @@ class TestTheWalkSharesOneDeadline:
             seen.append(timeout)
             return subprocess.CompletedProcess(argv, 1, "", BWRAP_LINE)
 
-        monkeypatch.setattr(executor, "_run_sandbox_probe", recording)
-        monkeypatch.setattr(executor, "SANDBOX_PROBE_TIMEOUT_S", 10.0)
+        monkeypatch.setattr(sandbox_walk, "_run_sandbox_probe", recording)
+        monkeypatch.setattr(sandbox_walk, "SANDBOX_PROBE_TIMEOUT_S", 10.0)
         executor.sandbox_verdict(_Ladder(landlock=SANDBOX_BROKEN), PROFILE_GENERATE)
         assert seen[0] == 10.0
         assert 0 < seen[2] <= seen[1] <= 10.0
@@ -801,7 +802,7 @@ def executor_gate(monkeypatch):
     executor._SANDBOX_DECISIONS.clear()
 
     def run(adapter, profile=PROFILE_AGENT_READONLY, request=None):
-        monkeypatch.setattr(executor, "get_provider", lambda _name: adapter)
+        monkeypatch.setattr(sandbox_walk, "get_provider", lambda _name: adapter)
         return executor._detect_sandbox(
             "fakecodex", key="driver.subagent_runner", spec="fakecodex:m",
             profile=profile,
@@ -856,7 +857,7 @@ class TestTheExecutorGate:
         assert "[SANDBOX_BYPASSED]" not in out and "[SANDBOX_FALLBACK]" not in out
 
     def test_a_stopped_walk_refuses_under_auto_and_says_why(self, executor_gate, monkeypatch):
-        monkeypatch.setattr(executor, "SANDBOX_PROBE_TIMEOUT_S", 0.5)
+        monkeypatch.setattr(sandbox_walk, "SANDBOX_PROBE_TIMEOUT_S", 0.5)
         with pytest.raises(executor.RunnerRejected) as excinfo:
             executor_gate(_Ladder(policy="auto", landlock=HANGS))
         assert "'landlock' was unprobed" in str(excinfo.value)
@@ -1036,7 +1037,7 @@ class TestTheRungSurvivesTheCarriers:
     @pytest.mark.shell_probe
     def test_the_preflight_rung_reaches_the_spawn_as_its_id(self, monkeypatch, tmp_path):
         executor._SANDBOX_DECISIONS.clear()
-        monkeypatch.setattr(executor, "get_provider", lambda _name: _Ladder())
+        monkeypatch.setattr(sandbox_walk, "get_provider", lambda _name: _Ladder())
         executor._detect_sandbox(
             "codex", key="k", spec="codex:gpt-5.5", profile=PROFILE_AGENT_READONLY,
         )

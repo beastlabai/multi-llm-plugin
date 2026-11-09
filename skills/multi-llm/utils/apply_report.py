@@ -447,7 +447,7 @@ class ApplyPhaseReport:
             print("\nBatches:")
             for row in rows:
                 count = len(self._row_item_ids(row))
-                # `subagent_executor.row_outcome_label`'s reading order.
+                # `batch_reply.row_outcome_label`'s reading order.
                 verdict = row.get("outcome_label") or row.get("write_outcome") or "-"
                 if self._row_ok(row) and row_batch_check_findings(row):
                     verdict += (
@@ -881,7 +881,7 @@ class ApplyPhaseReport:
         if rows:
             for row in rows:
                 item_ids = self._row_item_ids(row)
-                # `subagent_executor.row_outcome_label`'s reading order.
+                # `batch_reply.row_outcome_label`'s reading order.
                 verdict = row.get("outcome_label") or row.get("write_outcome") or "-"
                 failing = (
                     (", its check could not run"

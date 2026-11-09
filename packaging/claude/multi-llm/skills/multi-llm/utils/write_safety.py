@@ -476,7 +476,7 @@ def _looks_like_a_windows_escape(text: str) -> bool:
     if re.match(r"^[A-Za-z]:[^\\/]", text):
         return True
     # An NTFS alternate data stream: *any* colon left once the drive prefix has
-    # been sliced off, mirroring ``subagent_executor._is_unsafe_windows_path``.
+    # been sliced off, mirroring ``task_result._is_unsafe_windows_path``.
     # The standard shape is ``name.ext:stream``, whose colon is preceded by a
     # letter — a rule that exempted those would flag nothing that matters (D3f).
     remainder = text[2:] if re.match(r"^[A-Za-z]:", text) else text

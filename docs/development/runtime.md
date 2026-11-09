@@ -278,7 +278,7 @@ verdicts or sealed a report to them.
   `PHASE_WORK_JOIN_S`, or when the wait itself is interrupted, the lock is held until the process
   exits (`PhaseLock.hold_until_exit`), never released early.
 - **Late results are bound to their round.** The dispatch runs under `review_round.results_bound_to`
-  its claim, and `subagent_executor.persist_result` writes a result file only while the checkpoint
+  its claim, and `task_result.persist_result` writes a result file only while the checkpoint
   still records that round, deciding under the `.status.lock` mutex held across the write; a result
   of a replaced round (or one whose round cannot be checked) is logged (`… dropped, not written`)
   and dropped. Defence in depth behind the lock; batch files a host's own subagents write arrive from

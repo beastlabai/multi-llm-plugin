@@ -29,6 +29,7 @@ The standard these tests hold the fix to is M13's, not "drop the tail":
 """
 
 import ast
+import importlib
 import json
 import subprocess
 import sys
@@ -40,6 +41,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import subagent_executor  # noqa: E402
+from utils import failure_capture  # noqa: E402
 from tests.conftest import stand_in  # noqa: E402
 from utils.providers.cursor_agent import (  # noqa: E402
     CURSOR_ABOUT_IDENTITY_KEYS,
@@ -260,7 +262,7 @@ class TestTheProbeTailHelper:
         def _boom(_text):
             raise RuntimeError("write_safety is unavailable")
 
-        monkeypatch.setattr(subagent_executor, "_redact", _boom)
+        monkeypatch.setattr(failure_capture, "_redact", _boom)
         tail = subagent_executor._redact_probe_tail(PROBE_ENVELOPE, 500)
         assert tail == "<redacted:probe-output>"
         for value in IDENTITY_VALUES:
@@ -311,7 +313,7 @@ class TestTheNotAuthenticatedRefusal:
         self, monkeypatch
     ):
         monkeypatch.setattr(
-            subagent_executor,
+            failure_capture,
             "_redact",
             lambda _text: (_ for _ in ()).throw(RuntimeError("no redactor")),
         )
@@ -357,7 +359,7 @@ class TestTheNestedExecCredentialsRefusal:
             lambda provider, capture, model="": (STATUS_AUTH_FAILED, "stubbed"),
         )
         monkeypatch.setattr(
-            subagent_executor,
+            failure_capture,
             "_redact",
             lambda _text: (_ for _ in ()).throw(RuntimeError("no redactor")),
         )
@@ -388,7 +390,7 @@ class TestTheNestedExecNetworkRefusal:
         self, monkeypatch
     ):
         monkeypatch.setattr(
-            subagent_executor,
+            failure_capture,
             "_redact",
             lambda _text: (_ for _ in ()).throw(RuntimeError("no redactor")),
         )
@@ -408,7 +410,32 @@ class TestTheNestedExecNetworkRefusal:
 # ---------------------------------------------------------------------------
 
 
-#: The only ``_tail(...)`` call in ``subagent_executor`` allowed to be handed
+#: The executor and every module split out of it (its ``_MOVED`` table), so a
+#: refusal or a tail that moved with its function stays in this gate's view.
+_EXECUTOR_MODULES = (subagent_executor, *(
+    importlib.import_module(f"utils.{owner}") for owner in subagent_executor._MOVED
+))
+
+
+def _executor_trees():
+    """``(path, tree)`` for each of :data:`_EXECUTOR_MODULES`."""
+    return [(module.__file__, source_tree(module.__file__)) for module in _EXECUTOR_MODULES]
+
+
+def _callee(func):
+    """The name a call reaches: ``f`` for ``f(...)`` and for an owner-qualified
+    ``_<owner>.f(...)`` (the split modules spell each other's names that way)."""
+    if isinstance(func, ast.Name):
+        return func.id
+    if (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+            and func.value.id.startswith("_")
+            and func.value.id[1:] in subagent_executor._MOVED):
+        return func.attr
+    return None
+
+
+#: The only ``_tail(...)`` call in ``subagent_executor`` (or a module split out
+#: of it, :data:`_EXECUTOR_MODULES`) allowed to be handed
 #: an unredacted stream, keyed by ``(enclosing function, ``ast.unparse``
 #: rendering)`` and valued by how many times that exact site occurs. It builds
 #: ``outcome.reason`` in ``dispatch_task``, which is written through §4.5.3's
@@ -431,7 +458,7 @@ class TestTheNestedExecNetworkRefusal:
 #: message — with no test change at all, and the enclosing name alone would
 #: wave through a different tail added to the same function.
 _TAIL_WITHOUT_REDACTION_ALLOWLIST = {
-    ("dispatch_task", "_tail(capture.stderr, 2000)"): 1,
+    ("dispatch_task", "_failure_capture._tail(capture.stderr, 2000)"): 1,
 }
 
 
@@ -447,50 +474,49 @@ class TestNoRefusalQuotesAStreamRaw:
 
     @staticmethod
     def _tail_calls_without_redaction():
-        """``(lineno, enclosing function, rendering)`` per bare ``_tail`` call.
+        """``(file:lineno, enclosing function, rendering)`` per bare ``_tail`` call.
 
         The enclosing name is half a site's identity: the rendering on its own
         cannot tell two allowlisted calls apart from a third that happens to be
         spelled the same way.
         """
-        tree = source_tree(subagent_executor.__file__)
-        # `ast.walk` is breadth-first, so an inner `def` is visited after the
-        # one enclosing it and its assignment wins: every node ends up owned by
-        # the *nearest* function around it.
-        owner_of = {}
-        for function in ast.walk(tree):
-            if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            for node in ast.walk(function):
-                owner_of[id(node)] = function.name
         found = []
-        for node in ast.walk(tree):
-            # `_redact_probe_tail` is the boundary itself: its own `_tail` runs
-            # on text `_redact` has already returned, one statement earlier,
-            # which no single-expression rule can see.
-            owner = owner_of.get(id(node), "<module>")
-            if owner == "_redact_probe_tail":
-                continue
-            if not isinstance(node, ast.Call):
-                continue
-            if not (isinstance(node.func, ast.Name) and node.func.id == "_tail"):
-                continue
-            if not node.args:
-                continue
-            first = node.args[0]
-            redacted = (
-                isinstance(first, ast.Call)
-                and isinstance(first.func, ast.Name)
-                and first.func.id.startswith("_redact")
-            )
-            if not redacted:
-                found.append((node.lineno, owner, ast.unparse(node)))
+        for path, tree in _executor_trees():
+            # `ast.walk` is breadth-first, so an inner `def` is visited after the
+            # one enclosing it and its assignment wins: every node ends up owned by
+            # the *nearest* function around it.
+            owner_of = {}
+            for function in ast.walk(tree):
+                if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                for node in ast.walk(function):
+                    owner_of[id(node)] = function.name
+            for node in ast.walk(tree):
+                # `_redact_probe_tail` is the boundary itself: its own `_tail` runs
+                # on text `_redact` has already returned, one statement earlier,
+                # which no single-expression rule can see.
+                owner = owner_of.get(id(node), "<module>")
+                if owner == "_redact_probe_tail":
+                    continue
+                if not isinstance(node, ast.Call):
+                    continue
+                if _callee(node.func) != "_tail":
+                    continue
+                if not node.args:
+                    continue
+                first = node.args[0]
+                redacted = (
+                    isinstance(first, ast.Call)
+                    and (_callee(first.func) or "").startswith("_redact")
+                )
+                if not redacted:
+                    found.append((f"{path}:{node.lineno}", owner, ast.unparse(node)))
         return found
 
     def test_every_bare_tail_is_a_declared_and_covered_one(self):
         offenders = [
-            f"{subagent_executor.__file__}:{lineno}: {owner}: {text}"
-            for lineno, owner, text in self._tail_calls_without_redaction()
+            f"{where}: {owner}: {text}"
+            for where, owner, text in self._tail_calls_without_redaction()
             if (owner, text) not in _TAIL_WITHOUT_REDACTION_ALLOWLIST
         ]
         assert not offenders, (
@@ -545,31 +571,30 @@ class TestNoRefusalQuotesAStreamRaw:
         understands the inline spelling would go green on a refactor that
         reintroduced the leak one line higher.
         """
-        tree = source_tree(subagent_executor.__file__)
         owners = []
-        for function in ast.walk(tree):
-            if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            raises_it = any(
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id == "RunnerRejected"
-                and any(
-                    keyword.arg == "reason_code"
-                    and isinstance(keyword.value, ast.Constant)
-                    and keyword.value.value == reason_code
-                    for keyword in node.keywords
+        for _path, tree in _executor_trees():
+            for function in ast.walk(tree):
+                if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                raises_it = any(
+                    isinstance(node, ast.Call)
+                    and _callee(node.func) == "RunnerRejected"
+                    and any(
+                        keyword.arg == "reason_code"
+                        and isinstance(keyword.value, ast.Constant)
+                        and keyword.value.value == reason_code
+                        for keyword in node.keywords
+                    )
+                    for node in ast.walk(function)
                 )
-                for node in ast.walk(function)
-            )
-            if raises_it:
-                owners.append(function)
+                if raises_it:
+                    owners.append(function)
         assert owners, f"no RunnerRejected raises {reason_code!r} any more"
         for function in owners:
             called = {
-                node.func.id
+                _callee(node.func)
                 for node in ast.walk(function)
-                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                if isinstance(node, ast.Call)
             }
             assert "_redact_probe_tail" in called, (
                 f"{function.name} raises {reason_code!r} while quoting a probe "

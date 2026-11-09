@@ -270,7 +270,7 @@ class TestTheRuleIsStatedOnce:
             "the result shape's placeholder `<each check command you ran>`",
             "or it has no `ran` at all but gives a `not_run` reason",
             '`--own-check findings --finding "its check could not run: ',
-            "`subagent_executor.batch_check_findings`",
+            "`batch_reply.batch_check_findings`",
         ):
             assert clause in text, clause
 

@@ -37,6 +37,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import subagent_executor as executor  # noqa: E402
+from utils import runner_selection, sandbox_walk, task_result  # noqa: E402
 from tests.conftest import stand_in  # noqa: E402
 from tests.harness.native_invoker import simulate_native_invoker  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
@@ -234,7 +235,7 @@ class TestOutputContainment:
         assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == []
 
     def test_rejects_an_oversized_result_rather_than_truncating(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(executor, "MAX_RESULT_BYTES", 128)
+        monkeypatch.setattr(task_result, "MAX_RESULT_BYTES", 128)
         task = _validation_batch(tmp_path)
         with pytest.raises(executor.ResultRejected):
             executor.persist_result(task, str(tmp_path), {"groups": ["x" * 500]})
@@ -415,7 +416,7 @@ class TestParseBeforeExtract:
         assert excinfo.value.status == executor.STATUS_UNPARSEABLE
 
     def test_an_oversized_stream_is_refused_not_truncated(self, monkeypatch):
-        monkeypatch.setattr(executor, "MAX_STREAM_BYTES", 16)
+        monkeypatch.setattr(task_result, "MAX_STREAM_BYTES", 16)
         provider = registry.get_provider("codex")
         with pytest.raises(executor.ResultRejected) as excinfo:
             executor.extract_result(provider, "x" * 64, "", prefer_arrays=False)
@@ -727,7 +728,7 @@ class TestFailureLadder:
             head -c 20000 /dev/zero | tr '\\0' 'x'
             exit $status
             """)
-        monkeypatch.setattr(executor, "MAX_STREAM_BYTES", 4096)
+        monkeypatch.setattr(task_result, "MAX_STREAM_BYTES", 4096)
         outcome = self._dispatch(tmp_path, runner_env, timeout=60, retries=0)
         assert outcome.status == executor.STATUS_UNPARSEABLE
         assert outcome.rung == 5
@@ -3751,7 +3752,7 @@ def test_fx_step_budget_is_terminal_in_dispatch(tmp_path, runner_env, monkeypatc
     runner_env.use("fx:test/model", subagent_retries=2)
     # Exercise the shared dispatch machinery using fx's supported generate
     # profile; this does not add a read-only runner profile to the adapter.
-    monkeypatch.setattr(executor, "profile_for_kind", lambda kind: "generate")
+    monkeypatch.setattr(runner_selection, "profile_for_kind", lambda kind: "generate")
     calls = []
 
     def spawn(**kwargs):
@@ -5409,7 +5410,7 @@ class TestSandboxUnavailable:
             return [_SH, "-c", "sleep 5"] if requested == PROFILE_AGENT_READONLY else None
 
         monkeypatch.setattr(type(provider), "sandbox_probe_command", slow)
-        monkeypatch.setattr(executor, "SANDBOX_PROBE_TIMEOUT_S", 0.2)
+        monkeypatch.setattr(sandbox_walk, "SANDBOX_PROBE_TIMEOUT_S", 0.2)
         info = executor.preflight_runner("codex:gpt-5.5", profile=PROFILE_AGENT_READONLY)
         assert info["sandbox"] == "unknown"
         assert not executor.sandbox_bypassed("codex:gpt-5.5", PROFILE_AGENT_READONLY)
@@ -5479,7 +5480,7 @@ class TestSandboxUnavailable:
             runs.append(list(argv))
             return real(argv, **kwargs)
 
-        monkeypatch.setattr(executor, "_run_sandbox_probe", counting)
+        monkeypatch.setattr(sandbox_walk, "_run_sandbox_probe", counting)
         info = executor.preflight_runner("codex:gpt-5.5", profile=PROFILE_AGENT_WRITE)
         assert info["sandbox"] == "ok"
         assert len(runs) == 1
@@ -5504,7 +5505,7 @@ class TestSandboxUnavailable:
         monkeypatch.setattr(
             type(provider), "sandbox_probe_command", self._fake_command("sleep 5"),
         )
-        monkeypatch.setattr(executor, "SANDBOX_PROBE_TIMEOUT_S", 0.2)
+        monkeypatch.setattr(sandbox_walk, "SANDBOX_PROBE_TIMEOUT_S", 0.2)
         started = time.monotonic()
         info = executor.preflight_runner("codex:gpt-5.5", profile=PROFILE_AGENT_WRITE)
         assert time.monotonic() - started < 4.0
@@ -5726,7 +5727,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
             runs.append(list(argv))
             return real(argv, **kwargs)
 
-        monkeypatch.setattr(executor, "_run_sandbox_probe", counting)
+        monkeypatch.setattr(sandbox_walk, "_run_sandbox_probe", counting)
         first = self._run_slot(fanout, tmp_path, "fakebwrap:m1")
         second = self._run_slot(fanout, tmp_path, "fakebwrap:m2")
         assert len(runs) == 1
@@ -5757,7 +5758,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
                 return executor.SandboxProbeResult("ok", "")
             return executor.SandboxProbeResult("not-required", "")
 
-        monkeypatch.setattr(executor, "sandbox_verdict", verdict)
+        monkeypatch.setattr(sandbox_walk, "sandbox_verdict", verdict)
 
         slow = threading.Thread(
             target=rob._fanout_sandbox_verdict, args=("slowbwrap", None)
@@ -5795,7 +5796,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
         runs = []
         monkeypatch.setattr(
-            executor, "_run_sandbox_probe",
+            sandbox_walk, "_run_sandbox_probe",
             lambda argv, **kwargs: runs.append(list(argv)),
         )
         monkeypatch.setattr(rob, "invoke_with_file_output", lambda **kwargs: {
@@ -5916,7 +5917,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._AutoFallback())
         monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
         # The probe could not be run at all → `unknown`.
-        monkeypatch.setattr(executor, "_run_sandbox_probe", lambda argv, **kw: None)
+        monkeypatch.setattr(sandbox_walk, "_run_sandbox_probe", lambda argv, **kw: None)
         seen = []
 
         def dispatch(**kwargs):

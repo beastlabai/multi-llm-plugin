@@ -718,7 +718,7 @@ carries `declined: [{id, reason}]` beside `ids` (`with_result_contract`, the rep
 re-ask's shape, `write_batch_result.schema.json`; `implement` has none — a task its runner will not
 do is `failed`, and a reply declining its task is read so).
 
-`subagent_executor.declined_items` reads it leniently (a reason is recorded as the batch wrote it, closing stop
+`batch_reply.declined_items` reads it leniently (a reason is recorded as the batch wrote it, closing stop
 included, fix round 26; a line that ends the sentence after it adds a full stop only where the
 reason ends in no `.`, `?`, `!` or
 `…` of its own, `text_clip.with_closing_mark`, fix round 27): an expected id declined
@@ -964,7 +964,7 @@ dispatched text, and are records, never compared on resume.
 **A write reply is read as its report object, and the records end a quoted sentence once** (fix
 round 28, live run 12 #4/#6/#7/#9). `json_extractor.extract_json_from_text` adds `only_object`, the reply's
 one JSON object outside every other document, whenever it serves something else, and both invokers
-read a kind whose result is an object (`subagent_executor.OBJECT_RESULT_KINDS`: the write kinds,
+read a kind whose result is an object (`task_result.OBJECT_RESULT_KINDS`: the write kinds,
 `task_generation`, `consolidation`, the judge) through `the_reply_object`: Codex's
 decline batch opened with prose and the array-preferring extraction served its report's
 `declined` array ("<root>: expected type object, got list", a re-ask); a reply holding

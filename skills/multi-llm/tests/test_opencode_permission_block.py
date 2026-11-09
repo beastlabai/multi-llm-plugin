@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils import llm_client  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from utils import sandbox_walk  # noqa: E402
 from utils.providers import opencode as oc  # noqa: E402
 from utils.providers.base import (  # noqa: E402
     PROFILE_AGENT_READONLY,
@@ -411,7 +412,7 @@ class TestTheVersionComesFromThePreflight:
             raise AssertionError("a dispatch spawned a version probe")
 
         monkeypatch.setattr(executor, "_run_probe", _refuse)
-        monkeypatch.setattr(executor, "_run_sandbox_probe", _refuse)
+        monkeypatch.setattr(sandbox_walk, "_run_sandbox_probe", _refuse)
         monkeypatch.setattr(oc.subprocess, "run", _refuse)
 
     def _dispatch(self, provider) -> dict:

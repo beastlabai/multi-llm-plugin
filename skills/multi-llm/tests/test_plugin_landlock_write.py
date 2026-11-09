@@ -45,6 +45,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils import landlock_dispatch  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from utils import probe_state, sandbox_walk  # noqa: E402
 from utils import write_batch_scheduler as wbs  # noqa: E402
 from utils.providers.base import (  # noqa: E402
     PROFILE_AGENT_WRITE,
@@ -223,8 +224,8 @@ class FakeExecutor:
         self.rung_queries: List[Optional[str]] = []
         monkeypatch.setattr(wbs, "dispatch_task", self.dispatch_task)
         monkeypatch.setattr(wbs, "preflight_runner", self.preflight_runner)
-        monkeypatch.setattr(executor, "sandbox_rung", self.sandbox_rung)
-        monkeypatch.setattr(executor, "write_rung_notice",
+        monkeypatch.setattr(probe_state, "sandbox_rung", self.sandbox_rung)
+        monkeypatch.setattr(sandbox_walk, "write_rung_notice",
                             self.write_rung_notice, raising=False)
 
     def script(self, *steps: Step) -> "FakeExecutor":

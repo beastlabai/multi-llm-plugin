@@ -256,7 +256,7 @@ CHECK_RESULTS = ("passed", "findings", "could-not-run")
 #: object about the checks it ran on its own edits (fix round 18). A code
 #: batch has no ``could-not-run``: a check of its own that could not run is
 #: one of its findings. ``none`` (fix round 26): its ``check`` says it ran no
-#: check (an empty ``ran``, ``subagent_executor.ran_no_check``) — recorded as
+#: check (an empty ``ran``, ``batch_reply.ran_no_check``) — recorded as
 #: no check, never as a pass, as the executor reads the same reply. Fix round
 #: 27: only when it also names no finding and does not say it failed
 #: (``references/own-check.md``, the rules the native host maps a reply by).

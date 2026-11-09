@@ -27,6 +27,7 @@ import pytest
 from tests import conftest as suite_conftest
 from utils import landlock_dispatch
 import utils.subagent_executor as executor
+import utils.sandbox_walk as sandbox_walk
 
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 PRODUCTION_WRAPPER = SKILL_ROOT / "utils" / "landlock_exec.py"
@@ -60,7 +61,7 @@ def spawned(monkeypatch):
         return subprocess.CompletedProcess(list(argv), 0, "recorded", "")
 
     monkeypatch.setattr(executor.subprocess, "run", record)
-    monkeypatch.setattr(executor, "_run_sandbox_probe_tree", record)
+    monkeypatch.setattr(sandbox_walk, "_run_sandbox_probe_tree", record)
     return calls
 
 

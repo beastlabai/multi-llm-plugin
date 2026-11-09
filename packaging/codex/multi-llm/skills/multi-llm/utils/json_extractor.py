@@ -1087,7 +1087,7 @@ def is_answer_shaped(data: Any) -> bool:
       ``{"error": {"code": 401, …}}`` body parses and holds nothing, so no
       salvage is dispatched and the operator is sent to the provider's auth
       rather than to a JSON repair.
-    * the **persist step** — ``utils/subagent_executor._salvage_gave_up`` — asks
+    * the **persist step** — ``utils/task_result._salvage_gave_up`` — asks
       it of what the salvage subagent came back with: *is what came back an
       answer?* A salvage task's ``output_name`` **is** the model's own result
       file, so a subagent that faithfully "recovered" the relayed error envelope

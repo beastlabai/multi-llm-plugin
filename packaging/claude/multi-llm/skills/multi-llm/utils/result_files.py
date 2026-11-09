@@ -52,7 +52,7 @@ NON_MODEL_JSON_MARKERS = (
 
 #: Whole basenames that are never a model's result. ``state.json`` belongs in
 #: the plan's output dir, one level up, but the executor reserves the name in
-#: a phase dir too (``subagent_executor.RESERVED_OUTPUT_NAMES``); a substring
+#: a phase dir too (``task_result.RESERVED_OUTPUT_NAMES``); a substring
 #: marker would also drop a model whose id contains ``state``.
 NON_MODEL_JSON_NAMES = frozenset({'state.json'})
 

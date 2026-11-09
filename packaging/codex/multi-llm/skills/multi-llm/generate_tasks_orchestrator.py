@@ -359,7 +359,7 @@ def validate_document(data: Any) -> List[str]:
     owns the four rules the *graph* has to satisfy for every later phase (batching,
     dependency walks, the human-task strategies) to mean anything. Both run before
     a byte reaches the plan — and both are the executor's own verdict for this
-    kind (``subagent_executor.validate_result``), so a document that fails either
+    kind (``task_result.validate_result``), so a document that fails either
     gets the executor lane's schema-repair re-ask and is never persisted.
     """
     from utils.subagent_executor import validate_result

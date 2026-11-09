@@ -51,6 +51,7 @@ import mock_llm  # noqa: E402 - the one definition of each CLI's stream shape
 
 from utils import structured_output as so  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from utils import sandbox_walk  # noqa: E402
 from utils.provider_registry import get_provider  # noqa: E402
 from utils.providers.base import PROFILE_AGENT_READONLY  # noqa: E402
 from utils.providers.claude_code import (  # noqa: E402
@@ -253,6 +254,9 @@ def lane(tmp_path, monkeypatch):
     monkeypatch.setattr(executor.subprocess, "Popen", _CannedPopen)
     monkeypatch.setattr(
         executor, "_resolve_executable", lambda name: ([f"/usr/bin/{name}"], False)
+    )
+    monkeypatch.setattr(
+        sandbox_walk, "_resolve_executable", lambda name: ([f"/usr/bin/{name}"], False)
     )
     monkeypatch.setenv("MULTI_LLM_TEST_FAST_BACKOFF", "1")
     with patch(

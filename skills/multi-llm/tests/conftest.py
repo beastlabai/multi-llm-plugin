@@ -852,6 +852,7 @@ def _pin_real_sandbox_probes(request, monkeypatch):
     """
     try:
         import utils.subagent_executor as executor
+        import utils.sandbox_walk as sandbox_walk
         import utils.review_orchestrator_base as rob
         from utils.llm_client import _resolve_executable
         from utils import provider_registry as registry
@@ -864,7 +865,7 @@ def _pin_real_sandbox_probes(request, monkeypatch):
     if "sandbox_probe" in request.keywords:
         yield
         return
-    real = executor._run_sandbox_probe
+    real = sandbox_walk._run_sandbox_probe
     shell_ok = "shell_probe" in request.keywords
     refused: List[List[str]] = []
     request.node.stash[PROBE_GUARD_REFUSALS] = refused
@@ -947,7 +948,7 @@ def _pin_real_sandbox_probes(request, monkeypatch):
                 return None
         return real(argv, **kwargs)
 
-    monkeypatch.setattr(executor, "_run_sandbox_probe", guarded)
+    monkeypatch.setattr(sandbox_walk, "_run_sandbox_probe", guarded)
     yield
     if refused:
         pytest.fail(

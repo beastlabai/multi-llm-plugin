@@ -1229,7 +1229,7 @@ SCHEMA_REPAIR_TOP_KEYS: Dict[str, Sequence[str]] = {
 }
 
 #: A minimal reply that passes the kind's whole validation (a test runs it
-#: through ``subagent_executor.validate_result``), shown after the shape so the
+#: through ``task_result.validate_result``), shown after the shape so the
 #: re-ask carries one concrete, parseable document and not only placeholders.
 SCHEMA_REPAIR_EXAMPLES: Dict[str, Dict[str, Any]] = {
     "task_generation": {

@@ -27,7 +27,7 @@ A check task's result contract (`batch_prompt.CHECK_RESULT_CONTRACT`, appended b
 legs when `is_check_task`) asks for a structured `check: {passed, findings}` (optional and untyped
 in `write_batch_result.schema.json`: an older reply stays valid and a near-miss shape is read, never a schema
 failure — fix round 11, when implement had no report re-ask; it has one since fix round 14, and the
-lenient reading stays so a near-miss costs no re-ask); `subagent_executor.check_findings_from` reads it leniently,
+lenient reading stays so a near-miss costs no re-ask); `batch_reply.check_findings_from` reads it leniently,
 never `notes` (only a clear pass with nothing listed is a pass;
 `{}`, `check: null` or an unreadable `passed` is a
 `CHECK_RESULT_UNKNOWN` finding, and a bare
@@ -214,7 +214,7 @@ same check over the same scope, never a narrower one such as one test file or `-
 `ran` naming each command and how it ended or an empty `ran` and a
 `not_run` reason, which is no check and never a pass — `ran_no_check`, natively
 `--own-check none` — after live run 11's replies that ran `npm test` sent no
-`check`), read by `subagent_executor.batch_check_findings` (no usable report is `None`,
+`check`), read by `batch_reply.batch_check_findings` (no usable report is `None`,
 never a finding; never `notes`; unlike a check task's reading, a clear
 `passed: true` is a pass whatever it lists beside it, and `could_not_run` is one
 `BATCH_CHECK_COULD_NOT_RUN` finding every surface words "its check could not run", fix round 15; fix
@@ -341,7 +341,7 @@ unchanged.
 `accepted_checks_section` asks for the accepted finding copied exactly, nothing added, and any comment
 in the `check`'s `note`; `WRITE_CHECK_CONTRACT` asks every code batch
 for findings that are the command and what it reported, nothing else, and a `note`
-for its own words (`subagent_executor.batch_check_note`: the row, the verdict stamp, `state.json`'s
+for its own words (`batch_reply.batch_check_note`: the row, the verdict stamp, `state.json`'s
 `task_own_check_note` or an `apply_fix_batch_checks` entry's `note`, the
 `[BATCH_CHECK_*]` lines and summary.md; natively `util batch-done --note`, refused without
 `--own-check`; never read as a finding).

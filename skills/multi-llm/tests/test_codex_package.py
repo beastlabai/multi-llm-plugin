@@ -964,7 +964,7 @@ _ALLOWED_ABSOLUTE = {
     f"{PAYLOAD}/utils/cli_common.py": {"/tmp"},
     f"{PAYLOAD}/utils/llm_client.py": {"/tmp"},
     f"{PAYLOAD}/utils/providers/omp.py": {"/tmp"},
-    f"{PAYLOAD}/utils/subagent_executor.py": {"/private/tmp", "/tmp"},
+    f"{PAYLOAD}/utils/task_result.py": {"/private/tmp", "/tmp"},
     f"{PAYLOAD}/utils/providers/gemini.py": {"/tmp/mllm-inv", "/tmp/mllm-inv/gemini-"},
     f"{PAYLOAD}/utils/providers/kilocode.py": {"/tmp/mllm-inv"},
     f"{PAYLOAD}/utils/provider_registry.py": {"/home/me/repo/.git"},

@@ -3036,6 +3036,7 @@ SNAPSHOT_READERS = frozenset({
 _SNAPSHOT_MODULES = (
     "utils/provider_registry.py",
     "utils/subagent_executor.py",
+    "utils/runner_selection.py",
     "utils/write_batch_scheduler.py",
 )
 

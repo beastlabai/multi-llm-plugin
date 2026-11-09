@@ -140,7 +140,7 @@ first dispatch, `stopped`, `complete`), because the step is set before a
 all 288 s of batch application and in the terminal payload, next to `run.state: done` (measured
 2026-09-16).
 
-Before validation, `subagent_executor.normalize_result` supplies `[]` for any of
+Before validation, `task_result.normalize_result` supplies `[]` for any of
 `depends_on`/`files_to_create`/`files_to_modify` (`TASK_GENERATION_LIST_KEYS`) a task
 left *out* — on both executor parse lanes and, for the native host's file, in
 `consume_document`, which writes the completed document back before validating because

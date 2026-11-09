@@ -943,7 +943,7 @@ def ensure_prerequisites(
 #: what :func:`repo_wide_sandbox_warning` asks the dispatch's own decision.
 REPO_WIDE_WRITE_PHASES = ("implement", "apply-code-fixes")
 
-#: The remedy sentence of that refusal. ``subagent_executor.F6_LEAD`` is the
+#: The remedy sentence of that refusal. ``sandbox_walk.F6_LEAD`` is the
 #: text this repeats with ``{key}`` filled; ``status`` must stay sub-second, so
 #: it is not imported here (that module is heavy) and
 #: ``TestEarlySandboxWarning`` pins the two together instead.
@@ -964,7 +964,7 @@ def repo_wide_sandbox_warning(
     learn that at phase 6, about 20 minutes in (Codex racing run, 2026-10-02).
     This says so at ``init``, in ``status`` before any phase has run, and on
     the next-step block, from the SAME decision the dispatch takes
-    (:func:`utils.subagent_executor.repo_wide_write_refusal`: the adapter's
+    (:func:`utils.sandbox_walk.repo_wide_write_refusal`: the adapter's
     model-free probes through the shared probe cache — cheap, no model), never
     from a guess: with the jail usable the warning stays silent, and it fires
     whenever Landlock is unavailable, the rung probe fails, the step-3 opt-in

@@ -693,14 +693,12 @@ def listed_check_outcomes(
     return out
 
 
-def _failed_without_findings() -> str:
-    """``subagent_executor.CHECK_FAILED_WITHOUT_FINDINGS``: what a check that
-    said ``passed: false`` and listed no finding reads as."""
-    try:
-        from .subagent_executor import CHECK_FAILED_WITHOUT_FINDINGS
-    except ImportError:  # pragma: no cover - direct script invocation
-        from utils.subagent_executor import CHECK_FAILED_WITHOUT_FINDINGS  # type: ignore
-    return CHECK_FAILED_WITHOUT_FINDINGS
+#: The finding recorded for a ``check`` that said it did not pass and listed
+#: no finding, so the task still reads as one with findings.
+CHECK_FAILED_WITHOUT_FINDINGS = (
+    "the check reported that it did not pass but listed no finding; "
+    "see the runner notes"
+)
 
 
 def with_listed_failures(
@@ -719,7 +717,7 @@ def with_listed_failures(
     """
     failed = [command for command, word in listed.items() if word == LISTED_FAILED]
     if not failed:
-        if listed and list(findings or []) == [_failed_without_findings()]:
+        if listed and list(findings or []) == [CHECK_FAILED_WITHOUT_FINDINGS]:
             return []
         return findings
     current = list(findings or [])
