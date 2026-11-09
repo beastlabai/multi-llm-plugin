@@ -512,7 +512,8 @@ def _unsettled_outcome(
         "the dispatch did not complete (cancelled by the batch timeout or "
         "the run was killed); "
     )
-    if _task_result.task_is_complete(task, phase_dir):
+    complete = _task_result.complete_result_bytes(task, phase_dir)
+    if complete is not None:
         if resume:
             return _task_outcome.TaskOutcome(
                 task_id=task_id,
@@ -525,6 +526,7 @@ def _unsettled_outcome(
                     "before its dispatch reported an outcome"
                 ),
                 skipped=True,
+                result_sha256=hashlib.sha256(complete).hexdigest(),
             )
         found = (
             "a valid result file is on disk, but this batch ran without resume, "
@@ -558,13 +560,15 @@ def _batch_provenance(
     """Per-output provenance for :attr:`BatchReport.batch_provenance` (§7.3a).
 
     A task this dispatch ran to a persisted result file records its runner and
-    the sha256 of the file's bytes as they are now. A task it did *not* run —
-    skipped under ``--resume``, or outside ``only_task_ids`` — keeps the row an
-    earlier dispatch recorded, but only while that row is still true: same
-    round, and the file's bytes still hash to the recorded value. Anything else
-    records nothing, so the merge falls back to the batch's own
-    ``metadata.model`` rather than crediting this executor with a file it never
-    wrote.
+    the sha256 of the bytes it persisted (:attr:`TaskOutcome.result_sha256`),
+    never of the file hashed now. A task it did *not* run — skipped under
+    ``--resume``, or outside ``only_task_ids`` — keeps the row an earlier
+    dispatch recorded, but only while that row is still true: same round, and
+    the bytes the skip found complete (outside ``only_task_ids``, the file's
+    bytes) still hash to the recorded value. Anything else records nothing, so
+    the merge falls back to the batch's own ``metadata.model`` rather than
+    crediting this executor with a file it never wrote
+    (docs/development/review-results.md, "Consuming checked bytes").
     """
     try:
         from .subagent_tasks import file_bytes_sha256, task_round
@@ -575,37 +579,39 @@ def _batch_provenance(
         str(task.get("task_id", index)): str(task.get("kind") or kind)
         for index, task in enumerate(tasks)
     }
-    output_by_id: Dict[str, str] = {}
+    held_by_id: Dict[str, Optional[str]] = {}
     provenance: Dict[str, Dict[str, Any]] = {}
     for outcome in outcomes:
         if outcome.ok and outcome.output_path:
-            output_by_id[outcome.task_id] = outcome.output_path
+            held_by_id[outcome.task_id] = outcome.result_sha256
         if not outcome.ok or outcome.skipped or not outcome.output_path:
             continue
-        digest = file_bytes_sha256(outcome.output_path)
-        if not digest:
+        if not outcome.result_sha256:
             continue
         provenance[outcome.task_id] = {
             "task_id": outcome.task_id,
             "kind": outcome.kind or task_kinds.get(outcome.task_id, kind),
             "round": round_id,
             "runner": outcome.runner,
-            "sha256": digest,
+            "sha256": outcome.result_sha256,
         }
     for task_id, row in previous.items():
         if task_id in provenance or not isinstance(row, dict):
             continue
         if task_id not in task_kinds or row.get("round") != round_id:
             continue
-        path = output_by_id.get(task_id)
-        if path is None:
+        if task_id in held_by_id:
+            digest = held_by_id[task_id]
+        else:
             task = next(
                 (t for i, t in enumerate(tasks)
                  if str(t.get("task_id", i)) == task_id),
                 None,
             )
-            path = task.get("output_path") if isinstance(task, dict) else None
-        if path and row.get("sha256") and file_bytes_sha256(path) == row["sha256"]:
+            digest = file_bytes_sha256(
+                task.get("output_path") if isinstance(task, dict) else None
+            )
+        if row.get("sha256") and digest == row["sha256"]:
             provenance[task_id] = dict(row)
     return provenance
 
@@ -1038,7 +1044,8 @@ async def _gather(
         return settled(outcome)
 
     def skip_done(task: Dict[str, Any], runner: str, index: int) -> Optional[_task_outcome.TaskOutcome]:
-        if not resume or not _task_result.task_is_complete(task, phase_dir):
+        found = _task_result.complete_result_bytes(task, phase_dir) if resume else None
+        if found is None:
             return None
         target = _task_result.resolve_output_target(task, phase_dir)
         print(f"[exec-subagents] {task.get('task_id')} already complete — skipping")
@@ -1049,6 +1056,7 @@ async def _gather(
             status=STATUS_OK,
             output_path=str(target),
             skipped=True,
+            result_sha256=hashlib.sha256(found).hexdigest(),
         ))
 
     return await run_tasks_concurrent(

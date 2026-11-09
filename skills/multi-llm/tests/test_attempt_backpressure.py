@@ -147,8 +147,8 @@ class TestAfterAttemptSeam:
             lambda *a, **k: (executor.STATUS_OK, None, {"ok": True}, None),
         )
         monkeypatch.setattr(
-            task_result, "persist_result",
-            lambda task, phase_dir, data: str(tmp_path / "validation_batch_0.json"),
+            task_result, "persist_result_bytes",
+            lambda task, phase_dir, data: (str(tmp_path / "validation_batch_0.json"), None),
         )
         seen = []
         outcome = executor.dispatch_task(

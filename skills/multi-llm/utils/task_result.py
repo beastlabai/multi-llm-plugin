@@ -312,6 +312,14 @@ def persist_result(task: Dict[str, Any], phase_dir: str, data: Any) -> str:
     behavior the executor has, so a task carrying ``inline-json`` is refused
     before dispatch instead of selecting a second write path here.
     """
+    return persist_result_bytes(task, phase_dir, data)[0]
+
+
+def persist_result_bytes(
+    task: Dict[str, Any], phase_dir: str, data: Any,
+) -> Tuple[str, Optional[bytes]]:
+    """:func:`persist_result`, with the bytes it wrote: ``None`` when it wrote
+    none (a late result of a replaced round)."""
     target = resolve_output_target(task, phase_dir)
     encoded = json.dumps(data, indent=2)
     if len(encoded.encode("utf-8")) > MAX_RESULT_BYTES:
@@ -326,6 +334,7 @@ def persist_result(task: Dict[str, Any], phase_dir: str, data: Any) -> str:
     # record; a late result of a replaced round is dropped (utils/review_round.py).
     from .review_round import persisting_result, record_checked_result
 
+    persisted: Optional[bytes] = None
     with persisting_result(phase_dir, target.name) as current:
         if current:
             # By the phase folder as the run spelled it, not as it resolves
@@ -338,8 +347,9 @@ def persist_result(task: Dict[str, Any], phase_dir: str, data: Any) -> str:
             # instead of the file (docs/development/review-results.md,
             # "Consuming checked bytes").
             if isinstance(written, bytes):
+                persisted = written
                 record_checked_result(phase_dir, target.name, written, dispatched=True)
-    return str(target)
+    return str(target), persisted
 
 
 # ---------------------------------------------------------------------------
@@ -872,31 +882,36 @@ def task_is_complete(task: Dict[str, Any], phase_dir: str) -> bool:
     route is not complete either, because it fails :func:`validate_result` the
     way any other non-document would.
     """
+    return complete_result_bytes(task, phase_dir) is not None
+
+
+def complete_result_bytes(task: Dict[str, Any], phase_dir: str) -> Optional[bytes]:
+    """The bytes :func:`task_is_complete` judged complete, or ``None``."""
     try:
         target = resolve_output_target(task, phase_dir)
     except _task_outcome.ResultRejected:
-        return False
+        return None
     if not target.exists() or target.stat().st_size == 0:
-        return False
+        return None
     try:
         raw = target.read_bytes()
         data = json.loads(raw.decode("utf-8"))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        return False
+        return None
     # Read as every lane reads it: an absent schema_version is the one
     # version there is (fix round 28), in memory only.
     supply_result_version(str(task.get("kind", "")), data)
     if validate_result(str(task.get("kind", "")), data):
-        return False
+        return None
     if _result_names_foreign_groups(task, data):
-        return False
+        return None
     # The bytes judged complete, for a review round that dispatched this task
     # to read instead of the file (docs/development/review-results.md,
     # "Consuming checked bytes").
     from .review_round import record_checked_result
 
     record_checked_result(phase_dir, target.name, raw, dispatched=False)
-    return True
+    return raw
 
 
 def _result_names_foreign_groups(task: Dict[str, Any], data: Any) -> bool:

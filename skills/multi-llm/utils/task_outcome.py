@@ -197,6 +197,12 @@ class TaskOutcome:
     usage: Optional[Dict[str, Any]] = None
     usage_reported: bool = False
     skipped: bool = False
+    #: The sha256 of the result bytes this dispatch persisted for the reply it
+    #: accepted, or of those a skipped task was found complete with; ``None``
+    #: when it holds none. Never serialized: it is the hash ``batch_provenance``
+    #: records, never the file hashed again (docs/development/review-results.md,
+    #: "Consuming checked bytes").
+    result_sha256: Optional[str] = None
     #: D3g, write kinds only: which of the four outcomes the snapshot/diff
     #: classification landed on. Its own axis rather than a status, because
     #: the status says whether the loop goes on and this says what the bytes did.

@@ -90,6 +90,7 @@ VERDICT_FIELDS: Dict[str, str] = {
     "usage": "the dispatch's own; a skip ran nothing",
     "usage_reported": "the dispatch's own; a skip ran nothing",
     "skipped": "set by the resume skip itself",
+    "result_sha256": "the dispatch's own, for subagent_batch_report.json's provenance",
     "write_outcome": "stamped",
     "files_touched": "stamped",
     "summary": "the reply's own `summary`, read from the result file beside the verdict",

@@ -16,10 +16,13 @@ Three defects found while redoing a run's validations by hand (2026-09-24):
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import sys
 from pathlib import Path
+
+import pytest
 
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SKILL_ROOT))
@@ -369,8 +372,9 @@ def _validation_group(index):
 
 def _executor_round(tmp_path, monkeypatch, n_groups=8):
     """Materialize a validation round and dispatch it through the real
-    ``run_tasks`` with a stand-in ``dispatch_task`` that writes each batch file,
-    so ``subagent_batch_report.json`` carries the executor's own provenance."""
+    ``run_tasks`` with a stand-in ``dispatch_task`` that writes each batch file
+    and, as the real one does, the hash of the bytes it wrote, so
+    ``subagent_batch_report.json`` carries the executor's own provenance."""
     phase_dir = tmp_path / "review-plan"
     phase_dir.mkdir()
     groups = [_validation_group(i) for i in range(n_groups)]
@@ -387,6 +391,7 @@ def _executor_round(tmp_path, monkeypatch, n_groups=8):
         return executor.TaskOutcome(
             task_id=task["task_id"], kind=task["kind"], runner=runner,
             status=executor.STATUS_OK, output_path=str(path),
+            result_sha256=file_bytes_sha256(str(path)),
         )
 
     monkeypatch.setattr(task_dispatch, "dispatch_task", fake_dispatch)
@@ -549,6 +554,94 @@ class TestMergeAttributesEachBatchByContent:
         assert metadata["model"] == "claude-code:sonnet"
         assert "runner" not in metadata
         assert set(metadata["runners"].values()) == {"claude-code:sonnet"}
+
+
+#: The runner the mock launcher on PATH stands in for, and the self-report
+#: of a batch file a concurrent writer put in place of a dispatched one.
+MOCK_RUNNER = "codex:gpt-5.5"
+LATE_WRITER = "late-writer-self-report"
+
+
+class TestProvenanceIsOfTheBytesTheDispatchHeld:
+    """A batch's runner credit is recorded from the bytes its dispatch
+    persisted, or found complete on a resume, never from the file hashed once
+    the batch settled. Through the real dispatch (a mock runner on PATH) under
+    a round's claim, each batch file is replaced at that moment: the report
+    keeps the verified credit for the bytes the dispatch held, the merge of
+    those bytes credits the runner, and a merge that reads the replacement
+    credits only its self-report (docs/development/review-results.md,
+    "Consuming checked bytes")."""
+
+    @staticmethod
+    def _dispatch(phase_dir, document, monkeypatch, *, replace, resume):
+        from utils import review_round
+
+        real = task_batch._batch_provenance
+
+        def replace_then_record(outcomes, tasks, **kwargs):
+            if replace:
+                for batch in document["batches"]:
+                    _write_batch(phase_dir, batch, "invalid", model=LATE_WRITER)
+            return real(outcomes, tasks, **kwargs)
+
+        claim = review_round.start_round(phase_dir)
+        monkeypatch.setattr(task_batch, "_batch_provenance", replace_then_record)
+        with review_round.results_bound_to(claim):
+            report = executor.run_tasks(
+                document["batches"], phase_dir=str(phase_dir), kind="validation",
+                resume=resume,
+            )
+        monkeypatch.setattr(task_batch, "_batch_provenance", real)
+        assert report.ok, report.failure_summary()
+        assert all(o.skipped == resume for o in report.outcomes)
+        return claim
+
+    @pytest.mark.parametrize("replace", [True, False], ids=["replaced", "control"])
+    @pytest.mark.parametrize("resume", [False, True], ids=["dispatched", "resumed-skip"])
+    def test_a_batch_replaced_after_its_dispatch_keeps_the_runner_of_its_bytes(
+        self, tmp_path, runner_env, monkeypatch, replace, resume
+    ):
+        runner_env.use(MOCK_RUNNER)
+        runner_env.echo("validation")
+        phase_dir = tmp_path / "review-plan"
+        phase_dir.mkdir()
+        groups = [_validation_group(i) for i in range(8)]
+        document = prepare_batched_validation_tasks(
+            groups=groups, context="ctx", output_dir=str(phase_dir),
+            plan_file="/path/to/plan.md", max_per_batch=4,
+        )
+        if resume:
+            self._dispatch(phase_dir, document, monkeypatch, replace=False, resume=False)
+        claim = self._dispatch(
+            phase_dir, document, monkeypatch, replace=replace, resume=resume,
+        )
+
+        provenance = json.loads(
+            (phase_dir / "subagent_batch_report.json").read_text(encoding="utf-8")
+        )["batch_provenance"]
+        assert set(provenance) == {b["task_id"] for b in document["batches"]}
+        for batch in document["batches"]:
+            held = claim.checked_result(Path(batch["output_path"]).name)
+            row = provenance[batch["task_id"]]
+            assert row["runner"] == MOCK_RUNNER
+            assert row["sha256"] == hashlib.sha256(held).hexdigest()
+            assert (row["sha256"] == file_bytes_sha256(batch["output_path"])) is not replace
+
+        held_merge = rob.merge_validation_batches(
+            str(phase_dir), document, groups, str(phase_dir / "validation.json"), claim,
+        )
+        metadata = json.loads(
+            (phase_dir / "validation.json").read_text(encoding="utf-8"))["metadata"]
+        assert set(metadata["runners"].values()) == {MOCK_RUNNER}
+        assert metadata["runner"] == MOCK_RUNNER
+        assert {g["validation_status"] for g in held_merge} == {"valid"}
+
+        from_disk = _merge(phase_dir, groups, document)
+        if replace:
+            assert set(from_disk["runners"].values()) == {LATE_WRITER}
+            assert "runner" not in from_disk
+        else:
+            assert set(from_disk["runners"].values()) == {MOCK_RUNNER}
 
 
 # ---------------------------------------------------------------------------

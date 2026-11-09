@@ -20,6 +20,7 @@ Test groups map onto the design items:
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import shutil
@@ -2591,9 +2592,12 @@ class TestTheBatchDeadline:
                     task_id=task["task_id"], kind=task["kind"], runner=runner,
                     status=executor.STATUS_TIMEOUT, reason="its own deadline",
                 )
+            path = write_reply(task, phase_dir)
             return executor.TaskOutcome(
                 task_id=task["task_id"], kind=task["kind"], runner=runner,
-                status=executor.STATUS_OK, output_path=write_reply(task, phase_dir),
+                status=executor.STATUS_OK, output_path=path,
+                # As the real dispatch records it: the hash of what it wrote.
+                result_sha256=hashlib.sha256(Path(path).read_bytes()).hexdigest(),
             )
 
         monkeypatch.setattr(task_dispatch, "dispatch_task", dispatch)

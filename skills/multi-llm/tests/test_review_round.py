@@ -1771,7 +1771,7 @@ from pathlib import Path
 sys.path[:0] = [sys.argv[1]]
 from utils import task_result
 plan, gate, ready = sys.argv[2], Path(sys.argv[3]), Path(sys.argv[4])
-persist = task_result.persist_result
+persist = task_result.persist_result_bytes
 def held(task, phase_dir, data):
     if str(task.get("output_name", "")).endswith("validation_batch_0.json"):
         ready.write_text("ready")
@@ -1781,7 +1781,7 @@ def held(task, phase_dir, data):
         (Path(phase_dir) / "late-write").write_text("written")
         return result
     return persist(task, phase_dir, data)
-task_result.persist_result = held
+task_result.persist_result_bytes = held
 import multi_llm
 sys.exit(multi_llm.main(["review-code", plan, "--reaggregate", "--yes", "--exec-subagents"]))
 """

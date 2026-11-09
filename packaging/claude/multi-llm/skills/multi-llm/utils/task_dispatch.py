@@ -34,6 +34,7 @@ only: patch one here, never through the executor
 from __future__ import annotations
 
 import copy
+import hashlib
 import os
 import re
 import sys
@@ -1222,7 +1223,8 @@ def ask_about_reply(
             state.restate_check[0], data.get("check"), state.restate_check[1],
         )}
     try:
-        written = _task_result.persist_result(plan.task, plan.phase_dir, data)
+        written, persisted = _task_result.persist_result_bytes(
+            plan.task, plan.phase_dir, data)
     except _task_outcome.ResultRejected as exc:
         # The byte cap, not the shape: the document validated, so a
         # re-ask quoting "the validator's errors" would quote none
@@ -1230,6 +1232,9 @@ def ask_about_reply(
         # round 6). Rung 6 stays terminal for it.
         return replace(reading, status=exc.status, error=exc.message, data=None), None
     outcome.output_path = written
+    outcome.result_sha256 = (
+        hashlib.sha256(persisted).hexdigest() if persisted is not None else None
+    )
     reading = replace(reading, data=data)
     reply = hook_context("reply", plan, outcome, state=state, reading=reading)
     resend_why = (

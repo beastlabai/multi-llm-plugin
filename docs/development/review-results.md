@@ -857,9 +857,11 @@ produced:
   dispatch starts with none. The validation merge (`merge_validation_batches`) takes each batch
   from there and otherwise reads it once (`_held_batch_bytes`): the digest bound into
   `validation.json` (`batch_sha256`), the verdicts merged and the runner credited all come from
-  those bytes. The in-process salvage hands the lane the repair the same way
-  (`adopt_salvaged(data=...)`); a dispatch that reported none leaves the lane to read the file
-  once.
+  those bytes. The batch report's `batch_provenance` hash, which that credit is checked against,
+  is of the bytes the dispatch persisted or found complete (`TaskOutcome.result_sha256`), never
+  of the file hashed once the batch settled. The in-process salvage hands the lane the repair
+  the same way (`adopt_salvaged(data=...)`); a dispatch that reported none leaves the lane to
+  read the file once.
 - **A recovered round's batches.** A phase whose damaged checkpoint a fresh run replaced
   (`result_files.RECOVERED_KEY`) trusts no file on disk, so under `--exec-subagents` its
   validation dispatch runs without resume (`dispatch_subagent_tasks` passes `resume=False`):
