@@ -4,7 +4,6 @@ import os
 import shutil
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..json_extractor import extract_json_from_text
 from .base import (
     LAUNCH_DIAGNOSTICS_STDERR,
     REASONING_LADDER,
@@ -19,6 +18,7 @@ from .base import (
     read_stdout,
     split_reasoning_effort,
 )
+from .parse_kit import answer_from_text, fail, loads_or_extract, ok
 
 # Reasoning effort values accepted by `grok --reasoning-effort`
 # (verified live against grok 0.2.93) — exactly the seven canonical rungs, which
@@ -395,28 +395,14 @@ class GrokProvider(LLMProvider):
         elif shape.kind != STDOUT_PLAIN:
             return shape.failure("grok", stdout)
         else:
-            try:
-                wrapper = json.loads(stdout)
-            except json.JSONDecodeError as e:
-                # Try fallback extraction on raw stdout
-                fallback = extract_json_from_text(stdout, prefer_arrays=True)
-                if fallback.get("success"):
-                    return fallback
-                return {"success": False, "error": f"JSON parse error: {e}",
-                        "raw": stdout, "data": None}
+            wrapper, early = loads_or_extract(stdout)
+            if early is not None:
+                return early
         if isinstance(wrapper, dict) and "text" in wrapper:
             text = wrapper["text"]
             if isinstance(text, str):
-                text = text.strip()
-                if not text:
-                    return {"success": False, "error": "Empty text response", "raw": stdout, "data": None}
-                if text.startswith(("[", "{")):
-                    try:
-                        return {"success": True, "data": json.loads(text)}
-                    except json.JSONDecodeError:
-                        pass
-                return extract_json_from_text(text, prefer_arrays=True)
-            return {"success": True, "data": text}
+                return answer_from_text(text, raw=stdout)
+            return ok(text)
         # GROK'S ERROR ENVELOPE IS A DICT WITHOUT `text`, and the catch-all
         # below used to hand it back as the ANSWER. Measured 2026-08-19 on the
         # fixture capture: ten distinct injected failures — 401, 404, 400
@@ -432,14 +418,12 @@ class GrokProvider(LLMProvider):
             message = wrapper.get("message")
             if not isinstance(message, str) or not message.strip():
                 message = json.dumps(wrapper)
-            return {"success": False, "error": message.strip(),
-                    "raw": stdout, "data": None}
+            return fail(message.strip(), stdout)
         if isinstance(wrapper, dict) and "sessionId" in wrapper:
             # grok's envelope without its answer field: the bookkeeping is
             # not an answer. Another JSON object is the answer itself.
-            return {"success": False, "error": "grok's envelope carries no text field",
-                    "raw": stdout, "data": None}
-        return {"success": True, "data": wrapper}
+            return fail("grok's envelope carries no text field", stdout)
+        return ok(wrapper)
 
     def salvage_text(self, stdout: str) -> Optional[str]:
         """The wrapper's ``text``, never the wrapper or grok's error body (D2.5).

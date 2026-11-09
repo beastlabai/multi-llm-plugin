@@ -4,7 +4,6 @@ import re
 import shutil
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..json_extractor import extract_json_from_text
 from .base import (
     LAUNCH_DIAGNOSTICS_STDERR,
     STATUS_AUTH_FAILED,
@@ -22,6 +21,7 @@ from .base import (
     read_stdout,
     split_reasoning_effort,
 )
+from .parse_kit import answer_from_text, fail, loads_or_extract
 
 # Thinking effort values accepted by goose's ThinkingEffort parser, aliases
 # included (verified on goose 1.41.0). goose has no CLI flag for this — the
@@ -368,20 +368,14 @@ class GooseProvider(LLMProvider):
             # A text extraction over it would find the echoed user turn.
             return shape.failure("goose", stdout)
         else:
-            try:
-                envelope = json.loads(stdout)
-            except json.JSONDecodeError as e:
-                # Try fallback extraction on raw stdout
-                fallback = extract_json_from_text(stdout, prefer_arrays=True)
-                if fallback.get("success"):
-                    return fallback
-                return {"success": False, "error": f"JSON parse error: {e}",
-                        "raw": stdout, "data": None}
+            envelope, early = loads_or_extract(stdout)
+            if early is not None:
+                return early
 
         text = last_assistant_text(envelope)
 
         if text is None:
-            return {"success": False, "error": "No assistant message in output", "raw": stdout, "data": None}
+            return fail("No assistant message in output", stdout)
 
         # goose 1.53.0 puts a credential failure in a `type: "error"` part
         # (`kind: "authentication"`), not in text, and exits 1 with
@@ -389,22 +383,14 @@ class GooseProvider(LLMProvider):
         # without this branch, the run reported "Empty text response".
         error = last_assistant_error(envelope)
         if error:
-            return {"success": False, "error": error, "raw": stdout, "data": None}
+            return fail(error, stdout)
 
         text = text.strip()
 
         if "Ran into this error:" in text:
-            return {"success": False, "error": text, "raw": stdout, "data": None}
+            return fail(text, stdout)
 
-        if not text:
-            return {"success": False, "error": "Empty text response", "raw": stdout, "data": None}
-
-        if text.startswith(("[", "{")):
-            try:
-                return {"success": True, "data": json.loads(text)}
-            except json.JSONDecodeError:
-                pass
-        return extract_json_from_text(text, prefer_arrays=True)
+        return answer_from_text(text, raw=stdout)
 
     def salvage_text(self, stdout: str) -> Optional[str]:
         """The last assistant message's text, never the envelope (D2.5).

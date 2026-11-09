@@ -110,7 +110,7 @@ with `[DIFF_FAILED]`/`[DIFF_PARTIAL]`, never the phase).
 
 `.review-scope.json` records which scope id each result reviewed, so a resume re-runs a result
 from another scope (`[SCOPE_CHANGED]`, old file kept as `.stale-<id>`). The prompt's
-`{diff_access}` block is rendered by `llm_client.render_diff_access` from two
+`{diff_access}` block is rendered by `prompt_channels.render_diff_access` from two
 `generate`-profile declarations on the adapter, never from a provider name:
 `runs_shell_in_generate` (`True`/`False`/`None`,
 measured sources only, pinned by `TestShellDeclarationMatchesTheEvidence`) and `generate_read_scope`

@@ -75,6 +75,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.process_state",
         "utils.prompt_files",
         "utils.providers.failure_classifier",
+        "utils.providers.parse_kit",
         "utils.providers.reasoning",
         "utils.providers.result_envelope",
         "utils.providers.stdout_shape",
@@ -113,6 +114,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.landlock_dispatch",
         "utils.landlock_exec",
         "utils.llm_client",
+        "utils.prompt_channels",
         "utils.provider_outcome",
         "utils.provider_registry",
         "utils.providers",
@@ -265,7 +267,8 @@ KNOWN_UPWARD: Dict[Tuple[str, str], str] = {
     ("utils.result_files", "utils.progress_tracker"):
         "STATE_DONE, TERMINAL_STATES: belong in status_file (L1)",
     ("utils.llm_client", "utils.subagent_executor"):
-        "_VERSION_CACHE, _PROBE_VERSION_CACHE: belong in providers.base",
+        "_VERSION_CACHE, _PROBE_VERSION_CACHE: belong in providers.base; "
+        "_unconfirmed_kill: belongs in process_control, beside kill_tree's verdicts",
     ("utils.providers.result_envelope", "utils.providers.base"):
         "STATUS_* are defined in retry_ladder (L0); the two CATEGORY_* constants belong there too",
     ("utils.commit_front_door", "multi_llm"):
@@ -305,7 +308,7 @@ KNOWN_UPWARD: Dict[Tuple[str, str], str] = {
     # The front door (L5) also holds the stage a detached worker applies.
     ("utils.detach", "utils.commit_front_door"):
         "apply_stage, stage_takes_over: belong in a commit-stage module at L3",
-    ("utils.llm_client", "utils.commit_range"):
+    ("utils.prompt_channels", "utils.commit_range"):
         "pinned_head_read_rule: belongs in a commit-paths module, or becomes a parameter",
 }
 

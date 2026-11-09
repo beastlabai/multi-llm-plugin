@@ -57,6 +57,7 @@ inside a budget that ends before the abort SIGKILLs the worker.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import errno
 import itertools
 import json
@@ -112,14 +113,34 @@ def process_start_time(pid: int) -> Optional[str]:
     ``GetProcessTimes`` for the creation time. ``None`` means "this platform could
     not tell us", which callers must treat as *inconclusive*, never as a match.
     """
+    reading = sourced_start_time(pid)
+    return reading[1] if reading is not None else None
+
+
+#: Where a :func:`sourced_start_time` reading came from. The three are different
+#: representations of one instant, so two readings compare only when their
+#: sources match: Linux falls back to ``ps`` text when ``/proc`` cannot be read.
+START_SOURCE_PROC = "proc"  # /proc/<pid>/stat field 22, clock ticks since boot
+START_SOURCE_PS = "ps"  # ps -o lstart= text
+START_SOURCE_WINDOWS = "win"  # GetProcessTimes creation time, a FILETIME
+
+
+def sourced_start_time(pid: int) -> Optional[Tuple[str, str]]:
+    """:func:`process_start_time` with where it came from: ``(source, start
+    time)``, the source one of the ``START_SOURCE_*`` words, or ``None`` if
+    unknown. A start time recorded to be compared later is recorded with its
+    source, and a reading from another source is inconclusive, never a
+    mismatch."""
     if pid is None or pid <= 0:
         return None
     if IS_WINDOWS:
-        return _windows_start_time(pid)
+        value = _windows_start_time(pid)
+        return (START_SOURCE_WINDOWS, value) if value is not None else None
     linux = _linux_start_time(pid)
     if linux is not None:
-        return linux
-    return _ps_start_time(pid)
+        return START_SOURCE_PROC, linux
+    value = _ps_start_time(pid)
+    return (START_SOURCE_PS, value) if value is not None else None
 
 
 def _linux_start_time(pid: int) -> Optional[str]:
@@ -203,6 +224,51 @@ def process_alive(pid: Optional[int]) -> bool:
     return True
 
 
+def process_liveness(pid: Optional[int]) -> str:
+    """:data:`ALIVE` / :data:`DEAD` / :data:`UNKNOWN` for *pid*, where
+    :func:`process_alive` folds a probe that failed into "not alive": only a
+    pid the platform says does not exist is :data:`DEAD`, so a caller that
+    deletes on death never acts on a query that merely failed."""
+    if not pid or pid <= 0:
+        return DEAD
+    if IS_WINDOWS:  # pragma: no cover - Windows
+        return _windows_liveness(pid)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return DEAD
+    except PermissionError:
+        return ALIVE  # alive but owned by another user
+    except OSError:
+        return UNKNOWN
+    return ALIVE
+
+
+def _windows_liveness(pid: int) -> str:  # pragma: no cover - Windows
+    """``OpenProcess`` refusing an unknown pid (``ERROR_INVALID_PARAMETER``)
+    is death; any other failure, of it or of ``GetExitCodeProcess``, is
+    unknown."""
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    except Exception:
+        return UNKNOWN
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    STILL_ACTIVE = 259
+    ERROR_INVALID_PARAMETER = 87
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return DEAD if ctypes.get_last_error() == ERROR_INVALID_PARAMETER else UNKNOWN
+    try:
+        code = ctypes.c_ulong()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return UNKNOWN
+        return ALIVE if code.value == STILL_ACTIVE else DEAD
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _windows_alive(pid: int) -> bool:  # pragma: no cover - Windows
     try:
         import ctypes
@@ -245,6 +311,23 @@ def identity() -> Dict[str, Any]:
     """This process's own ``(pid, process_start_time)`` pair."""
     pid = os.getpid()
     return {"pid": pid, "process_start_time": process_start_time(pid)}
+
+
+def pid_namespace() -> Optional[str]:
+    """The PID namespace this process sees pids in, or ``None`` if unknown.
+
+    Linux reads the ``/proc/self/ns/pid`` link (``pid:[4026531836]``). A
+    recorded ``(pid, start time)`` means a process only in the namespace it was
+    recorded in: two processes sharing a temp directory from different
+    namespaces each see the other's pid as gone or reused. ``None`` elsewhere,
+    and wherever the link cannot be read.
+    """
+    if IS_WINDOWS:  # pragma: no cover - Windows
+        return None
+    try:
+        return os.readlink("/proc/self/ns/pid")
+    except (OSError, AttributeError):
+        return None
 
 
 def process_group_id(pid: Optional[int] = None) -> Optional[int]:
@@ -2356,6 +2439,110 @@ def _job_api() -> Optional[Any]:
     return _JOB_API[0]
 
 
+class ChildLedger:
+    """The children :func:`popen_tree` started inside one :func:`child_ledger`
+    block, and what their spawner recorded about stopping them.
+
+    A child has *ended* when its spawner recorded a confirmed stop
+    (:func:`note_stop`), or when it was seen to exit and no unconfirmed stop
+    was recorded for it. An unconfirmed stop sticks: a CLI that exited while a
+    process group it started survived the sweep has not ended. A child still
+    running, or one whose exit cannot be read, has not ended either.
+    """
+
+    def __init__(self, parent: Optional["ChildLedger"] = None) -> None:
+        self.parent = parent
+        self.closed = False
+        self._lock = threading.Lock()
+        #: ``[child, stop]``: stop is ``None`` (none recorded), True or False.
+        self._children: List[List[Any]] = []
+
+    def _entry(self, child: Any) -> List[Any]:
+        """*child*'s entry, added when missing; called with the lock held."""
+        for entry in self._children:
+            if entry[0] is child:
+                return entry
+        entry = [child, None]
+        self._children.append(entry)
+        return entry
+
+    def add(self, child: Any) -> None:
+        with self._lock:
+            self._entry(child)
+
+    def stopped(self, child: Any, confirmed: bool) -> None:
+        with self._lock:
+            entry = self._entry(child)
+            entry[1] = bool(confirmed) and entry[1] is not False
+
+    def all_ended(self) -> bool:
+        """Has every child recorded here ended? True when there is none."""
+        with self._lock:
+            entries = [tuple(entry) for entry in self._children]
+        for child, stop in entries:
+            if stop is False:
+                return False
+            if stop is None and not _child_exited(child):
+                return False
+        return True
+
+
+def _child_exited(child: Any) -> bool:
+    """Was *child* seen to exit? Its ``Popen`` exit status, read without waiting."""
+    if getattr(child, "returncode", None) is not None:
+        return True
+    try:
+        return child.poll() is not None
+    except Exception:  # noqa: BLE001 - an unreadable exit is not an exit
+        return False
+
+
+_CHILD_LEDGER: "contextvars.ContextVar[Optional[ChildLedger]]" = contextvars.ContextVar(
+    "process_control_child_ledger", default=None
+)
+
+
+@contextmanager
+def child_ledger() -> Iterator[ChildLedger]:
+    """Record every child :func:`popen_tree` starts in this block's context.
+
+    Blocks nest: a child started in an inner block is in every open ledger
+    around it too. Each context has its own, so concurrent threads never
+    record each other's children.
+    """
+    ledger = ChildLedger(_CHILD_LEDGER.get())
+    token = _CHILD_LEDGER.set(ledger)
+    try:
+        yield ledger
+    finally:
+        ledger.closed = True
+        try:
+            _CHILD_LEDGER.reset(token)
+        except ValueError:  # left in another context: the closed ledger takes no more
+            pass
+
+
+def _open_ledgers() -> Iterator[ChildLedger]:
+    ledger = _CHILD_LEDGER.get()
+    while ledger is not None:
+        if not ledger.closed:
+            yield ledger
+        ledger = ledger.parent
+
+
+def note_stop(child: Any, confirmed: bool) -> None:
+    """Record how *child*'s spawner stopped it, in every open ledger.
+
+    *confirmed* is the spawner's verdict on its own stop: True only when the
+    child and everything the stop reached were confirmed gone. Never raises.
+    """
+    try:
+        for ledger in _open_ledgers():
+            ledger.stopped(child, confirmed)
+    except Exception:  # noqa: BLE001 - bookkeeping never fails a teardown
+        pass
+
+
 def popen_tree(args: Any, **kwargs: Any) -> Tuple[Any, Optional[TreeJob]]:
     """``subprocess.Popen(args, **kwargs)``, and on Windows the
     :class:`TreeJob` that holds the child's whole tree.
@@ -2377,7 +2564,8 @@ def popen_tree(args: Any, **kwargs: Any) -> Tuple[Any, Optional[TreeJob]]:
     before anything is started when that record cannot be written, or when an
     abort has closed the run's launch gate (:func:`close_launch_gate`). The
     bounded version, help and auth probes run through ``subprocess.run`` and
-    are not recorded.
+    are not recorded. The child also goes into every open
+    :func:`child_ledger`.
     """
     token = _record_launch()
     try:
@@ -2386,6 +2574,8 @@ def popen_tree(args: Any, **kwargs: Any) -> Tuple[Any, Optional[TreeJob]]:
         _record_failed(token)
         raise
     _record_spawned(token, proc)
+    for ledger in _open_ledgers():
+        ledger.add(proc)
     return proc, job
 
 

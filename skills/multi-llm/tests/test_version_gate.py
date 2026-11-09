@@ -696,16 +696,18 @@ class TestTheOneOffsAreGone:
     """The absorption, asserted structurally rather than by reading the diff."""
 
     def test_no_adapter_keeps_a_private_help_sniff_of_the_absorbed_three(self):
-        """L7/M7 (claude) and M1 (cursor) hand their gate to the shared one.
+        """L7/M7 (claude) and M1 (cursor) hand their gate to the shared one, and
+        so does opencode's ``--pure`` sniff, the last local copy (its
+        ``help_argv`` reads ``opencode run --help``).
 
-        Named by module rather than by roster on purpose: these are the three
-        §5.4.1 one-offs M14 was scheduled to absorb, and this asserts the
-        absorption happened. A *fourth* adapter growing its own copy is a
+        Named by module rather than by roster on purpose: these are the
+        §5.4.1 one-offs scheduled for absorption, and this asserts the
+        absorption happened. Another adapter growing its own copy is a
         different question, answered by the next test.
         """
-        from utils.providers import claude_code, cursor_agent
+        from utils.providers import claude_code, cursor_agent, opencode
 
-        for module in (claude_code, cursor_agent):
+        for module in (claude_code, cursor_agent, opencode):
             for attribute in ("_read_help_tokens", "_probe_help_tokens",
                               "_help_flag_tokens", "_gateable_binary"):
                 assert not hasattr(module, attribute), (

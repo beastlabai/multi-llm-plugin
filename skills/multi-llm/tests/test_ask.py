@@ -1240,7 +1240,7 @@ class TestOutputChannelVariants:
         assert len(stdout_out.encode("utf-8")) <= len(file_out.encode("utf-8"))
 
     def test_unknown_or_absent_provider_renders_the_file_variant(self):
-        # The posture llm_client.render_output_location already takes: a config
+        # The posture prompt_channels.render_output_location already takes: a config
         # naming an adapter this build no longer ships gets what every caller
         # got before the field existed.
         assert self._render(None) == self._render("claude-code")

@@ -858,6 +858,12 @@ class ClaudeCodeProvider(LLMProvider):
         class's, shared by every adapter and every caller), so this is §9.3.b's
         backstop used deliberately and explicitly: the run's pinned plan path,
         or CWD when no pre-flight set one.
+
+        A config that cannot be read **raises** here, unlike the shared
+        ``child_env._provider_block``, which reads it as no configuration: this
+        block holds the fallback list :meth:`fallback_models` validates so a
+        malformed entry fails the run before a child is spawned, and reading a
+        broken config as empty would run without the fallback the user set.
         """
         from ..provider_registry import get_run_anchor, load_config  # import cycle
 

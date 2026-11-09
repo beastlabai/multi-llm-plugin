@@ -1,10 +1,8 @@
 """Google Antigravity CLI (agy) provider implementation with JSON envelope parsing."""
-import json
 import shutil
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..json_extractor import extract_json_from_text
 from .base import (
     LAUNCH_DIAGNOSTICS_STDERR,
     STDOUT_ENVELOPE,
@@ -17,6 +15,7 @@ from .base import (
     read_stdout,
     split_reasoning_effort,
 )
+from .parse_kit import answer_from_text, fail, loads_or_extract, ok
 
 # Reasoning effort values accepted by `agy --effort` (read from `agy --help` on
 # agy 1.1.13, offline and unauthenticated):
@@ -296,33 +295,22 @@ class AgyProvider(LLMProvider):
         elif shape.kind != STDOUT_PLAIN:
             return shape.failure("agy", stdout)
         else:
-            try:
-                envelope = json.loads(stdout)
-            except json.JSONDecodeError as e:
-                # Try fallback extraction on raw stdout
-                fallback = extract_json_from_text(stdout, prefer_arrays=True)
-                if fallback.get("success"):
-                    return fallback
-                return {"success": False, "error": f"JSON parse error: {e}",
-                        "raw": stdout, "data": None}
+            envelope, early = loads_or_extract(stdout)
+            if early is not None:
+                return early
 
         if isinstance(envelope, dict) and "status" in envelope:
             status = envelope.get("status")
             if status != "SUCCESS":
                 error = envelope.get("error") or f"agy returned status {status}"
-                return {"success": False, "error": error, "raw": stdout, "data": None}
+                return fail(error, stdout)
 
             text = envelope.get("response")
-            if not isinstance(text, str) or not text.strip():
-                return {"success": False, "error": "Empty response in agy output", "raw": stdout, "data": None}
-
-            text = text.strip()
-            if text.startswith(("[", "{")):
-                try:
-                    return {"success": True, "data": json.loads(text)}
-                except json.JSONDecodeError:
-                    pass
-            return extract_json_from_text(text, prefer_arrays=True)
+            if not isinstance(text, str):
+                return fail("Empty response in agy output", stdout)
+            return answer_from_text(
+                text, raw=stdout, empty_error="Empty response in agy output"
+            )
 
         # Valid JSON without the envelope shape: treat it as the answer itself
-        return {"success": True, "data": envelope}
+        return ok(envelope)

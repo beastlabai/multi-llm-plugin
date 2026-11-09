@@ -47,6 +47,9 @@ from .base import (
     split_reasoning_effort,
     version_tuple,
 )
+from .child_env import _provider_block
+from .parse_kit import direct_json, fail
+from .version_gate import reset_flag_gate_cache
 
 # OpenCode ships a built-in `plan` agent whose permission set denies every edit
 # tool ("Plan mode. Disallows all edit tools." — verified against the agent
@@ -542,32 +545,6 @@ def _warn_once(key: str, message: str) -> None:
     print(message, file=sys.stderr)
 
 
-def _load_config(anchor: Optional[str] = None) -> Dict[str, Any]:
-    """multi-llm's merged config, or ``{}`` if it cannot be read.
-
-    A config problem may never turn into a refusal or a crash on a dispatch
-    path, so every failure here resolves to "no configuration", which means the
-    documented defaults.
-    """
-    try:  # pragma: no cover - import shim mirrors the rest of utils/
-        from ..provider_registry import load_config
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.provider_registry import load_config  # type: ignore[no-redef]
-    try:
-        config = load_config(anchor=anchor)
-    except Exception:  # noqa: BLE001 - a config read may not break a dispatch
-        return {}
-    return config if isinstance(config, dict) else {}
-
-
-def _opencode_block(anchor: Optional[str] = None) -> Dict[str, Any]:
-    providers = _load_config(anchor).get("providers")
-    if not isinstance(providers, dict):
-        return {}
-    block = providers.get("opencode")
-    return block if isinstance(block, dict) else {}
-
-
 def hermetic_policy(anchor: Optional[str] = None) -> str:
     """Resolve ``providers.opencode.hermetic`` (default :data:`HERMETIC_DEFAULT`).
 
@@ -575,7 +552,7 @@ def hermetic_policy(anchor: Optional[str] = None) -> str:
     default: this is read on every dispatch, far from any parser, and raising
     out of the middle of a fan-out over a typo would be worse than the typo.
     """
-    value = _opencode_block(anchor).get("hermetic")
+    value = _provider_block("opencode", anchor).get("hermetic")
     if value is None:
         return HERMETIC_DEFAULT
     if isinstance(value, bool):
@@ -724,58 +701,6 @@ def _parse_model_listing(text: str) -> Optional[FrozenSet[str]]:
     if not slugs or len(slugs) * 2 < len(lines):
         return None
     return frozenset(slugs)
-
-
-def _read_help_tokens(binary: str) -> frozenset:
-    """The long options ``opencode run --help`` documents (§5.4.1's flag gate).
-
-    **The last local copy.** This was a near-twin of the claude-code adapter's
-    own sniff; M14 has since landed the shared gate
-    (``version_gate.read_help_tokens`` / ``LLMProvider.supports_flag``) and deleted the
-    copies in ``claude_code.py`` and ``cursor_agent.py``, together with codex's
-    prose exemption (now ``flags_verified_at_floor``). This one was outside that
-    task's file set and so still stands. Folding it in is a two-line change —
-    ``help_argv = ("run", "--help")`` on the adapter plus ``supports_flag``
-    instead of the body below — and the only reason it is still here is
-    ownership, not design.
-
-    Failure posture — decline the *flag*, keep the *run*: a timeout, a non-zero
-    exit, an unreadable stream or *anything else this probe can hit* resolves to
-    the empty set, i.e. the flag is treated as unsupported and simply omitted.
-    The `except` is deliberately total: a diagnostic read of a binary's own help
-    text may not be the thing that ends a dispatch, and the worst outcome of
-    declining is the reduced containment the caller is warned about.
-    """
-    cached = _HELP_TOKENS.get(binary)
-    if cached is not None:
-        return cached
-    env = dict(os.environ)
-    env["TERM"] = "dumb"
-    env["COLUMNS"] = "1000"
-    env["NO_COLOR"] = "1"
-    tokens: frozenset = frozenset()
-    try:
-        completed = subprocess.run(
-            [binary, "run", "--help"],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=5,
-            env=env,
-        )
-        if completed.returncode == 0:
-            text = f"{completed.stdout or ''}\n{completed.stderr or ''}"
-            tokens = frozenset(_FLAG_TOKEN_RE.findall(text))
-    except Exception:  # noqa: BLE001 - see the failure posture above
-        tokens = frozenset()
-    _HELP_TOKENS[binary] = tokens
-    return tokens
-
-
-_FLAG_TOKEN_RE = re.compile(r"--[A-Za-z0-9][A-Za-z0-9-]*")
-_HELP_TOKENS: Dict[str, frozenset] = process_cache("utils.providers.opencode._HELP_TOKENS")
 
 
 class _UnreconstructibleProvider(Exception):
@@ -1757,9 +1682,9 @@ def _user_defines_provider_from_files(prefix: str) -> bool:
 
 
 def reset_hermetic_state() -> None:
-    """Forget the memoised help read, Lane A's version read, the user-config
+    """Forget the memoised help reads, Lane A's version read, the user-config
     read and the warn-once set (tests only)."""
-    _HELP_TOKENS.clear()
+    reset_flag_gate_cache()
     with _WARNED_LOCK:
         _WARNED.clear()
     with _LANE_A_VERSION_LOCK:
@@ -1832,6 +1757,9 @@ class OpenCodeProvider(LLMProvider):
     #: entry the day the probe stops answering (see hosts/capabilities.yaml).
     credential_free_models = frozenset({"opencode/big-pickle"})
     version_cmd = ("opencode", "--version")
+    # The flag gate reads the `run` subcommand's own help: `--pure` is one of
+    # `opencode run`'s options, never the top-level command's.
+    help_argv = ("run", "--help")
     # SUPPORT POLICY (2026-10-02): the newest opencode release is the only one
     # supported, so the floor and the release the parser fixtures were captured
     # from are one version, always. Below it the executor refuses (exit 3,
@@ -2200,7 +2128,7 @@ class OpenCodeProvider(LLMProvider):
 
     def hermetic_config_providers(self, anchor: Optional[str] = None) -> Tuple[str, ...]:
         """``providers.opencode.config_providers`` ids: what a hermetic slot rebuilds."""
-        declared = _opencode_block(anchor).get("config_providers")
+        declared = _provider_block("opencode", anchor).get("config_providers")
         if not isinstance(declared, dict):
             return ()
         return tuple(str(key) for key in declared)
@@ -2376,8 +2304,7 @@ class OpenCodeProvider(LLMProvider):
         slot = _ACTIVE.get()
         if slot is None or not slot.get("config_home"):
             return []
-        binary = shutil.which("opencode")
-        if binary and PURE_FLAG in _read_help_tokens(binary):
+        if self.supports_flag(PURE_FLAG):
             return [PURE_FLAG]
         _warn_once(
             "pure-unsupported",
@@ -2423,7 +2350,7 @@ class OpenCodeProvider(LLMProvider):
         base_model, _effort = split_reasoning_effort(model or "", REASONING_EFFORTS)
         prefix = base_model.split("/", 1)[0].strip() if "/" in base_model else ""
         if prefix:
-            declared = _opencode_block(anchor).get("config_providers")
+            declared = _provider_block("opencode", anchor).get("config_providers")
             if isinstance(declared, dict) and isinstance(declared.get(prefix), dict):
                 provider_block = {prefix: declared[prefix]}
             elif _user_defines_provider(prefix):
@@ -2732,16 +2659,6 @@ class OpenCodeProvider(LLMProvider):
                 by_message.setdefault(key, []).append(text)
         last_message = by_message.get(last_key, []) if last_key is not None else []
         return _OpenCodeText(parts, last_message, saw_event)
-
-    @staticmethod
-    def _direct_json(text: str) -> Optional[Dict[str, Any]]:
-        """Parse ``text`` as one complete JSON document, or return None."""
-        if text.startswith(('[', '{')):
-            try:
-                return {"success": True, "data": json.loads(text)}
-            except json.JSONDecodeError:
-                pass
-        return None
 
     def classify_auth_probe(
         self, stdout: str, stderr: str, exit_code: int = 0
@@ -3102,7 +3019,7 @@ class OpenCodeProvider(LLMProvider):
             reason = self.describe_failure(stdout, stderr)
             if reason:
                 error = f"OpenCode reported an error: {reason}"
-            return {"success": False, "error": error, "raw": stdout, "data": None}
+            return fail(error, stdout)
 
         last = text_parts[-1].strip()
         concatenated = "".join(text_parts).strip()
@@ -3112,7 +3029,7 @@ class OpenCodeProvider(LLMProvider):
         joined = "\n".join(text_parts).strip()
 
         if not concatenated:
-            return {"success": False, "error": "Empty text response", "raw": stdout, "data": None}
+            return fail("Empty text response", stdout)
 
         # Exact parses first — they are unambiguous. The concatenation covers
         # a single document that arrived split across parts (a split can fall
@@ -3120,7 +3037,7 @@ class OpenCodeProvider(LLMProvider):
         # covers the ordinary case where the closing message is the answer.
         for candidate in (concatenated, last):
             if candidate:
-                direct = self._direct_json(candidate)
+                direct = direct_json(candidate)
                 if direct is not None:
                     return direct
 

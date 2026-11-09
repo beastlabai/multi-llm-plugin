@@ -84,6 +84,7 @@ from .base import (
     ReasoningLadder,
     StructuredSchema,
 )
+from .parse_kit import fail
 from .private_home import PrivateHomes
 
 #: M12 (§6.1): kimi's position on the ladder is *declined*, and the module
@@ -463,22 +464,13 @@ class KimiProvider(LLMProvider):
         answer = last_assistant_content(stdout)
 
         if answer is None:
-            return {
-                "success": False,
-                "error": (
-                    "no assistant record in kimi stream-json output "
-                    "(the run produced only meta records)"
-                ),
-                "raw": stdout,
-                "data": None,
-            }
+            return fail(
+                "no assistant record in kimi stream-json output "
+                "(the run produced only meta records)",
+                stdout,
+            )
         if not answer.strip():
-            return {
-                "success": False,
-                "error": "Empty assistant content",
-                "raw": stdout,
-                "data": None,
-            }
+            return fail("Empty assistant content", stdout)
         return extract_json_from_text(answer, prefer_arrays=True)
 
     def salvage_text(self, stdout: str) -> Optional[str]:

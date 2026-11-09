@@ -46,6 +46,7 @@ from utils import subagent_executor as executor  # noqa: E402
 from utils import subagent_prompts  # noqa: E402
 from utils import write_safety  # noqa: E402
 from utils.providers import opencode as oc  # noqa: E402
+from utils.providers import version_gate  # noqa: E402
 from utils.providers.base import PROFILE_AGENT_WRITE  # noqa: E402
 from utils.providers.claude_code import (  # noqa: E402
     JSON_SCHEMA_FLAG,
@@ -3724,8 +3725,14 @@ class TestReadDryRun:
         reset_flag_gate_cache()
         # `--pure` renders only when `opencode run --help` documents it; the mock
         # CLI's help does not, so pin the sniff rather than the adapter's rule.
-        monkeypatch.setattr(oc, "_read_help_tokens",
-                            lambda binary: frozenset({oc.PURE_FLAG}))
+        real_read = version_gate.read_help_tokens
+
+        def _help(binary, *, help_argv=("--help",), **kw):
+            if tuple(help_argv) == ("run", "--help"):  # opencode's `--pure` read only
+                return frozenset({oc.PURE_FLAG})
+            return real_read(binary, help_argv=help_argv, **kw)
+
+        monkeypatch.setattr(version_gate, "read_help_tokens", _help)
         # Deterministic: `_user_defines_provider` reads the *inherited* config
         # home, and a developer's own opencode config would decide the refusal.
         monkeypatch.setenv("XDG_CONFIG_HOME", str(env.tmp_path / "xdg-config"))

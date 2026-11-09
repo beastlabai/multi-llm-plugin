@@ -80,7 +80,6 @@ from .llm_client import (
     SALVAGE_FAILURE_TIMEOUT,
     SALVAGE_TEXT_KEY,
     SANDBOX_BYPASSED,
-    STDOUT_OUTPUT_LOCATION,
     _INCIDENTAL_RUNG_IDS,
     _redact,
     armed_homes_window,
@@ -92,9 +91,12 @@ from .llm_client import (
     invoke_with_provider,
     invoke_with_file_output,
     misnamed_result_baseline,
+    requested_result_baseline,
+)
+from .prompt_channels import (
+    STDOUT_OUTPUT_LOCATION,
     render_output_location,
     render_working_limits,
-    requested_result_baseline,
 )
 from .providers.base import (
     CATEGORY_CONNECTION_ERROR,

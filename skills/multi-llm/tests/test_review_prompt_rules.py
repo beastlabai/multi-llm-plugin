@@ -31,7 +31,7 @@ import yaml
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SKILL_ROOT))
 
-from utils.llm_client import (  # noqa: E402
+from utils.prompt_channels import (  # noqa: E402
     FILE_OUTPUT_LOCATION,
     STDOUT_OUTPUT_LOCATION,
     render_working_limits,

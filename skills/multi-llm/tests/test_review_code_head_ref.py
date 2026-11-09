@@ -48,7 +48,7 @@ from harness import SkillRunner  # noqa: E402
 from utils import cli_common  # noqa: E402
 from utils.commit_range import DATA_UNDER_REVIEW, pinned_head_read_rule  # noqa: E402
 from utils.git_utils import empty_tree_id, paths_changed_since  # noqa: E402
-from utils.llm_client import render_diff_access  # noqa: E402
+from utils.prompt_channels import render_diff_access  # noqa: E402
 from utils.state_manager import StateManager  # noqa: E402
 from utils.subagent_prompts import (  # noqa: E402
     CODE_REVIEW_VALIDATION_GUIDANCE,

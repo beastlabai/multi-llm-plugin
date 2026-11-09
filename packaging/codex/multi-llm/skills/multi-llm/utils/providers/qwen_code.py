@@ -160,6 +160,7 @@ from .base import (
     ReasoningLadder,
     StructuredSchema,
 )
+from .parse_kit import fail
 from .private_home import PrivateHomes
 from .result_envelope import envelope_verdict, parse_result_envelope
 
@@ -589,30 +590,15 @@ class QwenCodeProvider(LLMProvider):
         """
         text = (stdout or "").strip()
         if not text:
-            return {
-                "success": False,
-                "error": self._empty_stdout_reason(stderr),
-                "raw": stdout,
-                "data": None,
-            }
+            return fail(self._empty_stdout_reason(stderr), stdout)
 
         try:
             records = json.loads(text)
         except ValueError as exc:
-            return {
-                "success": False,
-                "error": f"JSON parse error: {exc}",
-                "raw": stdout,
-                "data": None,
-            }
+            return fail(f"JSON parse error: {exc}", stdout)
 
         if not isinstance(records, list):
-            return {
-                "success": False,
-                "error": "qwen -o json did not emit a JSON array of records",
-                "raw": stdout,
-                "data": None,
-            }
+            return fail("qwen -o json did not emit a JSON array of records", stdout)
 
         result_records = [
             record
@@ -620,15 +606,11 @@ class QwenCodeProvider(LLMProvider):
             if isinstance(record, dict) and record.get("type") == "result"
         ]
         if not result_records:
-            return {
-                "success": False,
-                "error": (
-                    "no result record in qwen output "
-                    "(the run produced no terminal envelope)"
-                ),
-                "raw": stdout,
-                "data": None,
-            }
+            return fail(
+                "no result record in qwen output "
+                "(the run produced no terminal envelope)",
+                stdout,
+            )
         record = result_records[-1]
 
         # Rule 1 -- the envelope's own verdict, where it has one. Since 0.25.0
@@ -637,43 +619,24 @@ class QwenCodeProvider(LLMProvider):
         # read out of the object rather than reported as its Python repr.
         subtype = record.get("subtype")
         if record.get("is_error") or (subtype is not None and subtype != "success"):
-            return {
-                "success": False,
-                "error": self._record_error_text(record),
-                "raw": stdout,
-                "data": None,
-            }
+            return fail(self._record_error_text(record), stdout)
 
         answer = record.get("result")
         if not isinstance(answer, str):
-            return {
-                "success": False,
-                "error": (
-                    "qwen result record carries no result string "
-                    "(an error-shaped envelope reported success)"
-                ),
-                "raw": stdout,
-                "data": None,
-            }
+            return fail(
+                "qwen result record carries no result string "
+                "(an error-shaped envelope reported success)",
+                stdout,
+            )
 
         # Rule 2 -- the marker, which is the ONLY signal on seven of the eight
         # failure shapes measured at 0.21.13 (the floor). 0.25.0 sends those
         # shapes through rule 1 instead.
         if _API_ERROR_MARKER.search(answer):
-            return {
-                "success": False,
-                "error": answer.strip(),
-                "raw": stdout,
-                "data": None,
-            }
+            return fail(answer.strip(), stdout)
 
         if not answer.strip():
-            return {
-                "success": False,
-                "error": "Empty result",
-                "raw": stdout,
-                "data": None,
-            }
+            return fail("Empty result", stdout)
 
         return parse_result_envelope(json.dumps(record))
 

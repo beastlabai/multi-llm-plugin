@@ -1912,7 +1912,7 @@ class TestTheRecordedPromptNamesTheAttemptsMinutes:
             ))
 
     def test_the_reconstructed_prompt_equals_the_sent_prompt(self, tmp_path):
-        from utils.llm_client import render_working_limits
+        from utils.prompt_channels import render_working_limits
 
         sent = []
         result = self._run(tmp_path, "cursor-agent:auto", 1200, sent)
@@ -1935,7 +1935,7 @@ class TestTheRecordedPromptNamesTheAttemptsMinutes:
         719.6 s pins the rounding: the placeholder uses `attempt_timeout`'s
         `round` (720 s, 12 minutes), where a truncated 719 s would read 11.
         """
-        from utils.llm_client import render_working_limits
+        from utils.prompt_channels import render_working_limits
 
         sent = []
         result = self._run(tmp_path, "muse:muse-spark-1.2", 719.6, sent)

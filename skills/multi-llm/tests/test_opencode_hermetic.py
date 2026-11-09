@@ -61,6 +61,7 @@ from utils import subagent_executor as executor  # noqa: E402
 from utils import dispatch_spawn  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
 from utils.providers import opencode as oc  # noqa: E402
+from utils.providers import version_gate  # noqa: E402
 from utils.providers.base import (  # noqa: E402
     PROFILE_AGENT_READONLY,
     PROFILE_AGENT_WRITE,
@@ -149,13 +150,16 @@ def _child_env(provider, model: str, profile: str) -> dict:
 
 
 def _pure_help(monkeypatch, *, supported: bool = True) -> None:
-    """Pin the `--help` token sniff instead of spawning the real binary."""
+    """Pin the shared gate's help sniff instead of spawning the real binary."""
     monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
-    monkeypatch.setattr(
-        oc,
-        "_read_help_tokens",
-        lambda binary: frozenset({oc.PURE_FLAG}) if supported else frozenset(),
-    )
+    real_read = version_gate.read_help_tokens
+
+    def _help(binary, *, help_argv=("--help",), **kw):
+        if tuple(help_argv) != ("run", "--help"):  # another adapter's gate
+            return real_read(binary, help_argv=help_argv, **kw)
+        return frozenset({oc.PURE_FLAG}) if supported else frozenset()
+
+    monkeypatch.setattr(version_gate, "read_help_tokens", _help)
 
 
 #: The temp dir every process on the machine shares.
@@ -567,6 +571,47 @@ class TestGateCProjectConfigIsolation:
         assert env["XDG_CONFIG_HOME"].split(os.sep)[-1].startswith(
             oc.HERMETIC_DIR_PREFIX
         )
+
+    @pytest.mark.skipif(os.name == "nt", reason="a POSIX shell script stands in for opencode")
+    def test_the_shared_gate_reads_run_help_through_the_child_env(
+        self, provider, user_xdg, tmp_path, monkeypatch
+    ):
+        """The help sniff is the shared gate's: one ``opencode run --help`` read,
+        spawned with the env the builder composes for a dispatch (inside a
+        hermetic slot, opencode's inherited config carriers stripped)."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        record = tmp_path / "probe.txt"
+        fake = bin_dir / "opencode"
+        fake.write_text(
+            "#!/bin/sh\n"
+            f'printf "%s|%s|%s\\n" "$*" "${{OPENCODE_CONFIG-unset}}" "$TERM" >> "{record}"\n'
+            'echo "  --pure   run without external plugins"\n',
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+        monkeypatch.setenv("OPENCODE_CONFIG", str(tmp_path / "user-opencode.json"))
+
+        assert not hasattr(oc, "_read_help_tokens")
+        assert provider.help_argv == ("run", "--help")
+        with provider.hermetic_dispatch(PROFILE_AGENT_READONLY, "opencode/sonnet"):
+            argv = provider.build_agent_command(
+                "hi", "opencode/sonnet", PROFILE_AGENT_READONLY
+            )
+            again = provider.build_agent_command(
+                "hi", "opencode/sonnet", PROFILE_AGENT_READONLY
+            )
+        assert oc.PURE_FLAG in argv and oc.PURE_FLAG in again
+        calls = record.read_text(encoding="utf-8").splitlines()
+        assert calls == ["run --help|unset|dumb"], "one memoised read, in the child env"
+
+    def test_reset_hermetic_state_forgets_the_shared_help_read(self):
+        key = ("/usr/bin/opencode", ("run", "--help"))
+        with version_gate._HELP_TOKENS_LOCK:
+            version_gate._HELP_TOKENS[key] = frozenset()
+        oc.reset_hermetic_state()
+        assert key not in version_gate._HELP_TOKENS
 
     @pytest.mark.live
     def test_debug_config_yields_the_empty_shape(self, provider, tmp_path):

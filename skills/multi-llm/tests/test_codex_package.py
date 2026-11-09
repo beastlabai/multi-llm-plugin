@@ -917,10 +917,11 @@ _ALLOWED_ABSOLUTE = {
     f"{PAYLOAD}/utils/git_utils.py": {"/dev/null"},
     f"{PAYLOAD}/utils/git_diff.py": {"/dev/null"},
     # `/proc/self/exe`: the loader the executable names, the owned kill's ABI check;
-    # `/proc/self/stat`: whether `/proc` is there, for the identity kill.
+    # `/proc/self/stat`: whether `/proc` is there, for the identity kill;
+    # `/proc/self/ns/pid`: the PID namespace a recorded owner is judged in.
     f"{PAYLOAD}/utils/process_control.py": {
         "/dev/fd", "/dev/null", "/proc", "/proc/self/fd", "/proc/self/exe",
-        "/proc/self/stat"},
+        "/proc/self/ns/pid", "/proc/self/stat"},
     f"{PAYLOAD}/utils/run_registry.py": {"/proc"},
     # `/proc/self/fd`: the O_TMPFILE restore links its unnamed staging file
     # through its own descriptor's entry (U87).

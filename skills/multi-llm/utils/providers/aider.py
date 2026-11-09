@@ -16,6 +16,7 @@ from .base import (
     StructuredSchema,
     split_reasoning_effort,
 )
+from .parse_kit import fail, ok
 
 # Reasoning effort values passed to aider's --reasoning-effort, which is an
 # unvalidated pass-through (verified on aider 0.86.2): for openrouter/ models
@@ -1052,7 +1053,7 @@ class AiderProvider(LLMProvider):
         """
         stdout = stdout.strip()
         if not stdout:
-            return {"success": False, "error": "Empty output from aider", "raw": stdout, "data": None}
+            return fail("Empty output from aider", stdout)
         lines = _drop_confirmation_pairs(self._drop_tolerated_lines(stdout).splitlines())
         text = "\n".join(lines)
 
@@ -1063,24 +1064,19 @@ class AiderProvider(LLMProvider):
                 if not line.strip().startswith(("Tokens:", "Cost:"))
             ).strip()
             if not answer:
-                return {"success": False, "error": "Empty answer after ANSWER marker", "raw": stdout, "data": None}
+                return fail("Empty answer after ANSWER marker", stdout)
             if answer.startswith(("[", "{")):
                 try:
                     data = json.loads(answer)
                 except json.JSONDecodeError:
                     pass
                 else:
-                    return {"success": True, "data": self._unwrap_file_write_envelope(data)}
+                    return ok(self._unwrap_file_write_envelope(data))
             result = extract_json_from_text(answer, prefer_arrays=True)
             if result.get("success"):
                 result["data"] = self._unwrap_file_write_envelope(result["data"])
                 return result
-            return {
-                "success": False,
-                "error": f"No JSON found in aider answer: {answer[:500]}",
-                "raw": stdout,
-                "data": None,
-            }
+            return fail(f"No JSON found in aider answer: {answer[:500]}", stdout)
 
         # No ANSWER marker (e.g. auth error / rate-limit give-up printed to
         # stdout with exit code 0). An exit-0 failure on a diagnostic line wins
@@ -1089,7 +1085,7 @@ class AiderProvider(LLMProvider):
         # body carrying any array got written as a clean `[]` review.
         failure = self._exit_zero_failure(lines)
         if failure is not None:
-            return {"success": False, "error": failure, "raw": stdout, "data": None}
+            return fail(failure, stdout)
         fallback = extract_json_from_text(text, prefer_arrays=True)
         if fallback.get("success"):
             fallback["data"] = self._unwrap_file_write_envelope(fallback["data"])
@@ -1104,12 +1100,7 @@ class AiderProvider(LLMProvider):
         # fixture capture. `_drop_tolerated_lines` already exists for
         # `classify_failure`; the error text needs it for the same reason.
         diagnosis = text.strip() or stdout
-        return {
-            "success": False,
-            "error": f"No JSON found in aider output: {diagnosis[:500]}",
-            "raw": stdout,
-            "data": None,
-        }
+        return fail(f"No JSON found in aider output: {diagnosis[:500]}", stdout)
 
     def _exit_zero_failure(self, lines: Sequence[str]) -> Optional[str]:
         """D4.1: the error for an exit-0 failure on aider's diagnostic lines, else ``None``.

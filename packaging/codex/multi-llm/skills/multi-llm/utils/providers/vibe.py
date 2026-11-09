@@ -133,6 +133,7 @@ from .base import (
     StructuredSchema,
     split_reasoning_effort,
 )
+from .parse_kit import fail
 from .private_home import PrivateHomes
 
 #: Levels accepted by the ``[[models]]`` key ``thinking`` at 2.24.1, read off the
@@ -660,12 +661,7 @@ class VibeProvider(LLMProvider):
         """
         text = (stdout or "").strip()
         if not text:
-            return {
-                "success": False,
-                "error": self._empty_stdout_reason(stderr),
-                "raw": stdout,
-                "data": None,
-            }
+            return fail(self._empty_stdout_reason(stderr), stdout)
 
         stopped = stopped_by_a_limit(stderr)
         if stopped is not None:
@@ -674,15 +670,11 @@ class VibeProvider(LLMProvider):
             # had said when the limit fell -- half an array, or a whole one
             # that cost more than --max-price. stderr's one line is the only
             # sign; read without it, all four limit rows parsed as success.
-            return {
-                "success": False,
-                "error": (
-                    f"vibe stopped before finishing (Stopped: {stopped}); the "
-                    "transcript on stdout is a stopped run's, not an answer"
-                ),
-                "raw": stdout,
-                "data": None,
-            }
+            return fail(
+                f"vibe stopped before finishing (Stopped: {stopped}); the "
+                "transcript on stdout is a stopped run's, not an answer",
+                stdout,
+            )
 
         try:
             entries = json.loads(text)
@@ -690,42 +682,24 @@ class VibeProvider(LLMProvider):
             # THE stdout-error shape: vibe's config-validation diagnostics land
             # here, on stdout, with stderr empty. Quoting them is the whole
             # point -- this is the only place the reason exists.
-            return {
-                "success": False,
-                "error": f"vibe produced non-JSON output on stdout: {text[:300]}",
-                "raw": stdout,
-                "data": None,
-            }
+            return fail(f"vibe produced non-JSON output on stdout: {text[:300]}", stdout)
 
         if not isinstance(entries, list):
-            return {
-                "success": False,
-                "error": (
-                    "vibe --output json returned "
-                    f"{type(entries).__name__}, expected a transcript array"
-                ),
-                "raw": stdout,
-                "data": None,
-            }
+            return fail(
+                "vibe --output json returned "
+                f"{type(entries).__name__}, expected a transcript array",
+                stdout,
+            )
 
         answer = self._last_assistant_text(entries)
         if answer is None:
-            return {
-                "success": False,
-                "error": (
-                    "no assistant message in vibe's transcript "
-                    "(the run produced no answer)"
-                ),
-                "raw": stdout,
-                "data": None,
-            }
+            return fail(
+                "no assistant message in vibe's transcript "
+                "(the run produced no answer)",
+                stdout,
+            )
         if not answer.strip():
-            return {
-                "success": False,
-                "error": "vibe returned an empty assistant message",
-                "raw": stdout,
-                "data": None,
-            }
+            return fail("vibe returned an empty assistant message", stdout)
 
         return extract_json_from_text(answer, prefer_arrays=True)
 

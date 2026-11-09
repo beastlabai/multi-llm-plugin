@@ -676,7 +676,7 @@ def main() -> int:
         #
         # This lane is the only place the question can be asked, so it asks it:
         # the smoke prompt ends in the block PRODUCTION renders for this very
-        # adapter (`llm_client.render_output_location`), not a hand-written one.
+        # adapter (`prompt_channels.render_output_location`), not a hand-written one.
         # A `True` adapter is asked for a file and the file's existence is the
         # verdict; a `False` adapter is asked for stdout and the file's ABSENCE
         # is. No second run and no extra spend — the same one-shot, with the tail

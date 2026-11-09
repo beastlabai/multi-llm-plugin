@@ -34,6 +34,7 @@ from utils import subagent_executor as executor  # noqa: E402
 from utils import dispatch_spawn, runner_preflight  # noqa: E402
 from utils.providers import base as pbase  # noqa: E402
 from utils.providers import opencode as oc  # noqa: E402
+from utils.providers import version_gate  # noqa: E402
 from utils.providers.base import (  # noqa: E402
     PROFILE_AGENT_READONLY,
     PROFILE_AGENT_WRITE,
@@ -69,7 +70,14 @@ def _clean(monkeypatch):
     oc.reset_hermetic_state()
     executor.reset_auth_cache()
     # Nothing here may reach the developer's `--pure` help sniff.
-    monkeypatch.setattr(oc, "_read_help_tokens", lambda binary: frozenset({oc.PURE_FLAG}))
+    real_read = version_gate.read_help_tokens
+    monkeypatch.setattr(
+        version_gate, "read_help_tokens",
+        lambda binary, *, help_argv=("--help",), **kw: (
+            frozenset({oc.PURE_FLAG}) if tuple(help_argv) == ("run", "--help")
+            else real_read(binary, help_argv=help_argv, **kw)
+        ),
+    )
     monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
     yield
     oc.sweep_config_home()

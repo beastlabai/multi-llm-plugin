@@ -4,7 +4,6 @@ import re
 import shutil
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..json_extractor import extract_json_from_text
 from .base import (
     LAUNCH_DIAGNOSTICS_NONE,
     STDOUT_ENVELOPE,
@@ -17,6 +16,7 @@ from .base import (
     envelope_signature,
     read_stdout,
 )
+from .parse_kit import answer_from_text, fail, loads_or_extract, ok
 
 #: M12 (§6.1): gemini has no rung on the ladder, and the reason is written down
 #: rather than left as an absent constant. gemini-cli exposes **no per-run effort
@@ -198,7 +198,7 @@ class GeminiProvider(LLMProvider):
     write that did not happen. That puts this adapter in the same class as
     ``cursor-agent --mode ask`` and ``aider /ask``, and the fix is the
     declaration (``supports_file_output = False``, so
-    ``llm_client.render_output_location`` asks for the array on stdout), never a
+    ``prompt_channels.render_output_location`` asks for the array on stdout), never a
     ``--yolo``-class argv bypass. Left unchanged here because the roster in
     ``tests/test_provider_housekeeping.py`` is keyed on restriction-shaped argv
     atoms and gemini's argv carries none — its read-only tool set is the
@@ -564,32 +564,19 @@ class GeminiProvider(LLMProvider):
         elif shape.kind != STDOUT_PLAIN:
             return shape.failure("gemini", stdout)
         else:
-            try:
-                wrapper = json.loads(stdout)
-            except json.JSONDecodeError as e:
-                # Try fallback extraction on raw stdout
-                fallback = extract_json_from_text(stdout, prefer_arrays=True)
-                if fallback.get("success"):
-                    return fallback
-                return {"success": False, "error": f"JSON parse error: {e}",
-                        "raw": stdout, "data": None}
+            wrapper, early = loads_or_extract(stdout)
+            if early is not None:
+                return early
         # Gemini returns: {"session_id": "...", "response": "...", "stats": {...}}
         if isinstance(wrapper, dict) and "response" in wrapper:
             response = wrapper["response"]
-            # Try to parse the response as JSON if it looks like JSON
             if isinstance(response, str):
-                response = response.strip()
-                if response.startswith(('[', '{')):
-                    try:
-                        return {"success": True, "data": json.loads(response)}
-                    except json.JSONDecodeError:
-                        pass
-                # Apply JSON extraction fallback for non-JSON starting responses
-                return extract_json_from_text(response, prefer_arrays=True)
-            return {"success": True, "data": response}
+                # No empty check of its own: an empty response is the
+                # extractor's failure, as it always was.
+                return answer_from_text(response, empty_error=None)
+            return ok(response)
         if isinstance(wrapper, dict) and "session_id" in wrapper:
             # gemini's envelope without its answer field: the bookkeeping
             # is not an answer. Another JSON object is the answer itself.
-            return {"success": False, "error": "gemini's envelope carries no response field",
-                    "raw": stdout, "data": None}
-        return {"success": True, "data": wrapper}
+            return fail("gemini's envelope carries no response field", stdout)
+        return ok(wrapper)

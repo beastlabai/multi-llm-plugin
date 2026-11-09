@@ -35,6 +35,7 @@ from .base import (
     envelope_signature,
     read_stdout,
 )
+from .parse_kit import answer_from_text, fail, ok
 
 #: How the result envelope opens, from the captures: claude-code 2.1.319 prints
 #: ``duration_api_ms`` first (every row under ``tests/fixtures/claude-code/``),
@@ -140,7 +141,7 @@ def _refuse(wrapper: Dict[str, Any], raw: str) -> Optional[Dict[str, Any]]:
     words = _envelope_words(wrapper)
     if words:
         error = f"{error}: {words}"
-    return {"success": False, "error": error, "raw": raw, "data": None}
+    return fail(error, raw)
 
 
 def _whole_envelope(stdout: str) -> Optional[Dict[str, Any]]:
@@ -394,7 +395,7 @@ def parse_result_envelope(
     # Try direct JSON parsing for arrays
     if stdout.startswith("["):
         try:
-            return {"success": True, "data": json.loads(stdout)}
+            return ok(json.loads(stdout))
         except json.JSONDecodeError:
             pass
 
@@ -414,26 +415,16 @@ def _unwrap_result_envelope(wrapper: Any, stdout: str) -> Dict[str, Any]:
     ):
         # The envelope without its answer field: its bookkeeping is not an
         # answer. Another JSON object is the answer itself.
-        return {
-            "success": False,
-            "error": "the result envelope carries no result field",
-            "raw": stdout,
-            "data": None,
-        }
+        return fail("the result envelope carries no result field", stdout)
     if isinstance(wrapper, dict) and "result" in wrapper:
         inner_result = wrapper["result"]
         if isinstance(inner_result, str):
-            inner_result = inner_result.strip()
-            if inner_result.startswith(("[", "{")):
-                try:
-                    return {"success": True, "data": json.loads(inner_result)}
-                except json.JSONDecodeError:
-                    pass
-            # Try to extract JSON from text
-            return extract_json_from_text(inner_result, prefer_arrays=True)
+            # No empty check of its own: an empty result is the extractor's
+            # failure, as it always was.
+            return answer_from_text(inner_result, empty_error=None)
         return (
-            {"success": True, "data": inner_result}
+            ok(inner_result)
             if inner_result
             else {"success": False, "error": "Empty result", "data": None}
         )
-    return {"success": True, "data": wrapper}
+    return ok(wrapper)

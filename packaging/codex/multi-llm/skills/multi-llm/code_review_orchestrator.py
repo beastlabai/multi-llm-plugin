@@ -197,17 +197,19 @@ from utils.json_extractor import (
     sanitize_model_name,
 )
 from utils.llm_client import (
-    INLINE_MANIFEST_LABEL,
-    INLINE_PROMPT_CAP_BYTES,
     argv_prompt_bytes,
     describe_output_file,
     describe_usage,
     invoke_with_file_output,
     invoke_with_provider,
     misnamed_result_baseline,
-    render_diff_access,
     requested_result_baseline,
     sandbox_record_word,
+)
+from utils.prompt_channels import (
+    INLINE_MANIFEST_LABEL,
+    INLINE_PROMPT_CAP_BYTES,
+    render_diff_access,
 )
 from utils.git_utils import (
     attribute_source_args,
@@ -3251,7 +3253,7 @@ async def run_single_review(
     2. Take the files to review from the resolved scope it is handed
     3. Read each file's change from the diff set main wrote before dispatch
        (``review-scope.md`` and ``diff/``), reached the way its adapter can
-       (the ``{diff_access}`` block, :func:`utils.llm_client.render_diff_access`)
+       (the ``{diff_access}`` block, :func:`utils.prompt_channels.render_diff_access`)
     4. Write findings as JSON to the specified output file
 
     Args:

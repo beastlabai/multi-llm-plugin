@@ -12,6 +12,7 @@ from .base import (
     StructuredSchema,
     split_reasoning_effort,
 )
+from .parse_kit import direct_json, fail
 
 # Reasoning effort values accepted by `muse exec --reasoning-effort`
 # (verified live against Muse Code 0.1.0-R708.1). Unlike most providers here,
@@ -363,16 +364,6 @@ class MuseProvider(LLMProvider):
             if isinstance(event, dict) and isinstance(event.get("payload"), dict):
                 yield event
 
-    @staticmethod
-    def _direct_json(text: str) -> Optional[Dict[str, Any]]:
-        """Parse ``text`` as one complete JSON document, or return None."""
-        if text.startswith(('[', '{')):
-            try:
-                return {"success": True, "data": json.loads(text)}
-            except json.JSONDecodeError:
-                pass
-        return None
-
     def _scan(self, stdout: str) -> Dict[str, Any]:
         """Collect the answer text and terminal state from the event stream.
 
@@ -482,7 +473,7 @@ class MuseProvider(LLMProvider):
         MEASURED 2026-08-19, **FIXED 2026-08-20 (C8)**: a FAILED run whose
         salvaged text happened to parse used to be returned as a success. The
         first branch below fails a non-``completed`` run only ``and not full``,
-        so with any text present control fell through to ``_direct_json(tail)``
+        so with any text present control fell through to ``direct_json(tail)``
         and returned before the terminal state was consulted again.
         ``tests/fixtures/muse/truncated-json-answer.stdout.txt`` is the capture:
         exit **1**, ``run.terminal.failed`` reading "model failed after 10
@@ -547,20 +538,20 @@ class MuseProvider(LLMProvider):
             error = f"Muse run {scan['terminal']}"
             if reason:
                 error = f"{error}: {reason}"
-            return {"success": False, "error": error, "raw": stdout, "data": None}
+            return fail(error, stdout)
 
         if not full:
             error = "No output events found in output"
             reason = self.describe_failure(stdout, stderr)
             if reason:
                 error = f"Muse reported an error: {reason}"
-            return {"success": False, "error": error, "raw": stdout, "data": None}
+            return fail(error, stdout)
 
         # Exact parses first — they are unambiguous — closing message before
         # the whole transcript.
         for candidate in (tail, full):
             if candidate:
-                direct = self._direct_json(candidate)
+                direct = direct_json(candidate)
                 if direct is not None:
                     return direct
 

@@ -4,7 +4,6 @@ import re
 import shutil
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..json_extractor import extract_json_from_text
 from .base import (
     LAUNCH_DIAGNOSTICS_NONE,
     CATEGORY_SERVER_ERROR,
@@ -21,6 +20,7 @@ from .base import (
     split_reasoning_effort,
     warn_gate_once,
 )
+from .parse_kit import answer_from_text, fail
 from .pi_family_stream import (  # noqa: F401 - _MAX_DIAGNOSIS_CHARS re-exported
     _MAX_DIAGNOSIS_CHARS,
     StreamDialect,
@@ -190,18 +190,7 @@ def parse_answer_text(text: str) -> Dict[str, Any]:
     tool policy, transports — diverges, which is why omp does not subclass pi;
     the stream reader they now share lives in ``pi_family_stream``.
     """
-    text = (text or "").strip()
-
-    if not text:
-        return {"success": False, "error": "Empty output", "raw": text, "data": None}
-
-    if text.startswith(('[', '{')):
-        try:
-            return {"success": True, "data": json.loads(text)}
-        except json.JSONDecodeError:
-            pass
-
-    return extract_json_from_text(text, prefer_arrays=True)
+    return answer_from_text(text or "", empty_error="Empty output")
 
 
 # --------------------------------------------------------------------------- #
@@ -825,12 +814,7 @@ class PiProvider(LLMProvider):
             return sentence
 
         def failed(code: Optional[str]) -> Dict[str, Any]:
-            out = {
-                "success": False,
-                "error": with_junk(terminal_verdict(raw)),
-                "raw": raw,
-                "data": None,
-            }
+            out = fail(with_junk(terminal_verdict(raw)), raw)
             if code is not None:
                 out["error_code"] = code
             return out
@@ -845,7 +829,7 @@ class PiProvider(LLMProvider):
                 sentence = f"{sentence}; stderr: {diagnosis[1]}"
             # No `error_code`: the model produced nothing, so the file channel is
             # welcome to look (and will find nothing).
-            return {"success": False, "error": sentence, "raw": raw, "data": None}
+            return fail(sentence, raw)
 
         final = messages[-1]
         reason = final.get("stopReason")
@@ -854,25 +838,18 @@ class PiProvider(LLMProvider):
             answer = _answer_text(final)
             if not answer.strip():
                 gave_up = terminal_verdict(raw)
-                return {
-                    "success": False,
-                    "error": f"Empty output ({gave_up})" if gave_up else "Empty output",
-                    "raw": answer,
-                    "data": None,
-                }
+                return fail(
+                    f"Empty output ({gave_up})" if gave_up else "Empty output", answer
+                )
             cut = _unclosed_container(answer)
             if cut is not None:
                 closing = "]" if cut == "[" else "}"
-                return {
-                    "success": False,
-                    "error": (
-                        f"Truncated output (the answer opens a JSON document "
-                        f"with '{cut}' and never closes it: no matching "
-                        f"'{closing}' in {len(answer)} characters)"
-                    ),
-                    "raw": answer,
-                    "data": None,
-                }
+                return fail(
+                    f"Truncated output (the answer opens a JSON document "
+                    f"with '{cut}' and never closes it: no matching "
+                    f"'{closing}' in {len(answer)} characters)",
+                    answer,
+                )
             result = dict(parse_answer_text(answer))
             # `raw` carries the answer on every outcome: `ask`'s
             # `recover_answer_text` falls back to it, and without it would fall
@@ -892,13 +869,9 @@ class PiProvider(LLMProvider):
             # success.md D3.1). The `stop` branch's unclosed-container refusal
             # above does not set it: there the model ended its turn, and the
             # refusal is a verdict on JSON, which an ask answer need not be.
-            return {
-                "success": False,
-                "error": with_junk(terminal_verdict(raw)),
-                "raw": _answer_text(final),
-                "data": None,
-                "incomplete": True,
-            }
+            return fail(
+                with_junk(terminal_verdict(raw)), _answer_text(final), incomplete=True
+            )
 
         if reason == "toolUse":
             out = failed(ERROR_TIMEOUT)

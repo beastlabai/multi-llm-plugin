@@ -44,6 +44,7 @@ from .base import (
     sandbox_rung_id,
     split_reasoning_effort,
 )
+from .parse_kit import fail, ok
 
 # Reasoning effort values this adapter EMITS as `model_reasoning_effort`
 # (verified live against codex-cli 0.144.0/0.146.0).
@@ -1871,7 +1872,7 @@ class CodexProvider(LLMProvider):
         """
         if text.startswith(('[', '{')):
             try:
-                return {"success": True, "data": _loads_reply(text)}
+                return ok(_loads_reply(text))
             except json.JSONDecodeError:
                 pass
 
@@ -1914,10 +1915,10 @@ class CodexProvider(LLMProvider):
             reported = fatal_errors or item_errors
             if reported:
                 error = "Codex reported an error: " + "; ".join(reported)
-            return {"success": False, "error": error, "raw": stdout, "data": None}
+            return fail(error, stdout)
 
         if not any(candidate.strip() for candidate in candidates):
-            return {"success": False, "error": "Empty text response", "raw": stdout, "data": None}
+            return fail("Empty text response", stdout)
 
         result: Dict[str, Any] = {}
         for candidate in candidates:

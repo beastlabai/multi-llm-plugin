@@ -615,6 +615,7 @@ class TestConfigDeclaredProvidersOnThePin:
     @pytest.fixture(autouse=True)
     def _setup(self, tmp_path, monkeypatch):
         from utils.providers import opencode as oc
+        from utils.providers import version_gate
 
         self.oc = oc
         home = tmp_path / "user-config"
@@ -628,8 +629,13 @@ class TestConfigDeclaredProvidersOnThePin:
         monkeypatch.delenv("OPENCODE_CONFIG_DIR", raising=False)
         monkeypatch.delenv("OPENCODE_CONFIG_CONTENT", raising=False)
         monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+        real_read = version_gate.read_help_tokens
         monkeypatch.setattr(
-            oc, "_read_help_tokens", lambda binary: frozenset({oc.PURE_FLAG})
+            version_gate, "read_help_tokens",
+            lambda binary, *, help_argv=("--help",), **kw: (
+                frozenset({oc.PURE_FLAG}) if tuple(help_argv) == ("run", "--help")
+                else real_read(binary, help_argv=help_argv, **kw)
+            ),
         )
         oc.reset_hermetic_state()
         executor.reset_auth_cache()

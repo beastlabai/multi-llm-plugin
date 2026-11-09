@@ -200,7 +200,7 @@ def build_inline_plan(plan_content: str, plan_path: str) -> Tuple[str, bool]:
 # adapter's declared
 # :attr:`~utils.providers.base.LLMProvider.supports_file_output` rather than from
 # a provider name spelled out in this orchestrator
-# (:func:`utils.llm_client.render_output_location` is the review-side twin). The
+# (:func:`utils.prompt_channels.render_output_location` is the review-side twin). The
 # wording cannot be shared with that function's constants — those ask for a raw
 # JSON array and ask mode's answer is markdown — but the roster, the rule and
 # the unknown-provider posture are the same one: an adapter this build no longer
@@ -258,7 +258,7 @@ FILE_OUTPUT_LOCATION = (
 #: instead: stdout is the channel it *does* have, it is the one step 2 of
 #: ``ask_one`` reads (the reduced ``answer_text``, D2.3), and the answer lands in
 #: exactly the same ``answer_<model>.md`` either way. Worded like
-#: ``llm_client.STDOUT_OUTPUT_LOCATION``: "refused by the sandbox where one
+#: ``prompt_channels.STDOUT_OUTPUT_LOCATION``: "refused by the sandbox where one
 #: runs", because a codex slot under the D6 fallback (``sandbox_fallback:
 #: auto``, the default, 2026-09-17) runs with no sandbox and a write there
 #: would succeed — the prompt may not claim otherwise.

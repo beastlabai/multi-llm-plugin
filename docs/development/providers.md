@@ -17,6 +17,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
   - [Launch diagnostics](#launch-diagnostics)
 - [Usage reporting](#usage-reporting)
 - [Child Python environments](#child-python-environments)
+- [Private config roots](#private-config-roots)
 - [Provider outcome logs](#provider-outcome-logs)
 
 ## Adding a provider adapter
@@ -596,7 +597,7 @@ and cursor-agent, agy and grok a logged-in one plus a parser.
 ## Provider output channels
 
 **The fan-out asks each adapter for the channel it actually has** (`supports_file_output`). The
-three JSON review prompts end in a `{output_location}` block rendered by `llm_client.render_output_location`
+three JSON review prompts end in a `{output_location}` block rendered by `prompt_channels.render_output_location`
 from the adapter's own declaration, never from a provider name branched on in an orchestrator:
 `True` (the default) renders the byte-identical "write your JSON output to this
 file: …" block, `False` asks for the raw array on stdout. The `False`
@@ -787,6 +788,12 @@ to `outcome_from_capture`.
   other JSON lines and the trailing text; for a cut or ambiguous stdout, nothing of stdout, so only
   stderr is read, under the adapter's [launch diagnostics](#launch-diagnostics); for a plain stdout
   (a CLI's plain-text refusal), all of it.
+- **One parse result.** Every `parse_output` returns `{"success": True, "data": …}` or
+  `{"success": False, "error": …, "raw": …, "data": None}`, adapter keys after those four, built
+  through `providers.parse_kit` (`ok`, `fail`, `answer_from_text`, `loads_or_extract`,
+  `direct_json`). A failure's `raw` picks the executor's rung: non-empty text is
+  `unparseable_result`, none is `runner_error`, so each adapter passes the text it means. Error
+  sentences stay the adapter's own: the fixture manifests grade them.
 - **The jail stays the caller's.** Its read-back needs the attempt's live context, so it comes in
   as a callable (`JailReadBack`); a jail denial replaces the error line, carries no category tag
   and wins over any category.
@@ -870,6 +877,43 @@ Runner CLIs are unaffected (both lanes resolve `argv[0]` against the dispatcher'
 `PATH` before the spawn, and the venv holds none); the suite's mock launchers get
 the test interpreter from `python3`/`python` shims in
 `SkillRunner`'s `bin/`.
+
+## Private config roots
+
+copilot, kimi, qwen-code and vibe write CLI state (sessions, caches, logs) under the user's home,
+so each spawn gets a fresh `0700` root instead (`providers.private_home.PrivateHomes`), handed to
+the CLI through its own variable (`COPILOT_HOME`, `KIMI_CODE_HOME`, `QWEN_HOME`, `VIBE_HOME`). Two
+concurrent slots never share one writable root. A root the user pinned through that variable is
+used as it is and never removed.
+
+- **A root lives as long as its dispatch, and its CLI.** Both spawn sites enter
+  `llm_client.provider_dispatch_context`, which is also a `private_home.dispatch_homes` scope:
+  closing it removes the roots the adapter's `get_env` made inside it, once every child the
+  dispatch started has ended. The scope holds a `process_control.child_ledger`, which
+  `popen_tree` adds each child to. A child has ended when it was seen to exit, or when its spawner
+  confirmed the stop (`process_control.note_stop`): the CLI gone and every process group the stop
+  reached `killed` or `gone`, U77's rule (`subagent_executor._unconfirmed_kill`; the executor's
+  `_kill_timed_out` applies it, its own zombie counting as stopped, and Lane A's
+  `llm_client._stop_and_note` applies it to the sweep's groups). Any other stop (`survived`,
+  `unresolved`, `skipped`, a kill that raised, a Windows job not ended) keeps the roots, `0700` and
+  tracked, so whatever is still running can go on writing there. Roots are attributed through a
+  context variable, so concurrent slots never release each other's. A root made outside a dispatch
+  (an auth probe, `doctor`), one kept for a stop not confirmed, and one that could not be removed
+  wait for `PrivateHomes.cleanup`, registered with `atexit`, or, after a crash, for the sweep below.
+  A CLI that exits on its own has ended: what it leaves running is not followed.
+- **Orphans are swept by owner, never by age.** A root is named
+  `<prefix><pid>-<start>-<pidns>-<random>`: the creating process's pid, start time with its source
+  (`proc.8812345`, `process_control.sourced_start_time`: `/proc` ticks, `ps` text or a Windows
+  creation time) and PID namespace (`na` off Linux, which has none; `unknown` on Linux when it
+  cannot be read). The first root an adapter makes in a process removes that adapter's roots whose
+  owner is dead: both namespaces known and the same, and the pid gone or live under another start
+  time read from the same source (a pid alone can be reused). An owner that is alive, whose start
+  time cannot be read now or was read from another source (Linux falls back to `ps` when `/proc`
+  cannot be read), or whose namespace is another or unknown on either side (two sandboxes sharing
+  one temp directory) keeps its roots, and so does a root named before owners were recorded
+  (`<prefix><random>`). Only real directories this user owns are removed, never through a symlink.
+  The jail's scratch directories use the same pid and start-time rule
+  (`landlock_dispatch.sweep_slot_leftovers`).
 
 ## Provider outcome logs
 

@@ -14,7 +14,7 @@ one that can** — which is exactly how cursor-agent shipped for a release under
 file the prompt demanded.
 
 `mock_llm.py` now reads the SHIPPED instruction
-(`llm_client.FILE_OUTPUT_LOCATION`), so the primary channel is live on this lane
+(`prompt_channels.FILE_OUTPUT_LOCATION`), so the primary channel is live on this lane
 and the two halves of the `supports_file_output` contract are both observable:
 
 * a file-capable identity writes the file and the result reports `source ==
@@ -35,10 +35,10 @@ sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tests.mock_launchers import install_mock_llm  # noqa: E402
-from utils.llm_client import (  # noqa: E402
+from utils.llm_client import invoke_with_file_output  # noqa: E402
+from utils.prompt_channels import (  # noqa: E402
     FILE_OUTPUT_LOCATION,
     STDOUT_OUTPUT_LOCATION,
-    invoke_with_file_output,
 )
 
 MOCK_LLM = Path(__file__).parent / "mocks" / "mock_llm.py"

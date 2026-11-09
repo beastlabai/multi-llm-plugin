@@ -405,7 +405,7 @@ class LLMProvider(ABC):
 
     # Whether this adapter's ``generate`` invocation can write the per-model
     # result file the Lane A review prompts name in their ``{output_location}``
-    # block (``llm_client.render_output_location``).
+    # block (``prompt_channels.render_output_location``).
     #
     # ``True`` is the default and the honest one for a CLI agent that carries
     # write tools — it is what ``invoke_with_file_output``'s whole file-first
@@ -502,7 +502,7 @@ class LLMProvider(ABC):
     # runs. ``supports_workspace_reads``/``reads_outside_cwd``/
     # ``read_scope_flag`` say nothing about it, and neither does
     # ``tests/read_only_modes.yaml`` (the record of write-restricting
-    # mechanisms). ``llm_client.render_diff_access`` renders the code-review
+    # mechanisms). ``prompt_channels.render_diff_access`` renders the code-review
     # prompt's ``{diff_access}`` block from these two, so the orchestrator never
     # branches on a provider name (plan: review-run-scope-salvage-and-failure-
     # visibility D2.3).

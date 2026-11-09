@@ -243,7 +243,7 @@ def _merged_config(anchor: Optional[str] = None) -> Dict[str, Any]:
 
     A config problem may never turn into a refusal or a crash on a dispatch
     path, so every failure resolves to "no configuration", i.e. the documented
-    defaults. Same posture as ``opencode._load_config``.
+    defaults. ``claude_code``'s fallback-list read raises instead, on purpose.
     """
     try:  # pragma: no cover - import shim mirrors the rest of utils/
         from ..provider_registry import load_config

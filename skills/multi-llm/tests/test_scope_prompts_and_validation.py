@@ -29,7 +29,7 @@ from utils import review_orchestrator_base as base  # noqa: E402
 from utils import scope_policy as sp  # noqa: E402
 from utils import scope_round  # noqa: E402
 from utils import validation as validation_mod  # noqa: E402
-from utils.llm_client import STDOUT_OUTPUT_LOCATION, render_working_limits  # noqa: E402
+from utils.prompt_channels import STDOUT_OUTPUT_LOCATION, render_working_limits  # noqa: E402
 from utils.output_handler import output_dir_path  # noqa: E402
 from utils.prompt_loader import clear_cache, load_prompt  # noqa: E402
 from utils.schema_validator import drop_non_record_entries  # noqa: E402

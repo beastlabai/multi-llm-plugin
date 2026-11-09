@@ -32,10 +32,10 @@ from utils.commit_report import (  # noqa: E402
     commit_prompt_context,
     review_prompt_name,
 )
-from utils.llm_client import (  # noqa: E402
+from utils.llm_client import invoke_with_file_output  # noqa: E402
+from utils.prompt_channels import (  # noqa: E402
     FILE_OUTPUT_LOCATION,
     STDOUT_OUTPUT_LOCATION,
-    invoke_with_file_output,
     render_working_limits,
 )
 from utils.output_handler import output_dir_path  # noqa: E402

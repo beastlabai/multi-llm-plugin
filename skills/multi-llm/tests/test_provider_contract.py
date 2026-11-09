@@ -757,7 +757,7 @@ class TestDeclaredOutputChannel:
     def test_a_read_only_adapter_is_asked_for_stdout(self, name):
         """The declaration is what the prompt is rendered from — not a name
         spelled out in an orchestrator."""
-        from utils.llm_client import STDOUT_OUTPUT_LOCATION, render_output_location
+        from utils.prompt_channels import STDOUT_OUTPUT_LOCATION, render_output_location
 
         block = render_output_location("/out/result.json", f"{name}:some-model")
 
@@ -864,7 +864,7 @@ class TestDeclaredGenerateShellAndReadScope:
 
     @pytest.mark.parametrize("name", sorted(_registered_provider_names()))
     def test_every_read_scope_is_one_of_the_three(self, name):
-        from utils.llm_client import GENERATE_READ_SCOPES
+        from utils.prompt_channels import GENERATE_READ_SCOPES
         from utils.provider_registry import _PROVIDERS
 
         assert GENERATE_READ_SCOPES == ("none", "cwd", "any")

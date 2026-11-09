@@ -196,12 +196,12 @@ def plan_block(record: Mapping[str, Any], *, repo_root: Optional[str] = None,
 
     An *inline* lane cannot open the snapshot, so it is pointed at the
     snapshot's block in its ``{diff_access}`` payload instead
-    (``llm_client.render_diff_access``'s ``context_plan_path``, which refuses
+    (``prompt_channels.render_diff_access``'s ``context_plan_path``, which refuses
     the lane when the snapshot cannot be shown in full)."""
     path = context_plan_path(record, repo_root=repo_root)
     if path is None:
         return ""
-    from .llm_client import INLINE_CONTEXT_PLAN_LABEL
+    from .prompt_channels import INLINE_CONTEXT_PLAN_LABEL
 
     digest = record.get("plan_sha256") or "unknown"
     where = (

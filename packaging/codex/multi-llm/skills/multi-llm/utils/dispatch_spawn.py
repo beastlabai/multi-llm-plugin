@@ -971,6 +971,8 @@ def _kill_timed_out(
             except OSError:
                 pass
     reason = _unconfirmed_kill(verdict)
+    # A private home lent to the runner outlives a stop that is not confirmed.
+    process_control.note_stop(proc, reason is None)
     if reason is not None:
         print(
             f"WARNING: the timed-out runner pid {proc.pid} (process group "

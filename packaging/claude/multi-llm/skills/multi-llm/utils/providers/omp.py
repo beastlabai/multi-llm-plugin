@@ -67,6 +67,7 @@ from .base import (
     VERSION_TOO_LOW,
     split_reasoning_effort,
 )
+from .parse_kit import fail
 from .pi import parse_answer_text
 from .pi_family_stream import (
     _ASSISTANT_MESSAGE_REQUIRED_KEYS,  # noqa: F401 - re-exported; the docstrings cite it
@@ -1148,7 +1149,7 @@ class OmpProvider(LLMProvider):
         if not raw.strip():
             diagnosis = stderr_diagnosis(stderr)
             error = f"Empty output (stderr: {diagnosis})" if diagnosis else "Empty output"
-            return {"success": False, "error": error, "raw": "", "data": None}
+            return fail(error, "")
 
         events, junk = _events(raw)
         version = _stream_version(events)
@@ -1216,7 +1217,7 @@ class OmpProvider(LLMProvider):
             # No `error_code`: the model produced nothing, and a file it did not
             # write cannot be recovered — so `PARSE_ERROR` is correct and the
             # file channel is welcome to look.
-            return {"success": False, "error": sentence, "raw": raw, "data": None}
+            return fail(sentence, raw)
 
         final = messages[-1]
         reason = final.get("stopReason")
@@ -1237,14 +1238,7 @@ class OmpProvider(LLMProvider):
                 # not write cannot be recovered, so the file channel is welcome
                 # to look.
                 gave_up = terminal_verdict(raw, "")
-                return {
-                    "success": False,
-                    "error": (
-                        f"Empty output ({gave_up})" if gave_up else "Empty output"
-                    ),
-                    "raw": answer,
-                    "data": None,
-                }
+                return fail(f"Empty output ({gave_up})" if gave_up else "Empty output", answer)
             cut = _unclosed_container(answer)
             if cut is not None:
                 # **A cut document is never handed to the extractor.**
@@ -1265,16 +1259,12 @@ class OmpProvider(LLMProvider):
                 # model may have written whole before the stream was cut, so the
                 # file channel is welcome to look.
                 closing = "]" if cut == "[" else "}"
-                return {
-                    "success": False,
-                    "error": (
-                        f"Truncated output (the answer opens a JSON document "
-                        f"with '{cut}' and never closes it: no matching "
-                        f"'{closing}' in {len(answer)} characters)"
-                    ),
-                    "raw": answer,
-                    "data": None,
-                }
+                return fail(
+                    f"Truncated output (the answer opens a JSON document "
+                    f"with '{cut}' and never closes it: no matching "
+                    f"'{closing}' in {len(answer)} characters)",
+                    answer,
+                )
             result = dict(parse_answer_text(answer))
             # **`raw` carries the answer on every outcome, success included.**
             # A successful extraction returns `{"success": True, "data": …}`

@@ -113,6 +113,7 @@ from .base import (
     StructuredSchema,
     split_reasoning_effort,
 )
+from .parse_kit import fail
 from .private_home import PrivateHomes
 
 #: Levels accepted by ``copilot --effort`` at 1.0.80, measured one at a time
@@ -754,12 +755,7 @@ class CopilotProvider(LLMProvider):
         """
         text = (stdout or "").strip()
         if not text:
-            return {
-                "success": False,
-                "error": self._empty_stdout_reason(stderr),
-                "raw": stdout,
-                "data": None,
-            }
+            return fail(self._empty_stdout_reason(stderr), stdout)
 
         scan = _scan_copilot_records(text)
         assistant_contents = scan.assistant_contents
@@ -767,12 +763,7 @@ class CopilotProvider(LLMProvider):
         saw_record = scan.saw_record
 
         if not saw_record:
-            return {
-                "success": False,
-                "error": "copilot emitted no JSON records on stdout",
-                "raw": stdout,
-                "data": None,
-            }
+            return fail("copilot emitted no JSON records on stdout", stdout)
 
         if session_error is not None:
             message = session_error.get("message") or "copilot reported a session error"
@@ -781,38 +772,25 @@ class CopilotProvider(LLMProvider):
             detail = f"{kind or 'error'}"
             if status is not None:
                 detail = f"{detail} (HTTP {status})"
-            return {
-                "success": False,
-                "error": f"{detail}: {message}",
-                "raw": stdout,
-                "data": None,
-            }
+            return fail(f"{detail}: {message}", stdout)
 
         if not assistant_contents:
-            return {
-                "success": False,
-                "error": (
-                    "no assistant.message record in copilot output "
-                    "(the run produced no answer)"
-                ),
-                "raw": stdout,
-                "data": None,
-            }
+            return fail(
+                "no assistant.message record in copilot output "
+                "(the run produced no answer)",
+                stdout,
+            )
 
         answer = assistant_contents[-1]
         if not answer.strip():
             # THE exit-0 failure shape: exit 0, result.exitCode 0, no error
             # record, and an empty answer. Structural by necessity -- there is no
             # text here for a marker to match.
-            return {
-                "success": False,
-                "error": (
-                    "copilot returned an empty assistant message "
-                    "(exit-0 failure: the provider answered 200 with no content)"
-                ),
-                "raw": stdout,
-                "data": None,
-            }
+            return fail(
+                "copilot returned an empty assistant message "
+                "(exit-0 failure: the provider answered 200 with no content)",
+                stdout,
+            )
 
         return extract_json_from_text(answer, prefer_arrays=True)
 

@@ -3925,6 +3925,7 @@ from types import SimpleNamespace as _NS
 
 from utils import review_diff as _review_diff
 from utils import llm_client as _llm_client
+from utils import prompt_channels as _prompt_channels
 from utils.git_utils import (
     REVIEW_SCOPE_FILENAME as _MANIFEST,
     read_review_scope as _read_review_scope,
@@ -4031,11 +4032,14 @@ def _scope_fanout(plan, monkeypatch, models, *, respond=None, capabilities=None,
     monkeypatch.setattr(cro, "invoke_with_file_output", dispatch)
     monkeypatch.setattr(base, "PROVIDER_STAGGER_DELAY", 0.0)
     if capabilities is not None:
+        # Both readers of the adapter's declarations: the prompt blocks
+        # (`prompt_channels`) and the argv measurement (`llm_client`).
         real = _llm_client.get_provider
-        monkeypatch.setattr(
-            _llm_client, "get_provider",
-            lambda name: capabilities.get(name) or real(name),
-        )
+        for module in (_llm_client, _prompt_channels):
+            monkeypatch.setattr(
+                module, "get_provider",
+                lambda name: capabilities.get(name) or real(name),
+            )
     args = _make_args(plan, models=list(models), files=[], files_from=None,
                       **arg_overrides)
     with contextlib.ExitStack() as stack:
@@ -4057,10 +4061,10 @@ def _full_prompt(dispatch, plan) -> str:
     kwargs = dispatch["kwargs"]
     context = dict(kwargs["prompt_context"])
     context["output_json_path"] = "<unused>"
-    context["output_location"] = _llm_client.render_output_location(
+    context["output_location"] = _prompt_channels.render_output_location(
         "<unused>", kwargs["model_spec"], anchor=str(plan)
     )
-    context["working_limits"] = _llm_client.render_working_limits(kwargs["timeout"])
+    context["working_limits"] = _prompt_channels.render_working_limits(kwargs["timeout"])
     return kwargs["prompt_template"].format(**context)
 
 
@@ -4494,8 +4498,8 @@ class TestALaneThatCannotOpenTheArtifacts:
         line = next(text for text in out.splitlines()
                     if text.startswith("[REVIEW_UNSUPPORTED] qwen-code:qwen3-coder"))
         inline = int(re.search(r"inline (\d+) B", line).group(1))
-        assert inline <= _llm_client.INLINE_DIFF_CAP_BYTES
-        assert (f"exceeds the {_llm_client.INLINE_PROMPT_CAP_BYTES} B argv cap"
+        assert inline <= _prompt_channels.INLINE_DIFF_CAP_BYTES
+        assert (f"exceeds the {_prompt_channels.INLINE_PROMPT_CAP_BYTES} B argv cap"
                 in line)
         status = json.loads((_phase(scope_repo.plan) / ".status.json").read_text())
         assert status["models_failed"]["qwen-code:qwen3-coder"].startswith(
@@ -4596,7 +4600,7 @@ class TestTheTwoRenderingsNeverDisagree:
             capabilities=self.CAPABILITIES,
         )
 
-        block = _llm_client.render_working_limits(1200)
+        block = _prompt_channels.render_working_limits(1200)
         assert "git" not in block and "`" not in block
         prompts = {
             d["kwargs"]["model_spec"].split(":")[0]: _full_prompt(d, scope_repo.plan)

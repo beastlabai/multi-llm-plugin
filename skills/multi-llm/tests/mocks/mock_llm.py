@@ -888,7 +888,7 @@ def shipped_file_instruction(prompt: str) -> Optional[Path]:
     """The file the SHIPPED review prompt orders the model to write, if any.
 
     This is the one spelling the product really renders
-    (``llm_client.FILE_OUTPUT_LOCATION``), and therefore the only one that means
+    (``prompt_channels.FILE_OUTPUT_LOCATION``), and therefore the only one that means
     "an adapter was asked for the file channel". The refusal gate keys on it
     alone — `MOCK_OUTPUT_PATH` and the legacy `OUTPUT_FILE:` directive are both
     a *test author* saying "put a file here", which is a property of the harness

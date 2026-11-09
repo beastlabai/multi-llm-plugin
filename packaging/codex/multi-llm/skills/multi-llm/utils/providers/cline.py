@@ -4,7 +4,6 @@ import re
 import shutil
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
-from ..json_extractor import extract_json_from_text
 from .base import (
     LAUNCH_DIAGNOSTICS_STDERR,
     InternalRetryEnvelope,
@@ -13,6 +12,7 @@ from .base import (
     StructuredSchema,
     split_reasoning_effort,
 )
+from .parse_kit import answer_from_text, answer_json, fail
 
 # Thinking levels accepted by `cline --thinking` (verified on cline 3.0.39).
 # Hard-validated by the CLI — invalid values exit 1. Unlike -m, --thinking
@@ -170,16 +170,6 @@ def _is_model_line(event: Any) -> bool:
 def cline_answer_text(stdout: str) -> str:
     """The reducer's text alone: :func:`read_cline_stream`'s ``text`` (D2.5)."""
     return read_cline_stream(stdout).text
-
-
-def _unwrap_answer_text(text: str) -> Dict[str, Any]:
-    """The answer text to a parse result, as the ``run_result`` branch does."""
-    if text.startswith(("[", "{")):
-        try:
-            return {"success": True, "data": json.loads(text)}
-        except json.JSONDecodeError:
-            pass
-    return extract_json_from_text(text, prefer_arrays=True)
 
 
 class ClineProvider(LLMProvider):
@@ -413,9 +403,9 @@ class ClineProvider(LLMProvider):
 
         if run_result is None:
             if reading.text:
-                result = dict(_unwrap_answer_text(reading.text))
+                result = dict(answer_json(reading.text))
             else:
-                result = {"success": False, "error": "No run_result event found in output", "raw": stdout, "data": None}
+                result = fail("No run_result event found in output", stdout)
             if not reading.finished:
                 result["incomplete"] = True
             return result
@@ -424,12 +414,9 @@ class ClineProvider(LLMProvider):
         text = text.strip() if isinstance(text, str) else ""
 
         if run_result.get("finishReason") == "error":
-            return {"success": False, "error": text or "Cline run failed", "raw": stdout, "data": None}
+            return fail(text or "Cline run failed", stdout)
 
-        if not text:
-            return {"success": False, "error": "Empty text response", "raw": stdout, "data": None}
-
-        return _unwrap_answer_text(text)
+        return answer_from_text(text, raw=stdout)
 
     def vendor_text(self, stdout: str, stderr: str) -> Tuple[str, str]:
         """The stream without the lines that carry the model's words.

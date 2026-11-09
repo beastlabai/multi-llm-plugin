@@ -1,10 +1,9 @@
 """Kilo Code CLI provider implementation."""
-import json
 import re
 import shutil
 from typing import Any, Dict, List, Optional, Tuple
 
-from ..json_extractor import _ANSI_ESCAPE, extract_json_from_text
+from ..json_extractor import _ANSI_ESCAPE
 from .base import (
     LAUNCH_DIAGNOSTICS_NONE,
     REASONING_LADDER,
@@ -13,6 +12,7 @@ from .base import (
     StructuredSchema,
     split_reasoning_effort,
 )
+from .parse_kit import answer_from_text
 
 # Reasoning variant names accepted by `kilocode run --variant` (verified on
 # kilocode 7.4.1). Variants are model-specific: effort words for
@@ -350,18 +350,4 @@ class KiloCodeProvider(LLMProvider):
         the old one (it adds ``?``-parameterized CSI sequences and the OSC form),
         so no stream that parsed before parses differently now.
         """
-        stdout = _strip_ansi(stdout)
-        stdout = stdout.strip()
-
-        if not stdout:
-            return {"success": False, "error": "Empty output", "raw": stdout, "data": None}
-
-        # Try direct JSON parsing
-        if stdout.startswith(('[', '{')):
-            try:
-                return {"success": True, "data": json.loads(stdout)}
-            except json.JSONDecodeError:
-                pass
-
-        # Fall back to extraction from text/code blocks
-        return extract_json_from_text(stdout, prefer_arrays=True)
+        return answer_from_text(_strip_ansi(stdout), empty_error="Empty output")
