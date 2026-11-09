@@ -134,6 +134,7 @@ from .metrics import (
     restore_to_progress_in_state, state_file_lock,
     withdraw_from_progress_in_state,
 )
+from .state_file import StateDocumentError
 from .state_manager import (
     PROCESSED_LEG_NATIVE,
     TASK_RESET_AT_KEY,
@@ -758,7 +759,12 @@ def record_batch(
     # unlocked pair read the same file and the second write dropped the
     # first one's `task_status`.
     with state_file_lock(target):
-        state = _read_state(target)
+        try:
+            state = _read_state(target)
+        except StateDocumentError as exc:
+            raise WritePromptError(
+                f"{target} is not a JSON object ({exc.detail})."
+            ) from exc
         if not isinstance(state, dict):
             raise WritePromptError(f"{target} is not a JSON object.")
         if status == "completed":

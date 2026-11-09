@@ -67,6 +67,7 @@ from utils import report_markdown
 from utils import commit_report
 from utils import commit_spelling
 from utils.commit_attribution import attribute_review_groups
+from utils.atomic_io import atomic_write_text
 from utils.state_manager import (
     load_groups_payload,
     match_issues_to_suggestions,
@@ -2805,10 +2806,8 @@ def record_scope_attempt(phase_dir: Any, stem: str, scope_id: str) -> None:
     ledger = read_scope_ledger(phase_dir)
     ledger[stem] = scope_id
     target = Path(phase_dir) / REVIEW_SCOPE_LEDGER
-    temp = target.with_name(f"{REVIEW_SCOPE_LEDGER}.{os.getpid()}.tmp")
     try:
-        temp.write_text(json.dumps(ledger, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        os.replace(temp, target)
+        atomic_write_text(target, json.dumps(ledger, indent=2, sort_keys=True) + "\n")
     except OSError as exc:
         print(
             f"Warning: could not record the scope of {stem}'s attempt in "

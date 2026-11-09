@@ -1273,10 +1273,11 @@ def write_review_diff(
     )
     for name, data in diffs.items():
         _write_diff_file(_contained_diff_target(out, diff_dir, name), data)
-    temp = out / f".{REVIEW_SCOPE_FILENAME}.{os.getpid()}.tmp"
-    with open(temp, "wb") as handle:
-        handle.write(_scope_bytes(text))
-    os.replace(temp, scope_file)
+    # Imported here: this module's import-time code imports only the standard
+    # library (it loads lazily through git_utils, tests/test_git_utils_moved_names.py).
+    from .atomic_io import atomic_write_bytes
+
+    atomic_write_bytes(scope_file, _scope_bytes(text))
     print(
         f"Review scope written (scope {scope_id}, coverage {coverage}, "
         f"{len(diffs)} diff file(s) for {len(reviewed)} source and test "

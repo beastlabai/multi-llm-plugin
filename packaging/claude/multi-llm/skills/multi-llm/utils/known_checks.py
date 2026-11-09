@@ -40,8 +40,10 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 try:
+    from .state_file import STATE_FILENAME, read_document
     from .text_clip import clip
 except ImportError:  # pragma: no cover - direct script runs with utils/ on path
+    from state_file import STATE_FILENAME, read_document  # type: ignore
     from text_clip import clip  # type: ignore
 
 #: At most this many commands are listed in a prompt (prompt size).
@@ -378,11 +380,8 @@ def commands_in_text(text: Any) -> List[str]:
 
 
 def read_state(output_dir: Any) -> Dict[str, Any]:
-    try:
-        state = json.loads((Path(str(output_dir)) / "state.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return state if isinstance(state, dict) else {}
+    """``state.json`` in *output_dir*, or ``{}`` (``state_file.read_document``)."""
+    return read_document(Path(str(output_dir)) / STATE_FILENAME) or {}
 
 
 def implement_task_list_text(output_dir: Any, plan: Optional[Path]) -> Optional[str]:

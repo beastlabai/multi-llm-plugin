@@ -52,15 +52,16 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
 import threading
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 try:  # pragma: no cover - import shim mirrors the rest of utils/
+    from .atomic_io import atomic_write_bytes
     from .git_utils import git_argv
     from .process_state import process_cache
 except ImportError:  # pragma: no cover - direct-script import shim
+    from utils.atomic_io import atomic_write_bytes
     from utils.git_utils import git_argv
     from utils.process_state import process_cache
 
@@ -249,21 +250,8 @@ def _remove_table(text: str, key: str) -> Tuple[str, str]:
 
 
 def _atomic_write(path: str, data: bytes, mode: int) -> None:
-    directory = os.path.dirname(path)
-    fd, tmp = tempfile.mkstemp(prefix=".multi-llm-trust-", dir=directory)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(tmp, mode)
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    """Replace codex's config with *data*, its permission bits exactly *mode*."""
+    atomic_write_bytes(path, data, mode=mode, temp_prefix=".multi-llm-trust-")
 
 
 def restore_home(record: _HomeRecord) -> List[str]:

@@ -101,6 +101,7 @@ from .git_utils import (
     run_git_for_paths,
     subtract_baseline,
 )
+from .state_file import update as update_state
 from .text_clip import clip, plain_line
 
 # ---------------------------------------------------------------------------
@@ -875,20 +876,16 @@ def mark_stale(guard: Dict[str, Any], groups: Mapping[str, Sequence[str]],
 
 def save_guard(state_path: Any, guard: Mapping[str, Any]) -> None:
     """Write *guard* under the pinned record of ``state.json`` at *state_path*,
-    under ``metrics.state_file_lock``, keeping every other key: for an update
+    under the state lock (``state_file.update``), keeping every other key: for an update
     taken outside the apply phase's own ``StateManager`` (a pre-dispatch
-    re-check, ``util batch-done``). Raises ``ValueError`` when the file pins
-    no endpoints."""
-    from .metrics import _read_state, _write_state, state_file_lock
-
+    re-check, ``util batch-done``). Raises ``ValueError`` when the file holds
+    no JSON object (``state_file.StateDocumentError``) or pins no endpoints."""
     target = Path(state_path)
-    with state_file_lock(target):
-        state = _read_state(target)
-        record = pinned_record(state) if isinstance(state, dict) else None
+    with update_state(target) as state:
+        record = pinned_record(state)
         if record is None:
             raise ValueError(f"{target} records neither commit_range nor head_ref")
         record["guard"] = copy.deepcopy(dict(guard))
-        _write_state(target, state)
 
 
 # ---------------------------------------------------------------------------

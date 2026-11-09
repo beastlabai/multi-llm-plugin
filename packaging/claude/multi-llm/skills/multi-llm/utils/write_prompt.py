@@ -95,6 +95,7 @@ try:
         _read_state, _write_state, mark_failed_in_progress, state_file_lock,
         withdraw_from_progress_in_state,
     )
+    from .state_file import StateDocumentError
     from .state_manager import (
         PROCESSED_LEG_NATIVE, record_batch_items_in_state, update_task_status_in_state,
     )
@@ -149,6 +150,7 @@ except ImportError:  # pragma: no cover - direct script invocation
         _read_state, _write_state, mark_failed_in_progress, state_file_lock,
         withdraw_from_progress_in_state,
     )
+    from utils.state_file import StateDocumentError  # type: ignore
     from utils.state_manager import (  # type: ignore
         PROCESSED_LEG_NATIVE, record_batch_items_in_state, update_task_status_in_state,
     )
@@ -592,7 +594,10 @@ def commit_stale_check(phase_dir: Path, task_id: str) -> Optional[List[str]]:
     reason = commit_stale_reason(failing, guard, held=bool(held))
     phase = PHASE_BY_WRITE_KIND.get(kind, kind)
     with state_file_lock(target):
-        state = _read_state(target)
+        try:
+            state = _read_state(target)
+        except StateDocumentError:
+            return None
         guard = commit_guard_of(state, kind) if isinstance(state, dict) else None
         if guard is None:
             return None

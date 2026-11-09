@@ -313,8 +313,9 @@ is *output* (D7).** `install-host <host> [--global|--project] [--check] [--all] 
 from the capability data, `{{uv_missing_file}}`/`{{uv_missing_text}}` and every
 `hosts/snippets/*.md` slot, then `{SKILL_DIR}` and the baked `--host <id>` — and
 writes it as a **rendered copy, never a symlink or junction** (which is what keeps
-`SeCreateSymbolicLinkPrivilege` out of the Windows story): temp file *in the target directory* →
-`fsync` → `os.replace`, `newline="\n"` so the bytes are identical
+`SeCreateSymbolicLinkPrivilege` out of the Windows story), by the shared atomic write
+([Atomic file writes](runtime.md#atomic-file-writes)): temp file *in the target directory* →
+`fsync` → `os.replace`, owner-only, the text encoded with `\n` newlines so the bytes are identical
 on every platform. `host_install.py` keeps the check, the write and the CLI; scopes and locations
 are `utils/host_paths.py`, rendering and the header are `utils/host_shim.py`, and the package-route
 resolvers are `utils/host_routes/` (`npm.py`, and `codex.py`, the one per-host piece that is code

@@ -1346,21 +1346,40 @@ class TestWindowsSeam:
         ]
         assert not offenders, offenders
 
-    def test_the_write_is_a_replace_into_the_target_directory(self):
-        source = Path(hi.__file__).read_text(encoding="utf-8")
-        assert "os.replace" in source
-        assert "os.fsync" in source
-        assert 'dir=str(target.parent)' in source, (
+    def test_the_write_is_a_replace_into_the_target_directory(self, tmp_path, monkeypatch):
+        """Through ``atomic_io`` (docs/development/runtime.md#atomic-file-writes)."""
+        replaced, flushed = [], []
+        real_replace, real_fsync = os.replace, os.fsync
+
+        def recording_replace(source, destination):
+            replaced.append((Path(source), Path(destination)))
+            return real_replace(source, destination)
+
+        def recording_fsync(descriptor):
+            flushed.append(descriptor)
+            return real_fsync(descriptor)
+
+        monkeypatch.setattr(os, "replace", recording_replace)
+        monkeypatch.setattr(os, "fsync", recording_fsync)
+        target = tmp_path / "commands" / "multi-llm.md"
+        hi.atomic_write(target, "a\nb\n")
+        hi.atomic_write_bytes(target, b"c\r\nd")
+        assert [d for _s, d in replaced] == [target, target]
+        assert all(s.parent == target.parent for s, _d in replaced), (
             "the temp file must live in the target directory, which is what makes "
             "os.replace atomic on Windows too"
         )
-        assert 'os.fdopen(handle, "wb")' in source, (
+        assert all(s.name.startswith(".multi-llm-shim-") for s, _d in replaced)
+        assert flushed, "the bytes are flushed before the rename"
+        assert target.read_bytes() == b"c\r\nd", (
             "the write is byte mode — identical bytes on every platform, which "
             "idempotency and the body hash both depend on, and which a backup or "
             "a rollback needs too: round-tripping a user's file through a text "
             "stream would rewrite its line endings"
         )
-        assert ', "w",' not in source, (
+        monkeypatch.undo()
+        hi.atomic_write(target, "a\nb\n")
+        assert target.read_bytes() == b"a\nb\n", (
             "a text-mode stream translates newlines on Windows; encode instead"
         )
 

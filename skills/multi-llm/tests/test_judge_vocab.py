@@ -670,8 +670,8 @@ class TestTheUpgradeIsWrittenBack:
 import sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
-from utils import metrics
-metrics.STATE_LOCK_TIMEOUT_S = 0
+from utils import metrics, state_file
+state_file.STATE_LOCK_TIMEOUT_S = 0
 path = Path(sys.argv[2])
 try:
     with metrics.state_file_lock(path):
@@ -710,11 +710,12 @@ except metrics.StateLockTimeout:
         self, tmp_path, monkeypatch
     ):
         from utils import metrics
+        from utils import state_file as state_file_mod
 
         plan_path, state_file = _plan_with_recorded_decisions(tmp_path, "legacy")
         # A second OS-lock acquisition would fail immediately rather than
         # waiting on our own lock for the production timeout.
-        monkeypatch.setattr(metrics, "STATE_LOCK_TIMEOUT_S", 0)
+        monkeypatch.setattr(state_file_mod, "STATE_LOCK_TIMEOUT_S", 0)
         with metrics.state_file_lock(state_file):
             StateManager(plan_path)
         assert not LEGACY_TOKEN.search(state_file.read_text(encoding="utf-8"))
@@ -723,12 +724,12 @@ except metrics.StateLockTimeout:
     def test_a_failed_upgrade_writeback_is_advisory(
         self, failure, tmp_path, monkeypatch, caplog
     ):
-        from utils import metrics
+        from utils import state_file as state_file_mod
 
         plan_path, state_file = _plan_with_recorded_decisions(tmp_path, "legacy")
         pinned = _pin_file(state_file)
         if failure == "lock":
-            monkeypatch.setattr(metrics.process_control.FileMutex, "acquire",
+            monkeypatch.setattr(state_file_mod.process_control.FileMutex, "acquire",
                                 lambda *_args, **_kwargs: False)
         else:
             def fail_write(*_args):

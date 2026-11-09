@@ -13,6 +13,7 @@ import threading
 from dataclasses import dataclass
 from typing import Any, Dict, FrozenSet, Iterator, List, Optional, Tuple
 
+from ..atomic_io import atomic_write_bytes
 from .base import (
     LAUNCH_DIAGNOSTICS_STDERR,
     PROFILE_GENERATE,
@@ -393,24 +394,10 @@ class CursorResidueSnapshot:
         return [f"{self.config_path}:{key}" for key in moved]
 
     def _write_atomically(self, payload: bytes) -> None:
-        directory = os.path.dirname(self.config_path) or "."
-        handle = tempfile.NamedTemporaryFile(
-            mode="wb", dir=directory, prefix=".cli-config.", suffix=".tmp", delete=False
-        )
-        try:
-            with handle:
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            if self.config_mode is not None:
-                os.chmod(handle.name, self.config_mode)
-            os.replace(handle.name, self.config_path)
-        except OSError:
-            try:
-                os.unlink(handle.name)
-            except OSError:
-                pass
-            raise
+        """Replace the user's config by ``atomic_io``'s atomic write, with the
+        mode it had when the run started (owner-only when unknown)."""
+        mode = self.config_mode if self.config_mode is not None else 0o600
+        atomic_write_bytes(self.config_path, payload, mode=mode, temp_prefix=".cli-config.")
 
 
 def snapshot_side_effects(workspace: Optional[str] = None) -> CursorResidueSnapshot:

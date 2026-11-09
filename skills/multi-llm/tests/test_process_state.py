@@ -80,7 +80,6 @@ NOT_REGISTERED: Dict[str, str] = {
         "leftovers; a test that wants a sweep replaces it, so a reset per "
         "test would only sweep /tmp again",
     "utils.llm_client._LIVE_CHILDREN": "live fan-out children",
-    "utils.metrics._HELD_STATE_LOCKS": "state-file locks this process holds",
     "utils.process_control._JOB_API":
         "the lazily bound Windows job API, fixed for the process",
     "utils.process_control._RUN_JOB_HANDLES": "open handles on the worker's run job",
@@ -115,6 +114,7 @@ NOT_REGISTERED: Dict[str, str] = {
     "utils.process_control._PIDFDS":
         "the lazily bound pidfd API, fixed for the process",
     "utils.review_round._BOUND": "the round each running dispatch thread is bound to",
+    "utils.state_file._HELD_STATE_LOCKS": "state-file locks this process holds",
     "utils.status_file._HELD_MUTEXES": "interprocess mutexes this process holds",
     "utils.validation._VIEWS_LOCKS":
         "the per-phase host-views mutexes this process holds (re-entrant per thread)",

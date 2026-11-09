@@ -5,151 +5,47 @@ and generates markdown reports for individual phases or cross-phase summaries.
 """
 
 import argparse
-import contextlib
 import json
 import os
 import re
 import sys
-import tempfile
-import threading
-import time
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import (
-    Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence,
+    Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence,
     Tuple,
 )
 
 try:
-    from . import process_control
+    from . import state_file as _state_file
     from .stream_bootstrap import bootstrap_streams
     from .text_clip import clip
 except ImportError:
     # Direct script invocation (`python utils/metrics.py`): sys.path[0]
     # is the utils/ directory, so import the sibling module directly.
-    import process_control  # type: ignore[no-redef]
+    import state_file as _state_file  # type: ignore[no-redef]
     from stream_bootstrap import bootstrap_streams
     from text_clip import clip  # type: ignore[no-redef]
 
 
-#: The interprocess lock every raw read-modify-write of ``state.json`` holds
-#: (:func:`state_file_lock`): a sibling of the state file, dot-prefixed,
-#: created on demand and never unlinked (an unlinked lock file would put two
-#: writers on two inodes of "the" lock; see ``process_control.FileMutex``).
-STATE_LOCK_FILENAME = ".state.lock"
-
-#: How long a raw state write waits for its turn. A holder runs one JSON read
-#: and write plus, for ``util batch-done`` and ``util finalize-tracking``, the
-#: dirty-tree census (seconds on a large repository); a host that records
-#: several parallel tasks at once queues that many. Generous, because the only
-#: thing the bound is for is a holder that is stopped rather than dead.
-STATE_LOCK_TIMEOUT_S = 120.0
-
-
-class StateLockTimeout(OSError):
-    """The state-file lock was not free in time; nothing was written."""
-
-
-#: Serializes this process's own raw state writes across threads; the file
-#: lock serializes processes. Reentrant, because a holder may call a helper
-#: that takes the lock again (see :func:`state_file_lock`).
-_STATE_THREAD_LOCK = threading.RLock()
-
-#: The state-file locks this process holds, by lock path. Only touched under
-#: :data:`_STATE_THREAD_LOCK`, so a present key is this thread's outer frame.
-_HELD_STATE_LOCKS: Dict[str, Any] = {}
-
-
-@contextlib.contextmanager
-def state_file_lock(state_path) -> Iterator[None]:
-    """Hold ``<state dir>/.state.lock`` for one read-modify-write of *state_path*.
-
-    The native write leg's per-batch records are separate processes the host
-    may start in parallel — implement.md lets same-batch tasks run together,
-    and ``util batch-done`` reads ``state.json``, runs the dirty-tree census
-    (seconds since fix round 7) and writes the whole file back — so two
-    unlocked records read the same file and the later write dropped the
-    earlier one's ``task_status`` (fix round 8: two records started together
-    left one). ``util batch-done``, ``util metrics record|start|finish`` and
-    ``util finalize-tracking`` take this lock from their read to their write.
-
-    Reentrant within a process (an inner frame does not take the file lock a
-    second time: an OS lock is per open file, so it would wait on itself). A
-    state file whose directory does not exist yet has nothing to lock. One
-    deadline, :data:`STATE_LOCK_TIMEOUT_S` from entry, bounds both waits: for
-    another thread of this process (:data:`_STATE_THREAD_LOCK`, process-wide,
-    so a thread writing another plan's state counts) and then for another
-    process (the file lock gets what is left). A lock not free by then raises
-    :class:`StateLockTimeout` and the caller writes nothing: an unserialized
-    write is exactly the lost record this lock exists to prevent. The
-    same-thread reentry takes neither wait.
-    """
-    timeout_s = STATE_LOCK_TIMEOUT_S
-    deadline = time.monotonic() + max(0.0, float(timeout_s))
-    if not _STATE_THREAD_LOCK.acquire(timeout=max(0.0, float(timeout_s))):
-        raise StateLockTimeout(
-            f"another thread of this process held the state lock for "
-            f"{timeout_s:g}s while it was writing state (perhaps of another "
-            f"plan), so nothing was written to {state_path}. Run this command "
-            f"again once that write has finished."
-        )
-    try:
-        folder = os.path.dirname(os.path.abspath(str(state_path)))
-        key = os.path.realpath(os.path.join(folder, STATE_LOCK_FILENAME))
-        if key in _HELD_STATE_LOCKS or not os.path.isdir(folder):
-            yield
-            return
-        mutex = process_control.FileMutex(key)
-        if not mutex.acquire(timeout_s=max(0.0, deadline - time.monotonic()),
-                             poll_interval_s=0.02):
-            raise StateLockTimeout(
-                f"{key} was not free within {timeout_s:g}s: another multi-llm "
-                f"command is still writing {state_path} (or the lock file "
-                f"cannot be opened), so nothing was written. Run this command "
-                f"again once that one has finished."
-            )
-        _HELD_STATE_LOCKS[key] = mutex
-        try:
-            yield
-        finally:
-            del _HELD_STATE_LOCKS[key]
-            mutex.release()
-    finally:
-        _STATE_THREAD_LOCK.release()
+# The state file's lock, reader and writer live in ``utils/state_file.py``;
+# these names stay importable from here for the modules that take them.
+state_file_lock = _state_file.locked
+StateLockTimeout = _state_file.StateLockTimeout
+STATE_LOCK_FILENAME = _state_file.STATE_LOCK_FILENAME
 
 
 def _read_state(state_path: Path) -> dict:
-    """Read and parse the state JSON file."""
-    with open(state_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    """``state.json``'s document; raises ``OSError`` or
+    ``state_file.StateDocumentError``, a ``ValueError``
+    (``state_file.read_document_strict``)."""
+    return _state_file.read_document_strict(state_path)
 
 
 def _write_state(state_path: Path, state: dict) -> None:
-    """Write state JSON atomically (temp file + os.replace)."""
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_fd, temp_path = tempfile.mkstemp(
-        dir=str(state_path.parent),
-        suffix=".tmp",
-        prefix=".metrics_",
-    )
-    try:
-        with os.fdopen(temp_fd, "w", encoding="utf-8") as f:
-            json.dump(state, f, indent=2)
-        temp_fd = None  # fdopen closes the fd
-        os.replace(temp_path, str(state_path))
-        temp_path = None  # file has been moved
-    finally:
-        if temp_fd is not None:
-            try:
-                os.close(temp_fd)
-            except OSError:
-                pass
-        if temp_path is not None and os.path.exists(temp_path):
-            try:
-                os.unlink(temp_path)
-            except OSError:
-                pass
+    """Write state JSON atomically (``state_file.write_document``)."""
+    _state_file.write_document(state_path, state, temp_prefix=".metrics_")
 
 
 def format_duration(ms: Optional[int]) -> str:
@@ -734,10 +630,8 @@ def start_phase(state_path: Path, phase: str, total_batches: int) -> None:
     (necessary so ``--resume`` runs reset the progress baseline, and start a new
     ``run_id``).
     """
-    with state_file_lock(state_path):
-        state = _read_state(state_path)
+    with _state_file.update(state_path, temp_prefix=".metrics_") as state:
         start_phase_in_state(state, phase, total_batches)
-        _write_state(state_path, state)
 
 
 def finish_phase_in_state(
@@ -855,20 +749,18 @@ def finish_phase(state_path: Path, phase: str) -> Optional[int]:
 
     Returns None if the phase was never started (graceful no-op).
     """
-    with state_file_lock(state_path):
-        state = _read_state(state_path)
+    with _state_file.update(state_path, temp_prefix=".metrics_") as state:
         if (
             phase not in (state.get("metrics_progress") or {})
             and not left_out_in_state(state, phase)
         ):
-            # Never started and nothing left out: nothing to mutate, so
-            # nothing to write back.
+            # Never started and nothing left out: nothing changes, so
+            # nothing is written back.
             return None
         finished = finish_phase_in_state(state, phase)
         if finished is None:  # pragma: no cover - guarded above
             return None
         elapsed_ms, line = finished
-        _write_state(state_path, state)
     # The CLI leg is the one that owns stderr; the in-memory twin only returns
     # the line (F7).
     print(line, file=sys.stderr)
@@ -1528,8 +1420,7 @@ def record_metric(
             apply batch's label carries none): the line of one ``util
             batch-done`` recorded failed says so (fix round 24).
     """
-    with state_file_lock(state_path):
-        state = _read_state(state_path)
+    with _state_file.update(state_path, temp_prefix=".metrics_") as state:
         eta_line = record_metric_in_state(
             state,
             phase,
@@ -1542,7 +1433,6 @@ def record_metric(
             batch_index=batch_index,
             task_id=task_id,
         )
-        _write_state(state_path, state)
 
     if print_eta and eta_line:
         print(eta_line, file=sys.stderr)
@@ -1757,7 +1647,7 @@ def main(argv=None) -> int:
 
     try:
         return _run_command(args, state_file)
-    except StateLockTimeout as exc:
+    except (StateLockTimeout, _state_file.StateDocumentError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 

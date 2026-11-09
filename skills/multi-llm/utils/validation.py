@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 try:
+    from .atomic_io import atomic_write_bytes, atomic_write_text
     from .state_manager import generate_group_id, CURRENT_FORMAT_VERSION
     from .state_manager import group_join_ids, records_by_unique_id, stamped_group_id
     from .cli_common import (
@@ -45,6 +46,7 @@ try:
         tasks_of,
     )
 except ImportError:
+    from utils.atomic_io import atomic_write_bytes, atomic_write_text
     from utils.state_manager import generate_group_id, CURRENT_FORMAT_VERSION
     from utils.state_manager import group_join_ids, records_by_unique_id, stamped_group_id
     from utils.cli_common import (
@@ -429,22 +431,8 @@ class BoundDocument:
 
 
 def _atomic_write_bytes(target: str, data: bytes) -> None:
-    """temp file + ``os.replace``, so a reader never sees a half-written snapshot."""
-    tmp = os.path.join(
-        os.path.dirname(target), f".{os.path.basename(target)}.{os.getpid()}.tmp"
-    )
-    try:
-        with open(tmp, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, target)
-    except OSError:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    """Atomic write, so a reader never sees a half-written snapshot."""
+    atomic_write_bytes(target, data)
 
 
 def bind_document_file(
@@ -992,31 +980,14 @@ def sidecar_path(phase_dir: str, batch_index: int) -> str:
 def _write_one_sidecar(target: str, prompt: str) -> None:
     r"""Atomic, byte-identical write.
 
-    ``newline=""`` is load-bearing: a text-mode open on Windows would rewrite
-    ``\n`` as ``\r\n`` and the file would no longer equal ``prompt`` — and
-    byte identity is the whole contract, since a host hands a subagent this file
-    *instead of* the prompt. Same temp-then-``os.replace`` shape as
-    ``subagent_executor._atomic_write_json``, written out here because importing
-    that module from this one would close a cycle.
+    No newline translation (``atomic_write_text`` writes ``\n`` as ``\n``) is
+    load-bearing: a text-mode write on Windows would rewrite ``\n`` as
+    ``\r\n`` and the file would no longer equal ``prompt`` — and byte
+    identity is the whole contract, since a host hands a subagent this file
+    *instead of* the prompt. A failed write leaves no temp file behind, so the
+    all-or-none rule's cleanup of the sidecars already written is complete.
     """
-    tmp = os.path.join(
-        os.path.dirname(target), f".{os.path.basename(target)}.{os.getpid()}.tmp"
-    )
-    try:
-        with open(tmp, "w", encoding="utf-8", newline="") as handle:
-            handle.write(prompt)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, target)
-    except OSError:
-        # The all-or-none rule above removes the sidecars this one already
-        # wrote; without this the *partial* write would survive as a hidden
-        # `.…tmp` in the phase dir, matched by no glob and cleaned by nothing.
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    atomic_write_text(target, prompt)
 
 
 def write_prompt_sidecars(

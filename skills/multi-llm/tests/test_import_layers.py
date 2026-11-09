@@ -63,6 +63,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
     0: ("core", (
         "modes",
         "utils.advisory",
+        "utils.atomic_io",
         "utils.env_vars",
         "utils.importance",
         "utils.json_extractor",
@@ -101,6 +102,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.review_diff",
         "utils.review_round",
         "utils.run_registry",
+        "utils.state_file",
         "utils.state_manager",
         "utils.status_file",
         "utils.task_ledger",

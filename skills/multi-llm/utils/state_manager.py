@@ -6,7 +6,6 @@ import logging
 import os
 import re
 import shutil
-import tempfile
 import unicodedata
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +14,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 from .git_utils import get_branch_name, head_or_empty_tree
 from .judge_vocab import upgrade_legacy
 from .schema_validator import validate_state_file
+from . import state_file as _state_file
 from . import task_ledger as _task_ledger
 
 logger = logging.getLogger(__name__)
@@ -1958,7 +1958,7 @@ class StateManager:
 
         The state lock is the innermost lock: a caller may hold its own
         (the scheduler's ``_effects_lock``), but nothing is taken while this
-        one is held. A lock not free within ``metrics.STATE_LOCK_TIMEOUT_S``
+        one is held. A lock not free within ``state_file.STATE_LOCK_TIMEOUT_S``
         raises ``StateLockTimeout`` with nothing written; the changes stay in
         memory for the next ``save()``.
 
@@ -2008,49 +2008,15 @@ class StateManager:
             return None
 
     def _write_atomic(self, document: Dict[str, Any]) -> str:
-        """Write *document* to ``state.json`` via a temp file and ``os.replace``.
-
-        Returns the JSON text written.
+        """Write *document* to ``state.json`` (``state_file.write_document``:
+        temp file and ``os.replace``). Returns the JSON text written.
 
         Raises:
             IOError: If the write fails
         """
-        # Write to temp file first, then atomically rename
-        temp_fd = None
-        temp_path = None
         try:
-            # Create a temp file in the same directory as the target
-            # Use state_file.parent since state is now plan-local
-            self.state_file.parent.mkdir(parents=True, exist_ok=True)
-            temp_fd, temp_path = tempfile.mkstemp(
-                dir=str(self.state_file.parent),
-                suffix='.tmp',
-                prefix='.state_'
-            )
-
-            # Write state to temp file
-            text = json.dumps(document, indent=2)
-            with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
-                f.write(text)
-            temp_fd = None  # fdopen closes the file descriptor
-
-            # Atomically rename temp file to target location
-            os.replace(temp_path, str(self.state_file))
-            temp_path = None  # File has been moved
-            return text
-
+            return _state_file.write_document(self.state_file, document)
         except Exception as e:
-            # Clean up temp file if something went wrong
-            if temp_fd is not None:
-                try:
-                    os.close(temp_fd)
-                except OSError:
-                    pass
-            if temp_path is not None and os.path.exists(temp_path):
-                try:
-                    os.unlink(temp_path)
-                except OSError:
-                    pass
             raise IOError(f"Failed to save state: {e}") from e
 
     def reload(self) -> None:

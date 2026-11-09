@@ -1624,6 +1624,31 @@ class TestTheNativeReCheck:
         code, out, err = _write_prompt(native, capsys, "apply-fix-batch-1")
         assert code == 0 and out.startswith("[WRITE_PROMPT] "), err
 
+    @pytest.mark.parametrize("content", [b"[]", b"{not json"], ids=["a-list", "not-json"])
+    def test_a_state_file_with_no_object_by_the_locked_read_is_no_re_check(
+        self, native, fake_apply, monkeypatch, content,
+    ):
+        """The re-check's locked read finds ``state.json`` holding no object
+        (rewritten since its first look): no guard, so ``None`` and nothing
+        written, as for a state it cannot read at all."""
+        from utils import write_prompt
+
+        native.materialize([_batch("src/a.py", "g0")])
+        native.install_guard(_guard(native.head, expect=_head_expect(
+            native.root, native.head, "src/a.py")))
+        native.write("src/a.py", "a = 'by hand'\n")
+        real_recheck = write_prompt.commit_recheck_failing
+
+        def then_rewritten(*args, **kwargs):
+            failing = real_recheck(*args, **kwargs)
+            assert failing, "the edit fails the re-check"
+            native.state_path.write_bytes(content)
+            return failing
+
+        monkeypatch.setattr(write_prompt, "commit_recheck_failing", then_rewritten)
+        assert write_prompt.commit_stale_check(native.phase_dir, "apply-fix-batch-0") is None
+        assert native.state_path.read_bytes() == content
+
 
 class TestNoGuardOnTheNativeLeg:
 

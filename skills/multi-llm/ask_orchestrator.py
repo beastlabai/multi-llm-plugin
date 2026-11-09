@@ -55,7 +55,6 @@ import json
 import os
 import shlex
 import sys
-import tempfile
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -65,6 +64,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple, Un
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
+from utils.atomic_io import atomic_write_text
 from utils.stream_bootstrap import bootstrap_streams
 from utils import cli_common
 from utils.cli_common import (
@@ -730,24 +730,13 @@ def origin_file_path(question_dir: str, stem: str) -> str:
 
 
 def _write_atomically(path: str, text: str) -> None:
-    """Write *text* to a temp file beside *path*, then ``os.replace`` it in.
+    """Replace *path* with *text* by ``atomic_io``'s atomic write.
 
-    A reader never sees a half-written record or partial. Raises ``OSError``.
+    A reader never sees a half-written record or partial. Owner-only (0600)
+    and the platform's newlines, as these files have always been written.
+    Raises ``OSError``.
     """
-    directory = os.path.dirname(path) or "."
-    fd, tmp = tempfile.mkstemp(
-        dir=directory, prefix=f".{os.path.basename(path)}.", suffix=".tmp"
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
-        raise
+    atomic_write_text(path, text, newline=os.linesep, mode=0o600)
 
 
 def answers_on_stdout(provider_name: Optional[str]) -> bool:

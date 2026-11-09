@@ -44,8 +44,6 @@ import hashlib
 import json
 import os
 import re
-import secrets
-import stat as stat_module
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -61,6 +59,7 @@ from .commit_range import (
     pinned_spelling,
     render_window_line,
 )
+from .atomic_io import atomic_write_bytes
 from .commit_paths import BRIEF_END_MARKER, BRIEF_MARKER
 from .git_utils import GitError, attribute_source_args, git_path, run_git
 from .text_clip import clip, plain_line
@@ -513,26 +512,10 @@ def split_brief(text: str) -> Tuple[Optional[str], str]:
 
 
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
-    """A temp file beside *path* (created exclusively, so the umask applies),
-    ``fsync``, then ``os.replace``: a reader sees the old file or the new
-    one, never half of either. An existing file's mode is kept."""
-    temporary = path.parent / f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
-    try:
-        with open(temporary, "xb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        try:
-            os.chmod(temporary, stat_module.S_IMODE(os.stat(path).st_mode))
-        except OSError:
-            pass
-        os.replace(temporary, path)
-    except BaseException:
-        try:
-            os.unlink(temporary)
-        except OSError:
-            pass
-        raise
+    """``atomic_io``'s atomic write: a reader sees the old file or the new
+    one, never half of either. An existing file's mode is kept; a new file
+    gets the umask's."""
+    atomic_write_bytes(path, data)
 
 
 def write_brief(path: PathLike, header: str, *, exclusive: bool = False) -> None:

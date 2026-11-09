@@ -754,7 +754,7 @@ class TestStateWritesAreSerialized:
     def test_a_lock_never_released_fails_the_record_and_writes_nothing(
         self, implement_phase, tmp_path, monkeypatch, capsys
     ):
-        from utils import metrics
+        from utils import state_file as state_file_mod
 
         state_path, phase_dir = implement_phase
         before = state_path.read_text(encoding="utf-8")
@@ -767,7 +767,7 @@ class TestStateWritesAreSerialized:
         )
         try:
             assert holder.stdout.readline().strip() == "held"
-            monkeypatch.setattr(metrics, "STATE_LOCK_TIMEOUT_S", 0.3)
+            monkeypatch.setattr(state_file_mod, "STATE_LOCK_TIMEOUT_S", 0.3)
 
             code = batch_done.main([
                 "--phase-dir", str(phase_dir), "--task-id", "T001",

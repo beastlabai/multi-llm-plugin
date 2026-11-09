@@ -453,7 +453,7 @@ class TestStateFileUpdates:
         mock_get_files.return_value = {"new_file.py"}
         before = valid_state.read_text(encoding="utf-8")
 
-        with patch("finalize_tracking.json.dump", side_effect=OSError("disk full")):
+        with patch("utils.state_file.json.dumps", side_effect=OSError("disk full")):
             with patch("sys.argv", ["finalize_tracking.py", "--state-file", str(valid_state)]):
                 result = main()
 

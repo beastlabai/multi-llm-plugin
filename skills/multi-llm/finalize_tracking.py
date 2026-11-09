@@ -23,7 +23,6 @@ import argparse
 import json
 import os
 import sys
-import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -49,6 +48,7 @@ from utils.git_utils import (
 )
 from utils.metrics import StateLockTimeout, state_file_lock
 from utils.output_handler import workflow_file_entries
+from utils.state_file import write_document
 from utils.state_manager import compute_plan_hash, mark_phase_completed_in_state
 
 # A tracked-file dump is a reference list, not a reading; state.json holds all
@@ -111,18 +111,9 @@ def _expand_uncovered_directories(entries: Set[str]) -> Set[str]:
 
 
 def _write_state_atomic(state_path: Path, state: dict) -> None:
-    """Keep the previous state intact if either finalization write fails."""
-    state_path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temp_path = tempfile.mkstemp(
-        dir=str(state_path.parent), suffix=".tmp", prefix=".tracking_",
-    )
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(state, handle, indent=2)
-        os.replace(temp_path, str(state_path))
-    finally:
-        if os.path.exists(temp_path):
-            os.unlink(temp_path)
+    """Keep the previous state intact if either finalization write fails
+    (``state_file.write_document``)."""
+    write_document(state_path, state, temp_prefix=".tracking_")
 
 
 def _restamp_plan_hash(state_path: Path, plan_path: Path) -> None:

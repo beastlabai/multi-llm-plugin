@@ -49,10 +49,11 @@ import json
 import math
 import os
 import stat
-import tempfile
 import threading
 import time
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
+
+from .atomic_io import atomic_write_text
 
 #: Bump when an entry's shape or meaning changes; a file with another value is
 #: ignored (and replaced on the next write).
@@ -343,15 +344,7 @@ def _atomic_write_json(path: str, payload: Dict[str, Any]) -> None:
     why = directory_refusal(directory)
     if why:
         raise _Refused(why)
-    handle, temporary = tempfile.mkstemp(prefix=".cli-versions.", suffix=".tmp", dir=directory)
-    try:
-        with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            json.dump(payload, stream, indent=1, sort_keys=True)
-            stream.write("\n")
-        os.replace(temporary, path)
-    except BaseException:
-        try:
-            os.unlink(temporary)
-        except OSError:
-            pass
-        raise
+    # Owner-only, like its 0700 directory. No fsync: a lost write costs one
+    # more version probe, and the flush would cost doctor's startup budget.
+    text = json.dumps(payload, indent=1, sort_keys=True) + "\n"
+    atomic_write_text(path, text, mode=0o600, fsync=False, temp_prefix=".cli-versions.")

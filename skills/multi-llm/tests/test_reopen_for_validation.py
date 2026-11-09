@@ -38,9 +38,9 @@ _LOCKED_WRITER = """
 import sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
-from utils import metrics
+from utils import metrics, state_file
 from utils.state_manager import StateManager
-metrics.STATE_LOCK_TIMEOUT_S = 0
+state_file.STATE_LOCK_TIMEOUT_S = 0
 manager = StateManager(Path(sys.argv[2]))
 try:
     with metrics.state_file_lock(manager.state_file):

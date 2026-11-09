@@ -70,6 +70,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Mapping, NamedTuple, Optional, Tuple, Union
 
 from . import report_markdown, status_file
+from .atomic_io import atomic_write_bytes, atomic_write_text
 
 #: The key that holds the round id: top level in ``.status.json`` and the task
 #: file, under ``metadata`` in ``validation.json``.
@@ -402,29 +403,14 @@ def persisting_result(phase_dir: PathLike, name: str) -> Iterator[bool]:
 
 
 def replace_file(path: PathLike, data: Union[bytes, str]) -> bytes:
-    """Write *data* beside *path* and rename it into place, so a reader sees
-    the old file or the new one, never part of one; the bytes written. Text is
+    """Write *data* by ``atomic_io``'s atomic write, so a reader sees the old
+    file or the new one, never part of one; the bytes written. Text is
     encoded as text mode writes it (UTF-8, the platform's newlines, as
     ``write_text`` did); bytes as they are."""
-    target = Path(path)
-    tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
     if isinstance(data, bytes):
-        raw = data
-    else:
-        raw = (data if os.linesep == "\n" else data.replace("\n", os.linesep)).encode("utf-8")
-    try:
-        with open(tmp, "wb") as handle:
-            handle.write(raw)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, target)
-        return raw
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+        atomic_write_bytes(path, data)
+        return data
+    return atomic_write_text(path, data, newline=os.linesep)
 
 
 def task_document_round(document: Any) -> Optional[str]:

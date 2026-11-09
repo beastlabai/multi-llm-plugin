@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 try:
+    from .atomic_io import atomic_write_text
+    from .state_file import read_document as _read_state_document
     from .stream_bootstrap import bootstrap_streams
     from .json_extractor import sanitize_model_name
     from .metrics import describe_usage
@@ -31,6 +33,8 @@ try:
 except ImportError:
     # Direct script invocation (`python utils/html_report_generator.py`):
     # sys.path[0] is the utils/ directory, so import the sibling module directly.
+    from atomic_io import atomic_write_text  # type: ignore
+    from state_file import read_document as _read_state_document  # type: ignore
     from stream_bootstrap import bootstrap_streams
     from json_extractor import sanitize_model_name
     from process_state import process_cache  # type: ignore
@@ -49,25 +53,12 @@ logger = logging.getLogger(__name__)
 
 
 def _write_atomic(path: Path, text: str) -> None:
-    """Write *text* beside *path* and rename it into place, so a reader (the
-    apply step, a decision overlay, a browser) sees the old file or the new
-    one, never part of one. UTF-8, the platform's newlines, as ``write_text``."""
+    """Write *text* by ``atomic_io``'s atomic write, so a reader (the apply
+    step, a decision overlay, a browser) sees the old file or the new one,
+    never part of one. UTF-8, the platform's newlines, as ``write_text``."""
     import os
 
-    path = Path(path)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    try:
-        with open(tmp, "w", encoding="utf-8") as handle:
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
+    atomic_write_text(path, text, newline=os.linesep)
 
 
 # ---------------------------------------------------------------------------
@@ -2784,11 +2775,7 @@ def _read_guard_from_state(state_file: Path) -> Optional[Dict[str, Any]]:
 
 def _read_state_dict(state_file: Path) -> Dict[str, Any]:
     """A state.json file as a dict (``{}`` when unreadable)."""
-    try:
-        state = json.loads(Path(state_file).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return state if isinstance(state, dict) else {}
+    return _read_state_document(state_file) or {}
 
 
 def _report_consolidated_regeneration(phase_dir: Path, decisions: Mapping[str, Any],

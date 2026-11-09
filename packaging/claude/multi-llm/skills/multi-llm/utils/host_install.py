@@ -54,13 +54,13 @@ import os
 import re
 import shutil
 import sys
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 try:  # normal import (utils is a package)
     from . import host_capabilities as caps
+    from .atomic_io import atomic_write_bytes as _atomic_write_bytes
     from .cli_common import (
         EXIT_NEEDS_HUMAN,
         EXIT_NOTHING_TO_DO,
@@ -73,6 +73,7 @@ try:  # normal import (utils is a package)
     from .unattended import find_uv, uv_missing_text
 except ImportError:  # pragma: no cover - direct script runs with utils/ on path
     import host_capabilities as caps  # type: ignore
+    from atomic_io import atomic_write_bytes as _atomic_write_bytes  # type: ignore
     from cli_common import (  # type: ignore
         EXIT_NEEDS_HUMAN,
         EXIT_NOTHING_TO_DO,
@@ -1415,7 +1416,8 @@ def runner_available(provider: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def atomic_write(target: Path, text: str) -> None:
-    """Render into the target directory, ``fsync``, then ``os.replace``.
+    """Render into the target directory, ``fsync``, then ``os.replace``
+    (:func:`atomic_write_bytes`).
 
     The text is encoded here rather than handed to a newline-translating stream,
     which is the same guarantee ``newline="\\n"`` used to give: the bytes are
@@ -1436,23 +1438,12 @@ def atomic_write_bytes(target: Path, data: bytes) -> None:
     ``read_text`` translates CRLF/CR to LF, so round-tripping a user's edited
     shim through it would rewrite the line endings of the very bytes D7a
     promises to preserve.
+
+    The written file is owner-only (0600), as every shim, backup and rollback
+    this installer has written is.
     """
     target.parent.mkdir(parents=True, exist_ok=True)
-    handle, temporary = tempfile.mkstemp(
-        dir=str(target.parent), prefix=".multi-llm-shim-", suffix=".tmp"
-    )
-    try:
-        with os.fdopen(handle, "wb") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, target)
-    except BaseException:
-        try:
-            os.unlink(temporary)
-        except OSError:  # pragma: no cover - best-effort cleanup
-            pass
-        raise
+    _atomic_write_bytes(target, data, mode=0o600, temp_prefix=".multi-llm-shim-")
 
 
 def _as_text(data: bytes) -> str:

@@ -62,6 +62,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     from .launch_limiter import attempt_turn_blocking
     from .process_state import process_cache
     from .text_clip import clip
+    from .atomic_io import atomic_write_text
     from .json_extractor import (
         describe_syntax_error,
         extract_json_from_text,
@@ -203,6 +204,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
     from utils.launch_limiter import attempt_turn_blocking  # type: ignore
     from utils.process_state import process_cache  # type: ignore
     from utils.text_clip import clip  # type: ignore
+    from utils.atomic_io import atomic_write_text  # type: ignore
     from utils.json_extractor import (
         describe_syntax_error,
         extract_json_from_text,
@@ -5679,33 +5681,14 @@ def resolve_output_target(task: Dict[str, Any], phase_dir: str) -> Path:
 
 
 def _atomic_write_json(path: str, data: Any) -> None:
-    """Write ``data`` as JSON via a same-directory temp file, 0600, ``os.replace``.
+    """Write ``data`` as JSON, owner-only (0600), by ``atomic_io``'s atomic write.
 
     An executor killed mid-batch (expected on the D4 detached path) therefore
     never leaves a half-written result for the reaggregation glob to pick up.
     """
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
-    payload = json.dumps(data, indent=2)
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    handle = os.open(str(tmp), flags, 0o600)
-    try:
-        with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-    except BaseException:
-        try:
-            os.unlink(str(tmp))
-        except OSError:
-            pass
-        raise
-    os.replace(str(tmp), str(target))
-    try:
-        os.chmod(str(target), 0o600)
-    except OSError:  # pragma: no cover - exotic filesystems
-        pass
+    atomic_write_text(target, json.dumps(data, indent=2), mode=0o600)
 
 
 def persist_result(task: Dict[str, Any], phase_dir: str, data: Any) -> str:

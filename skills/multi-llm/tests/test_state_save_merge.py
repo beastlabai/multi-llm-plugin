@@ -19,6 +19,7 @@ SKILL_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SKILL_DIR))
 
 from utils import metrics  # noqa: E402
+from utils import state_file as state_file_mod  # noqa: E402
 from utils.state_manager import StateManager  # noqa: E402
 
 
@@ -227,7 +228,7 @@ class TestTheStateLock:
         try:
             assert holder.stdout.readline().strip() == "held"
             before = manager.state_file.read_text(encoding="utf-8")
-            monkeypatch.setattr(metrics, "STATE_LOCK_TIMEOUT_S", 0.3)
+            monkeypatch.setattr(state_file_mod, "STATE_LOCK_TIMEOUT_S", 0.3)
 
             with pytest.raises(metrics.StateLockTimeout) as raised:
                 manager.save()
@@ -544,7 +545,7 @@ class TestTheLockDeadline:
         release = threading.Event()
 
         def hold() -> None:
-            with metrics._STATE_THREAD_LOCK:
+            with state_file_mod._STATE_THREAD_LOCK:
                 held.set()
                 release.wait(timeout=60)
 
@@ -552,7 +553,7 @@ class TestTheLockDeadline:
         holder.start()
         try:
             assert held.wait(timeout=60)
-            monkeypatch.setattr(metrics, "STATE_LOCK_TIMEOUT_S", 0.05)
+            monkeypatch.setattr(state_file_mod, "STATE_LOCK_TIMEOUT_S", 0.05)
             with pytest.raises(metrics.StateLockTimeout) as raised:
                 manager.save()
             assert "nothing was written" in str(raised.value)
@@ -589,17 +590,17 @@ class TestTheLockDeadline:
             def release(self):
                 pass
 
-        monkeypatch.setattr(metrics, "time", types.SimpleNamespace(monotonic=lambda: clock[0]))
-        monkeypatch.setattr(metrics, "_STATE_THREAD_LOCK", ThreadLock())
-        monkeypatch.setattr(metrics.process_control, "FileMutex", FileMutex)
-        monkeypatch.setattr(metrics, "STATE_LOCK_TIMEOUT_S", 120.0)
+        monkeypatch.setattr(state_file_mod, "time", types.SimpleNamespace(monotonic=lambda: clock[0]))
+        monkeypatch.setattr(state_file_mod, "_STATE_THREAD_LOCK", ThreadLock())
+        monkeypatch.setattr(state_file_mod.process_control, "FileMutex", FileMutex)
+        monkeypatch.setattr(state_file_mod, "STATE_LOCK_TIMEOUT_S", 120.0)
         state_path = tmp_path / "state.json"
 
         with metrics.state_file_lock(state_path):
             pass
         assert file_waits == [50.0]
 
-        monkeypatch.setattr(metrics, "STATE_LOCK_TIMEOUT_S", 60.0)
+        monkeypatch.setattr(state_file_mod, "STATE_LOCK_TIMEOUT_S", 60.0)
         with pytest.raises(metrics.StateLockTimeout):
             with metrics.state_file_lock(state_path):
                 pass

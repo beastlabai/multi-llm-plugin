@@ -17,17 +17,16 @@ import argparse
 import json
 import os
 import re
-import secrets
-import stat
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Union
 
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
+from utils.atomic_io import atomic_write_bytes, atomic_write_text
 from utils.stream_bootstrap import bootstrap_streams
 from utils.output_handler import get_output_paths, get_relative_output_path
 from utils.plan_updater import insert_tasks_file_reference
@@ -293,70 +292,21 @@ class AppliedTasks:
 
 
 def replace_file(path: Path, data: Union[str, bytes]) -> None:
-    """Write *data* to *path* through a sibling temp file and ``os.replace``.
+    """Write *data* to *path* by ``atomic_io``'s atomic write.
 
     A crash or a failed write leaves the old bytes in place, never a truncated
     file. Text is written the way ``Path.write_text(encoding="utf-8")`` writes
-    it (newline translation included); bytes land exactly. A symlink is
-    written through to its target, so the link survives, and an existing
-    file's permission bits carry over to the replacement; a new file gets the
-    process umask, as ``write_text`` would.
-
-    The temp file replacing an existing file is created owner-only and given
-    the old file's mode before its bytes are flushed, so it is never readable
-    more widely than the file it replaces. On POSIX the directory is flushed
-    after the rename, so a returned call survives a power loss.
+    it (the platform's newlines); bytes land exactly. A symlink is written
+    through to its target, so the link survives (a user may keep the plan
+    elsewhere and link it in), and an existing file's permission bits carry
+    over to the replacement; a new file gets the process umask, as
+    ``write_text`` would. The temp file is never readable more widely than the
+    file it replaces, and a returned call survives a power loss.
     """
-    target = Path(os.path.realpath(path))
-    try:
-        mode: Optional[int] = stat.S_IMODE(os.stat(target).st_mode)
-    except FileNotFoundError:
-        mode = None
-    temporary = target.with_name(
-        f".{target.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp"
-    )
-    # O_BINARY: the CRT must not translate newlines a second time on Windows;
-    # the text stream below does it, exactly as ``write_text`` would.
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
-    handle = os.open(str(temporary), flags, 0o666 if mode is None else 0o600)
-    try:
-        if isinstance(data, bytes):
-            stream = os.fdopen(handle, "wb")
-        else:
-            stream = os.fdopen(handle, "w", encoding="utf-8")
-        with stream:
-            stream.write(data)
-            stream.flush()
-            if mode is not None:
-                if hasattr(os, "fchmod"):
-                    os.fchmod(stream.fileno(), mode)
-                else:  # Windows before 3.13: only the read-only bit exists
-                    os.chmod(temporary, mode)
-            os.fsync(stream.fileno())
-        os.replace(temporary, target)
-    except BaseException:
-        try:
-            os.unlink(temporary)
-        except OSError:
-            pass
-        raise
-    _flush_directory(target.parent)
-
-
-def _flush_directory(folder: Path) -> None:
-    """Flush *folder*'s entries on POSIX; Windows can't open a directory for this."""
-    if os.name == "nt":
-        return
-    try:
-        descriptor = os.open(str(folder), os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    except OSError:
-        return
-    try:
-        os.fsync(descriptor)
-    except OSError:
-        pass
-    finally:
-        os.close(descriptor)
+    if isinstance(data, bytes):
+        atomic_write_bytes(path, data, follow_symlinks=True)
+    else:
+        atomic_write_text(path, data, newline=os.linesep, follow_symlinks=True)
 
 
 def apply_tasks_document(

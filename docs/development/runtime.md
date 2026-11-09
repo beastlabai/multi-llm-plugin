@@ -12,6 +12,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [uv runtime flags](#uv-runtime-flags)
 - [Process primitives](#process-primitives)
 - [Advisory guards](#advisory-guards)
+- [Atomic file writes](#atomic-file-writes)
 - [Durable retry commands](#durable-retry-commands)
 
 ## Detach boundary and worker lifecycle
@@ -742,6 +743,48 @@ Rules for a site:
 
 `utils/run_status.py` and the `utils/status_*.py` modules split out of it, `utils/detach.py` and
 `utils/next_phase.py` use the guard; the broad excepts elsewhere in the tree are still silent.
+
+## Atomic file writes
+
+Replace a file whole through `utils/atomic_io.py` (`atomic_write_bytes`, `atomic_write_text`),
+not a private temp-then-`os.replace` copy. The guarantees, each pinned by an injected fault in
+`tests/test_atomic_io.py`:
+
+- The temp file sits beside the target (the same volume, so the rename is atomic on Windows too) and
+  is created with `O_EXCL`: a file or symlink already at its name is never opened, nor removed.
+- While it holds bytes it is owner-only, and never readable more widely than the file it replaces.
+  Replacing an existing file, or with an explicit `mode`, it is created owner-only (0600). A new
+  file with no `mode` is created empty with the umask's mode, as `open()` would, read back with
+  `fstat` (so the process umask is never set, which would race every other thread creating a
+  file), and narrowed to owner-only before its first byte. Either way it gets its final mode only
+  once written.
+- The mode is applied before the `fsync`, then `os.replace`, then on POSIX the directory is
+  flushed. Any exception, `KeyboardInterrupt` included, closes the descriptor (a failed `os.fdopen`
+  included), gives a temp file made read-only by its final mode its owner write bit back (Windows
+  deletes no read-only file, and refuses to replace a read-only target), removes it, and leaves the
+  old bytes.
+
+A call site states only how it differs, through a parameter:
+
+| Parameter | Default | Who changes it |
+|-----------|---------|----------------|
+| `keep_mode` | on: an existing file's bits carry over | no caller turns it off |
+| `mode` | none | 0600: executor results, ask records, the version cache, `state.json`, shims; codex's and cursor's config keep the mode they had |
+| `fsync` | on | off for `state.json` (rewritten dozens of times a run, under its lock) and doctor's version cache (inside the startup budget) |
+| `follow_symlinks` | off: a symlink is replaced by a file | `update_plan_tasks.replace_file`: a plan or task list kept elsewhere and linked in stays linked |
+| `newline` (text) | `\n` | `os.linesep` where a writer has always written what `write_text` does (`update_plan_tasks`, `review_round`, the HTML report, ask's records) |
+| `temp_prefix` | `.<name>.` | where something matches leftovers by name (`.state_`, `.metrics_`, `.tracking_`, `.multi-llm-shim-`, `.multi-llm-trust-`) |
+
+`state.json` itself goes through `utils/state_file.py`: `write_document` (the one writer),
+`read_document` / `read_document_strict` (the raw readers; a raw read migrates and writes
+nothing), `locked` (the state lock, still importable as `metrics.state_file_lock`) and `update`
+(read, change, write under the lock; nothing is written when the body raises or changes nothing).
+The strict reader raises `StateDocumentError` (a `ValueError`) for a file that is not UTF-8 JSON
+holding an object; each command turns it into its own refusal (`util batch-done` exits 3 with
+`... is not a JSON object`, `util metrics` exits 1 with `Error:`). `StateDoc` lists the top-level
+keys the skill writes and `schemas/state_file.schema.json` lists the same properties;
+`tests/test_state_file.py` compares them, and checks the keys `StateManager`'s writers put in a
+saved file against both.
 
 ## Durable retry commands
 

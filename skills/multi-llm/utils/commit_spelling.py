@@ -27,10 +27,11 @@ Pure apart from reading one ``state.json`` (read-only, no lock, no git call).
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Mapping, Optional, Sequence, Tuple, Union
+
+from .state_file import STATE_FILENAME, read_document
 
 #: Flags a front door synthesises or consumes; a printed commit command never
 #: carries one (the front doors refuse the first three, and the rest are
@@ -61,16 +62,11 @@ class CommitView:
 def _state_path_for(plan: Union[str, Path]) -> Path:
     from .output_handler import output_dir_path
 
-    return output_dir_path(Path(plan)) / "state.json"
+    return output_dir_path(Path(plan)) / STATE_FILENAME
 
 
 def _read_state(plan: Union[str, Path]) -> Optional[Mapping[str, Any]]:
-    try:
-        with open(_state_path_for(plan), encoding="utf-8") as handle:
-            data = json.load(handle)
-    except (OSError, ValueError):
-        return None
-    return data if isinstance(data, Mapping) else None
+    return read_document(_state_path_for(plan))
 
 
 def commit_view(

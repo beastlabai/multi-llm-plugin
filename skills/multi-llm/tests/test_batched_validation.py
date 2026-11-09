@@ -850,12 +850,12 @@ class TestPrepareBatchedValidationTasks:
 # ============================================================================
 
 class _CountingOs:
-    """``utils.validation``'s view of ``os``, with a failing ``os.replace``.
+    """``utils.atomic_io``'s view of ``os``, with a failing sidecar rename.
 
     Scoped to the one module attribute rather than to ``os.replace`` itself:
     the real function backs every other atomic write in the process, so
     patching it globally would break the test run instead of the one sidecar
-    write under test.
+    write under test. Only the renames onto a ``.prompt.txt`` sidecar count.
     """
 
     def __init__(self, fail_on_call: int):
@@ -866,6 +866,8 @@ class _CountingOs:
         return getattr(os, name)
 
     def replace(self, src, dst):
+        if not str(dst).endswith(".prompt.txt"):
+            return os.replace(src, dst)
         self.replace_calls += 1
         if self.replace_calls == self._fail_on_call:
             raise OSError(28, "No space left on device")
@@ -894,8 +896,10 @@ class TestPromptSidecars:
         line says so, and the fan-out is otherwise untouched.
         """
         groups = [make_group("MEDIUM", f"Theme {i}") for i in range(10)]
+        from utils import atomic_io
+
         counting_os = _CountingOs(fail_on_call=3)
-        monkeypatch.setattr(validation_module, "os", counting_os)
+        monkeypatch.setattr(atomic_io, "os", counting_os)
 
         result = prepare_batched_validation_tasks(
             groups=groups,
