@@ -74,7 +74,10 @@ CASES: Tuple[Case, ...] = (
         "`--force` re-run leaves the previous round's `validation.json` and "
         "`report.md` in place until it regroups",
         "The phase is complete. Report results from `{plan}/{phase}/report.md` (or "
-        "`report.html`) and skip (`report`).",
+        "`report.html`) and skip (`report`). While `.status.json` records "
+        "`checkpoint_recovered`, a note on stderr says so: the report was built from "
+        "the answers the run that completed it checked, and a later run of the phase "
+        "reuses no file in the folder.",
     ),
     Case(
         "b",
@@ -117,7 +120,12 @@ CASES: Tuple[Case, ...] = (
         "no validation file (as in c), but per-model `*.json` result "
         "files (or a `grouped.json`) exist in `{plan}/{phase}/`, or `.status.json` "
         "reads a fan-out stage (`models_running`, `models_complete`, "
-        "`grouping_complete`) and lists `models_requested`",
+        "`grouping_complete`) and lists `models_requested`; or `.status.json` "
+        "records `checkpoint_recovered` and `state.json` records the phase neither "
+        "complete (a) nor stale (e), whatever files are there (checked right "
+        "after a: an earlier run replaced the phase's damaged checkpoint, so no "
+        "file in the folder counts, validation files included, and a "
+        "`--reaggregate` refuses it)",
         "The fan-out stopped before validation. Compare the files with "
         "`models_requested` in `{plan}/{phase}/.status.json`; a file counts when the "
         "fan-out would keep it (non-empty, a JSON list, and on review-code tied by "
@@ -141,7 +149,8 @@ CASES: Tuple[Case, ...] = (
         "before the latest implement (checked first: its files are out of date)",
         "Nothing to resume: run the orchestrator as planned (`run`). A code review "
         "older than the latest implement is re-run as `--force` by the orchestrator "
-        "itself.",
+        "itself; while its `.status.json` records `checkpoint_recovered`, a note on "
+        "stderr says the run reuses no file in the folder.",
     ),
     Case(
         "f",
@@ -331,6 +340,35 @@ def _stale_note(phase_dir: Path, rounds: "review_round.RoundFiles",
             "a re-run stopped before replacing them. " + _RERUN_SENTENCE)
 
 
+def _recovered_note(phase_dir: Path, action: str = "rerun") -> str:
+    """The note of a phase whose checkpoint records ``RECOVERED_KEY``, for the
+    *action* its case answers: ``rerun`` (no file there counts), ``report``
+    (the phase completed after the recovery) or ``run`` (a stale completion)."""
+    head = f"multi-llm: an earlier run replaced the damaged checkpoint of {phase_dir}"
+    tail = "Move the whole phase folder aside to start clean."
+    if action == "report":
+        return (f"{head}; its report was built from the answers that run checked, "
+                "never from the files there, and a later run of the phase reuses no "
+                "result or validation file there (its --reaggregate refuses). " + tail)
+    if action == "run":
+        return (f"{head}, so the run reuses no result or validation file there: every "
+                "selected model runs again. " + tail)
+    return (f"{head}, so no result or validation file there is reused: every requested "
+            "model runs again. " + tail)
+
+
+def _with_recovery_note(answer: ResumeState, phase_dir: Path) -> ResumeState:
+    """*answer*, with the recovery note while the phase's checkpoint records
+    ``RECOVERED_KEY``: a completed or stale phase keeps its case, and the note
+    says no file in the folder is reused."""
+    if not result_files.phase_recovered(phase_dir):
+        return answer
+    return ResumeState(answer.case, answer.action, models=answer.models,
+                       batches=answer.batches, flags=answer.flags,
+                       ownership=answer.ownership,
+                       note=_recovered_note(phase_dir, answer.action))
+
+
 def _recorded_scope(phase_dir: Path) -> Optional[str]:
     """The scope id of the review set on disk, the one a ``--reaggregate``
     reports and an unchanged change's fan-out recomputes; ``None`` when the
@@ -384,13 +422,22 @@ def classify(plan: Path, phase: str) -> ResumeState:
     """The resume case of *phase* for *plan* (:data:`CASES`)."""
     phase_dir = phase_dir_path(plan, phase)
     completed, stale = _state_facts(plan, phase)
+    # state.json decides first, a recovery record or not: a phase completed
+    # after its recovery reported the answers that run checked in memory
+    # (docs/development/review-results.md, "Recovering a damaged one").
     if stale:
-        return ResumeState("e", "run")
+        return _with_recovery_note(ResumeState("e", "run"), phase_dir)
     if completed:
-        return ResumeState("a", "report")
+        return _with_recovery_note(ResumeState("a", "report"), phase_dir)
     status = status_file.read_status(str(phase_dir))
     rounds = review_round.round_files(phase_dir, status)
     requested = _requested_models(status)
+    if result_files.RECOVERED_KEY in status:
+        # A recovered phase trusts no file on disk: nothing is reusable, and
+        # its --reaggregate refuses (utils/result_files.py, RECOVERED_KEY).
+        rerun = _rerun(phase, requested)
+        return ResumeState(rerun.case, rerun.action, models=rerun.models,
+                           flags=rerun.flags, note=_recovered_note(phase_dir))
     earlier = rounds.stale()
     if earlier:
         # Proven another round's by the ids, so neither b nor f may read them.

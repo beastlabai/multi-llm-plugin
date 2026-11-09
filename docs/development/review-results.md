@@ -517,7 +517,9 @@ salvage loop and `--reaggregate` both read it back as this round's).
 A model's answer re-enters the review only from an attempt whose safety checks passed. Two
 `.status.json` maps withhold the rest, and every reader honours both
 (`result_files.withheld_models`): `models_rejected`, a slot the checks failed, and
-`models_unchecked`, a slot whose checks never passed.
+`models_unchecked`, a slot whose checks never passed. A phase whose damaged checkpoint a fresh
+run replaced carries a third record, `checkpoint_recovered`, under which no result file on disk
+is trusted at all (see "Recovering a damaged one" below).
 
 **Rejected.** A slot whose guard checks fail (the working-tree check on the uncontained rung,
 the mode or home check on the plugin's jail: whatever `SlotGuard.finish` returns a reason for)
@@ -580,20 +582,129 @@ may hold either map, so: `update_status` skips its update rather than writing th
 over it (every best-effort merge, a progress write included); the record writers write nothing
 and say so; `withheld_models` withholds every model (`WithheldModels.unreadable`), so both resume
 skips re-run, the salvage dispatch and adoption take nothing, and a `--reaggregate` stops at exit
-3 with every file left unread and none renamed; `close_fanout` leaves the maps on disk as they
-are. A run never opens a round over one: `start_round` and `open_round` read it up to
-`status_file.CHECKPOINT_READ_ATTEMPTS` times (a read failure that passes is not damage), and
-`open_round` reads both maps whole, every model's, under the lock its opening write holds;
-when it still cannot be read the run stops at exit 3, `needs-human`, before anything is written
-or dispatched, rather than rebuild the maps from what it selected. The stops at a round's start,
-its map opening, a `--reaggregate` and the last-resort check give one advice
-(`status_file.unreadable_checkpoint_advice`); a checkpoint damaged after the round started still
-stops through the round-ownership check (`review_round.Claim.held`), whose advice is `--force`
-(U90c routes it here too). The advice: if the failure has
-passed, run again; if the file is damaged, once no run of the phase is live, move the whole
-phase folder aside (or delete it) and run the phase again. Never move `.status.json` aside
-alone: the result files left beside it would then be read as results, rejected answers among
-them.
+3 with every file left unread and none renamed (it can only reuse, so it never recovers one);
+`close_fanout` leaves the maps on disk as they are. A round never opens over one: `start_round`
+and `open_round` read it up to `status_file.CHECKPOINT_READ_ATTEMPTS` times (a read failure that
+passes is not damage), and `open_round` reads both maps whole, every model's, under the lock its
+opening write holds; when it still cannot be read the run stops at exit 3, `needs-human`, before
+anything is written or dispatched, rather than rebuild the maps from what it selected. Mid-run,
+the round-ownership check (`review_round.Claim.held`) tells a checkpoint it cannot read from one
+that records no round or another round's: the first stops with the shared advice below, never
+the takeover's `--force`, and is not recovered, since the run's own records are in that file.
+
+**Recovering a damaged one.** A fresh review run (review-plan, review-tasks, review-code; never a
+`--reaggregate` or a `--detach` launcher, whose worker does it) recovers a **damaged**
+checkpoint at its startup and completes with a warning (`review_lane.recover_damaged_checkpoint`).
+It runs in the process that will own the round, under the phase `.lock` its entry took after the
+earlier run's cleanup check (`detach.PhaseRun.take`), and before the boundary: a detached worker
+claims its run identity and heartbeat in the checkpoint (`RunHandle.start`, whose `claim_run`
+over a damaged file writes nothing at all), so the recovery comes before that claim and the
+round's stamp (`start_round`) after it. review-code's partial-completion guard, which runs in
+pre-flight and would read such a checkpoint as recording no round, leaves it to this recovery
+(`_guard_partial_completion`), so a plain run recovers too. In order:
+
+1. **Damage, not a failed read** (`status_file.checkpoint_damage`): the same bytes on every one
+   of the `CHECKPOINT_READ_ATTEMPTS` reads, from a regular file, that are not a JSON object
+   (empty, not JSON, not UTF-8, another JSON value). A read that fails, a link or anything else
+   at the name, or bytes that change between reads stop the run at exit 3 with nothing changed.
+2. **Sole owner**: this process holds the phase `.lock` (no live run writes the folder), and the
+   run registry keeps no run of this phase dir (`detach.registered_runs_of`): with the checkpoint
+   unreadable, the registry is the only record of whether an earlier run's processes stopped.
+   The registry is read once and strictly for this (`run_registry.read_entries_strictly`, not the
+   permissive `list_entries` a view uses): a registry that exists but cannot be listed, or an
+   entry whose phase cannot be told (it cannot be opened or parsed, is not a regular file, is not
+   a JSON object, or has no `phase_dir` that resolves), stops the run as surely as an entry of
+   this phase does, nothing changed, naming `util runs` and `util runs --sweep`. The run's own
+   entry is left out. Every registry reader opens an entry without blocking and reads it only
+   from a regular file (`run_registry._read_entry`), so a FIFO at the name is an unreadable
+   entry, never a hang.
+3. **Every earlier answer set aside, the damaged checkpoint still in place**: each model result
+   candidate and salvage pair of every model, selected or not, renamed
+   `<name>.quarantined-<stamp>` through the phase folder held below the plan's directory
+   (`held_folder.rename_in_plan_dir`; outside every result and salvage glob), and the validation
+   round retired (`retire_stale_validation_round`: the host index first, then `validation.json`,
+   the task file, the batch replies and their sidecars; `.views.lock` stays) and checked gone,
+   its host index included, under one hold of the views lock (`validation.host_views_lock`), so
+   a host's index refresh cannot republish the old round's index between the retirement and the
+   check (docs/development/delegation.md#the-host-index). A file left, or one that appears
+   meanwhile, stops the run.
+4. **Copied, then replaced**: under one hold of the checkpoint mutex, the damaged bytes are
+   copied to `.status.json.unreadable-<stamp>` (`status_file.archive_damaged_checkpoint`), then a
+   fresh checkpoint is renamed over the damaged one in one step, only while it still holds the
+   bytes step 1 read, and read back (`status_file.publish_checkpoint(replacing=...)`). The fresh
+   checkpoint records the warning under `result_notes` and **`checkpoint_recovered`**
+   (`result_files.RECOVERED_KEY`, `{"reason", "accepted": []}`).
+5. **The warning**: `[CHECKPOINT_RECOVERED]`, and the round's opening write records the same
+   note again (`Claim.notes`), so the report's **Result files:** line and `status` carry it.
+
+**A recovered phase never trusts a result file on disk.** What the damaged file withheld is
+unknown, and the phase lock cannot show that the crashed run's processes have stopped: a provider
+CLI a crashed foreground run left behind may write any file of the folder, at any moment, for a
+model this run did not select, one that had no file when the folder was listed, or one a later
+slot has already answered for at that very path, between any check and the read that follows it.
+So no reader trusts a file there, and the rule needs no window closed:
+
+- `withheld_models` withholds every model, selected, unselected or never seen, by this record
+  (named after a map's record when one names the model), whatever its file holds.
+- **A resume reuses nothing**: both resume skips dispatch every selected model again, as
+  `--rerun-all` would, and say so once, at the round's opening (`open_round`'s `WARNING`, also
+  recorded under `result_notes`), not per model. `util resume-state` agrees: for a phase
+  `state.json` records neither complete nor stale, whatever the folder holds, a validation round
+  of its own included, its answer is `rerun` with every requested model. `state.json` still
+  decides first: a phase completed after its recovery keeps `report` (its report was built from
+  the answers that run checked in memory), a stale one `run`, and each carries the recovery note
+  while the record is present.
+- **A `--reaggregate` refuses** at exit 3 before it touches anything
+  (`review_lane.reaggregate_result_files`, `recovered_phase_advice`): run the phase again (every
+  selected model is dispatched again), or move the whole phase folder aside to start clean.
+- **No salvage runs**: neither lane writes a salvage request (`review_lane.salvage_refused`, from
+  both `save_model_result`s' branches and review-code's two slot sites), `close_fanout` runs no
+  in-process salvage and adopts nothing, and the model just fails; the run completes partial with
+  a warning. A host-written repair is a file on disk like any other: there is no salvage in a
+  recovered phase, so move the folder aside to start clean.
+- **The round counts what it holds in memory.** review-code groups its slots' issues, never the
+  files (it always did); review-plan and review-tasks group what each slot's save wrote, kept in
+  memory (`BaseReviewLane.saved`) when the close says the phase is recovered
+  (`FanoutOutcome.recovered`), never the files they just saved. The report is built from those
+  groups too, an empty grouping included: the base lane's `aggregate_results` never reads
+  `grouped.json` back for a recovered round (`read_grouped_file=False`; `[]` is zero groups,
+  never a missing answer).
+- **No validation is handed to the host**: the `--reaggregate` that would read the verdicts back
+  refuses, so without `--exec-subagents` the round completes unvalidated, as under
+  `--skip-validation`, with a warning (and a `result_notes` entry) naming `--exec-subagents`, which
+  validates in the run's own process, and moving the folder aside
+  (`materialize_fanout_round`). The round's groups, without verdicts, still reach the report and
+  the HIGH-group count, so `--fail-on-high` exits 3 over a HIGH group exactly as under an explicit
+  `--skip-validation`.
+
+`accepted` is the operator's own override, ask's `--accept-partial`
+(`result_files.clear_withheld_model`, read back before `[ACCEPTED]` is printed): it never says
+a check passed, and the model's next checked attempt drops it (`withheld_record`). Ask's closing
+scan counts no file in a recovered folder but the answer a slot of this run produced with its
+checks passed, or one the operator accepted (`ask_orchestrator.withheld_after_run`).
+`open_round` (and ask's `_record_launch`) carries the record across its opening write, and
+nothing removes it: only a folder moved aside starts clean.
+
+The order is the safety. At every moment a checkpoint refuses the folder: until step 4's rename
+the damaged one is still there, so every reader refuses the folder over it, and an interruption
+or a failure in steps 1 to 4 (the copy, the write, the rename) leaves that refusal; after the
+rename the fresh one withholds every model. Had the damaged file been moved aside before the
+fresh one was in place, the files beside a missing checkpoint would be read as results: a
+`--reaggregate` with no recorded models keeps every result file, a rejected answer or a late
+provider's file included (Codex reproduced both on both lanes). Every
+stop gives one advice (`status_file.unreadable_checkpoint_advice`), the same at a round's start,
+its map opening, the round-ownership check, a `--reaggregate`, the last-resort check and the
+recovery's own stops: if the failure has passed, run again; if the file is damaged, run the phase
+again without `--reaggregate` once no run of it is live, and the fresh run recovers it; if the
+file cannot be opened at all, or the recovery stops, move the whole phase folder aside (or delete
+it) and run the phase again. Never move `.status.json` aside alone: the result files left beside
+it would then be read as results, rejected answers among them.
+
+**Nothing blocks on the name.** Every read of the checkpoint (`load_status`, `read_status`, the
+damage check) opens it without blocking and reads it only when the descriptor is a regular file
+(`status_file._open_checkpoint`, `fstat`): a FIFO at the name, behind a link, or swapped in after
+an `lstat`, is a read that failed, never a hang. A link to a readable checkpoint is still read
+through.
 
 **Readers.** `save_model_result(rejected=...)` writes no salvage request. The salvage dispatch
 never runs a withheld model's task (`[SALVAGE_WITHHELD]`; a rejected model's pair is retired
@@ -621,7 +732,9 @@ each were special-cased, and an entry would have to be bound to the file's bytes
 entry would vouch for a later rejected answer at the same path. Recording `models_unchecked`
 before the dispatch, and refusing the dispatch when it cannot be recorded, gives the same
 guarantee for this run's answers (nothing the checks did not pass is eligible, and a lost
-verdict leaves it ineligible) while an absent record stays permissive.
+verdict leaves it ineligible) while an absent record stays permissive. A recovered phase has
+neither: its negative records were lost with the damaged file, and binding an allow-list to a
+file's bytes leaves a window between each check and the read after it, so it trusts no file.
 
 Not rejected: a `[SANDBOX_BYPASSED]` fallback notice, or a tree change the slot's own audited
 stream cleared (`not attributed`): neither fails the slot. The apply phases read `grouped.json`

@@ -75,6 +75,14 @@
       "additionalProperties": { "type": "string" },
       "description": "{spec: reason}: models a slot was dispatched for whose safety checks have not passed since: recorded before the dispatch, cleared when the checks pass; left by a slot the deadline, an interrupt or an exception ended first. A file of theirs is never salvaged, reused or reaggregated (review_lane.run_slot)."
     },
+    "checkpoint_recovered": {
+      "type": "object",
+      "properties": {
+        "reason": { "type": "string" },
+        "accepted": { "type": "array", "items": { "type": "string" } }
+      },
+      "description": "{reason, accepted: [spec]}: the phase's damaged checkpoint was replaced by a fresh run's startup (review_lane.recover_damaged_checkpoint), and a run it left behind may still write any file of the folder, so no result file on disk is trusted there: every model is withheld, selected, unselected or never seen (a resume reuses nothing, salvage never runs, --reaggregate refuses, a run counts only the answers it holds in memory). `accepted`: models the operator counted anyway (ask's --accept-partial), never a passed check; a model's next checked attempt drops it. Carried across every round's opening, never removed (result_files.RECOVERED_KEY)."
+    },
     "models_served": {
       "type": "object",
       "description": "{spec: {served_model, fallback, sandbox, ...}}, present only when an adapter attributed something."

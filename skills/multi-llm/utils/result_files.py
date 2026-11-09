@@ -106,6 +106,31 @@ UNFINISHED_ANSWER_REASON = (
     "its run failed, and its unfinished answer could not be set aside"
 )
 
+#: ``.status.json`` key of a phase whose checkpoint was found damaged and
+#: replaced by a fresh run's startup (``review_lane.recover_damaged_checkpoint``):
+#: ``{"reason": str, "accepted": [model_spec, ...]}``. What the damaged file
+#: withheld is unknown, and a provider of the run that left it may still write
+#: any file of the folder, so a recovered phase never trusts a result file on
+#: disk: **every** model is withheld, selected, unselected or never seen, but
+#: the ones the operator *accepted* (ask's ``--accept-partial``,
+#: :func:`clear_withheld_model`; never a passed check). A resume reuses
+#: nothing, salvage never runs and a ``--reaggregate`` refuses; a run counts
+#: only the answers it holds in memory. Every later round's opening carries
+#: the record over; nothing removes it (docs/development/review-results.md,
+#: "Recovering a damaged one"). A model one of the maps records is withheld by
+#: that record first.
+RECOVERED_KEY = "checkpoint_recovered"
+
+#: The reason :data:`RECOVERED_KEY` records, and the one a record of the
+#: wrong shape is read with.
+RECOVERED_REASON = (
+    "the phase's damaged checkpoint was replaced, and a run it left behind may "
+    "still write any file of the folder"
+)
+
+#: The :data:`RECOVERED_KEY` field naming the models the operator counted anyway.
+ACCEPTED_FIELD = "accepted"
+
 #: ``{name: (mtime_ns, size)}`` of a phase dir's candidate files.
 Snapshot = Dict[str, Tuple[int, int]]
 
@@ -327,17 +352,67 @@ def recorded_models(phase_dir: Optional[os.PathLike | str], key: str) -> Dict[st
     return _recorded_in(_status_file.load_status(str(phase_dir)), key)
 
 
+def _recovery_in(status: Optional[Dict[str, object]]) -> Optional[Dict[str, object]]:
+    """The :data:`RECOVERED_KEY` record of *status*, as
+    ``{"reason": str, "accepted": [...]}``, or ``None`` when it has none. A
+    record of the wrong shape still withholds every model: only a list names
+    an accepted model."""
+    if not status or RECOVERED_KEY not in status:
+        return None
+    value = status.get(RECOVERED_KEY)
+    record = value if isinstance(value, dict) else {}
+    reason = record.get("reason")
+    accepted = record.get(ACCEPTED_FIELD)
+    return {
+        "reason": str(reason) if isinstance(reason, str) and reason else RECOVERED_REASON,
+        ACCEPTED_FIELD: (sorted({str(spec) for spec in accepted})
+                         if isinstance(accepted, list) else []),
+    }
+
+
+def recovery_record(reason: str = RECOVERED_REASON) -> Dict[str, object]:
+    """A fresh :data:`RECOVERED_KEY` record: every model withheld, none accepted."""
+    return {"reason": reason, ACCEPTED_FIELD: []}
+
+
+def recorded_recovery(phase_dir: Optional[os.PathLike | str]) -> Optional[Dict[str, object]]:
+    """The phase's :data:`RECOVERED_KEY` record, or ``None`` (no checkpoint,
+    or one never recovered). Raises :class:`CheckpointUnreadable`, as
+    :func:`recorded_models` does."""
+    if not phase_dir:
+        return None
+    return _recovery_in(_status_file.load_status(str(phase_dir)))
+
+
+def phase_recovered(phase_dir: Optional[os.PathLike | str]) -> bool:
+    """Whether the phase's checkpoint carries a :data:`RECOVERED_KEY` record.
+    ``False`` with no checkpoint, one never recovered, or one that cannot be
+    read: every reader withholds every model over that one already
+    (:class:`WithheldModels`)."""
+    try:
+        return recorded_recovery(phase_dir) is not None
+    except CheckpointUnreadable:
+        return False
+
+
 def recorded_withheld(
     phase_dir: os.PathLike | str, *, attempts: int = 1,
-) -> Dict[str, Dict[str, str]]:
+) -> Dict[str, Dict[str, object]]:
     """Both withheld maps, ``{key: {model_spec: reason}}`` for each of
     :data:`WITHHELD_KEYS`, from one read of the checkpoint (``{}`` for each
-    with no checkpoint, or an older one). Raises :class:`CheckpointUnreadable`
-    when the checkpoint cannot be read on any of *attempts* reads
-    (``status_file.load_status``): a writer that carries the maps over writes
-    them whole or not at all."""
+    with no checkpoint, or an older one), and the :data:`RECOVERED_KEY` record
+    under its key when the checkpoint has one. Raises
+    :class:`CheckpointUnreadable` when the checkpoint cannot be read on any of
+    *attempts* reads (``status_file.load_status``): a writer that carries the
+    maps over writes them whole or not at all."""
     status = _status_file.load_status(str(phase_dir), attempts=attempts)
-    return {key: _recorded_in(status, key) for key in WITHHELD_KEYS}
+    recorded: Dict[str, Dict[str, object]] = {
+        key: dict(_recorded_in(status, key)) for key in WITHHELD_KEYS
+    }
+    recovery = _recovery_in(status)
+    if recovery is not None:
+        recorded[RECOVERED_KEY] = recovery
+    return recorded
 
 
 def rejected_models(phase_dir: Optional[os.PathLike | str]) -> Dict[str, str]:
@@ -354,8 +429,9 @@ def unchecked_models(phase_dir: Optional[os.PathLike | str]) -> Dict[str, str]:
 
 class Withheld(NamedTuple):
     """Why a model's answer is withheld: the ``.status.json`` *key* that
-    records it (one of :data:`WITHHELD_KEYS`, or :data:`UNREADABLE_CHECKPOINT`
-    when no record can be read) and the *reason*."""
+    records it (one of :data:`WITHHELD_KEYS`, :data:`RECOVERED_KEY`, or
+    :data:`UNREADABLE_CHECKPOINT` when no record can be read) and the
+    *reason*."""
 
     key: str
     reason: str
@@ -373,6 +449,9 @@ class Withheld(NamedTuple):
             if self.reason == UNFINISHED_ANSWER_REASON:
                 return "left an unfinished answer"
             return "ended before its safety checks passed"
+        if self.key == RECOVERED_KEY:
+            return ("is not one this run produced, in a phase whose damaged "
+                    "checkpoint was replaced")
         return "cannot be shown to have passed its safety checks"
 
     def note(self, model_spec: str) -> str:
@@ -383,12 +462,14 @@ class Withheld(NamedTuple):
         )
 
     def set_aside(self, path: os.PathLike | str, model_spec: str) -> Optional[Path]:
-        """*path* renamed ``.json.rejected`` or ``.json.unchecked`` and noted.
-        Under :data:`UNREADABLE_CHECKPOINT` nothing is renamed (``None``):
-        the file is only left unread while the checkpoint cannot be read."""
+        """*path* renamed ``.json.rejected`` or ``.json.unchecked`` (a
+        :data:`RECOVERED_KEY` file too: nothing on disk is trusted there) and
+        noted. Under :data:`UNREADABLE_CHECKPOINT` nothing is renamed
+        (``None``): the file is only left unread while the checkpoint cannot
+        be read."""
         if self.rejected:
             return set_aside_rejected_result(path, reason=self.note(model_spec))
-        if self.key == UNCHECKED_MODELS_KEY:
+        if self.key in (UNCHECKED_MODELS_KEY, RECOVERED_KEY):
             return set_aside_unchecked_result(path, reason=self.note(model_spec))
         return None
 
@@ -405,20 +486,32 @@ class WithheldModels:
     ``[]``, truth). When the checkpoint exists but could not be read
     (``unreadable``) every model is withheld, by :data:`UNREADABLE`: a read
     failure never passes for a checkpoint that records nothing, which is what
-    lets a model's answer through. :meth:`recorded` is the narrower question
-    a writer asks: whether a readable checkpoint records the model.
+    lets a model's answer through. A checkpoint a fresh run recovered
+    (*recovered*, from :data:`RECOVERED_KEY`) withholds every model too,
+    whatever its files hold, named by a map's record first, but the ones the
+    operator *accepted*. :meth:`recorded` is the narrower question a writer
+    asks: whether a readable checkpoint records the model.
     """
 
     def __init__(self, models: Optional[Dict[str, Withheld]] = None, *,
-                 unreadable: bool = False) -> None:
+                 unreadable: bool = False, recovered: Optional[Withheld] = None,
+                 accepted: Iterable[str] = ()) -> None:
         self.models: Dict[str, Withheld] = dict(models or {})
         self.unreadable = unreadable
+        self.recovered = recovered
+        self.accepted = frozenset(accepted)
 
     def get(self, model_spec: str) -> Optional[Withheld]:
-        return UNREADABLE if self.unreadable else self.models.get(model_spec)
+        if self.unreadable:
+            return UNREADABLE
+        withheld = self.models.get(model_spec)
+        if (withheld is None and self.recovered is not None
+                and model_spec not in self.accepted):
+            return self.recovered
+        return withheld
 
     def __contains__(self, model_spec: object) -> bool:
-        return self.unreadable or model_spec in self.models
+        return isinstance(model_spec, str) and self.get(model_spec) is not None
 
     def __getitem__(self, model_spec: str) -> Withheld:
         withheld = self.get(model_spec)
@@ -427,31 +520,39 @@ class WithheldModels:
         return withheld
 
     def __bool__(self) -> bool:
-        return self.unreadable or bool(self.models)
+        return self.unreadable or bool(self.models) or self.recovered is not None
 
     def recorded(self, model_spec: str) -> bool:
         """Whether the checkpoint, read, records *model_spec* as withheld."""
-        return not self.unreadable and model_spec in self.models
+        return not self.unreadable and self.get(model_spec) is not None
 
     def owner(self, stem: str) -> Optional[str]:
         """The withheld spec a result file named *stem* would be read as, if
         any (its anchored or pre-anchor stem, as
         :func:`set_aside_unrecorded_results` matches them); *stem* itself
-        while the checkpoint cannot be read."""
+        while the checkpoint cannot be read, and in a recovered phase unless
+        an accepted model's own stem is *stem*."""
         if self.unreadable:
             return stem
-        return next(
+        recorded = next(
             (spec for spec in self.models if stem in _claimed_stems([spec])), None,
         )
+        if recorded is not None or self.recovered is None:
+            return recorded
+        if any(sanitize_model_name(spec) == stem for spec in self.accepted):
+            return None
+        return stem
 
 
 def withheld_models(phase_dir: Optional[os.PathLike | str]) -> WithheldModels:
     """Every model whose answer the phase withholds, from one read of
     ``.status.json``: ``models_rejected`` and ``models_unchecked``, a model in
-    both named by its rejection. A checkpoint that records neither (an older
-    one, or a phase that never dispatched) withholds nothing, and so does no
-    checkpoint; one that exists but cannot be read withholds every model
-    (:class:`WithheldModels`)."""
+    both named by its rejection, and, in a phase whose damaged checkpoint a
+    fresh run replaced (:data:`RECOVERED_KEY`), every model the operator did
+    not accept, whatever its files hold. A checkpoint that records none of
+    them (an older one, or a phase that never dispatched) withholds nothing,
+    and so does no checkpoint; one that exists but cannot be read withholds
+    every model (:class:`WithheldModels`)."""
     if not phase_dir:
         return WithheldModels()
     try:
@@ -463,7 +564,13 @@ def withheld_models(phase_dir: Optional[os.PathLike | str]) -> WithheldModels:
         withheld.update(
             {spec: Withheld(key, reason) for spec, reason in _recorded_in(status, key).items()}
         )
-    return WithheldModels(withheld)
+    recovery = _recovery_in(status)
+    if recovery is None:
+        return WithheldModels(withheld)
+    return WithheldModels(
+        withheld, recovered=Withheld(RECOVERED_KEY, str(recovery["reason"])),
+        accepted=recovery[ACCEPTED_FIELD],  # type: ignore[arg-type]
+    )
 
 
 def _record_model(phase_dir: os.PathLike | str, key: str, model_spec: str, reason: str) -> bool:
@@ -532,10 +639,14 @@ def clear_unchecked_model(phase_dir: os.PathLike | str, model_spec: str) -> bool
 
 
 def clear_withheld_model(phase_dir: os.PathLike | str, model_spec: str) -> bool:
-    """Take *model_spec* out of both withheld maps; whether it is out of both
-    now (read back). For the operator's own choice only, never a slot's: ask's
-    ``--accept-partial`` counting a withheld model's partial. ``True`` with no
-    checkpoint; ``False``, writing nothing, over one that cannot be read."""
+    """Take *model_spec* out of both withheld maps and, in a recovered phase,
+    add it to :data:`RECOVERED_KEY`'s ``accepted``; whether both hold now
+    (read back). For the operator's own choice only, never a slot's: ask's
+    ``--accept-partial`` counting a withheld model's partial. ``accepted``
+    says the operator counted it, never that its checks passed: the model's
+    next checked attempt drops it (``review_lane.withheld_record``). ``True``
+    with no checkpoint; ``False``, writing nothing, over one that cannot be
+    read."""
     phase_dir = str(phase_dir)
     with _status_file.checkpoint_lock(phase_dir):
         try:
@@ -546,17 +657,27 @@ def clear_withheld_model(phase_dir: os.PathLike | str, model_spec: str) -> bool:
             return True
         rejected = _recorded_in(status, REJECTED_MODELS_KEY)
         unchecked = _recorded_in(status, UNCHECKED_MODELS_KEY)
+        recovery = _recovery_in(status)
+        updates: Dict[str, object] = {}
         if model_spec in rejected or model_spec in unchecked:
             rejected.pop(model_spec, None)
             unchecked.pop(model_spec, None)
-            _status_file.update_status(phase_dir, {
-                REJECTED_MODELS_KEY: rejected, UNCHECKED_MODELS_KEY: unchecked,
-            })
+            updates.update({REJECTED_MODELS_KEY: rejected, UNCHECKED_MODELS_KEY: unchecked})
+        if recovery is not None and model_spec not in recovery[ACCEPTED_FIELD]:  # type: ignore[operator]
+            updates[RECOVERED_KEY] = {
+                **recovery,
+                ACCEPTED_FIELD: sorted({*recovery[ACCEPTED_FIELD], model_spec}),  # type: ignore[misc]
+            }
+        if updates:
+            _status_file.update_status(phase_dir, updates)
     try:
         recorded = recorded_withheld(phase_dir)
     except CheckpointUnreadable:
         return False
-    return not any(model_spec in recorded[key] for key in WITHHELD_KEYS)
+    recovery = recorded.get(RECOVERED_KEY)
+    return not any(model_spec in recorded[key] for key in WITHHELD_KEYS) and (
+        recovery is None or model_spec in recovery[ACCEPTED_FIELD]  # type: ignore[operator]
+    )
 
 
 def rejected_result_note(model_spec: str, reason: str) -> str:

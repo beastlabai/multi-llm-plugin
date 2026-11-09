@@ -47,7 +47,9 @@ publication and completion decision re-reads the checkpoint under its mutex
 (:meth:`Claim.held`) and stops the run at exit 3 unless the checkpoint still
 records the claim's round. Both checks fail closed: a mutex that cannot be
 taken, or a checkpoint that no longer records an id the claim established,
-stops the run as surely as another round's id does. ``report.md``'s round line
+stops the run as surely as another round's id does, and a checkpoint that
+cannot be read stops it with the advice every such stop gives
+(``status_file.unreadable_checkpoint_advice``). ``report.md``'s round line
 also seals the report: it records the digest of the exact ``validation.json``
 bytes its verdicts came from (:class:`Verdicts`, captured as the claim wrote or
 read them, never by reading the path again; only when they record the claim's
@@ -67,7 +69,7 @@ import sys
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Mapping, NamedTuple, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterator, List, Mapping, NamedTuple, Optional, Sequence, Tuple, Union
 
 from . import report_markdown, status_file
 from .atomic_io import atomic_write_bytes, atomic_write_text
@@ -123,7 +125,7 @@ def current_round(phase_dir: PathLike) -> Optional[str]:
 FANOUT_STATE = "models_running"
 
 
-def start_round(phase_dir: PathLike) -> "Claim":
+def start_round(phase_dir: PathLike, *, notes: Sequence[str] = ()) -> "Claim":
     """Stamp a fresh round id into *phase_dir*'s checkpoint; this run's claim.
 
     Called by a fan-out right past its detach boundary, before it replaces or
@@ -139,13 +141,20 @@ def start_round(phase_dir: PathLike) -> "Claim":
     (``status_file.load_status``, read up to
     ``status_file.CHECKPOINT_READ_ATTEMPTS`` times), which the stamp never
     writes over: it may record answers the phase withholds
-    (docs/development/review-results.md, "Withheld slot answers").
+    (docs/development/review-results.md, "Withheld slot answers"). A damaged
+    one was recovered before the boundary, by the fan-out's startup
+    (``review_lane.recover_damaged_checkpoint``), never here: a detached
+    worker claims its run in the checkpoint before this is reached.
+
+    *notes* are the round's own result notes from its start (that recovery's
+    warning): :attr:`Claim.notes`, which the opening write records
+    (``review_lane.open_round``).
     """
     round_id = new_round_id()
     # The dir the round is recorded in exists before the stamp (the phase-dir
     # helper creates it; a caller that skipped it would otherwise lose the id).
     Path(phase_dir).mkdir(parents=True, exist_ok=True)
-    claim = Claim(str(phase_dir), round_id, started=True)
+    claim = Claim(str(phase_dir), round_id, started=True, notes=tuple(notes))
     with claim._mutex("start its fan-out"):
         try:
             status_file.load_status(
@@ -204,6 +213,8 @@ class Claim:
     phase_dir: str
     round_id: Optional[str]
     started: bool = False
+    #: Result notes the round brings from its start (:func:`start_round`).
+    notes: Tuple[str, ...] = field(default=(), compare=False)
     _verdicts: List[Verdicts] = field(default_factory=list, compare=False, repr=False)
 
     def describe(self) -> str:
@@ -243,9 +254,24 @@ class Claim:
         checkpoint still records this claim's round (:meth:`taken_over_by`);
         otherwise print why and raise :class:`RoundTakenOver`. A round stamped
         by another run cannot land between the check and the block's writes,
-        and a mutex that cannot be taken stops the run too."""
+        and a mutex that cannot be taken stops the run too.
+
+        A checkpoint that cannot be read (``status_file.load_status``, read up
+        to ``status_file.CHECKPOINT_READ_ATTEMPTS`` times) is neither a
+        missing round nor another one: the run stops with the shared advice
+        (``status_file.unreadable_checkpoint_advice``), not the takeover's
+        ``--force``. It is never recovered here: mid-run, the round's records
+        are in that file, and only a fresh run's startup, holding the phase,
+        may replace it (docs/development/review-results.md, "Withheld slot
+        answers")."""
         with self._mutex(doing):
-            recorded = current_round(self.phase_dir)
+            try:
+                status = status_file.load_status(
+                    self.phase_dir, attempts=status_file.CHECKPOINT_READ_ATTEMPTS,
+                )
+            except status_file.CheckpointUnreadable:
+                raise _unreadable(self, doing) from None
+            recorded = status_round(status or {})
             if self.taken_over_by(recorded):
                 raise _taken_over(self, recorded, doing)
             yield
@@ -413,11 +439,16 @@ def persisting_result(phase_dir: PathLike, name: str) -> Iterator[bool]:
                   "that the checkpoint still records it.", file=sys.stderr)
             yield False
             return
-        recorded = current_round(phase_dir)
+        try:
+            recorded = status_round(status_file.load_status(str(phase_dir)) or {})
+            unreadable = False
+        except status_file.CheckpointUnreadable:
+            recorded, unreadable = None, True
         if claim.taken_over_by(recorded):
-            shown = f"round {recorded}" if recorded else "no round"
+            shown = ("cannot be read" if unreadable
+                     else f"records {'round ' + recorded if recorded else 'no round'}")
             print(f"NOTE: {name} dropped, not written: a late result, this run "
-                  f"{claim.describe()}, and .status.json records {shown} now.",
+                  f"{claim.describe()}, and .status.json {shown} now.",
                   file=sys.stderr)
             yield False
             return

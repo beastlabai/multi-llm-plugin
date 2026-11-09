@@ -12,7 +12,10 @@ changed in the move — same atomic temp+rename, same best-effort swallow, same
 merge semantics — so every existing consumer and test keeps its meaning. One
 rule was added since: a merge that cannot read the checkpoint skips its update
 rather than writing the update alone over it (:func:`update_status`,
-:func:`load_status`).
+:func:`load_status`). And one writer replaces a checkpoint whole: a fresh
+review run's recovery of a damaged one (:func:`checkpoint_damage`,
+:func:`archive_damaged_checkpoint`, :func:`publish_checkpoint`, called by
+``review_lane.recover_damaged_checkpoint``).
 
 **The schema is additive, never forked.** ``{phase}/.status.json`` is the
 orchestrator checkpoint: ``ask_orchestrator`` reads ``question`` byte-for-byte as
@@ -141,12 +144,14 @@ about whether anyone holds it.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
+import stat
 import sys
 import threading
 import time
-from typing import Any, Dict, Iterable, Iterator, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, NamedTuple, Optional, Tuple
 
 from . import process_control
 from .held_folder import write_in_plan_dir
@@ -421,11 +426,32 @@ def read_status(phase_dir: str) -> Dict[str, Any]:
     """
     path = status_path(phase_dir)
     try:
-        with open(path, 'r', encoding='utf-8') as f:
+        with _open_checkpoint(path, 'r', encoding='utf-8') as f:
             data = json.load(f)
         return data if isinstance(data, dict) else {}
     except (OSError, IOError, ValueError):
         return {}
+
+
+def _nonblocking(path: str, flags: int) -> int:
+    return os.open(path, flags | getattr(os, "O_NONBLOCK", 0))
+
+
+def _open_checkpoint(path: str, mode: str, **kwargs: Any) -> Any:
+    """*path* opened for reading as ``open`` opens it, but never blocking (a
+    FIFO at the name, or at a link's end, opens at once) and only when the
+    descriptor is a regular file (``fstat``, so a name swapped after any
+    earlier ``lstat`` cannot slip a FIFO or a device in): ``OSError``
+    otherwise, which every reader takes for a read that failed. Links are
+    followed, as the readers always followed them."""
+    handle = open(path, mode, opener=_nonblocking, **kwargs)
+    try:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise OSError(f"{path} is not a regular file")
+    except BaseException:
+        handle.close()
+        raise
+    return handle
 
 
 class CheckpointUnreadable(Exception):
@@ -457,7 +483,7 @@ def load_status(phase_dir: str, *, attempts: int = 1) -> Optional[Dict[str, Any]
         if attempt:
             time.sleep(_CHECKPOINT_RETRY_DELAY * 2 ** (attempt - 1))
         try:
-            with open(path, 'r', encoding='utf-8') as f:
+            with _open_checkpoint(path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
         except FileNotFoundError:
             return None
@@ -476,15 +502,186 @@ def unreadable_checkpoint_advice(phase_dir: str) -> str:
     "Withheld slot answers"). The checkpoint is what withholds answers whose
     safety checks failed or never finished: moved aside alone, it would leave
     their files beside a phase that no longer records them, and they would
-    be read as results."""
+    be read as results. A fresh review run recovers a damaged one in that
+    order: every earlier result set aside first, its bytes copied aside and
+    a fresh checkpoint renamed over it after
+    (``review_lane.recover_damaged_checkpoint``)."""
     return (
         f"If the read failure has passed, running again is enough. If the file "
-        f"is damaged: once no run of this phase is live (`status`), move the "
-        f"whole phase folder {phase_dir} aside, or delete it, and run the phase "
-        f"again, so that no earlier result in it can be reused. Never move "
-        f".status.json aside on its own: the result files left beside it would "
-        f"then be read as results, answers whose safety checks failed among them."
+        f"is damaged, run the phase again without --reaggregate once no run of "
+        f"this phase is live (`status`): a fresh review run sets every earlier "
+        f"result in the folder aside, keeps the damaged file as "
+        f"{STATUS_FILENAME}{UNREADABLE_ARCHIVE_INFIX}<time> and starts a new round "
+        f"that reuses none of them. If the file cannot be opened at all, or that "
+        f"recovery stops, move the whole phase folder {phase_dir} aside, or "
+        f"delete it, and run the phase again. Never move .status.json aside on "
+        f"its own: the result files left beside it would then be read as "
+        f"results, answers whose safety checks failed among them."
     )
+
+
+# ---------------------------------------------------------------------------
+# A damaged checkpoint: told apart from a read that failed, archived, replaced
+# ---------------------------------------------------------------------------
+
+#: What a damaged checkpoint's bytes are kept as (:func:`archive_damaged_checkpoint`):
+#: ``.status.json.unreadable-<stamp>``. Dot-prefixed and no longer ending in
+#: ``.json``, so no reader of the phase dir takes it for a checkpoint or a result.
+UNREADABLE_ARCHIVE_INFIX = ".unreadable-"
+
+
+class CheckpointDamage(NamedTuple):
+    """A checkpoint read whole whose bytes are not a JSON object
+    (:func:`checkpoint_damage`): its path, the SHA-256 of the bytes, their
+    length and what they are instead."""
+
+    path: str
+    digest: str
+    size: int
+    detail: str
+
+
+def _not_an_object(data: bytes) -> Optional[str]:
+    """What *data* is instead of a JSON object, or ``None`` when it is one."""
+    if not data:
+        return "empty"
+    try:
+        document = json.loads(data.decode("utf-8"))
+    except UnicodeDecodeError:
+        return "not UTF-8 text"
+    except (ValueError, RecursionError):
+        return "not JSON"
+    if isinstance(document, dict):
+        return None
+    return f"a JSON {type(document).__name__}, not an object"
+
+
+def checkpoint_damage(
+    phase_dir: str, *, attempts: int = CHECKPOINT_READ_ATTEMPTS,
+) -> Optional[CheckpointDamage]:
+    """Whether *phase_dir*'s checkpoint is **damaged**, as opposed to absent,
+    readable, or unread.
+
+    ``None`` when there is none, or when a read finds a JSON object. A
+    :class:`CheckpointDamage` only when each of *attempts* reads got the same
+    bytes, from a regular file, and they are not a JSON object: the file is
+    there and wrong, and reading it again will not change that. Raises
+    :class:`CheckpointUnreadable` otherwise: a read that failed (a descriptor
+    limit, a permission, a flaky mount), a link or anything but a file at the
+    name, or bytes that changed between reads. Those are not proven damage,
+    and nothing may be done to the file over them
+    (docs/development/review-results.md, "Withheld slot answers"). Nothing
+    blocks: a name that is no file is never opened, and every open is
+    :func:`_open_checkpoint`'s, so a FIFO behind a link, or swapped in after
+    the ``lstat``, is a failed read too."""
+    path = status_path(phase_dir)
+    failure: Optional[BaseException] = None
+    found: Optional[CheckpointDamage] = None
+    stable = True
+    for attempt in range(max(1, attempts)):
+        if attempt:
+            time.sleep(_CHECKPOINT_RETRY_DELAY * 2 ** (attempt - 1))
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            failure, stable = exc, False
+            continue
+        link = stat.S_ISLNK(info.st_mode)
+        if not (link or stat.S_ISREG(info.st_mode)):
+            failure, stable = CheckpointUnreadable(f"{path} is not a file"), False
+            continue
+        try:
+            with _open_checkpoint(path, "rb") as handle:
+                data = handle.read()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            failure, stable = exc, False
+            continue
+        detail = _not_an_object(data)
+        if detail is None:
+            return None
+        if link:
+            failure, stable = CheckpointUnreadable(f"{path} is a link"), False
+            continue
+        seen = CheckpointDamage(path, hashlib.sha256(data).hexdigest(), len(data), detail)
+        if found is not None and found.digest != seen.digest:
+            failure, stable = CheckpointUnreadable(f"{path} changed between reads"), False
+        found = seen
+    if stable and found is not None:
+        return found
+    raise CheckpointUnreadable(path) from failure
+
+
+def _still_damaged(path: str, damage: CheckpointDamage, *, doing: str) -> bytes:
+    """The bytes at *path*, read again: ``OSError`` unless they are the ones
+    *damage* found, in a regular file (a link is refused, never followed)."""
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            raise OSError(f"{path} is not a regular file")
+        with _open_checkpoint(path, "rb") as handle:
+            data = handle.read()
+    except OSError as exc:
+        raise OSError(f"{path} could not be read again before it was {doing} "
+                      f"({exc})") from exc
+    if hashlib.sha256(data).hexdigest() != damage.digest:
+        raise OSError(f"{path} changed after it was found damaged, so it was not {doing}")
+    return data
+
+
+def archive_damaged_checkpoint(phase_dir: str, damage: CheckpointDamage, stamp: str) -> str:
+    """Copy the damaged checkpoint's bytes to ``.status.json.unreadable-<stamp>``
+    (:data:`UNREADABLE_ARCHIVE_INFIX`, ``-2``... on a collision); the copy's path.
+
+    The checkpoint itself is left in place, so it keeps refusing the folder
+    until :func:`publish_checkpoint` replaces it in one rename: no moment
+    leaves the phase without one. Under the checkpoint mutex, which must be
+    taken (:class:`CheckpointLockUnavailable`), and only while the file still
+    holds the bytes *damage* read; the copy is written through the phase
+    folder held below the plan's directory and flushed. ``OSError`` when no
+    copy was written."""
+    path = status_path(phase_dir)
+    with checkpoint_lock(phase_dir, required=True):
+        data = _still_damaged(path, damage, doing="archived")
+        name = f"{STATUS_FILENAME}{UNREADABLE_ARCHIVE_INFIX}{stamp}"
+        suffix = 2
+        while os.path.lexists(os.path.join(str(phase_dir), name)):
+            name = f"{STATUS_FILENAME}{UNREADABLE_ARCHIVE_INFIX}{stamp}-{suffix}"
+            suffix += 1
+        target = os.path.join(str(phase_dir), name)
+        write_in_plan_dir(target, data, mode=0o600, fsync=True, temp_prefix=STATUS_TEMP_PREFIX)
+        return target
+
+
+def publish_checkpoint(
+    phase_dir: str, document: Dict[str, Any], *, replacing: Optional[CheckpointDamage] = None,
+) -> Dict[str, Any]:
+    """Write *document* as *phase_dir*'s whole checkpoint, and read it back;
+    the document as read.
+
+    Unlike :func:`write_status`, nothing is carried over and nothing is
+    swallowed: the write (published through the phase folder held below the
+    plan's directory, flushed, renamed over the old file in one step) raises
+    ``OSError`` when it fails, a read-back that cannot be read raises
+    :class:`CheckpointUnreadable`, and one that differs raises ``OSError``.
+    With *replacing*, only over the damaged bytes it found (``OSError``
+    otherwise, nothing written). Under the checkpoint mutex, which must be
+    taken (:class:`CheckpointLockUnavailable`). For the one writer that
+    replaces a damaged checkpoint (``review_lane.recover_damaged_checkpoint``)."""
+    data = dict(document)
+    path = status_path(phase_dir)
+    with checkpoint_lock(phase_dir, required=True):
+        if replacing is not None:
+            _still_damaged(path, replacing, doing="replaced")
+        data["updated_at"] = now_iso()
+        write_in_plan_dir(path, json.dumps(data, indent=2).encode("utf-8"),
+                          mode=0o600, fsync=True, temp_prefix=STATUS_TEMP_PREFIX)
+        back = load_status(phase_dir)
+        if back != data:
+            raise OSError(f"{path} does not read back as written")
+        return back
 
 
 def read_run(phase_dir: str) -> Dict[str, Any]:

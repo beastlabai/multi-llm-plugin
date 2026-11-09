@@ -16,9 +16,10 @@ Two things, below every writer that needs them (layer L0: the stdlib,
 * **The plan directories** this process writes below (:func:`anchor_plan_dir`,
   each resolved once, when the run locates its outputs:
   ``output_handler.output_dir_path``, or when a command handed the state file
-  alone takes its lock: ``state_file.locked``) and the writes and removals made through
-  a folder held below one (:func:`write_in_plan_dir`,
-  :func:`remove_in_plan_dir`): ``state.json``, ``.status.json``, the prompt
+  alone takes its lock: ``state_file.locked``) and the writes, renames and removals made
+  through a folder held below one (:func:`write_in_plan_dir`,
+  :func:`rename_in_plan_dir`, :func:`remove_in_plan_dir`): ``state.json``,
+  ``.status.json`` (and its archive when it is found damaged), the prompt
   sidecars and host views, the executor's JSON records (its results, its
   reports, the write scheduler's report) and the generate-tasks restore's
   ``state.json``. A link swapped in for any folder below the plan's directory
@@ -317,7 +318,7 @@ def _checked(path: PathLike, root: str, *, what: str) -> Path:
 
 
 def _done(what: str) -> str:
-    return "removed" if what == "remove" else "written"
+    return {"remove": "removed", "move": "moved"}.get(what, "written")
 
 
 def write_in_plan_dir(path: PathLike, data: bytes, *, make: bool = False,
@@ -377,6 +378,33 @@ def write_in_plan_dir(path: PathLike, data: bytes, *, make: bool = False,
                 f"{folder.where(target.name, str(target))}, not at {target}; check both")
     finally:
         os.close(folder.fd)
+
+
+def rename_in_plan_dir(path: PathLike, name: str) -> Path:
+    """Rename the entry *path*, below the plan's directory, to *name* in the
+    same folder, as :func:`write_in_plan_dir` writes one: relative to its
+    folder held there, which must still be the one at its path, so a name is
+    never moved in a folder a link swapped in leads to; the entry is renamed,
+    never a link's target. Returns the new path; ``OSError`` when nothing was
+    renamed. *path* below no anchored plan directory is renamed by its path.
+    The caller picks a *name* that is free: like ``os.replace``, a file
+    already at *name* is replaced."""
+    spelled = Path(os.path.abspath(os.fspath(path)))
+    renamed = spelled.with_name(name)
+    root = plan_dir_of(path)
+    if root is None:
+        os.replace(spelled, renamed)
+        return renamed
+    target = _checked(path, root, what="move")
+    if not _WRITES_HELD:
+        os.replace(target, target.with_name(name))
+        return renamed
+
+    def rename(fd: int) -> None:
+        os.replace(target.name, name, src_dir_fd=fd, dst_dir_fd=fd)
+
+    _in_held_folder(root, target, _MOVED, rename, resolve_root=False)
+    return renamed
 
 
 def remove_in_plan_dir(path: PathLike) -> None:

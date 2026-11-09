@@ -50,9 +50,11 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol, Seque
 
 from . import cli_common
 from . import detach as _detach
+from . import held_folder as _held_folder
 from . import interactive as _interactive
 from . import result_files as _result_files
 from . import review_round as _review_round
+from . import run_registry as _run_registry
 from . import scope_policy as _sp
 from . import scope_round as _scope_round
 from . import status_file as _status_file
@@ -70,6 +72,7 @@ from .validation import (
     ValidationRound,
     apply_validation_to_groups,
     ensure_prompt_sidecars,
+    host_index_path,
     host_views_lock,
     legacy_context_round_reason,
     load_validation_results,
@@ -143,6 +146,338 @@ class ReviewLane(Protocol):
 
 
 # ---------------------------------------------------------------------------
+# A damaged checkpoint, recovered at a fresh run's startup
+# ---------------------------------------------------------------------------
+
+#: What every earlier model result and salvage file of a phase whose
+#: checkpoint was found damaged is renamed with: ``<name>.quarantined-<stamp>``,
+#: the stamp the archived checkpoint carries. The name no longer ends in
+#: ``.json``, so no reader of the phase dir's results or salvage pairs matches
+#: it (the result candidates, every ``salvage_*.json`` glob, a resume's skip).
+QUARANTINED_INFIX = ".quarantined-"
+
+#: The warning line of a fresh run that recovered its phase's damaged
+#: checkpoint (:func:`recover_damaged_checkpoint`); the round records the same
+#: note under ``result_notes``.
+CHECKPOINT_RECOVERED_MARKER = "[CHECKPOINT_RECOVERED]"
+
+
+
+@dataclass(frozen=True)
+class CheckpointRecovery:
+    """What :func:`recover_damaged_checkpoint` did: the path of the damaged
+    checkpoint's copy, the files it set aside (their new names) and the
+    validation round files it retired, and the one *note* the round records
+    about it."""
+
+    archived: str
+    quarantined: Tuple[str, ...]
+    retired: Tuple[str, ...]
+    note: str
+
+
+def recovery_notes(recovery: Optional[CheckpointRecovery]) -> Tuple[str, ...]:
+    """The round's notes from *recovery* (``review_round.start_round``'s *notes*)."""
+    return (recovery.note,) if recovery is not None else ()
+
+
+def salvage_refused(phase_dir: str, model_spec: str) -> bool:
+    """Whether *model_spec*'s salvage request must not be written, said once
+    when so: its phase's damaged checkpoint was replaced
+    (``result_files.RECOVERED_KEY``), and a repair is a file on disk, which
+    that phase never trusts. The model stays failed."""
+    if not _result_files.phase_recovered(phase_dir):
+        return False
+    print(f"[{model_spec}] No salvage request written: {phase_dir}'s damaged "
+          f"checkpoint was replaced, so no repaired file there would be read; "
+          f"the model stays failed")
+    return True
+
+
+def recovered_phase_advice(phase_dir: str) -> str:
+    """What a stop over a recovered phase (``result_files.RECOVERED_KEY``)
+    says: why nothing on disk is read, and the two ways on."""
+    return (
+        f"its damaged checkpoint was replaced by a fresh run: a run that left it "
+        f"behind may still write any file there, so no result file in it is read "
+        f"again. Run the phase again without --reaggregate (every selected model "
+        f"is dispatched again), or move the whole phase folder {phase_dir} aside, "
+        f"or delete it, to start clean."
+    )
+
+
+class _RecoveryStopped(Exception):
+    """One step of :func:`recover_damaged_checkpoint` failed; the message says which."""
+
+
+def _stop_recovery(phase_dir: str, run_id: Optional[str], what: str) -> None:
+    message = (f"ERROR: {what} Nothing was dispatched. "
+               f"{_status_file.unreadable_checkpoint_advice(phase_dir)}")
+    # A detached worker's launch is waiting for its run record: it reports this.
+    _detach.record_worker_refusal(phase_dir, run_id, message)
+    sys.exit(_unattended.fail_closed(message))
+
+
+def _is_salvage_name(name: str) -> bool:
+    """A salvage request or task still outstanding (``salvage_*.json``)."""
+    return name.startswith("salvage_") and name.endswith(".json")
+
+
+def _earlier_answers(phase_dir: str) -> List[str]:
+    """Every name in *phase_dir* a reader could take for a model's answer:
+    the result candidates (``result_files.is_model_result_name``, whatever
+    their content) and the salvage pairs. ``OSError`` when the folder cannot
+    be listed."""
+    return [
+        name for name in sorted(os.listdir(phase_dir))
+        if _result_files.is_model_result_name(name) or _is_salvage_name(name)
+    ]
+
+
+def _quarantine_earlier_answers(phase_dir: str, stamp: str) -> List[str]:
+    """Rename every earlier answer in *phase_dir* (:func:`_earlier_answers`)
+    to ``<name>.quarantined-<stamp>``, through the folder held below the plan's
+    directory; the new names. Raises :class:`_RecoveryStopped` when the folder
+    cannot be listed, a rename fails, or an answer is still there after
+    (written meanwhile): every one is out, or the caller stops."""
+    try:
+        names = _earlier_answers(phase_dir)
+    except OSError as exc:
+        raise _RecoveryStopped(f"{phase_dir} could not be listed ({exc}).") from exc
+    moved: List[str] = []
+    for name in names:
+        target = f"{name}{QUARANTINED_INFIX}{stamp}"
+        suffix = 2
+        while os.path.lexists(os.path.join(phase_dir, target)):
+            target = f"{name}{QUARANTINED_INFIX}{stamp}-{suffix}"
+            suffix += 1
+        try:
+            _held_folder.rename_in_plan_dir(os.path.join(phase_dir, name), target)
+        except OSError as exc:
+            raise _RecoveryStopped(
+                f"{name} could not be set aside ({exc})"
+                + (f", after {len(moved)} other file(s) were." if moved else ".")
+            ) from exc
+        moved.append(target)
+    try:
+        left = _earlier_answers(phase_dir)
+    except OSError as exc:
+        raise _RecoveryStopped(f"{phase_dir} could not be listed again ({exc}).") from exc
+    if left:
+        raise _RecoveryStopped(
+            f"{', '.join(left)} appeared in the folder while the earlier results "
+            f"were being set aside: something is still writing there.")
+    return moved
+
+
+def _validation_round_left(phase_dir: str) -> List[str]:
+    """The validation round's files still in *phase_dir* under their live
+    names (``validation.json``, ``validation_tasks.json`` and its host index,
+    a batch reply or its prompt sidecar), the ones a round or a host reads."""
+    try:
+        names = sorted(os.listdir(phase_dir))
+    except OSError:
+        return [_review_round.TASKS_NAME]
+    index = os.path.basename(host_index_path(_review_round.TASKS_NAME))
+    return [
+        name for name in names
+        if name in (_review_round.VALIDATION_NAME, _review_round.TASKS_NAME, index)
+        or (name.startswith("validation_batch_") and ".stale" not in name
+            and (name.endswith(".json") or name.endswith(".prompt.txt")))
+    ]
+
+
+def recover_damaged_checkpoint(
+    *,
+    phase_dir: str,
+    phase_name: str,
+    plan_file: str,
+    run_id: Optional[str] = None,
+    retire_validation_round: Optional[Callable[..., Any]] = None,
+    fields: Optional[Mapping[str, Any]] = None,
+) -> Optional[CheckpointRecovery]:
+    """A fresh review run's startup over a damaged ``.status.json``: recover
+    it, reusing no earlier answer, and go on with a warning; ``None`` when
+    the checkpoint is absent or readable, and nothing is done.
+
+    Called by both review fan-outs (never a ``--reaggregate``, which can only
+    reuse) in the process that will own the round, after its phase lock and
+    the earlier run's cleanup check (``detach.PhaseRun.take``) and before its
+    boundary: a detached worker claims its run *in* the checkpoint
+    (``RunHandle.start``), so the checkpoint is recovered before that claim,
+    and the round is stamped after it (``review_round.start_round``). A
+    ``--detach`` launcher leaves it to its worker. In order:
+
+    1. **Damage, not a failed read** (``status_file.checkpoint_damage``): the
+       same bytes on every read, from a regular file, that are not a JSON
+       object. A read that fails, or anything else, stops the run (exit 3)
+       with nothing changed.
+    2. **Sole owner.** This process holds the phase's ``.lock``, so no live
+       run writes the folder, and the run registry, read strictly
+       (``detach.registered_runs_of``), keeps no run of it: the checkpoint
+       was the only other record of an earlier run's processes. A registry
+       that cannot be listed, or holds an entry whose phase cannot be told,
+       stops the run too, nothing changed.
+    3. **Every earlier answer set aside first**, with the damaged checkpoint
+       still in place: each model result and salvage pair of every model,
+       selected or not, renamed ``<name>.quarantined-<stamp>``
+       (:data:`QUARANTINED_INFIX`), and the validation round retired
+       (*retire_validation_round*: the lane's
+       ``retire_stale_validation_round``) and checked gone, its host index
+       included, under one hold of the views lock (``host_views_lock``), so
+       no refresh republishes the index in between.
+    4. **The damaged bytes copied** to ``.status.json.unreadable-<stamp>``
+       (``status_file.archive_damaged_checkpoint``), then **a fresh
+       checkpoint renamed over the damaged one** in one step, only while it
+       still holds those bytes, and read back
+       (``status_file.publish_checkpoint``), under one hold of the checkpoint
+       mutex. It records ``result_files.RECOVERED_KEY``: a provider the
+       crashed run left behind may still write any file of the folder, so no
+       result file on disk is trusted there again. Every model, selected,
+       unselected or never seen, is withheld (``result_files.withheld_models``):
+       a resume reuses nothing, salvage never runs, a ``--reaggregate``
+       refuses, and the round counts only the answers it holds in memory.
+       And it records the warning under ``result_notes``.
+    5. **The warning**: :data:`CHECKPOINT_RECOVERED_MARKER`, and the note the round's
+       opening records again (:func:`recovery_notes`).
+
+    A step that fails stops the run at exit 3, ``needs-human``, before
+    anything is dispatched, and at every point a checkpoint refuses the
+    folder: the damaged one, kept in place until the fresh one, which
+    withholds every model, replaces it (docs/development/review-results.md,
+    "Withheld slot answers"). A detached worker's stop is recorded for its
+    launch (``detach.record_worker_refusal``), identified by *run_id*, which
+    the registry check also leaves out.
+
+    *fields* are further keys of the fresh checkpoint, for a phase whose
+    checkpoint carries more than a review round's (``ask``'s ``question``);
+    a phase with no validation round passes no *retire_validation_round*.
+    """
+    phase_dir = str(phase_dir)
+    status = _status_file.status_path(phase_dir)
+    try:
+        damage = _status_file.checkpoint_damage(
+            phase_dir, attempts=_status_file.CHECKPOINT_READ_ATTEMPTS,
+        )
+    except _status_file.CheckpointUnreadable as exc:
+        cause = exc.__cause__ or exc
+        _stop_recovery(phase_dir, run_id, (
+            f"{status} could not be read ({cause}), on each of "
+            f"{_status_file.CHECKPOINT_READ_ATTEMPTS} reads: nothing shows that "
+            f"its bytes are damaged, so it is left as it is."
+        ))
+        return None
+    if damage is None:
+        return None
+    print(f"WARNING: {status} is damaged ({damage.detail}, {damage.size} bytes); this "
+          f"fresh run recovers it before it starts its round.", file=sys.stderr)
+    if not _detach.holds_phase_lock(phase_dir):
+        _stop_recovery(phase_dir, run_id, (
+            f"{status} is damaged, and this process does not hold "
+            f"{_detach.lock_path(phase_dir)}: it is never recovered without it."))
+    sweep = cli_common.dispatcher_command('util', 'runs', '--sweep')
+    try:
+        earlier = _detach.registered_runs_of(phase_dir, plan_file=plan_file,
+                                            except_run_id=run_id)
+    except _run_registry.UnreadableEntries as exc:
+        _stop_recovery(phase_dir, run_id, (
+            f"{status} is damaged, and the run registry holds entries whose run "
+            f"cannot be told ({', '.join(exc.paths)}): any of them may be an earlier "
+            f"run of this phase still writing there, so the folder is left as it "
+            f"is. Check them with {cli_common.dispatcher_command('util', 'runs')}, "
+            f"close them out with {sweep} or remove the ones you know are finished, "
+            f"then run this command again."))
+        return None
+    except OSError as exc:
+        _stop_recovery(phase_dir, run_id, (
+            f"{status} is damaged, and the run registry could not be read ({exc}): "
+            f"whether an earlier run of this phase may still be writing there is "
+            f"unknown, so it is left as it is."))
+        return None
+    if earlier:
+        runs = ", ".join(str(entry.get("run_id")) for entry in earlier)
+        _stop_recovery(phase_dir, run_id, (
+            f"{status} is damaged, and the run registry still keeps an earlier "
+            f"run of this phase ({runs}): with its checkpoint unreadable, nothing "
+            f"shows that run's processes have stopped, so the folder is left as "
+            f"it is. Close it out with {sweep}, then run this command again."))
+    stamp = datetime.now().strftime("%Y%m%dT%H%M%S%f")
+    try:
+        quarantined = _quarantine_earlier_answers(phase_dir, stamp)
+    except _RecoveryStopped as exc:
+        _stop_recovery(phase_dir, run_id, (
+            f"{status} is damaged, and the earlier results in the folder could not "
+            f"all be set aside: {exc} The damaged checkpoint is kept in place, so "
+            f"no later run or --reaggregate reads them."))
+        return None
+    retired: Sequence[Any] = ()
+    left: List[str] = []
+    if retire_validation_round is not None:
+        # One hold across the retirement and the check: a host-index refresh
+        # between them would publish the old round's index again
+        # (docs/development/delegation.md#the-host-index).
+        with host_views_lock(phase_dir):
+            retired = retire_validation_round(
+                phase_dir, reason="its phase's checkpoint was found damaged",
+            ) or ()
+            left = _validation_round_left(phase_dir)
+    if left:
+        _stop_recovery(phase_dir, run_id, (
+            f"{status} is damaged, and the earlier validation round could not be "
+            f"retired ({', '.join(left)} left in place). The damaged checkpoint is "
+            f"kept in place."))
+    archived_name = f"{_status_file.STATUS_FILENAME}{_status_file.UNREADABLE_ARCHIVE_INFIX}{stamp}"
+    note = (
+        f"{_status_file.STATUS_FILENAME} was damaged ({damage.detail}); its bytes are "
+        f"kept as {archived_name}; every earlier result in the folder was set aside "
+        f"({len(quarantined)} file(s), renamed *{QUARANTINED_INFIX}{stamp}, "
+        f"nothing deleted), so this round reuses none of them; a run that left it "
+        f"behind may still write there, so no result file in this folder is read "
+        f"again: a later run dispatches every model again, no salvage runs and a "
+        f"--reaggregate refuses (move the whole phase folder aside to start clean)"
+    )
+    try:
+        with _status_file.checkpoint_lock(phase_dir, required=True):
+            try:
+                archived = _status_file.archive_damaged_checkpoint(phase_dir, damage, stamp)
+            except OSError as exc:
+                raise _RecoveryStopped(
+                    f"its bytes could not be copied aside ({exc}). The damaged "
+                    f"checkpoint is kept in place; the earlier results stay set "
+                    f"aside.") from exc
+            note = note.replace(archived_name, os.path.basename(archived))
+            try:
+                _status_file.publish_checkpoint(phase_dir, {
+                    "phase": phase_name,
+                    "state": _review_round.FANOUT_STATE,
+                    _result_files.RECOVERED_KEY: _result_files.recovery_record(),
+                    _result_files.RESULT_NOTES_KEY: [note],
+                    **dict(fields or {}),
+                }, replacing=damage)
+            except (OSError, _status_file.CheckpointUnreadable) as exc:
+                raise _RecoveryStopped(
+                    f"its bytes were copied to {os.path.basename(archived)} and every "
+                    f"earlier result set aside, but a fresh checkpoint could not be "
+                    f"written over it and read back ({exc}). Either the damaged "
+                    f"checkpoint is still in place, or the fresh one, which withholds "
+                    f"every model's answer, is.") from exc
+    except _status_file.CheckpointLockUnavailable:
+        _stop_recovery(phase_dir, run_id, (
+            f"{status} is damaged, and {_status_file.STATUS_LOCK_FILENAME} could not "
+            f"be taken to replace it. The damaged checkpoint is kept in place; the "
+            f"earlier results stay set aside."))
+        return None
+    except _RecoveryStopped as exc:
+        _stop_recovery(phase_dir, run_id, f"{status} is damaged, and {exc}")
+        return None
+    print(f"{CHECKPOINT_RECOVERED_MARKER} {note}.")
+    return CheckpointRecovery(
+        archived=archived, quarantined=tuple(quarantined),
+        retired=tuple(str(path) for path in retired or ()), note=note,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Opening a fan-out's round
 # ---------------------------------------------------------------------------
 
@@ -201,15 +536,22 @@ def open_round(
     run's ``progress``, which on the foreground lane nothing else does, so a
     re-run never opens on the last run's terminal map.
 
-    *after_opening* runs right after the write (review-code reads it back).
+    *after_opening* runs right after the write (review-code reads it back),
+    after the round's notes from its start (``claim.notes``: a recovered
+    checkpoint's warning, :func:`recover_damaged_checkpoint`) are recorded
+    again under ``result_notes``, which the write replaced; in a phase an
+    earlier run recovered, one warning that nothing on disk is reused takes
+    their place.
     Under ``--yes`` the auto-selected models (D6 row 2) and an untyped scope
     policy (row 16) are recorded as resolutions; then the fan-out's step is
     published.
 
     The withheld models (``models_rejected``, ``models_unchecked``) survive
     the write, every model's, selected or not: both maps are read whole under
-    the same lock as the write, and carried over as read. The resume skip
-    that follows reads them, and refuses to reuse their files;
+    the same lock as the write, and carried over as read, and so is a
+    recovered checkpoint's ``result_files.RECOVERED_KEY``, which withholds
+    every model. The resume skip that follows reads them, and refuses to
+    reuse their files;
     :func:`close_fanout` writes both maps again. A checkpoint that cannot be
     read, even after ``status_file.CHECKPOINT_READ_ATTEMPTS`` reads, may hold
     either map, and maps rebuilt without it would drop every earlier refusal:
@@ -219,7 +561,7 @@ def open_round(
     """
     prior_usage = steps.recorded_usage(phase_dir) or {}
     prior_served = steps.recorded_served_models(phase_dir) or {}
-    withheld: Optional[Dict[str, Dict[str, str]]] = None
+    withheld: Optional[Dict[str, Dict[str, Any]]] = None
     with claim.opening():
         try:
             withheld = _result_files.recorded_withheld(
@@ -230,6 +572,7 @@ def open_round(
         else:
             rejected = withheld[_result_files.REJECTED_MODELS_KEY]
             unchecked = withheld[_result_files.UNCHECKED_MODELS_KEY]
+            recovery = withheld.get(_result_files.RECOVERED_KEY)
             steps.write_status(phase_dir, {
                 "phase": phase_name,
                 "state": "models_running",
@@ -240,6 +583,7 @@ def open_round(
                 "progress": None,
                 **({_result_files.REJECTED_MODELS_KEY: rejected} if rejected else {}),
                 **({_result_files.UNCHECKED_MODELS_KEY: unchecked} if unchecked else {}),
+                **({_result_files.RECOVERED_KEY: recovery} if recovery is not None else {}),
             })
     if withheld is None:
         sys.exit(_unattended.fail_closed(
@@ -249,6 +593,23 @@ def open_round(
             f"finished) could not be carried over; nothing was dispatched. "
             f"{_status_file.unreadable_checkpoint_advice(phase_dir)}"
         ))
+    # The round's notes from its start (a recovered checkpoint's warning):
+    # the write above replaced the checkpoint's `result_notes`.
+    for note in claim.notes:
+        _result_files.append_result_note(phase_dir, note)
+    if withheld.get(_result_files.RECOVERED_KEY) is not None and not claim.notes:
+        # An earlier run recovered the phase: said once, here, rather than per
+        # model by the resume skip (docs/development/review-results.md,
+        # "Recovering a damaged one").
+        note = (
+            "an earlier run replaced this phase's damaged checkpoint, and a run "
+            "that left it behind may still write there: no result file in the "
+            "folder is reused, so every selected model is dispatched again, no "
+            "salvage runs and a --reaggregate refuses; move the whole phase "
+            "folder aside to start clean"
+        )
+        print(f"WARNING: {note}.", file=sys.stderr)
+        _result_files.append_result_note(phase_dir, note)
     if after_opening is not None:
         after_opening()
     # Recorded rather than merely applied: an auto-selection nobody can see
@@ -954,13 +1315,16 @@ class FanoutOutcome:
     not be saved is a failure here) and with salvaged models replaced by the
     slot salvage made them. ``failed_models``: ``{model_spec: reason}``, the
     deadline losses included. ``salvaged``: the models this run's in-process
-    salvage recovered.
+    salvage recovered. ``recovered``: the phase's checkpoint carries
+    ``result_files.RECOVERED_KEY``, so grouping reads the answers in *slots*,
+    never the files the close saved.
     """
 
     slots: Dict[str, SlotResult]
     failed_models: Dict[str, str]
     completed_models: List[str]
     salvaged: List[str]
+    recovered: bool = False
 
 
 async def close_fanout(
@@ -995,7 +1359,9 @@ async def close_fanout(
     their files set aside (:func:`_withhold_lost_slots`), both withheld maps
     are written (:func:`withheld_record`), and a model whose refused files are
     still readable while nothing durable withholds them stops the phase
-    (:func:`_stop_unless_withheld`).
+    (:func:`_stop_unless_withheld`). In a recovered phase
+    (``result_files.RECOVERED_KEY``) no salvage runs: a failed model stays
+    failed, and the run completes partial with a warning.
 
     *served_models* and *usage* are the slots' provenance (``models_served``,
     ``usage``), recorded as given; *prior_served* is what the previous run
@@ -1049,7 +1415,18 @@ async def close_fanout(
     )
 
     salvaged: List[str] = []
-    if failed_models and steps.exec_subagents_requested(args):
+    recovered = _result_files.RECOVERED_KEY in withheld
+    if failed_models and recovered:
+        # A repair is a file on disk, which a recovered phase never trusts
+        # (docs/development/review-results.md, "Recovering a damaged one").
+        print(
+            f"WARNING: no salvage runs in {phase_dir}: its damaged checkpoint was "
+            f"replaced, so no file there is trusted; "
+            f"{', '.join(failed_models)} stay failed. Move the whole phase folder "
+            f"aside to start clean.",
+            file=sys.stderr,
+        )
+    elif failed_models and steps.exec_subagents_requested(args):
         salvaged = await _salvage_in_process(
             lane, claim, args, steps, slots=slots, failed_models=failed_models,
         )
@@ -1108,14 +1485,17 @@ async def close_fanout(
     )
     return FanoutOutcome(
         slots=slots, failed_models=failed_models,
-        completed_models=completed_models, salvaged=salvaged,
+        completed_models=completed_models, salvaged=salvaged, recovered=recovered,
     )
 
 
 def withheld_record(
     phase_dir: str, slots: Mapping[str, SlotResult],
-) -> Optional[Dict[str, Dict[str, str]]]:
-    """The ``models_rejected`` and ``models_unchecked`` maps a fan-out leaves.
+) -> Optional[Dict[str, Dict[str, Any]]]:
+    """The ``models_rejected`` and ``models_unchecked`` maps a fan-out leaves,
+    and in a recovered phase its ``result_files.RECOVERED_KEY`` record, carried
+    as read but for the operator's acceptance of each model a checked attempt
+    superseded: that attempt's own answer, or none, is the model's now.
 
     Every recorded entry stays until a checked attempt of its model supersedes
     it: a slot this run whose checks passed with nothing of an earlier answer
@@ -1131,6 +1511,7 @@ def withheld_record(
     try:
         recorded_rejected = _result_files.rejected_models(phase_dir)
         recorded_unchecked = _result_files.unchecked_models(phase_dir)
+        recovery = _result_files.recorded_recovery(phase_dir)
     except _status_file.CheckpointUnreadable:
         return None
     superseded = {
@@ -1148,10 +1529,19 @@ def withheld_record(
         for spec, reason in recorded_unchecked.items()
         if spec not in superseded and spec not in rejected_now
     }
-    return {
+    record: Dict[str, Dict[str, Any]] = {
         _result_files.REJECTED_MODELS_KEY: rejected,
         _result_files.UNCHECKED_MODELS_KEY: unchecked,
     }
+    if recovery is not None:
+        accepted = recovery[_result_files.ACCEPTED_FIELD]
+        record[_result_files.RECOVERED_KEY] = {
+            **recovery,
+            _result_files.ACCEPTED_FIELD: [
+                spec for spec in accepted if spec not in superseded  # type: ignore[union-attr]
+            ],
+        }
+    return record
 
 
 def _withhold_lost_slots(phase_dir: str, steps: FanoutSteps, lost: Sequence[str]) -> bool:
@@ -1472,10 +1862,13 @@ class RoundOutcome:
     """What :func:`resolve_validation_round` left for the report.
 
     ``groups``: the groups with their verdicts (``[]`` for zero groups), or
-    ``None`` when validation was skipped. ``verdicts``: the ``validation.json``
-    bytes they came from (``Claim.verdicts``). ``handed_off``: the round is with
-    the host, or waits for missing batches; the caller ends here with the
-    phase open.
+    ``None`` when validation was skipped. A recovered fan-out that runs no
+    validation (:func:`materialize_fanout_round`) gives the grouping it holds,
+    without verdicts (``verdicts`` ``None``): the report and the HIGH-group
+    count read them, never ``grouped.json``. ``verdicts``: the
+    ``validation.json`` bytes they came from (``Claim.verdicts``).
+    ``handed_off``: the round is with the host, or waits for missing batches;
+    the caller ends here with the phase open.
     """
 
     groups: Optional[List[Dict[str, Any]]] = None
@@ -1957,9 +2350,29 @@ async def materialize_fanout_round(
     markers, the task file and the follow-up in its durable form (mode word,
     plan, replay flags), so ``status`` can name the command that advances the
     phase; the caller then ends with the phase open.
+
+    A phase whose damaged checkpoint a fresh run replaced
+    (``result_files.RECOVERED_KEY``) is never handed over: the ``--reaggregate``
+    that reads the host's verdicts back refuses there. Without
+    ``--exec-subagents`` its round is not validated, as under
+    ``--skip-validation``, with a warning that names both ways to a validated
+    review: the :class:`RoundOutcome` carries *grouped* as it stands, with no
+    verdicts, so the report and ``--fail-on-high`` count the groups this run
+    holds and nothing is read back from disk.
     """
     phase_dir = str(lane.phase_dir)
     plan_path = str(lane.plan_path)
+    if (not lane.fanout_steps().exec_subagents_requested(args)
+            and _result_files.phase_recovered(phase_dir)):
+        note = (
+            f"validation was not run: {phase_dir}'s damaged checkpoint was replaced, "
+            f"and the --reaggregate that reads a host's verdicts back refuses that "
+            f"folder; run the phase with --exec-subagents to validate in its own "
+            f"process, or move the whole phase folder aside to start clean"
+        )
+        print(f"WARNING: {note}.", file=sys.stderr)
+        _result_files.append_result_note(phase_dir, note)
+        return RoundOutcome(groups=list(grouped))
     validation_tasks_path = os.path.join(phase_dir, "validation_tasks.json")
     # Host-neutral: printed on every host that dispatches subagent validation.
     print("\nPreparing batched validation for subagent execution...")
@@ -2046,8 +2459,16 @@ def reaggregate_result_files(
     stays failed. A checkpoint that cannot be read may record any model so,
     and stops the reaggregate at exit 3 with every file left unread. With
     no file left, every requested reviewer having failed is the fan-out's
-    exit 3 naming them (decision 11.11), and otherwise exit 0.
+    exit 3 naming them (decision 11.11), and otherwise exit 0. A phase whose
+    damaged checkpoint a fresh run replaced (``result_files.RECOVERED_KEY``)
+    trusts no file on disk, so its reaggregate stops at exit 3 first, every
+    file left as it is (:func:`recovered_phase_advice`).
     """
+    if _result_files.phase_recovered(phase_dir):
+        sys.exit(_unattended.fail_closed(
+            f"ERROR: --reaggregate reads the result files in {phase_dir}, and "
+            f"{recovered_phase_advice(phase_dir)}"
+        ))
     result_files = _result_files.model_result_paths(phase_dir)
     result_files = _result_files.set_aside_unrecorded_results(phase_dir, result_files)
     if result_files and _result_files.withheld_models(phase_dir).unreadable:

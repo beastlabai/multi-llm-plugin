@@ -4001,8 +4001,11 @@ class CodeSlot:
             details = result.get("details", {}) or {}
             raw_content = salvage_source(details)
             timed_out = salvage_failure_kind(result) is not None
+            salvageable = has_salvageable_json(raw_content)
 
-            if has_salvageable_json(raw_content):
+            if salvageable and _review_lane.salvage_refused(str(phase_dir), model_spec):
+                pass  # a recovered phase: said there, and the model stays failed
+            elif salvageable:
                 salvage_request = {
                     "model": model_spec,
                     "phase": "code_review",
@@ -4096,6 +4099,10 @@ class CodeSlot:
                 print(f"[{display_name}] Response carries no JSON — nothing to salvage")
                 return self._failed(
                     f"Model produced no JSON output: {raw_preview}", source=source,
+                )
+            if _review_lane.salvage_refused(str(phase_dir), model_spec):
+                return self._failed(
+                    f"Could not extract JSON from response: {raw_preview}", source=source,
                 )
 
             salvage_request = {
@@ -4258,7 +4265,10 @@ async def run_all_reviews(
         existing = existing_result_reuse(phase_dir, sanitized, scope_id)
         if existing.verdict == "corrupt":
             print(f"[{display_name}] Existing result file corrupt, re-running...")
-        elif existing.verdict == "withheld":
+        elif (existing.verdict == "withheld"
+              and existing.withheld.key != _result_files.RECOVERED_KEY):
+            # A recovered phase reuses no file at all, which its round's
+            # opening said once.
             print(f"[{display_name}] Result file is from a slot that "
                   f"{existing.withheld.phrase}; re-running...")
         elif existing.verdict == "scope_changed":
@@ -6005,6 +6015,17 @@ def _guard_phase_state(args: argparse.Namespace, plan_path: Path) -> Optional[Pi
     return pinned
 
 
+def _checkpoint_unreadable(phase_dir: Path) -> bool:
+    """Whether *phase_dir*'s checkpoint is damaged or cannot be read
+    (``status_file.checkpoint_damage``)."""
+    from utils import status_file
+
+    try:
+        return status_file.checkpoint_damage(str(phase_dir)) is not None
+    except status_file.CheckpointUnreadable:
+        return True
+
+
 def _guard_partial_completion(
     args: argparse.Namespace, plan_path: Path, state_guard: Any,
 ) -> None:
@@ -6021,6 +6042,13 @@ def _guard_partial_completion(
     grouped_path = phase_dir_check / "grouped.json"
     validation_path = phase_dir_check / "validation.json"
     report_path_check = phase_dir_check / "report.md"
+
+    # A checkpoint that cannot be read proves nothing about these files, and
+    # read as `{}` it would name them another round's: the startup recovers a
+    # damaged one, setting them aside, or stops with the shared advice
+    # (utils/review_lane.py, `recover_damaged_checkpoint`).
+    if _checkpoint_unreadable(phase_dir_check):
+        return
 
     if validation_tasks_path.exists():
         # Only the round on record's own files may complete the phase or
@@ -6340,6 +6368,19 @@ def _cross_detach_boundary(
     # fail on the caller's terminal — models resolved, base ref validated,
     # changed files discovered — and nothing below runs in the invoker.
     detach_phase_dir = get_phase_dir(plan_path, 'code-review')
+    # A damaged checkpoint is recovered first, by the process that will own
+    # the round (never a `--detach` launcher, whose worker does it): under the
+    # phase lock this run took at its entry, before a worker claims its run
+    # in that checkpoint and before the round is stamped
+    # (utils/review_lane.py, `recover_damaged_checkpoint`).
+    launcher = bool(getattr(args, "detach", False)) and not getattr(
+        args, "internal_worker", False)
+    recovery = None if launcher else _review_lane.recover_damaged_checkpoint(
+        phase_dir=str(detach_phase_dir), phase_name='code-review',
+        plan_file=str(plan_path),
+        run_id=getattr(args, "internal_run_id", None),
+        retire_validation_round=code_round_steps().retire_stale_validation_round,
+    )
     detach_outcome = maybe_detach(
         args=args,
         mode='review-code',
@@ -6358,7 +6399,8 @@ def _cross_detach_boundary(
     # opening checkpoint write (`_open_fanout_round`) carries it, every file
     # this run writes records it, and each publication checks that the
     # checkpoint still does (`claim.held`).
-    claim = _review_round.start_round(detach_phase_dir)
+    claim = _review_round.start_round(
+        detach_phase_dir, notes=_review_lane.recovery_notes(recovery))
 
     # A detached worker takes its lock inside `maybe_detach`, and a commit
     # front door's stage (the new header, `commit_range`, a context-plan

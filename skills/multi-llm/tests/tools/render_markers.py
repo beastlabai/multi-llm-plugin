@@ -210,6 +210,7 @@ NOT_FOR_HOST: Dict[str, str] = {
     "[METRICS_INDEX_MISMATCH]": "metrics-note",
     "[METRICS_NO_TASK_ID]": "metrics-note",
     # an input adjusted, set aside or refused
+    "[CHECKPOINT_RECOVERED]": "run-notice",
     "[CONSISTENCY_WARNING]": "run-notice",
     "[CONTEXT_PLAN_SNAPSHOT_CHANGED]": "run-notice",
     "[GIT_CONFIG_CHANGED]": "run-notice",

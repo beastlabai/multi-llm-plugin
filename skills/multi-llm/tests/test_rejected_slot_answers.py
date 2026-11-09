@@ -970,13 +970,13 @@ def test_an_unreadable_checkpoint_withholds_every_answer_from_a_reaggregate(
 
 def _flaky_opening_reads(monkeypatch, *, every: bool) -> List[str]:
     """``open`` of ``.status.json`` fails while ``open_round`` reads the
-    checkpoint to decide on it (``status_file.load_status``): the first such
-    ``open`` only, or every one. Its other reads, the round check among them,
-    succeed. Returns the failed paths."""
+    withheld maps to carry them over (``result_files.recorded_withheld``):
+    the first such ``open`` only, or every one. Its other reads, the round
+    check among them (``Claim.held``), succeed. Returns the failed paths."""
     import builtins
 
     real_open = builtins.open
-    real_load = status_file.load_status
+    real_load = result_files.recorded_withheld
     real_open_round = review_lane.open_round
     state = {"opening": False, "loading": False}
     failed: List[str] = []
@@ -1004,7 +1004,7 @@ def _flaky_opening_reads(monkeypatch, *, every: bool) -> List[str]:
             state["opening"] = False
 
     monkeypatch.setattr(builtins, "open", flaky_open)
-    monkeypatch.setattr(status_file, "load_status", load_status)
+    monkeypatch.setattr(result_files, "recorded_withheld", load_status)
     monkeypatch.setattr(review_lane, "open_round", open_round)
     return failed
 
@@ -1106,16 +1106,19 @@ def test_a_record_never_drops_the_entries_a_failed_read_missed(tmp_path, monkeyp
 # One safe advice at every stop over an unreadable checkpoint
 # ---------------------------------------------------------------------------
 
-def test_the_unreadable_checkpoint_advice_moves_the_whole_phase_folder():
+def test_the_unreadable_checkpoint_advice_names_the_recovery_and_the_folder_fallback():
     advice = status_file.unreadable_checkpoint_advice("/work/out/review-plan")
     assert advice == (
         "If the read failure has passed, running again is enough. If the file "
-        "is damaged: once no run of this phase is live (`status`), move the "
-        "whole phase folder /work/out/review-plan aside, or delete it, and run "
-        "the phase again, so that no earlier result in it can be reused. Never "
-        "move .status.json aside on its own: the result files left beside it "
-        "would then be read as results, answers whose safety checks failed "
-        "among them."
+        "is damaged, run the phase again without --reaggregate once no run of "
+        "this phase is live (`status`): a fresh review run sets every earlier "
+        "result in the folder aside, keeps the damaged file as "
+        ".status.json.unreadable-<time> and starts a new round that reuses none "
+        "of them. If the file cannot be opened at all, or that recovery stops, "
+        "move the whole phase folder /work/out/review-plan aside, or delete it, "
+        "and run the phase again. Never move .status.json aside on its own: the "
+        "result files left beside it would then be read as results, answers "
+        "whose safety checks failed among them."
     )
 
 
@@ -1123,7 +1126,6 @@ def test_the_unreadable_checkpoint_advice_moves_the_whole_phase_folder():
 def test_every_stop_over_a_damaged_checkpoint_gives_the_same_advice(tmp_path, monkeypatch,
                                                                     capsys, lane_class):
     lane = _lane(lane_class, tmp_path, monkeypatch)
-    module = _module(lane)
     _reject_and_leave_the_file(lane, monkeypatch)
     status_path = lane.phase_dir / ".status.json"
     status_path.write_text(status_path.read_text()[:-7])
@@ -1131,25 +1133,29 @@ def test_every_stop_over_a_damaged_checkpoint_gives_the_same_advice(tmp_path, mo
     advice = status_file.unreadable_checkpoint_advice(str(lane.phase_dir))
     capsys.readouterr()
 
-    # A new round stops at its start, the checkpoint kept as it is.
-    calls: List[int] = []
-    _probe(monkeypatch, None)
-    monkeypatch.setattr(module, "invoke_with_file_output",
-                        _answering_invoke(lane, lane.findings(["Clean answer"]), calls=calls))
-    assert _run(lane, "--force") == 3
-    captured = capsys.readouterr()
-    assert advice in captured.err
-    assert "re-run with --force" not in captured.out
-    assert calls == []
-    assert status_path.read_text() == damaged
-
-    # So does a reaggregate.
+    # A reaggregate, which can only reuse, stops and recovers nothing.
     assert lane.reaggregate("--skip-validation") == 3
     captured = capsys.readouterr()
     assert advice in captured.err
     assert "move it aside" not in captured.err
     assert _nothing_grouped(lane)
     assert status_path.read_text() == damaged
+
+    # A round's start reached over it (a fresh run recovers it before, in its
+    # startup) and a round whose checkpoint was damaged after it started stop
+    # the same way, never with the takeover's --force.
+    from utils import review_round
+
+    with pytest.raises(review_round.RoundTakenOver):
+        review_round.start_round(lane.phase_dir)
+    claim = review_round.Claim(str(lane.phase_dir), "0123456789abcdef", started=True)
+    with pytest.raises(review_round.RoundTakenOver):
+        claim.check("write grouped.json")
+    captured = capsys.readouterr()
+    assert captured.err.count(advice) == 2
+    assert "--force" not in captured.out
+    assert status_path.read_text() == damaged
+    # A fresh run recovering it is test_damaged_checkpoint_recovery.py's.
 
 
 def test_the_last_resort_stop_over_an_unreadable_checkpoint_gives_the_same_advice(tmp_path,

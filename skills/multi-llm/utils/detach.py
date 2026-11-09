@@ -1806,6 +1806,14 @@ def _record_worker_refusal(phase_dir: str, run_id: Optional[str], message: str) 
         pass
 
 
+def record_worker_refusal(phase_dir: str, run_id: Optional[str], message: str) -> None:
+    """A detached worker that stops at its startup, holding the lock but
+    before it claims its run (a damaged checkpoint it could not recover,
+    ``review_lane.recover_damaged_checkpoint``), tells its launch why
+    (:func:`_record_worker_refusal`). Nothing outside a real worker."""
+    _record_worker_refusal(phase_dir, run_id, message)
+
+
 def _read_worker_refusal(phase_dir: str, run_id: str) -> Optional[Dict[str, Any]]:
     """The refusal record run *run_id*'s worker left, removed once read."""
     path = worker_refusal_path(phase_dir, run_id)
@@ -2058,6 +2066,50 @@ def unconfirmed_cleanup(
     goes on. Returns ``{"run_id", "cleanup", "record", "problem"}`` for the
     record that refuses. Reads only."""
     return _cleanup_records(str(phase_dir), plan_file=plan_file)[0]
+
+
+def holds_phase_lock(phase_dir: str) -> bool:
+    """Whether this process holds *phase_dir*'s ``.lock`` (:class:`PhaseRun`,
+    a composite's step lock, the worker's)."""
+    return process_control.held_phase_lock(lock_path(str(phase_dir))) is not None
+
+
+def registered_runs_of(
+    phase_dir: str, *, plan_file: Optional[str], except_run_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """The run registry's entries of *phase_dir* (by each entry's
+    ``phase_dir``), *except_run_id*'s left out.
+
+    The registry keeps a detached run's entry from its start until its
+    teardown is confirmed (``RunHandle.finish``, a sweep, an abort), and it
+    is the one record of that run outside the phase's checkpoint: a reader
+    that cannot read the checkpoint learns from it alone whether an earlier
+    run of the dir may still have processes writing there. Reads only, and
+    strictly (``run_registry.read_entries_strictly``), once: the ``OSError``
+    of a registry that exists but cannot be listed propagates, and an entry
+    whose phase cannot be told (unreadable, not a JSON object, no
+    ``phase_dir`` that resolves) raises ``run_registry.UnreadableEntries``
+    naming it. Unread, either may be this dir's run."""
+    root = run_registry.resolve_project_root(plan_file or str(phase_dir))
+    here = _entry_key(str(phase_dir))
+    entries = run_registry.read_entries_strictly(root, except_run_id=except_run_id)
+    found: List[Dict[str, Any]] = []
+    unclear: List[str] = []
+    for entry in entries:
+        if except_run_id and str(entry.get("run_id")) == str(except_run_id):
+            continue
+        where = entry.get("phase_dir")
+        try:
+            key = _entry_key(where) if isinstance(where, str) and where else None
+        except (OSError, ValueError):
+            key = None
+        if key is None:
+            unclear.append(str(entry.get("_path")))
+        elif key == here:
+            found.append(entry)
+    if unclear:
+        raise run_registry.UnreadableEntries(unclear)
+    return found
 
 
 def _unconfirmed_cleanup_message(

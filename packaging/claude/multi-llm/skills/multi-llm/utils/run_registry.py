@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import stat
 import sys
 import time
 from typing import Any, Dict, List, Optional
@@ -116,6 +117,21 @@ def remove_entry(project_root: str, run_id: str) -> None:
         pass
 
 
+def _nonblocking(path: str, flags: int) -> int:
+    return os.open(path, flags | getattr(os, "O_NONBLOCK", 0))
+
+
+def _read_entry(path: str) -> Any:
+    """The JSON an entry file holds, opened without blocking and read only
+    when the descriptor is a regular file (``fstat``): a FIFO or a device at
+    the name, at a link's end, or swapped in after a listing, is an
+    ``OSError``, never a hang (``status_file._open_checkpoint``'s rule)."""
+    with open(path, "r", encoding="utf-8", opener=_nonblocking) as f:
+        if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
+            raise OSError(f"{path} is not a regular file")
+        return json.load(f)
+
+
 def list_entries(project_root: str) -> List[Dict[str, Any]]:
     """Every registry entry, each annotated with its own file path."""
     directory = registry_dir(project_root)
@@ -129,13 +145,65 @@ def list_entries(project_root: str) -> List[Dict[str, Any]]:
             continue
         path = os.path.join(directory, name)
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            data = _read_entry(path)
         except (OSError, IOError, ValueError):
             data = {"run_id": name[:-5], "corrupt": True}
         if isinstance(data, dict):
             data["_path"] = path
             entries.append(data)
+    return entries
+
+
+class UnreadableEntries(OSError):
+    """:func:`read_entries_strictly`: registry entries that exist but could
+    not be read as an entry (*paths*), so nothing in them can be told."""
+
+    def __init__(self, paths: List[str]):
+        super().__init__(f"registry entries that cannot be read: {', '.join(paths)}")
+        self.paths = list(paths)
+
+
+def read_entries_strictly(
+    project_root: str, *, except_run_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Every registry entry, each annotated with its own file path, for a
+    reader that decides something on what the registry does *not* hold;
+    *except_run_id*'s own entry (``<run_id>.json``) is not read at all.
+
+    :func:`list_entries` is for a view: a listing that fails reads as an empty
+    registry, and an entry that cannot be read becomes a placeholder with its
+    ``run_id`` alone. Here the folder is listed once: ``[]`` only when it does
+    not exist, the ``OSError`` of a listing that fails otherwise. An entry
+    removed between the listing and its read is gone (its run's teardown was
+    confirmed). One that cannot be opened or parsed, is no regular file (a
+    FIFO is refused, never waited on) or is no JSON object, raises
+    :class:`UnreadableEntries` naming every such entry, after all are read."""
+    directory = registry_dir(project_root)
+    try:
+        names = sorted(os.listdir(directory))
+    except FileNotFoundError:
+        return []
+    entries: List[Dict[str, Any]] = []
+    unreadable: List[str] = []
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        if except_run_id and name == f"{except_run_id}.json":
+            continue
+        path = os.path.join(directory, name)
+        try:
+            data = _read_entry(path)
+        except FileNotFoundError:
+            continue
+        except (OSError, ValueError):
+            data = None
+        if not isinstance(data, dict):
+            unreadable.append(path)
+            continue
+        data["_path"] = path
+        entries.append(data)
+    if unreadable:
+        raise UnreadableEntries(unreadable)
     return entries
 
 
@@ -188,8 +256,7 @@ def _cleanup_open(entry: Dict[str, Any]) -> bool:
 def entry_cleanup_open(project_root: str, run_id: str) -> bool:
     """Does run *run_id*'s entry carry a cleanup not confirmed? Never raises."""
     try:
-        with open(entry_path(project_root, run_id), "r", encoding="utf-8") as f:
-            return _cleanup_open(json.load(f))
+        return _cleanup_open(_read_entry(entry_path(project_root, run_id)))
     except (OSError, ValueError, TypeError):
         return False
 
@@ -205,8 +272,7 @@ def mark_cleanup(
     record). Best-effort, like :func:`write_entry`."""
     entry: Dict[str, Any] = {}
     try:
-        with open(entry_path(project_root, run_id), "r", encoding="utf-8") as f:
-            loaded = json.load(f)
+        loaded = _read_entry(entry_path(project_root, run_id))
         if isinstance(loaded, dict):
             entry = loaded
     except (OSError, ValueError):

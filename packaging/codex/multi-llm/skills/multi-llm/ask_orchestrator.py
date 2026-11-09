@@ -1837,14 +1837,19 @@ def withhold_lost_slots(question_dir: str, lost: Iterable[str]) -> None:
 def withheld_after_run(
     model_specs: Iterable[str],
     results: Dict[str, Any],
-    maps: Optional[Dict[str, Dict[str, str]]],
+    maps: Optional[Dict[str, Dict[str, Any]]],
 ) -> Dict[str, "_result_files.Withheld"]:
     """The models whose answer files the closing scan leaves unread, and why:
     every model in the maps the run's close writes (``review_lane.withheld_record``),
     a model in both named by its rejection. With no maps (the checkpoint cannot
     be read) every model is withheld but the ones this run vouched for itself:
     a slot whose checks passed, and a resume skip, which found the model
-    withheld by nothing."""
+    withheld by nothing. In a folder whose damaged checkpoint a fresh run
+    replaced (the ``result_files.RECOVERED_KEY`` record the maps carry) no
+    file on disk counts but the answer this run produced (a slot that
+    answered and whose checks passed) or one the operator accepted
+    (``--accept-partial``): every other model is withheld by that record."""
+    model_specs = list(model_specs)
     if maps is None:
         vouched = {
             spec for spec, res in results.items()
@@ -1857,7 +1862,33 @@ def withheld_after_run(
         withheld.update(
             {spec: _result_files.Withheld(key, reason) for spec, reason in maps[key].items()}
         )
+    recovery = maps.get(_result_files.RECOVERED_KEY)
+    if recovery is not None:
+        withheld.update(_withheld_by_recovery(model_specs, results, recovery, withheld))
     return withheld
+
+
+def _withheld_by_recovery(
+    model_specs: Iterable[str],
+    results: Dict[str, Any],
+    recovery: Dict[str, Any],
+    withheld: Dict[str, "_result_files.Withheld"],
+) -> Dict[str, "_result_files.Withheld"]:
+    """The models a ``result_files.RECOVERED_KEY`` *recovery* record
+    withholds at the close (:func:`withheld_after_run`): each of
+    *model_specs* not in *withheld* already, not answered by a slot of this
+    run whose checks passed, and not in the record's ``accepted``."""
+    produced = {
+        spec for spec, res in results.items()
+        if isinstance(res, dict) and res.get("success") and res.get(CHECKED_KEY) is True
+    }
+    accepted = set(recovery.get(_result_files.ACCEPTED_FIELD) or ())
+    reason = recovery.get("reason") or _result_files.RECOVERED_REASON
+    record = _result_files.Withheld(_result_files.RECOVERED_KEY, str(reason))
+    return {
+        spec: record for spec in model_specs
+        if spec not in withheld and spec not in produced and spec not in accepted
+    }
 
 
 def stop_unless_withheld(
@@ -2573,7 +2604,8 @@ def _record_launch(setup: AskSetup) -> Optional[int]:
     The withheld models (``models_rejected``, ``models_unchecked``) survive the
     write, as ``review_lane.open_round`` carries them: both maps are read whole
     under the lock the write holds, every model's, selected or not, and the
-    slots read them (docs/development/workflows.md#ask-mode). Returns the exit
+    slots read them (docs/development/workflows.md#ask-mode); so does a
+    recovered checkpoint's ``result_files.RECOVERED_KEY``. Returns the exit
     code of a stop, ``None`` once the checkpoint is written and read back. It
     stops at exit 3, ``needs-human``, before anything is dispatched, when the
     checkpoint cannot be read even after ``CHECKPOINT_READ_ATTEMPTS`` reads (a
@@ -2584,7 +2616,7 @@ def _record_launch(setup: AskSetup) -> Optional[int]:
     args = setup.inputs.args
     question_dir = setup.question_dir
     model_specs = setup.model_specs
-    withheld: Optional[Dict[str, Dict[str, str]]] = None
+    withheld: Optional[Dict[str, Dict[str, Any]]] = None
     with _status_file.checkpoint_lock(question_dir):
         try:
             withheld = _result_files.recorded_withheld(
@@ -2595,6 +2627,7 @@ def _record_launch(setup: AskSetup) -> Optional[int]:
         else:
             rejected = withheld[_result_files.REJECTED_MODELS_KEY]
             unchecked = withheld[_result_files.UNCHECKED_MODELS_KEY]
+            recovery = withheld.get(_result_files.RECOVERED_KEY)
             write_status(question_dir, {
                 "phase": "ask",
                 "state": "models_running",
@@ -2615,6 +2648,7 @@ def _record_launch(setup: AskSetup) -> Optional[int]:
                 "progress": None,
                 **({_result_files.REJECTED_MODELS_KEY: rejected} if rejected else {}),
                 **({_result_files.UNCHECKED_MODELS_KEY: unchecked} if unchecked else {}),
+                **({_result_files.RECOVERED_KEY: recovery} if recovery is not None else {}),
             })
     path = _status_file.status_path(question_dir)
     if withheld is None:

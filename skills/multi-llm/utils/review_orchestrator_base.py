@@ -6312,8 +6312,10 @@ async def run_all_models(
             # No checked attempt has superseded a slot that failed its safety
             # checks or ended before they passed: a file still there may be
             # that answer, never reused (docs/development/review-results.md,
-            # "Withheld slot answers").
-            if os.path.exists(existing_path):
+            # "Withheld slot answers"). A recovered phase reuses no file at
+            # all, which its round's opening said once.
+            if (os.path.exists(existing_path)
+                    and withheld.key != _result_files.RECOVERED_KEY):
                 print(f"[{display_name}] Result file is from a slot that "
                       f"{withheld.phrase}; re-running...")
             return None
@@ -6740,6 +6742,7 @@ def save_model_result(
     failure_output: Optional[str] = None,
     failure: Optional[str] = None,
     rejected: Optional[str] = None,
+    saved: Optional[Dict[str, List[Dict[str, Any]]]] = None,
 ) -> bool:
     """Save model result to appropriate file.
 
@@ -6786,6 +6789,10 @@ def save_model_result(
             salvaged: no request is written whatever ``failure_output`` holds,
             which the error log keeps under its own heading
             (docs/development/review-results.md, "Withheld slot answers").
+        saved: Keyword-only. When given, the suggestions written to
+            ``{model}.json`` are put here under *model* too: what the fan-out
+            groups in a phase that trusts no file on disk
+            (``result_files.RECOVERED_KEY``).
 
     Returns:
         True if result was saved successfully, False otherwise. A salvage request
@@ -6820,8 +6827,11 @@ def save_model_result(
         # Unsalvageable is not fatal, exactly as in the parse branch: the model
         # was already failed on arrival here, so the error log is written on both
         # paths and only its wording moves. A slot its safety checks rejected is
-        # never salvageable, whatever its text holds.
+        # never salvageable, whatever its text holds, and neither is one in a
+        # phase whose damaged checkpoint was replaced.
         salvageable = rejected is None and has_salvageable_json(failure_output or "")
+        if salvageable and _review_lane.salvage_refused(phase_dir, model):
+            salvageable = False
         if salvageable:
             _write_salvage_request(
                 model=model,
@@ -6905,7 +6915,7 @@ def save_model_result(
         # failed and D6 row 3 aggregates what the other slots returned — so the
         # error log below is written on both paths and only its wording moves.
         salvageable = has_salvageable_json(output)
-        if salvageable:
+        if salvageable and not _review_lane.salvage_refused(phase_dir, model):
             # The same writer the hard-failure branch above uses, and the reason
             # it is a function: the two branches ask for salvage about different
             # text for different reasons, but the request they produce is one
@@ -6934,10 +6944,13 @@ def save_model_result(
             )
         return False
 
-    return write_model_result(
+    written = write_model_result(
         model, validated_suggestions, phase_dir,
         noun="suggestions", raw_output=output,
     )
+    if written and saved is not None:
+        saved[model] = validated_suggestions
+    return written
 
 
 # ---------------------------------------------------------------------------
@@ -6963,6 +6976,7 @@ def aggregate_results(
     scope_state: Optional[Dict[str, Any]] = None,
     claim: Optional["_review_round.Claim"] = None,
     verdicts: Optional["_review_round.Verdicts"] = None,
+    read_grouped_file: bool = True,
 ) -> str:
     """Aggregate all model results into a consolidated markdown report.
 
@@ -6982,7 +6996,13 @@ def aggregate_results(
             requested": the fan-out's ``len(model_specs)``, a reaggregate's
             :func:`recorded_requested_models`. ``None`` states the count alone
             and leaves ``requestedModels`` out of the HTML report data.
-        validated_groups: Optional list of validated suggestion groups
+        validated_groups: The groups the report shows, with their verdicts
+            when validation ran. ``[]`` is zero groups; ``None`` reads them
+            from ``grouped.json`` beside the report (*read_grouped_file*).
+        read_grouped_file: ``False`` for a round that trusts no file on disk
+            (a recovered phase, ``result_files.RECOVERED_KEY``): its groups
+            are always given, and ``None`` raises ``ValueError`` instead of
+            reading ``grouped.json``.
         plan_path: Optional path to the plan file for HTML report
         base_ref: Optional git ref for PR-style diff context (forwarded to
             ``generate_html_report()``).
@@ -7021,7 +7041,12 @@ def aggregate_results(
         Path to the generated report
     """
     groups_to_display = validated_groups
-    if not groups_to_display:
+    if groups_to_display is None and not read_grouped_file:
+        raise ValueError(
+            f"the report of {phase_dir} trusts no file on disk, so it needs the "
+            f"groups its round holds; none were given"
+        )
+    if groups_to_display is None:
         grouped_path = os.path.join(phase_dir, "grouped.json")
         if os.path.exists(grouped_path):
             try:
@@ -7888,6 +7913,11 @@ class BaseReviewLane:
     # Reused verdicts are bound by their round's snapshots alone
     # (`ReviewLane.reuse_checks_inputs`).
     reuse_checks_inputs: ClassVar[bool] = False
+    # Each model's suggestions as `save_slot` wrote them: what grouping reads
+    # in a recovered phase, which trusts no file on disk.
+    saved: Dict[str, List[Dict[str, Any]]] = field(
+        default_factory=dict, compare=False, repr=False,
+    )
 
     def retry_command(self, *flags: str) -> str:
         return cli_common.retry_command(
@@ -7918,7 +7948,7 @@ class BaseReviewLane:
             self.prefix, slot.model_spec, slot.success, slot.payload, slot.error,
             self.out_dir, self.phase_dir, self.salvage_phase_name,
             failure_output=failure_output,
-            failure=slot.failure, rejected=slot.rejected,
+            failure=slot.failure, rejected=slot.rejected, saved=self.saved,
         )
 
     def adopt_salvaged(
@@ -8245,6 +8275,17 @@ async def _review_orchestration(
     # reachable only by polling `status` and finding `failed` seconds later. So
     # the fork happens here, once nothing knowable is left unchecked — and
     # nothing below this line runs in the invoker.
+    #
+    # A damaged checkpoint is recovered first, by the process that will own
+    # the round (never a `--detach` launcher, whose worker does it): under the
+    # phase lock this run took at its entry, before a worker claims its run
+    # in that checkpoint and before the round is stamped
+    # (utils/review_lane.py, `recover_damaged_checkpoint`).
+    recovery = None if detach_launcher else _review_lane.recover_damaged_checkpoint(
+        phase_dir=phase_dir, phase_name=phase_name,
+        plan_file=plan_path, run_id=getattr(args, "internal_run_id", None),
+        retire_validation_round=base_round_steps().retire_stale_validation_round,
+    )
     outcome = maybe_detach(
         args=args,
         mode=_modes().mode_for_script(orchestrator_script) or phase_name,
@@ -8263,7 +8304,7 @@ async def _review_orchestration(
     # (utils/review_round.py). The opening checkpoint write carries it, every
     # file this run writes records it, and each publication checks that the
     # checkpoint still does (`claim.held`).
-    claim = _review_round.start_round(phase_dir)
+    claim = _review_round.start_round(phase_dir, notes=_review_lane.recovery_notes(recovery))
 
     # This process now owns the phase (the foreground run, or the detached
     # worker after `claim_run`), so the snapshot may be replaced. The worker is
@@ -8415,6 +8456,16 @@ async def _review_orchestration(
         for model_spec in model_specs:
             if model_spec in failed_models:
                 continue
+            if closed.recovered:
+                # A recovered phase trusts no file on disk, the ones this run
+                # has just saved included: its answers as this run holds them
+                # (docs/development/review-results.md, "Recovering a damaged one").
+                for s in drop_non_record_entries(
+                    list(lane.saved.get(model_spec) or []), model_spec, noun="suggestions",
+                ):
+                    s["source_model"] = model_spec
+                    all_suggestions.append(s)
+                continue
             sanitized_model = sanitize_model_name(model_spec)
             result_path = os.path.join(phase_dir, f"{sanitized_model}.json")
             if os.path.exists(result_path):
@@ -8452,6 +8503,9 @@ async def _review_orchestration(
             validated_groups_for_report = []
         elif args.skip_validation:
             print("\nSkipping validation (--skip-validation flag set)")
+            # The groups this run holds, as review-code reports them: the
+            # report is built from them, never from a re-read of grouped.json.
+            validated_groups_for_report = grouped
         else:
             outcome = await _review_lane.materialize_fanout_round(
                 lane, claim, args, steps,
@@ -8487,6 +8541,10 @@ async def _review_orchestration(
             requested_models=len(model_specs),
             claim=claim,
             verdicts=verdicts,
+            # A recovered phase trusts no file on disk: its report shows the
+            # groups above, never a grouped.json read back
+            # (docs/development/review-results.md, "Recovering a damaged one").
+            read_grouped_file=not closed.recovered,
         )
 
         # Handle consolidation recommendation (only for phases that support it).

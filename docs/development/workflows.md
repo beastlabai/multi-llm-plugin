@@ -669,7 +669,12 @@ cannot read, and while a withheld model's answer file is in place; a withheld mo
 counted only with a `WARNING` naming why it was withheld, once both its records are cleared
 (`result_files.clear_withheld_model`). A readable checkpoint written before these maps
 withholds nothing, so an older question resumes as it did. `tests/test_ask_withheld_answers.py`
-holds the cases.
+holds the cases. Ask never recovers a damaged checkpoint itself, but `_record_launch` carries a
+`checkpoint_recovered` record over like the maps, so the resume skip and `--accept-partial` keep
+withholding every model by it, and the closing scan counts no answer file but one a slot of this
+run produced with its checks passed (`withheld_after_run`); `--accept-partial` then records the
+model under the record's `accepted` (the operator's choice, never a passed check) and reads it
+back before it reports `[ACCEPTED]` ([Withheld slot answers](review-results.md#withheld-slot-answers)).
 
 ## Implementation artifacts and state
 
