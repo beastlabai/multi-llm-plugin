@@ -287,8 +287,27 @@ model slots stubbed). A scenario that passes on one lane and fails on the other 
   `error`, `source`, `details` and the salvage `failure` kind. `payload` is only ever the
   answer of a completed run; a losing run's text stays in `details` for salvage.
   `slot_results` reads review-plan's record dict and review-code's `(success, issues,
-  error)` triple alike; review-code's slot wrapper returns one, and
+  error)` triple alike; `run_slot` and review-code's slot wrapper return one, and
   `FanoutProgress.record_result` reads it as it reads a record dict.
+- **`run_slot`** is one model slot on both lanes: the guard's gate and before-snapshots
+  (`utils/slot_guard.py`), the lane's preparation, one deadline per slot
+  (`slot_ladder`), the misnamed-result and requested-result baselines taken once, the
+  ladder loop (`dispatch_with_ladder`) and the guard's checks over every attempt before
+  the lane's ending. `run_single_model` and `run_single_review` stay the entry points and
+  return their own shapes. A lane's slot (`BaseSlot`, `CodeSlot`, a `ReviewSlot`)
+  supplies the hooks where the lanes differ, and the core reaches the lane's module names
+  through `SlotSteps` (`base_slot_steps`, `code_slot_steps`), as the round's stages do.
+  The differences `tests/test_review_lane_parity.py` pins (`TestTheSlotCore`):
+  review-code's slot retires another scope's result on a refusal, can end
+  undispatched as `[REVIEW_UNSUPPORTED]` (the diff set out of reach, or an inline prompt
+  over the argv cap), records its provenance in the run's collectors, puts a failure's
+  spend on its error string, takes its own terminal tracker rows, writes its salvage
+  request itself and leaves an exception past its deadline to the fan-out's wrapper; the
+  base's slot records spend and provenance on its record, leaves its terminal rows to
+  `run_models_concurrent`, has its salvage request written when the record is saved,
+  records an exception past its deadline itself (with the prompt), and, on a direct call
+  without an output folder, makes one stdout dispatch without the ladder
+  (`SingleShot`) under the same guard.
 - **The fan-out's mechanics** are `run_models_concurrent` on both lanes (review-code's
   `run_all_reviews` stays the entry point and still returns its triples): the semaphores,
   the launch spacing, the seeded map, the deadline that harvests finished slots before
@@ -367,7 +386,11 @@ model slots stubbed). A scenario that passes on one lane and fails on the other 
   (`unattended=False`, no `next`). The report before it is the lane's own
   (`aggregate_results` records the HIGH groups and verdict counts on the base;
   review-code's `generate_review_report`, `publish_report` and `finish_code_review`, whose
-  `--fail-on-high` gate follows the completion).
+  `--fail-on-high` gate follows the completion). Every site that publishes a report, and
+  review-code's heal of a lost completion, hands its files back through
+  `hand_back_report`: `.status.json`'s `output_files` and the result line's `artifacts`
+  name the same files (report, HTML report, grouping, `validation.json` when it exists,
+  review-code's `issues.json`).
 
 Both lanes also record these the same way:
 

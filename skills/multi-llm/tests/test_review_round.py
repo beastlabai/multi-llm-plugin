@@ -2030,13 +2030,14 @@ class TestACtrlCHoldsTheLockUntilTheFanOutEnds:
 
     def test_no_review_phase_module_starts_a_thread_of_its_own(self):
         """The rule the test above relies on, for every site: the review
-        base, review-code and the slot guard start threads only through
-        `phase_thread` (and `dispatch_in_round` over it)."""
+        base, review-code, the shared review lane (whose slot core dispatches
+        through the lane's `phase_thread`) and the slot guard start threads only
+        through `phase_thread` (and `dispatch_in_round` over it)."""
         import ast
 
         offenders = []
         for rel in ("utils/review_orchestrator_base.py", "code_review_orchestrator.py",
-                    "utils/slot_guard.py"):
+                    "utils/review_lane.py", "utils/slot_guard.py"):
             tree = ast.parse((SKILL_ROOT / rel).read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if isinstance(node, ast.Call):

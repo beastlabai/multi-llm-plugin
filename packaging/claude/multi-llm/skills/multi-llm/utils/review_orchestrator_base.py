@@ -5138,11 +5138,13 @@ async def run_single_model(
     1800 s (§7.5's opening paragraph). Being a tail call inside an ``async def``
     it also kept its retry state in a place no budget could see.
 
-    The loop is :func:`dispatch_with_ladder`, the one review-code's slot runs
-    too; this function supplies only its ``await``ed dispatch. It is
-    deliberately **not** Lane B's loop: this coroutine is awaited inside
-    ``asyncio.gather`` under two semaphores, so a blocking retry loop here would
-    serialize the whole fan-out. What the two lanes share is the policy object.
+    The slot is :func:`utils.review_lane.run_slot`, the core review-code's
+    slot runs too (the guard, the ladder loop :func:`dispatch_with_ladder` and
+    the checks), over this lane's :class:`BaseSlot`; this function is its entry
+    point and returns the record dict. It is deliberately **not** Lane B's
+    loop: this coroutine is awaited inside ``asyncio.gather`` under two
+    semaphores, so a blocking retry loop here would serialize the whole
+    fan-out. What the two lanes share is the policy object.
 
     Args:
         model_spec: Model specification (e.g., 'cursor-agent:auto')
@@ -5212,239 +5214,157 @@ async def run_single_model(
         always-empty key that later readers would have to re-derive the
         emptiness of.
     """
-    import time
     start_time = time.time()
-
-    project_root = get_project_root(plan_path)
-    # `plan_path` IS the discovery anchor (§9.3.a): no new value is computed
-    # here, the existing one simply stops being thrown away at the spawn.
-    provider_name, model_name = parse_model_spec(model_spec, anchor=plan_path)
-    display_name = f"{provider_name}:{model_name}"
-
-    effective_prefix = prefix or sanitize_prefix(os.path.basename(plan_path))
-    full_prompt_context = {**prompt_context}
-    if "prefix" not in full_prompt_context:
-        full_prompt_context["prefix"] = effective_prefix
-
-    effective_timeout = (
-        timeout if timeout is not None
-        else get_provider_timeout(provider_name, anchor=plan_path)
+    slot = BaseSlot(
+        model_spec, plan_path, prompt_template, prompt_context, phase_name,
+        invoke_phase, timeout=timeout, out_dir=out_dir, prefix=prefix,
+        tracker=tracker, run_model_specs=run_model_specs, start_time=start_time,
     )
+    return dict((await _review_lane.run_slot(slot, start_time=start_time)).details)
 
-    log_file = None
-    if out_dir and prefix:
-        sanitized_model = sanitize_model_name(model_spec)
-        phase_dir = get_phase_dir(Path(plan_path), phase_name)
-        os.makedirs(phase_dir, exist_ok=True)
-        log_file = os.path.join(str(phase_dir), f"log_{sanitized_model}.txt")
 
-    # D6 step 3, on the fan-out's own profile: ask this runner's sandbox whether
-    # it can start at all, before either lane below dispatches. A review slot is
-    # a `generate` dispatch, and a bubblewrap that cannot start denies the child
-    # every file operation — the READ of the plan file included, which is this
-    # phase's whole input. Ungated, such a slot came back in 28 s with a one-item
-    # "review" saying the plan could not be read, and was scored a success
-    # (`codex:gpt-5.6-terra`, 2026-09-16). `unknown` and `not-required` dispatch
-    # exactly as before: a probe that could not be read is a diagnostic and never
-    # a gate, and a sandbox that then dies mid-dispatch still lands on the D3k
-    # ladder as rung 1.
-    #
-    # On a fallback rung the guard prints the rung's one line and takes the
-    # before-snapshots its checks need; after the last attempt, its `finish`
-    # runs those checks and the caller drops `output` on the reason it returns,
-    # so `save_model_result` never parses it (`utils/slot_guard.py`).
+def base_slot_steps() -> "_review_lane.SlotSteps":
+    """The review base's :class:`~utils.review_lane.SlotSteps`, from this
+    module's names as they are bound when it is called, so a test that
+    patches one here reaches :func:`~utils.review_lane.run_slot`."""
+    # Imported here: the slot guard reads its checks off this module.
     from .slot_guard import Refused, SlotGuard
 
-    guard = SlotGuard(
-        provider_name=provider_name, display_name=display_name,
-        model_spec=model_spec, project_root=project_root, plan_path=plan_path,
-        tracker=tracker,
+    return _review_lane.SlotSteps(
+        slot_guard=SlotGuard,
+        refused=Refused,
+        slot_ladder=slot_ladder,
+        phase_thread=phase_thread,
+        misnamed_result_baseline=misnamed_result_baseline,
+        requested_result_baseline=requested_result_baseline,
+        invoke_with_file_output=invoke_with_file_output,
+        dispatch_with_ladder=dispatch_with_ladder,
+        sandbox_fallback_kwargs=sandbox_fallback_kwargs,
     )
-    gate = await guard.begin()
-    if isinstance(gate, Refused):
-        return {
+
+
+class BaseSlot:
+    """review-plan's and review-tasks' model slot, a
+    :class:`~utils.review_lane.ReviewSlot` (see :func:`run_single_model`).
+
+    What it holds is what this lane's slot does its own way: its prompt is
+    the plan-review template with the run's context, every ending is a record
+    dict (``SlotResult.details``) whose ``output`` is only the answer of a run
+    that completed, its terminal tracker transitions are the fan-out's
+    (``run_models_concurrent`` derives them from the record), a salvage request
+    is written when the record is saved (``save_model_result``), an exception
+    between the slot's deadline and its ending is recorded with the prompt,
+    and a direct call without an output folder makes one stdout dispatch
+    without the ladder (docs/development/review-results.md, "The shared review
+    lane").
+    """
+
+    def __init__(
+        self,
+        model_spec: str,
+        plan_path: str,
+        prompt_template: str,
+        prompt_context: Dict[str, Any],
+        phase_name: str,
+        invoke_phase: str,
+        *,
+        timeout: Optional[float],
+        out_dir: Optional[str],
+        prefix: Optional[str],
+        tracker: Optional[FanoutProgress],
+        run_model_specs: Optional[Sequence[str]],
+        start_time: float,
+    ) -> None:
+        self.model_spec = model_spec
+        self.anchor = plan_path
+        self.guard_plan_path = plan_path
+        self.prompt_template = prompt_template
+        self.phase_name = phase_name
+        self.invoke_phase = invoke_phase
+        self.out_dir = out_dir
+        self.tracker = tracker
+        self.run_model_specs = run_model_specs
+        self.start_time = start_time
+
+        self.project_root = get_project_root(plan_path)
+        # `plan_path` IS the discovery anchor (§9.3.a): no new value is computed
+        # here, the existing one simply stops being thrown away at the spawn.
+        self.provider_name, model_name = parse_model_spec(model_spec, anchor=plan_path)
+        self.display_name = f"{self.provider_name}:{model_name}"
+
+        effective_prefix = prefix or sanitize_prefix(os.path.basename(plan_path))
+        self.prompt_context = {**prompt_context}
+        if "prefix" not in self.prompt_context:
+            self.prompt_context["prefix"] = effective_prefix
+
+        self.timeout = (
+            timeout if timeout is not None
+            else get_provider_timeout(self.provider_name, anchor=plan_path)
+        )
+
+        self.log_file: Optional[str] = None
+        if out_dir and prefix:
+            sanitized_model = sanitize_model_name(model_spec)
+            phase_dir = get_phase_dir(Path(plan_path), phase_name)
+            os.makedirs(phase_dir, exist_ok=True)
+            self.log_file = os.path.join(str(phase_dir), f"log_{sanitized_model}.txt")
+
+        self.sandbox: Any = None
+        # This run's closing-summary key for the home check's and the jail's lines.
+        self.summary_key: Optional[str] = None
+        # The prompt the record names: a placeholder until the last attempt
+        # names its real output file (`before_dispatch`, `after_ladder`).
+        self.prompt: Optional[str] = None
+        # The last attempt's, read by `after_ladder`.
+        self.details: Dict[str, Any] = {}
+        self.stderr_text = ""
+        self.source = "unknown"
+
+    def slot_steps(self) -> "_review_lane.SlotSteps":
+        return base_slot_steps()
+
+    def _ending(self, record: Dict[str, Any]) -> "_review_lane.SlotResult":
+        return _review_lane.SlotResult.from_record(self.model_spec, record)
+
+    def refused(self, reason: str) -> "_review_lane.SlotResult":
+        return self._ending({
             "success": False, "output": None,
-            "error": gate.reason,
+            "error": reason,
             # `prompt` and `stdout` stay empty for the reason rule 4's refusal
             # leaves them empty: nothing was dispatched, so there is no stream to
             # excerpt — and neither lane below has chosen an output location yet,
             # so a prompt rendered here would name a file no dispatch ever picked.
             "prompt": "", "stdout": "", "stderr": "",
-            "duration_seconds": time.time() - start_time,
-            "model_spec": model_spec,
+            "duration_seconds": time.time() - self.start_time,
+            "model_spec": self.model_spec,
             "source": "not-dispatched",
-        }
-    sandbox = gate.sandbox
-    # This run's closing-summary key for the home check's and the jail's lines.
-    summary_key = phase_summary_key(plan_path, phase_name)
+        })
 
-    # Fall back to old method if no out_dir provided
-    if not out_dir:
-        # There is no output file on this path at all — the result is whatever
-        # `invoke_with_provider` parses off stdout — so the prompt asks for
-        # stdout outright, for every provider. It used to interpolate the string
-        # "(stdout)" into "Write your JSON output to this file:", which named a
-        # channel as if it were a path. The working-limits minutes come from the
-        # same `int(effective_timeout)` the one dispatch below is handed.
-        prompt = prompt_template.format(
-            **full_prompt_context,
-            output_json_path="(stdout)",
-            output_location=STDOUT_OUTPUT_LOCATION,
-            working_limits=render_working_limits(int(effective_timeout)),
+    async def prepare(self, sandbox: Any) -> Any:
+        self.sandbox = sandbox
+        self.summary_key = phase_summary_key(self.anchor, self.phase_name)
+        # Fall back to old method if no out_dir provided
+        if not self.out_dir:
+            return _review_lane.SingleShot(self._stdout_slot)
+        display_name, effective_timeout = self.display_name, self.timeout
+        return _review_lane.SlotDispatch(
+            prompt_template=self.prompt_template,
+            prompt_context=self.prompt_context,
+            output_dir=self.out_dir,
+            invoke_phase=self.invoke_phase,
+            log_file=self.log_file,
+            timeout=effective_timeout,
+            start_line=lambda attempt, attempt_timeout: (
+                f"[{display_name}] Starting review with file-based output "
+                f"(attempt {attempt}, timeout: {attempt_timeout}s "
+                f"of a {effective_timeout}s slot)..."
+            ),
+            jail_summary_key=self.summary_key,
         )
-        try:
-            # The provider's launch turn, at the dispatch, after the
-            # preparation above, as a ladder's first attempt takes it.
-            await attempt_turn()
-            print(f"[{display_name}] Starting review (timeout: {effective_timeout}s)...")
-            if tracker is not None:
-                # This lane makes exactly one dispatch and has no ladder, so the
-                # attempt is 1 by construction. `timeout_s` is the slot's whole
-                # budget, which is also the seed's value unless a per-slot
-                # override moved it — the one thing the seed could not know.
-                tracker.running(
-                    model_spec, attempt=1, timeout_s=effective_timeout
-                )
-            # Single-shot. A call that raises ends the slot as that exception,
-            # but only after the write, mode and home checks a returned call
-            # gets, as `dispatch_with_ladder` runs them for a raised attempt:
-            # nothing was read back, so its audit is `None`, and the jailed
-            # children it armed are compared here (see
-            # docs/development/providers.md). Cancellation and
-            # KeyboardInterrupt are not `Exception`s and pass straight through.
-            armed: List[Any] = []
-            try:
-                with armed_homes_window() as armed:
-                    result = await phase_thread(
-                        invoke_with_provider,
-                        prompt=prompt,
-                        model_spec=model_spec,
-                        timeout=int(effective_timeout),
-                        log_file=log_file,
-                        cwd=project_root,
-                        anchor=plan_path,
-                        **sandbox_fallback_kwargs(sandbox),
-                    )
-            except Exception as exc:  # noqa: BLE001 - recorded as the slot's ending
-                # The jailed homes this call armed are compared only once the
-                # write check passed.
-                violation = await guard.finish(
-                    [None], lambda: raised_attempt_home_records(armed),
-                    summary_key=summary_key,
-                )
-                return {
-                    "success": False, "output": None,
-                    "error": (
-                        violation if violation is not None
-                        else slot_exception_error(exc)
-                    ),
-                    "prompt": prompt, "stdout": "", "stderr": "",
-                    "duration_seconds": time.time() - start_time,
-                    "model_spec": model_spec, "source": "stdout",
-                }
-            duration = time.time() - start_time
-            details = result.get("details", {})
-            stderr_text = details.get("stderr", "")
-            report_jail_outcome(display_name, details, summary_key)
 
-            violation = await guard.finish(
-                [details.get("readonly_audit")], [details.get("home_check")],
-                summary_key=summary_key,
-            )
-            if violation is not None:
-                return {
-                    "success": False, "output": None, "error": violation,
-                    "prompt": prompt, "stdout": details.get("stdout_excerpt", ""),
-                    **salvage_text_fields(details),
-                    "stderr": stderr_text, "duration_seconds": duration,
-                    "model_spec": model_spec, "source": "stdout",
-                    # The slot ran — bypassed, which is why it was checked at
-                    # all — so the record keeps its `sandbox` word: without it
-                    # `models_served`, `progress.sandbox_bypassed` and the
-                    # retired-rung line all lose the one slot that most needs
-                    # them. Every failure below that ran a child does the same.
-                    **served_model_fields(details),
-                    **usage_fields(details),
-                }
-
-            if result["success"]:
-                output_str = _answer_text(result.get("data"))
-                return {
-                    "success": True,
-                    "output": output_str,
-                    "error": None,
-                    "prompt": prompt,
-                    "stdout": output_str,
-                    "stderr": stderr_text,
-                    "duration_seconds": duration,
-                    "model_spec": model_spec,
-                    "source": "stdout",
-                    **served_model_fields(details),
-                    # Stage U: and what it spent. Every record built from THIS
-                    # invocation's `details` carries it — the win, the loss, and
-                    # the harness verdicts above — because a slot that failed
-                    # spent real money too, and the run that ends without an
-                    # answer is the one an operator asks the cost of. The two
-                    # `except` handlers below are the exception, and only
-                    # because `details` is not bound on the path that reaches
-                    # them: they catch OUR failure, not the child's.
-                    **usage_fields(details),
-                }
-            else:
-                return {
-                    "success": False,
-                    "output": None,
-                    # `details` is this very invocation's, read off `result` a
-                    # dozen lines up, so a provider that streamed an array to
-                    # stdout and then exited non-zero has its answer here. The
-                    # older of the two dispatch paths, but it loses the same way
-                    # and the fix is the same one — see `Returns:` above for why
-                    # this is `stdout` and not `output`.
-                    "error": result.get("error", "Unknown error"),
-                    "prompt": prompt,
-                    "stdout": details.get("stdout_excerpt", ""),
-                    **salvage_text_fields(details),
-                    **salvage_failure_fields(result),
-                    "stderr": stderr_text,
-                    "duration_seconds": duration,
-                    "model_spec": model_spec,
-                    "source": "stdout",
-                    **served_model_fields(details),
-                    **usage_fields(details),
-                }
-        except Exception as e:
-            duration = time.time() - start_time
-            # `stdout` stays `""` here, and deliberately. This handler catches
-            # *our* exception, not the child's — `error` names a Python failure
-            # in this coroutine, and there is no losing-run excerpt that belongs
-            # beside it (an invocation that raised is recorded above, after
-            # its checks). Reading one would also be unsafe: `details` is
-            # assigned inside the `try`, *after* `invoke_with_provider`
-            # returns, so on an arrival before that the name is unbound and the
-            # module-level initialiser further down has not run for this path.
-            # That would trade a recorded exception for a `NameError`, which is
-            # the one outcome worse than a missing excerpt.
-            return {
-                "success": False,
-                "output": None,
-                "error": slot_exception_error(e),
-                "prompt": prompt,
-                "stdout": "",
-                "stderr": "",
-                "duration_seconds": duration,
-                "model_spec": model_spec,
-                "source": "stdout"
-            }
-
-    result: Optional[Dict[str, Any]] = None
-    details: Dict[str, Any] = {}
-    stderr_text = ""
-    source = "unknown"
-
-    try:
-        # §7.5 rule 1: ONE deadline for this slot, taken here, before the
-        # placeholder prompt and the result baselines below, which it pays for.
-        ladder = slot_ladder(provider_name, effective_timeout, anchor=plan_path)
+    def before_dispatch(
+        self, dispatch: "_review_lane.SlotDispatch",
+    ) -> Optional["_review_lane.SlotResult"]:
         # A placeholder only until the first attempt names its real output file:
         # rule 4 can refuse this slot before any dispatch, and the result dict
         # still owes its caller a `prompt`. The output-location block is already
@@ -5453,127 +5373,73 @@ async def run_single_model(
         # `attempt_timeout` is below. Not a slice: calling `next_attempt()` here
         # would use up the first attempt, and nothing was sent yet anyway — every
         # dispatched attempt re-renders this with its own `attempt_timeout`.
-        prompt = prompt_template.format(
-            **full_prompt_context,
+        self.prompt = self.prompt_template.format(
+            **self.prompt_context,
             output_json_path="",
-            output_location=render_output_location("", model_spec, anchor=plan_path),
+            output_location=render_output_location("", self.model_spec, anchor=self.anchor),
             working_limits=render_working_limits(
-                max(1, int(round(effective_timeout)))
+                max(1, int(round(self.timeout)))
             ),
         )
+        return None
 
-        # The misnamed-result baseline is the slot's, not an attempt's: taken
-        # once, here, and handed to every attempt, so a file attempt 1 wrote
-        # under the wrong name before it was killed is still this slot's when
-        # attempt 2 writes nothing (review of fix round 24). `None` without the
-        # run's model list, which never looks.
-        misnamed_baseline = (
-            await phase_thread(
-                misnamed_result_baseline, out_dir, invoke_phase, model_spec
-            )
-            if run_model_specs is not None else None
-        )
-        # The requested file's baseline is the slot's too, for the same reason:
-        # the file attempt 1 wrote before it was killed is still this slot's
-        # answer on attempt 2, and the one already there when the slot started
-        # (the previous round's, under `--force --rerun-all`) is never read as
-        # this slot's on any attempt (measured 2026-10-09). Taken whatever the
-        # model list, since every slot has a requested file.
-        requested_baseline = await phase_thread(
-            requested_result_baseline, out_dir, invoke_phase, model_spec
-        )
+    def ladder_refused(self, reason: str, duration: float) -> "_review_lane.SlotResult":
+        # `stdout` stays `""`, and this one is not a hole. A refused run means
+        # `next_attempt()` refused the slot before the first dispatch, so no
+        # child ever ran and there is no stream to excerpt. `details` would be
+        # safe to read, but it is guaranteed empty, and
+        # `details.get("stdout_excerpt", "")` here would be an always-empty key
+        # dressed as a live one: a reader would have to re-derive that it can
+        # never hold anything, and a later edit to this branch would inherit
+        # the pretence.
+        return self._ending({
+            "success": False, "output": None,
+            "error": reason,
+            "prompt": self.prompt, "stdout": "", "stderr": "",
+            "duration_seconds": duration, "model_spec": self.model_spec,
+            "source": "not-dispatched",
+        })
 
-        async def _dispatch(attempt_timeout: int) -> Dict[str, Any]:
-            return await phase_thread(
-                invoke_with_file_output,
-                prompt_template=prompt_template,
-                model_spec=model_spec,
-                prompt_context=full_prompt_context,
-                output_dir=out_dir,
-                phase=invoke_phase,
-                timeout=attempt_timeout,
-                log_file=log_file,
-                prefer_arrays=True,
-                cwd=project_root,
-                anchor=plan_path,
-                run_model_specs=run_model_specs,
-                misnamed_baseline=misnamed_baseline,
-                requested_baseline=requested_baseline,
-                **sandbox_fallback_kwargs(sandbox),
-            )
-
-        # The shared ladder loop (§7.1.b), the one review-code's slot runs too.
-        run = await dispatch_with_ladder(
-            _dispatch,
-            ladder=ladder,
-            model_spec=model_spec,
-            display_name=display_name,
-            timeout=effective_timeout,
-            start_line=lambda attempt, attempt_timeout: (
-                f"[{display_name}] Starting review with file-based output "
-                f"(attempt {attempt}, timeout: {attempt_timeout}s "
-                f"of a {effective_timeout}s slot)..."
+    def after_ladder(self, run: Any) -> None:
+        self.details = run.details
+        result = run.result
+        if result is None:
+            return
+        self.stderr_text = self.details.get("stderr", "")
+        self.source = result.get("source", "unknown")
+        output_file = result.get("output_file", "")
+        # The prompt the last attempt really sent, reconstructed for the
+        # record: `invoke_with_file_output` renders the same three values
+        # from the same spec and the same `attempt_timeout`, so this stays
+        # the text the child saw.
+        self.prompt = self.prompt_template.format(
+            **self.prompt_context,
+            output_json_path=output_file,
+            output_location=render_output_location(
+                output_file, self.model_spec, anchor=self.anchor
             ),
-            jail_summary_key=summary_key,
-            tracker=tracker,
+            working_limits=render_working_limits(run.attempt_timeout),
         )
-        result, details, status = run.result, run.details, run.status
-        slot_usage = run.usage
-        if result is not None:
-            stderr_text = details.get("stderr", "")
-            source = result.get("source", "unknown")
-            output_file = result.get("output_file", "")
-            # The prompt the last attempt really sent, reconstructed for the
-            # record: `invoke_with_file_output` renders the same three values
-            # from the same spec and the same `attempt_timeout`, so this stays
-            # the text the child saw.
-            prompt = prompt_template.format(
-                **full_prompt_context,
-                output_json_path=output_file,
-                output_location=render_output_location(
-                    output_file, model_spec, anchor=plan_path
-                ),
-                working_limits=render_working_limits(run.attempt_timeout),
-            )
-            # Only for an attempt that answered: a failed attempt carries
-            # `output_file` and no `source`, and the line would promise a file
-            # nothing writes.
-            if output_file and result.get("success"):
-                print(f"[{display_name}] {describe_output_file(output_file, source)}")
+        # Only for an attempt that answered: a failed attempt carries
+        # `output_file` and no `source`, and the line would promise a file
+        # nothing writes.
+        if output_file and result.get("success"):
+            print(f"[{self.display_name}] {describe_output_file(output_file, self.source)}")
 
-        duration = time.time() - start_time
+    def outcome(
+        self, run: Any, violation: Optional[str], duration: float,
+    ) -> "_review_lane.SlotResult":
+        model_spec, display_name = self.model_spec, self.display_name
+        prompt, details = self.prompt, self.details
+        stderr_text, source = self.stderr_text, self.source
+        result, status, slot_usage = run.result, run.status, run.usage
 
-        if run.refused:
-            # §7.5 rule 4: the slot was refused before anything was spawned. It
-            # is recorded as its own outcome rather than dispatched to be killed
-            # part-way through a retry chain the harness cannot see.
-            reason = run.refusal_reason(display_name)
-            print(f"[{display_name}] {reason}")
-            # `stdout` stays `""`, and this one is not a hole. `result is None`
-            # means `next_attempt()` refused the slot before the first dispatch,
-            # so no child ever ran and there is no stream to excerpt. `details`
-            # is safe to read — it is initialised to `{}` above the `try` — but
-            # it is guaranteed empty, and `details.get("stdout_excerpt", "")`
-            # here would be an always-empty key dressed as a live one: a reader
-            # would have to re-derive that it can never hold anything, and a
-            # later edit to this branch would inherit the pretence.
-            return {
-                "success": False, "output": None,
-                "error": reason,
-                "prompt": prompt, "stdout": "", "stderr": "",
-                "duration_seconds": duration, "model_spec": model_spec,
-                "source": "not-dispatched",
-            }
-
-        # The guard's checks, once, after the last attempt and ahead of every
-        # branch below: a slot the porcelain check (uncontained rung) or the
-        # mode and home checks (the plugin's jail) fail is failed with that
-        # reason whatever its last attempt reported, and the `output` is
-        # dropped so `save_model_result` never parses it. Placed after rule 4's
-        # refusal return because nothing ran on that path.
-        violation = await guard.finish(run.audits, run.home_checks, summary_key=summary_key)
+        # The guard's checks failed the slot (`run_slot` ran them once, after
+        # the last attempt): failed with that reason whatever its last attempt
+        # reported, and the `output` is dropped so `save_model_result` never
+        # parses it.
         if violation is not None:
-            return {
+            return self._ending({
                 "success": False, "output": None, "error": violation,
                 "prompt": prompt, "stdout": details.get("stdout_excerpt", ""),
                 **salvage_text_fields(details),
@@ -5582,7 +5448,7 @@ async def run_single_model(
                 "source": "exception" if run.exception is not None else source,
                 **served_model_fields(details),
                 **usage_total_fields(slot_usage),
-            }
+            })
 
         if run.exception is not None:
             # A dispatch raised, which ended the slot; recorded as that
@@ -5591,20 +5457,20 @@ async def run_single_model(
             # no relation to this error.
             error_msg = slot_exception_error(run.exception)
             print(f"[{display_name}] {error_msg}")
-            return {
+            return self._ending({
                 "success": False, "output": None,
                 "error": error_msg, "prompt": prompt,
                 "stdout": "", "stderr": "",
                 "duration_seconds": duration, "model_spec": model_spec,
                 "source": "exception",
                 **usage_total_fields(slot_usage),
-            }
+            })
 
         if status == STATUS_RATE_LIMITED:
             # Either the ≤ 3 backoffs are spent, or §7.5 rule 6(b) refused an
             # identical re-dispatch against an adapter whose CLI already ran its
             # own 429 chain; `LadderRun.stop_error` names which.
-            return {
+            return self._ending({
                 "success": False, "output": None,
                 "error": run.stop_error(model_spec),
                 # Stage U: a 429 chain is not free — the attempts before the
@@ -5623,7 +5489,7 @@ async def run_single_model(
                 "source": source,
                 **served_model_fields(details),
                 **usage_total_fields(slot_usage),
-            }
+            })
 
         # §7.6(a): a context overflow is TERMINAL. Splitting the prompt is open
         # question 13 and nobody has designed it, so the shipping behaviour is to
@@ -5634,7 +5500,7 @@ async def run_single_model(
         # also fired on `context_mode`, on "in this context", and on any prose
         # quoting the plan's own Context section.
         if status == STATUS_CONTEXT_LENGTH_EXCEEDED:
-            return {
+            return self._ending({
                 "success": False, "output": None,
                 "error": run.stop_error(model_spec),
                 # Terminal, never re-dispatched (§7.6(a)) — which is exactly why
@@ -5649,17 +5515,17 @@ async def run_single_model(
                 "source": source,
                 **served_model_fields(details),
                 **usage_total_fields(slot_usage),
-            }
+            })
 
         if result.get("success"):
             if result.get("misnamed_from"):
                 report_misnamed_result(
-                    model_spec, result, get_phase_dir(Path(plan_path), phase_name),
+                    model_spec, result, get_phase_dir(Path(self.anchor), self.phase_name),
                 )
             print(f"[{display_name}] Completed successfully in {duration:.1f}s (source: {source})")
             output_str = _answer_text(result.get("data"))
 
-            return {
+            return self._ending({
                 "success": True, "output": output_str,
                 "error": None, "prompt": prompt,
                 "stdout": output_str, "stderr": stderr_text,
@@ -5669,67 +5535,223 @@ async def run_single_model(
                 **served_model_fields(details),
                 # Stage U: so does what producing it cost.
                 **usage_total_fields(slot_usage),
-            }
-        else:
-            error_details = run.stop_error(model_spec)
-            file_error = result.get("file_error", "")
-            if file_error:
-                print(f"[{display_name}] File error: {file_error}")
-            print(f"[{display_name}] Failed: {error_details}")
-            return {
-                "success": False, "output": None,
-                "error": error_details, "prompt": prompt,
-                # The return residual item 5 is about. Every ordinary loss lands
-                # here: the non-zero exit, the timeout kill, and
-                # `invoke_with_file_output`'s "JSON parsing failed from both file
-                # and stdout" — all three of which `_attach_stdout_excerpt` has
-                # already populated. A `review-plan` or `review-tasks` provider
-                # that streams a truncated array and is then killed at the
-                # deadline used to lose it here without a word, because this dict
-                # hardcoded `""` and `save_model_result` short-circuited on
-                # `if not success or not output:` before its salvage gate could
-                # run — the gate was unreachable on a hard failure, not merely
-                # gated to False. It is reachable now because this line carries
-                # the evidence to it.
+            })
+
+        error_details = run.stop_error(model_spec)
+        file_error = result.get("file_error", "")
+        if file_error:
+            print(f"[{display_name}] File error: {file_error}")
+        print(f"[{display_name}] Failed: {error_details}")
+        return self._ending({
+            "success": False, "output": None,
+            "error": error_details, "prompt": prompt,
+            # The return residual item 5 is about. Every ordinary loss lands
+            # here: the non-zero exit, the timeout kill, and
+            # `invoke_with_file_output`'s "JSON parsing failed from both file
+            # and stdout" — all three of which `_attach_stdout_excerpt` has
+            # already populated. A `review-plan` or `review-tasks` provider
+            # that streams a truncated array and is then killed at the
+            # deadline used to lose it here without a word, because this dict
+            # hardcoded `""` and `save_model_result` short-circuited on
+            # `if not success or not output:` before its salvage gate could
+            # run — the gate was unreachable on a hard failure, not merely
+            # gated to False. It is reachable now because this line carries
+            # the evidence to it.
+            "stdout": details.get("stdout_excerpt", ""),
+            # The adapter's reduced answer text, when it has a reducer:
+            # `failure_output_from_result` gates on it ahead of `stdout`.
+            # And whether a deadline ended the run, which the salvage
+            # request records so a salvaged `[]` from it is refused.
+            **salvage_text_fields(details),
+            **salvage_failure_fields(result),
+            "stderr": stderr_text,
+            "duration_seconds": duration, "model_spec": model_spec,
+            "source": source,
+            **served_model_fields(details),
+            **usage_total_fields(slot_usage),
+        })
+
+    def raised(self, exc: Exception) -> Optional["_review_lane.SlotResult"]:
+        duration = time.time() - self.start_time
+        error_msg = slot_exception_error(exc)
+        print(f"[{self.display_name}] {error_msg}")
+        # `stdout` stays `""` for the same reason as the stdout lane's own
+        # handler: this is *our* exception. Every child failure the ladder
+        # understands has already returned through one of the endings above,
+        # so what reaches here is the orchestrator itself breaking — a prompt
+        # that would not format, a ladder misuse, an `asyncio` teardown. The
+        # last attempt's `details` may even hold a completed attempt's excerpt,
+        # which is precisely the argument against reading it: `error` names a
+        # failure that attempt did not cause, and pairing the two would offer
+        # salvage a document with no relationship to the error recorded beside
+        # it. The prompt is the placeholder once it rendered, else the template.
+        return self._ending({
+            "success": False, "output": None,
+            "error": error_msg,
+            "prompt": self.prompt if self.prompt is not None else self.prompt_template,
+            "stdout": "", "stderr": "",
+            "duration_seconds": duration, "model_spec": self.model_spec,
+            "source": "exception"
+        })
+
+    async def _stdout_slot(self, guard: Any) -> "_review_lane.SlotResult":
+        """The stdout lane: one dispatch, no ladder, under *guard*."""
+        model_spec, display_name = self.model_spec, self.display_name
+        effective_timeout, summary_key = self.timeout, self.summary_key
+        start_time = self.start_time
+        # There is no output file on this path at all — the result is whatever
+        # `invoke_with_provider` parses off stdout — so the prompt asks for
+        # stdout outright, for every provider. It used to interpolate the string
+        # "(stdout)" into "Write your JSON output to this file:", which named a
+        # channel as if it were a path. The working-limits minutes come from the
+        # same `int(effective_timeout)` the one dispatch below is handed.
+        prompt = self.prompt_template.format(
+            **self.prompt_context,
+            output_json_path="(stdout)",
+            output_location=STDOUT_OUTPUT_LOCATION,
+            working_limits=render_working_limits(int(effective_timeout)),
+        )
+        try:
+            # The provider's launch turn, at the dispatch, after the
+            # preparation above, as a ladder's first attempt takes it.
+            await attempt_turn()
+            print(f"[{display_name}] Starting review (timeout: {effective_timeout}s)...")
+            if self.tracker is not None:
+                # This lane makes exactly one dispatch and has no ladder, so the
+                # attempt is 1 by construction. `timeout_s` is the slot's whole
+                # budget, which is also the seed's value unless a per-slot
+                # override moved it — the one thing the seed could not know.
+                self.tracker.running(
+                    model_spec, attempt=1, timeout_s=effective_timeout
+                )
+            # Single-shot. A call that raises ends the slot as that exception,
+            # but only after the write, mode and home checks a returned call
+            # gets, as `dispatch_with_ladder` runs them for a raised attempt:
+            # nothing was read back, so its audit is `None`, and the jailed
+            # children it armed are compared here (see
+            # docs/development/providers.md). Cancellation and
+            # KeyboardInterrupt are not `Exception`s and pass straight through.
+            armed: List[Any] = []
+            try:
+                with armed_homes_window() as armed:
+                    result = await phase_thread(
+                        invoke_with_provider,
+                        prompt=prompt,
+                        model_spec=model_spec,
+                        timeout=int(effective_timeout),
+                        log_file=self.log_file,
+                        cwd=self.project_root,
+                        anchor=self.anchor,
+                        **sandbox_fallback_kwargs(self.sandbox),
+                    )
+            except Exception as exc:  # noqa: BLE001 - recorded as the slot's ending
+                # The jailed homes this call armed are compared only once the
+                # write check passed.
+                violation = await guard.finish(
+                    [None], lambda: raised_attempt_home_records(armed),
+                    summary_key=summary_key,
+                )
+                return self._ending({
+                    "success": False, "output": None,
+                    "error": (
+                        violation if violation is not None
+                        else slot_exception_error(exc)
+                    ),
+                    "prompt": prompt, "stdout": "", "stderr": "",
+                    "duration_seconds": time.time() - start_time,
+                    "model_spec": model_spec, "source": "stdout",
+                })
+            duration = time.time() - start_time
+            details = result.get("details", {})
+            stderr_text = details.get("stderr", "")
+            report_jail_outcome(display_name, details, summary_key)
+
+            violation = await guard.finish(
+                [details.get("readonly_audit")], [details.get("home_check")],
+                summary_key=summary_key,
+            )
+            if violation is not None:
+                return self._ending({
+                    "success": False, "output": None, "error": violation,
+                    "prompt": prompt, "stdout": details.get("stdout_excerpt", ""),
+                    **salvage_text_fields(details),
+                    "stderr": stderr_text, "duration_seconds": duration,
+                    "model_spec": model_spec, "source": "stdout",
+                    # The slot ran — bypassed, which is why it was checked at
+                    # all — so the record keeps its `sandbox` word: without it
+                    # `models_served`, `progress.sandbox_bypassed` and the
+                    # retired-rung line all lose the one slot that most needs
+                    # them. Every failure below that ran a child does the same.
+                    **served_model_fields(details),
+                    **usage_fields(details),
+                })
+
+            if result["success"]:
+                output_str = _answer_text(result.get("data"))
+                return self._ending({
+                    "success": True,
+                    "output": output_str,
+                    "error": None,
+                    "prompt": prompt,
+                    "stdout": output_str,
+                    "stderr": stderr_text,
+                    "duration_seconds": duration,
+                    "model_spec": model_spec,
+                    "source": "stdout",
+                    **served_model_fields(details),
+                    # Stage U: and what it spent. Every record built from THIS
+                    # invocation's `details` carries it — the win, the loss, and
+                    # the harness verdicts above — because a slot that failed
+                    # spent real money too, and the run that ends without an
+                    # answer is the one an operator asks the cost of. The
+                    # `except` handlers are the exception, and only because
+                    # `details` is not bound on the path that reaches them:
+                    # they catch OUR failure, not the child's.
+                    **usage_fields(details),
+                })
+            return self._ending({
+                "success": False,
+                "output": None,
+                # `details` is this very invocation's, read off `result` a
+                # dozen lines up, so a provider that streamed an array to
+                # stdout and then exited non-zero has its answer here. The
+                # older of the two dispatch paths, but it loses the same way
+                # and the fix is the same one — see `run_single_model`'s
+                # `Returns:` for why this is `stdout` and not `output`.
+                "error": result.get("error", "Unknown error"),
+                "prompt": prompt,
                 "stdout": details.get("stdout_excerpt", ""),
-                # The adapter's reduced answer text, when it has a reducer:
-                # `failure_output_from_result` gates on it ahead of `stdout`.
-                # And whether a deadline ended the run, which the salvage
-                # request records so a salvaged `[]` from it is refused.
                 **salvage_text_fields(details),
                 **salvage_failure_fields(result),
                 "stderr": stderr_text,
-                "duration_seconds": duration, "model_spec": model_spec,
-                "source": source,
+                "duration_seconds": duration,
+                "model_spec": model_spec,
+                "source": "stdout",
                 **served_model_fields(details),
-                **usage_total_fields(slot_usage),
-            }
-
-    except Exception as e:
-        duration = time.time() - start_time
-        error_msg = slot_exception_error(e)
-        print(f"[{display_name}] {error_msg}")
-        try:
-            prompt_for_log = prompt
-        except NameError:
-            prompt_for_log = prompt_template if 'prompt_template' in dir() else "(unavailable)"
-        # `stdout` stays `""` for the same reason as the stdout-only lane's own
-        # handler above: this is *our* exception. Every child failure the ladder
-        # understands has already returned through one of the branches above, so
-        # what reaches here is the orchestrator itself breaking — a prompt that
-        # would not format, a ladder misuse, an `asyncio` teardown. `details` is
-        # in scope (initialised to `{}` before the `try`) and may even hold a
-        # completed attempt's excerpt, which is precisely the argument against
-        # reading it: `error` names a failure that attempt did not cause, and
-        # pairing the two would offer salvage a document with no relationship to
-        # the error recorded beside it.
-        return {
-            "success": False, "output": None,
-            "error": error_msg, "prompt": prompt_for_log,
-            "stdout": "", "stderr": "",
-            "duration_seconds": duration, "model_spec": model_spec,
-            "source": "exception"
-        }
+                **usage_fields(details),
+            })
+        except Exception as e:
+            duration = time.time() - start_time
+            # `stdout` stays `""` here, and deliberately. This handler catches
+            # *our* exception, not the child's — `error` names a Python failure
+            # in this coroutine, and there is no losing-run excerpt that belongs
+            # beside it (an invocation that raised is recorded above, after
+            # its checks). Reading one would also be unsafe: `details` is
+            # assigned inside the `try`, *after* `invoke_with_provider`
+            # returns, so on an arrival before that the name is unbound. That
+            # would trade a recorded exception for a `NameError`, which is the
+            # one outcome worse than a missing excerpt.
+            return self._ending({
+                "success": False,
+                "output": None,
+                "error": slot_exception_error(e),
+                "prompt": prompt,
+                "stdout": "",
+                "stderr": "",
+                "duration_seconds": duration,
+                "model_spec": model_spec,
+                "source": "stdout"
+            })
 
 
 def raised_slot_record(
@@ -7106,35 +7128,14 @@ def aggregate_results(
     except Exception as e:
         print(f"Warning: Failed to generate HTML report: {e}")
 
-    # A detached run's caller never saw this stdout, so success has to hand back
-    # paths rather than a search: `status` on a `done` run prints these and
-    # repeats them in MULTI_LLM_RESULT.artifacts. A no-op in the foreground —
-    # `record_output_files` kept the handle guard `report_progress` gave up, so a
-    # non-detached `.status.json` still gains no `output_files` (it gains
-    # `progress`, and nothing else).
-    report_html_path = os.path.join(phase_dir, "report.html")
-    grouped_path_out = os.path.join(phase_dir, "grouped.json")
-    validation_path_out = os.path.join(phase_dir, "validation.json")
-    # validation.json is named on BOTH channels or on neither. The host reads the
-    # poll result, whose artifacts are rebuilt from `output_files`, and
-    # `apply_task_suggestions_orchestrator.load_data` hard-fails without this
-    # file — so a run that recorded it only in the terminal `MULTI_LLM_RESULT`
-    # (which a detached run prints into a log nobody reads) left the next phase
-    # with no way to learn the file exists. `record_output_files` records only
-    # paths that exist, which is the same guard the artifact list uses below.
-    _detach.record_output_files(
-        phase_dir,
+    # The report's files handed back on both channels, one rule for every
+    # review lane (utils/review_lane.py); validation.json only when it exists.
+    _review_lane.hand_back_report(
+        base_round_steps(), phase_dir,
         report=report_path,
-        report_html=report_html_path,
-        grouped=grouped_path_out,
-        validation=validation_path_out,
+        grouped=os.path.join(phase_dir, "grouped.json"),
+        validation=os.path.join(phase_dir, "validation.json"),
     )
-
-    # The terminal `MULTI_LLM_RESULT.artifacts` half of the same hand-back;
-    # validation.json only when it exists, it being the one machine-readable
-    # record of the verdicts the report describes.
-    record_review_artifacts(report_path, report_html_path, grouped_path_out,
-                            validation_path_out)
 
     # Every lane records this the same way. review-plan and review-tasks used
     # to print `HIGH priority: N` (validation prep only, and a count of
@@ -7795,6 +7796,8 @@ def base_round_steps() -> "_review_lane.RoundSteps":
         announce_remaining_failures=announce_remaining_failures,
         exit_when_every_reviewer_failed=exit_when_every_reviewer_failed,
         record_validation_counts=record_validation_counts,
+        record_output_files=_detach.record_output_files,
+        record_review_artifacts=record_review_artifacts,
     )
 
 

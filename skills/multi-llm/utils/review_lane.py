@@ -9,8 +9,8 @@ the other (docs/development/review-results.md, "The shared review lane"):
 * :class:`ReviewLane`, the hooks a lane supplies where the lanes differ;
 * :func:`select_review_models` and :func:`open_round`, a fan-out's model
   selection and the opening checkpoint of its round;
-* :class:`SlotResult`, one model slot's outcome, the shape both fan-outs close
-  over;
+* :class:`SlotResult`, one model slot's outcome, the shape :func:`run_slot`
+  returns and both fan-outs close over;
 * :func:`close_fanout`, what follows a fan-out up to grouping: each slot's
   result saved, the losses named, the sandbox words and salvage recorded, and
   the run either continued or ended at exit 3 when no model answered;
@@ -23,6 +23,10 @@ the other (docs/development/review-results.md, "The shared review lane"):
 * :func:`resolve_validation_round`, what a ``--reaggregate`` does with the
   validation round beside its grouping: reuse the verdicts bound to it, merge
   or hand out a round on disk, or build a new one;
+* :func:`run_slot`, one model slot: the guard, the ladder and the checks,
+  over each lane's :class:`ReviewSlot`;
+* :func:`hand_back_report`, a published report's files handed back on both
+  channels;
 * :func:`record_phase_complete` and :func:`complete_reaggregate`, the
   completion every ending that records the phase shares.
 
@@ -248,8 +252,9 @@ class SlotResult:
     served model, sandbox word and usage the checkpoint records); ``failure``
     is the salvage failure kind the slot recorded.
 
-    review-code's slot wrapper in ``run_all_reviews`` returns one; the slot
-    functions keep their own shapes (``run_single_model`` a record dict,
+    :func:`run_slot` returns one, and so does review-code's slot wrapper in
+    ``run_all_reviews``; the slot functions over :func:`run_slot` keep their
+    own shapes for their callers (``run_single_model`` a record dict,
     ``run_single_review`` a ``(success, issues, error)`` triple), and
     :func:`slot_results` reads any of the three.
     """
@@ -299,6 +304,230 @@ class SlotResult:
 def slot_results(results: Mapping[str, Any]) -> Dict[str, SlotResult]:
     """A fan-out's ``{model_spec: outcome}`` map, each outcome a :class:`SlotResult`."""
     return {spec: SlotResult.coerce(spec, value) for spec, value in results.items()}
+
+
+# ---------------------------------------------------------------------------
+# One slot: the guard, the ladder and the checks
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class SlotSteps:
+    """The names :func:`run_slot` calls, built like :class:`RoundSteps` from
+    the calling lane's own module when the slot runs
+    (``ReviewSlot.slot_steps``), so a test that patches one there reaches the
+    core. ``slot_guard`` and ``refused`` are ``utils.slot_guard``'s
+    ``SlotGuard`` and ``Refused``."""
+
+    slot_guard: Callable[..., Any]
+    refused: type
+    slot_ladder: Callable[..., Any]
+    phase_thread: Callable[..., Any]
+    misnamed_result_baseline: Callable[..., Any]
+    requested_result_baseline: Callable[..., Any]
+    invoke_with_file_output: Callable[..., Any]
+    dispatch_with_ladder: Callable[..., Any]
+    sandbox_fallback_kwargs: Callable[..., Dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class SlotDispatch:
+    """What a slot's ladder sends, as the lane prepared it.
+
+    ``output_dir`` is the folder the answer is written to, as the lane holds
+    it; ``timeout`` the slot's whole budget, taken once as its deadline;
+    ``start_line(attempt, attempt_timeout)`` the line each attempt prints;
+    ``jail_summary_key`` the closing-summary key the jail's and the home
+    check's lines are filed under, for the ladder and the checks alike.
+    """
+
+    prompt_template: str
+    prompt_context: Mapping[str, Any]
+    output_dir: Any
+    invoke_phase: str
+    log_file: Optional[str]
+    timeout: float
+    start_line: Callable[[int, int], str]
+    jail_summary_key: Any
+
+
+@dataclass(frozen=True)
+class SingleShot:
+    """A slot that makes its one dispatch without the ladder: the review
+    base's stdout lane, which only a direct call without an output folder
+    reaches. ``run(guard)`` dispatches under the guard :func:`run_slot`
+    admitted the slot with, and runs that guard's checks itself."""
+
+    run: Callable[[Any], Any]
+
+
+class ReviewSlot(Protocol):
+    """What one lane's model slot supplies to :func:`run_slot`.
+
+    The review base's slot (``review_orchestrator_base.BaseSlot``) and
+    review-code's (``code_review_orchestrator.CodeSlot``) each hold one
+    slot's identity (``model_spec``; ``anchor``, the plan path every lookup
+    is anchored on; ``guard_plan_path``, the plan path as the lane hands it to
+    the guard; the provider, display name, project root, tracker and the
+    fan-out's model list) and these hooks, where the lanes legitimately
+    differ:
+
+    * ``refused(reason)``: the guard refused the slot before anything ran.
+    * ``prepare(sandbox)``: the lane's own preparation once the guard admitted
+      the slot: a :class:`SlotDispatch` for the ladder, a :class:`SingleShot`,
+      or a :class:`SlotResult` that ends the slot undispatched (review-code's
+      ``[REVIEW_UNSUPPORTED]``).
+    * ``before_dispatch(dispatch)``: once the slot's deadline is taken and
+      before the result baselines: a :class:`SlotResult` ends the slot
+      undispatched (review-code's argv cap), ``None`` dispatches.
+    * ``ladder_refused(reason, duration)``: the budget refused the first
+      attempt (§7.5 rule 4); the reason is printed already.
+    * ``after_ladder(run)``: what the lane reads off the last attempt before
+      the checks run (its provenance, the output-file line).
+    * ``outcome(run, violation, duration)``: the slot's ending, with the
+      checks' reason when they failed it.
+    * ``raised(exc)``: a :class:`SlotResult` for an exception raised between
+      the deadline and the ending, or ``None`` to let it propagate to the
+      fan-out's wrapper (``raised_slot_record``).
+    * ``slot_steps()``: the :class:`SlotSteps` from the lane's module.
+    """
+
+    model_spec: str
+    anchor: str
+    guard_plan_path: Any
+    provider_name: str
+    display_name: str
+    project_root: Optional[str]
+    tracker: Any
+    run_model_specs: Optional[Sequence[str]]
+
+    def slot_steps(self) -> SlotSteps: ...
+
+    def refused(self, reason: str) -> SlotResult: ...
+
+    async def prepare(self, sandbox: Any) -> Any: ...
+
+    def before_dispatch(self, dispatch: SlotDispatch) -> Optional[SlotResult]: ...
+
+    def ladder_refused(self, reason: str, duration: float) -> SlotResult: ...
+
+    def after_ladder(self, run: Any) -> None: ...
+
+    def outcome(self, run: Any, violation: Optional[str], duration: float) -> SlotResult: ...
+
+    def raised(self, exc: Exception) -> Optional[SlotResult]: ...
+
+
+async def run_slot(slot: ReviewSlot, *, start_time: float) -> SlotResult:
+    """One model slot of a review fan-out, the same on every lane.
+
+    D6 step 3: the slot's guard asks the runner's sandbox whether it can start
+    before anything is dispatched, and on a fallback rung takes the
+    before-snapshots its checks need (``utils/slot_guard.py``). A refused slot
+    ends there (``slot.refused``). Otherwise the lane prepares its dispatch;
+    then §7.5 rule 1: ONE deadline for the slot (``slot_ladder``), taken
+    before the lane's last check and the result baselines, which it pays for.
+    The misnamed-result and requested-result baselines are the slot's, taken
+    once and handed to every attempt: a file an attempt wrote before it was
+    killed is still this slot's answer when a retry writes nothing, and one
+    already there when the slot started is never read as this slot's (the
+    misnamed one only with the fan-out's model list, which never looks
+    otherwise). The ladder loop is ``dispatch_with_ladder``
+    (docs/development/delegation.md#read-and-analyze-executor).
+
+    The guard's checks run once, after the last attempt, over every attempt
+    (ANDed: a clean retry cannot excuse an earlier attempt that wrote), and
+    ahead of the lane's ending: a slot they fail is failed with their reason
+    whatever its last attempt reported, and nothing it returned is parsed as
+    a review. *start_time* is the slot's start, for its duration.
+    """
+    import time
+
+    steps = slot.slot_steps()
+    guard = steps.slot_guard(
+        provider_name=slot.provider_name, display_name=slot.display_name,
+        model_spec=slot.model_spec, project_root=slot.project_root,
+        plan_path=slot.guard_plan_path, tracker=slot.tracker,
+    )
+    gate = await guard.begin()
+    if isinstance(gate, steps.refused):
+        return slot.refused(gate.reason)
+    sandbox = gate.sandbox
+
+    prepared = await slot.prepare(sandbox)
+    if isinstance(prepared, SlotResult):
+        return prepared
+    if isinstance(prepared, SingleShot):
+        return await prepared.run(guard)
+    dispatch: SlotDispatch = prepared
+
+    try:
+        ladder = steps.slot_ladder(slot.provider_name, dispatch.timeout, anchor=slot.anchor)
+        ended = slot.before_dispatch(dispatch)
+        if ended is not None:
+            return ended
+
+        misnamed_baseline = (
+            await steps.phase_thread(
+                steps.misnamed_result_baseline,
+                dispatch.output_dir, dispatch.invoke_phase, slot.model_spec,
+            )
+            if slot.run_model_specs is not None else None
+        )
+        requested_baseline = await steps.phase_thread(
+            steps.requested_result_baseline,
+            dispatch.output_dir, dispatch.invoke_phase, slot.model_spec,
+        )
+
+        async def _dispatch(attempt_timeout: int) -> Dict[str, Any]:
+            return await steps.phase_thread(
+                steps.invoke_with_file_output,
+                prompt_template=dispatch.prompt_template,
+                model_spec=slot.model_spec,
+                prompt_context=dispatch.prompt_context,
+                output_dir=dispatch.output_dir,
+                phase=dispatch.invoke_phase,
+                timeout=attempt_timeout,
+                log_file=dispatch.log_file,
+                prefer_arrays=True,
+                cwd=slot.project_root,
+                anchor=slot.anchor,
+                # Every model of the fan-out, so a result written under the
+                # wrong name is read from where the model put it (live run 10).
+                run_model_specs=slot.run_model_specs,
+                misnamed_baseline=misnamed_baseline,
+                requested_baseline=requested_baseline,
+                **steps.sandbox_fallback_kwargs(sandbox),
+            )
+
+        run = await steps.dispatch_with_ladder(
+            _dispatch,
+            ladder=ladder,
+            model_spec=slot.model_spec,
+            display_name=slot.display_name,
+            timeout=dispatch.timeout,
+            start_line=dispatch.start_line,
+            jail_summary_key=dispatch.jail_summary_key,
+            tracker=slot.tracker,
+        )
+        duration = time.time() - start_time
+        if run.refused:
+            # §7.5 rule 4: what is left of the slot cannot hold one worst-case
+            # attempt of the adapter's declared envelope, so nothing was
+            # spawned; recorded as its own outcome rather than dispatched to be
+            # killed part-way through a retry chain the harness cannot see.
+            reason = run.refusal_reason(slot.display_name)
+            print(f"[{slot.display_name}] {reason}")
+            return slot.ladder_refused(reason, duration)
+        slot.after_ladder(run)
+        violation = await guard.finish(
+            run.audits, run.home_checks, summary_key=dispatch.jail_summary_key,
+        )
+        return slot.outcome(run, violation, duration)
+    except Exception as exc:
+        caught = slot.raised(exc)
+        if caught is None:
+            raise
+        return caught
 
 
 # ---------------------------------------------------------------------------
@@ -525,8 +754,9 @@ class RoundSteps:
     (:func:`open_round`), the fan-out's grouping and round
     (:func:`group_findings`, :func:`materialize_fanout_round`), a reaggregate's
     loading, grouping and round (:func:`load_reaggregate_results`,
-    :func:`bind_grouping`, :func:`resolve_validation_round`) and the
-    completion (:func:`record_phase_complete`).
+    :func:`bind_grouping`, :func:`resolve_validation_round`), the report's
+    hand-back (:func:`hand_back_report`) and the completion
+    (:func:`record_phase_complete`).
 
     Each lane builds this from the names its own module binds when it calls
     (``ReviewLane.round_steps``), so a test that patches one of them on that
@@ -563,6 +793,9 @@ class RoundSteps:
     announce_remaining_failures: Callable[..., Any]
     exit_when_every_reviewer_failed: Callable[..., Any]
     record_validation_counts: Callable[..., Any]
+    # The report's hand-back (:func:`hand_back_report`).
+    record_output_files: Callable[..., Any]
+    record_review_artifacts: Callable[..., Any]
 
 
 @dataclass(frozen=True)
@@ -1338,6 +1571,48 @@ def load_reaggregate_results(
     return LoadedResults(
         records=records, by_model=by_model, stems=stems,
         failed_models=failed_models, requested=requested,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Handing the report back
+# ---------------------------------------------------------------------------
+
+def hand_back_report(
+    steps: RoundSteps,
+    phase_dir: Any,
+    *,
+    report: Any,
+    grouped: Any,
+    validation: Any,
+    issues: Any = None,
+) -> None:
+    """A published report's files handed back, the same on every lane.
+
+    A detached run's caller never saw its stdout, so ``status`` hands the
+    files back from ``.status.json``'s ``output_files``
+    (``record_output_files``: only paths that exist, and nothing in the
+    foreground), and the terminal ``MULTI_LLM_RESULT.artifacts`` names them
+    too (``record_review_artifacts``: ``validation.json`` and review-code's
+    ``issues.json`` only when they exist). Each file is named on both channels
+    or on neither: the apply phases read ``validation.json`` (and
+    ``issues.json``), and without it treat every group as needing a human or
+    stop. ``report.html`` sits beside ``report.md`` in *phase_dir*. Called by
+    every site that publishes a report and by review-code's heal of a lost
+    completion (docs/development/review-results.md, "The shared review lane").
+    """
+    report_html = os.path.join(str(phase_dir), "report.html")
+    files = {
+        "report": str(report),
+        "report_html": report_html,
+        "grouped": str(grouped),
+        "validation": str(validation),
+        **({"issues": str(issues)} if issues is not None else {}),
+    }
+    steps.record_output_files(str(phase_dir), **files)
+    steps.record_review_artifacts(
+        report, report_html, grouped, validation,
+        *((issues,) if issues is not None else ()),
     )
 
 

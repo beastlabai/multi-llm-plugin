@@ -35,6 +35,7 @@ from utils import detach  # noqa: E402
 from utils import review_lane  # noqa: E402
 from utils import review_orchestrator_base as rob  # noqa: E402
 from utils import status_file  # noqa: E402
+from utils.progress_tracker import FanoutProgress  # noqa: E402
 from utils.state_manager import CURRENT_FORMAT_VERSION, get_or_create_state  # noqa: E402
 from utils.subagent_tasks import build_inputs  # noqa: E402
 from tests.support.gitrepo import commit_file, git, init_repo  # noqa: E402
@@ -186,11 +187,85 @@ class Lane:
             for index, name in enumerate(names)
         ]
 
+    # -- one slot (``TestTheSlotCore``) ---------------------------------------
+
+    #: Where the lanes' slots legitimately differ (``ReviewSlot``): review-code's
+    #: slot takes its terminal tracker row itself, puts a failure's spend on its
+    #: error and writes a salvage request itself; the base's slot catches an
+    #: exception raised past its deadline and records it.
+    slot_takes_terminal_rows: bool
+    slot_spend_on_error: bool
+    slot_catches_its_own_errors: bool
+    slot_writes_salvage_requests: bool
+    #: Whether the report's hand-back names review-code's ``issues.json``.
+    hands_back_issues: bool
+
+    def tracker(self) -> FanoutProgress:
+        """A seeded one-model fan-out map in the phase dir."""
+        self.phase_dir.mkdir(parents=True, exist_ok=True)
+        tracker = FanoutProgress(str(self.phase_dir), [MODELS[0]],
+                                 anchor=str(self.plan), timeout=30)
+        tracker.seed()
+        return tracker
+
+    def slot(self, invoke: Any, *, tracker: Any = None) -> review_lane.SlotResult:
+        """The lane's slot function on ``MODELS[0]``, each attempt answered by
+        *invoke* (its ``invoke_with_file_output``), as one ``SlotResult``."""
+        self.phase_dir.mkdir(parents=True, exist_ok=True)
+        with patch.object(self.slot_module(), "invoke_with_file_output", invoke), \
+             patch.object(rob.asyncio, "sleep", _no_sleep):
+            outcome = asyncio.run(self.slot_call(tracker))
+        return review_lane.SlotResult.coerce(MODELS[0], outcome)
+
+    def slot_module(self) -> Any:
+        raise NotImplementedError
+
+    def slot_class(self) -> type:
+        raise NotImplementedError
+
+    def slot_call(self, tracker: Any) -> Any:
+        raise NotImplementedError
+
+    def answer(self, outcome: review_lane.SlotResult) -> Any:
+        """The findings a completed slot returned."""
+        raise NotImplementedError
+
+    def save_slot(self, outcome: review_lane.SlotResult) -> bool:
+        """Save the slot as the fan-out's save loop does."""
+        raise NotImplementedError
+
 
 class PlanLane(Lane):
     mode, phase, module, boundary = "review-plan", "review-plan", rpo, rob
     reuse_checks_inputs, reviewed_input = False, "plan_sha256"
     guards_partial_rounds = False
+    slot_takes_terminal_rows = slot_spend_on_error = False
+    slot_catches_its_own_errors, slot_writes_salvage_requests = True, False
+    hands_back_issues = False
+
+    def slot_module(self):
+        return rob
+
+    def slot_class(self):
+        return rob.BaseSlot
+
+    def slot_call(self, tracker):
+        return rob.run_single_model(
+            MODELS[0], str(self.plan), SLOT_TEMPLATE, {}, "review-plan",
+            "plan_review", 30, out_dir=str(self.phase_dir), prefix="feature",
+            tracker=tracker, run_model_specs=[MODELS[0]],
+        )
+
+    def answer(self, outcome):
+        return json.loads(outcome.payload)
+
+    def save_slot(self, outcome):
+        return rob.save_model_result(
+            "feature", outcome.model_spec, outcome.success, outcome.payload,
+            outcome.error, str(self.phase_dir), str(self.phase_dir), "review_plan",
+            failure_output=rob.failure_output_from_result(outcome.details),
+            failure=outcome.failure,
+        )
 
     def edit_a_reviewed_line(self):
         self.plan.write_text("# Plan\n\n## Step 1\n\nChange the handler to 999.\n",
@@ -248,6 +323,30 @@ class CodeLane(Lane):
     mode, phase, module, boundary = "review-code", "code-review", cro, cro
     reuse_checks_inputs, reviewed_input = True, "reviewed_code_sha256"
     guards_partial_rounds = True
+    slot_takes_terminal_rows = slot_spend_on_error = True
+    slot_catches_its_own_errors, slot_writes_salvage_requests = False, True
+    hands_back_issues = True
+
+    def slot_module(self):
+        return cro
+
+    def slot_class(self):
+        return cro.CodeSlot
+
+    def slot_call(self, tracker):
+        return cro.run_single_review(
+            MODELS[0], self.plan, self.phase_dir, timeout=30, tracker=tracker,
+            usage={}, run_model_specs=[MODELS[0]],
+        )
+
+    def answer(self, outcome):
+        return outcome.payload
+
+    def save_slot(self, outcome):
+        return cro.save_model_result(
+            "feature", outcome.model_spec, outcome.success, outcome.payload,
+            outcome.error, self.phase_dir,
+        )
 
     def edit_a_reviewed_line(self):
         (self.repo / "src/app.py").write_text("def handler():\n    return 999\n",
@@ -953,6 +1052,161 @@ class TestFanoutSlots:
         assert {spec: row["state"] for spec, row in progress["models"].items()} == {
             MODELS[0]: "done", MODELS[1]: "done"}
         assert (progress["models_done"], progress["models_succeeded"]) == (2, 2)
+
+
+#: The base slot's template: every placeholder its dispatch and record fill.
+SLOT_TEMPLATE = "{prefix}{output_json_path}{output_location}{working_limits}"
+#: What a failed attempt spent, reported by its adapter.
+SPENT = {"output_tokens": 1234, "cost_usd": 0.5}
+#: A failed attempt's leftover stdout that still holds an answer.
+LEFT_BEHIND = '[{"title": "Alpha", "desc": "AlphaAlpha", "importance": "MEDIUM"}'
+
+
+def _answered(findings: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """An attempt that completed with *findings*."""
+    return {"success": True, "data": findings, "source": "file",
+            "output_file": "", "details": {"stderr": ""}}
+
+
+def _lost(**details: Any) -> Dict[str, Any]:
+    """An attempt that failed with *details*."""
+    return {"success": False, "error": "provider exited 1",
+            "details": {"stderr": "provider exited 1", **details}}
+
+
+async def _no_sleep(_delay):
+    return None
+
+
+class TestTheReportsHandBack:
+    """A published report's files are handed back on both channels by one
+    helper (``review_lane.hand_back_report``) on every completion site;
+    review-code's ``issues.json`` is the one file only it writes."""
+
+    @staticmethod
+    def _handed(lane: Lane, run) -> List[List[str]]:
+        handed: List[List[str]] = []
+        with patch.object(rob, "record_artifacts",
+                          lambda paths: handed.append([Path(p).name for p in paths])):
+            run()
+        return handed
+
+    def _expected(self, lane: Lane, *, validated: bool) -> List[str]:
+        return (["report.md", "report.html", "grouped.json"]
+                + (["validation.json"] if validated else [])
+                + (["issues.json"] if lane.hands_back_issues else []))
+
+    def test_a_fanouts_report(self, lane):
+        handed = self._handed(lane, lambda: lane.fanout(_two_models(lane), "--skip-validation"))
+        assert handed == [self._expected(lane, validated=False)]
+
+    def test_a_reaggregates_report(self, lane):
+        handed = self._handed(lane, lambda: _validated(lane))
+        assert handed == [self._expected(lane, validated=True)]
+
+
+class TestTheSlotCore:
+    """One model slot, run on both lanes through the one core
+    (``review_lane.run_slot``: the guard, the ladder, the checks) with only
+    the dispatch stubbed. The lanes' slots still end in their own shapes and
+    keep the differences ``ReviewSlot`` lists; each case pins one."""
+
+    def test_both_slot_functions_are_entry_points_over_the_core(self, lane):
+        """``run_single_model`` and ``run_single_review`` hand their lane's
+        slot to ``run_slot`` and translate the one ``SlotResult`` back."""
+        seen = []
+        findings = lane.findings(NAMES[:1])
+
+        async def run_slot(slot, *, start_time):
+            seen.append(type(slot))
+            return review_lane.SlotResult(
+                slot.model_spec, True, payload=findings, error=None, source="file",
+                details={"success": True, "output": json.dumps(findings),
+                         "error": None, "source": "file"},
+            )
+
+        with patch.object(review_lane, "run_slot", run_slot):
+            outcome = lane.slot(None)
+
+        assert seen == [lane.slot_class()]
+        assert outcome.success and outcome.error is None
+        assert lane.answer(outcome) == findings
+
+    def test_a_completed_slot_returns_its_answer(self, lane):
+        findings = lane.findings(NAMES[:2])
+        outcome = lane.slot(lambda **_kw: _answered(findings))
+
+        assert outcome.success and outcome.error is None
+        assert lane.answer(outcome) == findings
+
+    def test_a_refused_slot_dispatches_nothing(self, lane):
+        """The guard's refusal ends the slot undispatched with the gate's own
+        line. review-code's slot takes its terminal row itself; the base's is
+        the fan-out's, from the record. Either way the map reads the same."""
+        reason = "[SANDBOX_UNAVAILABLE] the runner's sandbox cannot start"
+        calls = []
+        tracker = lane.tracker()
+        verdict = rob.SandboxVerdict(rob.SANDBOX_REFUSE, reason)
+        with patch.object(rob, "sandbox_refusal", lambda *_a: verdict):
+            outcome = lane.slot(lambda **kw: calls.append(kw), tracker=tracker)
+
+        assert calls == []
+        assert (outcome.success, outcome.error) == (False, reason)
+        row = lane.status()["progress"]["models"][MODELS[0]]
+        assert (row["state"] == "failed") is lane.slot_takes_terminal_rows
+        # The fan-out's terminal transition from what the slot returned
+        # (`run_models_concurrent`); idempotent on a row already terminal.
+        tracker.record_result(MODELS[0], outcome)
+        row = lane.status()["progress"]["models"][MODELS[0]]
+        assert (row["state"], row["source"]) == ("failed", "not-dispatched")
+
+    def test_a_failed_slot_names_its_spend_on_review_code_only(self, lane):
+        """What a failed slot spent: review-code puts it on the error string
+        every failure artifact carries (its triple has no other place); the
+        base records it on the record's own ``usage`` key."""
+        outcome = lane.slot(lambda **_kw: _lost(usage=dict(SPENT)))
+
+        assert not outcome.success
+        assert outcome.error.startswith("provider exited 1")
+        assert ("(spent $0.50 est., 1,234 output tokens)" in outcome.error) is (
+            lane.slot_spend_on_error)
+        if not lane.slot_spend_on_error:
+            assert outcome.details["usage"]["output_tokens"] == 1234
+
+    def test_an_exception_past_the_deadline_is_the_slots_own_error(self, lane):
+        """An exception between the slot's deadline and its ending: the base's
+        slot records it itself (with the template as the prompt); review-code's
+        raises to the fan-out's wrapper, which records it the same way
+        (``raised_slot_record``). Both name the exception's own text."""
+        boom = RuntimeError("ladder broke")
+
+        def slot_ladder(*_args, **_kwargs):
+            raise boom
+
+        with patch.object(lane.slot_module(), "slot_ladder", slot_ladder):
+            if lane.slot_catches_its_own_errors:
+                outcome = lane.slot(lambda **_kw: _answered([]))
+                assert outcome.details["prompt"] == SLOT_TEMPLATE
+            else:
+                with pytest.raises(RuntimeError, match="ladder broke"):
+                    lane.slot(lambda **_kw: _answered([]))
+                outcome = review_lane.SlotResult.from_record(
+                    MODELS[0], rob.raised_slot_record(MODELS[0], boom, anchor=str(lane.plan)))
+
+        assert not outcome.success
+        assert outcome.error == "Exception: RuntimeError: ladder broke"
+
+    def test_a_lost_answer_gets_one_salvage_request(self, lane):
+        """A failed attempt whose leftover stdout holds an answer: review-code's
+        slot writes the salvage request itself, the base's when the record is
+        saved. Either way one request carries that text."""
+        outcome = lane.slot(lambda **_kw: _lost(stdout_excerpt=LEFT_BEHIND))
+        stem = rob.sanitize_model_name(MODELS[0])
+        request = lane.phase_dir / f"salvage_{stem}.json"
+
+        assert request.exists() is lane.slot_writes_salvage_requests
+        lane.save_slot(outcome)
+        assert json.loads(request.read_text(encoding="utf-8"))["raw_output"] == LEFT_BEHIND
 
 
 class TestDetachLauncher:

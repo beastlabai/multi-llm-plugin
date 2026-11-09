@@ -416,6 +416,8 @@ def code_round_steps() -> "_review_lane.RoundSteps":
         announce_remaining_failures=announce_remaining_failures,
         exit_when_every_reviewer_failed=exit_when_every_reviewer_failed,
         record_validation_counts=record_validation_counts,
+        record_output_files=record_output_files,
+        record_review_artifacts=record_review_artifacts,
     )
 
 
@@ -3425,276 +3427,387 @@ async def run_single_review(
             call, or a fixture) leaves every transition unmade and costs nothing
             but the map, which is what keeps this function callable on its own.
 
+    The slot is :func:`utils.review_lane.run_slot`, the core review-plan's
+    slot runs too (the guard, the ladder loop and the checks), over this
+    lane's :class:`CodeSlot`; this function is its entry point.
+
     Returns:
         Tuple of (success, issues_list, error)
     """
     import time
     start_time = time.time()
-
-    # Detect project root so CLI providers (e.g. Claude Code) run in the
-    # correct working directory and can access project files.
-    project_root = get_project_root(str(plan_path))
-
-    # Parse model spec to get provider info for display. Anchored on the plan
-    # (§9.3.a): the value already exists here, it just used to be dropped.
-    provider_name, model_name = parse_model_spec(model_spec, anchor=str(plan_path))
-    display_name = f"{provider_name}:{model_name}"
-
-    # D6 step 3, the gate `run_single_model` applies to the other review lanes,
-    # asked here for the same reason and off the same once-per-run cache: this
-    # slot is a `generate` dispatch, and a runner whose own sandbox cannot start
-    # reads neither the plan nor the diff — it answers with a sentence about not
-    # being able to open them, which scores as a completed review. Refused
-    # before the phase dir is claimed and before an earlier attempt's salvage
-    # pair is retired, because a refused slot replaces nothing. The one thing
-    # a refusal still retires is a `<stem>.json` from ANOTHER scope (D2.2): it
-    # is not a review of this change whether or not this attempt runs, and
-    # left on disk the next `--reaggregate` would load it, move the model out
-    # of `models_failed` and report another change's findings as this one's.
-    #
-    # On a fallback rung the guard prints its one line and takes, now, the
-    # before-snapshots its checks need, so a write the model makes can be
-    # named (`utils/slot_guard.py`).
-    guard = SlotGuard(
-        provider_name=provider_name, display_name=display_name,
-        model_spec=model_spec, project_root=project_root, plan_path=plan_path,
-        tracker=tracker,
+    slot = CodeSlot(
+        model_spec, plan_path, out_dir, timeout=timeout,
+        changed_files=changed_files, base_ref=base_ref,
+        served_models=served_models, usage=usage, tracker=tracker,
+        scope_source=scope_source, task_ids=task_ids, scope_file=scope_file,
+        diff_dir=diff_dir, scope_id=scope_id, diff_coverage=diff_coverage,
+        run_model_specs=run_model_specs, pinned=pinned, scope_policy=scope_policy,
     )
-    gate = await guard.begin()
-    if isinstance(gate, Refused):
+    return (await _review_lane.run_slot(slot, start_time=start_time)).as_review()
+
+
+def code_slot_steps() -> "_review_lane.SlotSteps":
+    """review-code's :class:`~utils.review_lane.SlotSteps`, from this module's
+    names as they are bound when it is called, so a test that patches one here
+    reaches :func:`~utils.review_lane.run_slot`."""
+    return _review_lane.SlotSteps(
+        slot_guard=SlotGuard,
+        refused=Refused,
+        slot_ladder=slot_ladder,
+        phase_thread=phase_thread,
+        misnamed_result_baseline=misnamed_result_baseline,
+        requested_result_baseline=requested_result_baseline,
+        invoke_with_file_output=invoke_with_file_output,
+        dispatch_with_ladder=dispatch_with_ladder,
+        sandbox_fallback_kwargs=sandbox_fallback_kwargs,
+    )
+
+
+class CodeSlot:
+    """review-code's model slot, a :class:`~utils.review_lane.ReviewSlot`
+    (see :func:`run_single_review`).
+
+    What it holds is what this lane's slot does its own way: the scope ledger
+    and an earlier attempt's salvage pair, the diff set and how the lane
+    reaches it (``[REVIEW_UNSUPPORTED]`` when it cannot), the commit
+    templates, the argv cap of an inline prompt, the slot's provenance in the
+    run's collectors, a failure's spend on its error, the slot's own terminal
+    tracker transitions, the salvage request written here, and the issue list
+    checked here (docs/development/review-results.md, "The shared review
+    lane").
+    """
+
+    def __init__(
+        self,
+        model_spec: str,
+        plan_path: Path,
+        out_dir: Path,
+        *,
+        timeout: Optional[int],
+        changed_files: Optional[List[str]],
+        base_ref: str,
+        served_models: Optional[Dict[str, Dict[str, Any]]],
+        usage: Optional[Dict[str, Dict[str, Any]]],
+        tracker: Optional[FanoutProgress],
+        scope_source: Optional[str],
+        task_ids: Optional[Dict[str, str]],
+        scope_file: Optional[str],
+        diff_dir: Optional[str],
+        scope_id: Optional[str],
+        diff_coverage: Optional[str],
+        run_model_specs: Optional[List[str]],
+        pinned: Optional[PinnedRange],
+        scope_policy: Optional[str],
+    ) -> None:
+        self.model_spec = model_spec
+        self.plan_path = plan_path
+        self.anchor = str(plan_path)
+        self.guard_plan_path = plan_path
+        self.out_dir = out_dir
+        self.timeout = timeout
+        self.changed_files = changed_files
+        self.base_ref = base_ref
+        self.served_models = served_models
+        self.usage = usage
+        self.tracker = tracker
+        self.scope_source = scope_source
+        self.task_ids = task_ids
+        self.scope_file = scope_file
+        self.diff_dir = diff_dir
+        self.scope_id = scope_id
+        self.diff_coverage = diff_coverage
+        self.run_model_specs = run_model_specs
+        self.pinned = pinned
+        self.scope_policy = scope_policy
+
+        # Detect project root so CLI providers (e.g. Claude Code) run in the
+        # correct working directory and can access project files.
+        self.project_root = get_project_root(str(plan_path))
+        # Parse model spec to get provider info for display. Anchored on the plan
+        # (§9.3.a): the value already exists here, it just used to be dropped.
+        self.provider_name, model_name = parse_model_spec(model_spec, anchor=str(plan_path))
+        self.display_name = f"{self.provider_name}:{model_name}"
+
+        # Set by `prepare`, once the guard has admitted the slot.
+        self.phase_dir: Optional[Path] = None
+        self.log_file: Optional[Path] = None
+        self.sanitized_model = ""
+        self.commit_record: Optional[Mapping[str, Any]] = None
+        self.diff_access: Any = None
+
+    def slot_steps(self) -> "_review_lane.SlotSteps":
+        return code_slot_steps()
+
+    def _failed(self, error: str, *, source: str) -> "_review_lane.SlotResult":
+        """A failed ending, this lane's terminal tracker transition taken here."""
+        if self.tracker is not None:
+            self.tracker.failed(self.model_spec, error=error, source=source)
+        return _review_lane.SlotResult(self.model_spec, False, payload=None, error=error)
+
+    def refused(self, reason: str) -> "_review_lane.SlotResult":
+        # The gate `run_single_model` applies to the other review lanes, asked
+        # here for the same reason and off the same once-per-run cache: this
+        # slot is a `generate` dispatch, and a runner whose own sandbox cannot
+        # start reads neither the plan nor the diff — it answers with a
+        # sentence about not being able to open them, which scores as a
+        # completed review. Refused before the phase dir is claimed and before
+        # an earlier attempt's salvage pair is retired, because a refused slot
+        # replaces nothing. The one thing a refusal still retires is a
+        # `<stem>.json` from ANOTHER scope (D2.2): it is not a review of this
+        # change whether or not this attempt runs, and left on disk the next
+        # `--reaggregate` would load it, move the model out of `models_failed`
+        # and report another change's findings as this one's.
+        #
         # Retired, never re-recorded: no attempt started, so the ledger keeps
         # the old id — the one the `.stale-<id>` name carries — and the next
         # attempt that really starts records this scope over it.
-        if scope_id is not None:
+        if self.scope_id is not None:
             retire_result_from_another_scope(
-                get_phase_dir(plan_path, 'code-review'),
-                sanitize_model_name(model_spec),
-                scope_id,
+                get_phase_dir(self.plan_path, 'code-review'),
+                sanitize_model_name(self.model_spec),
+                self.scope_id,
             )
         # Terminal, and `not-dispatched` is the whole of what happened: no
         # attempt was started, so there is no channel a result could have come
         # from. Without this the slot would sit `queued` until the fan-out's
         # sweep retired it as `cancelled`, which names the wrong cause for a
         # model the report is about to list under its sandbox error.
-        if tracker is not None:
-            tracker.failed(
-                model_spec, error=gate.reason, source="not-dispatched"
+        return self._failed(reason, source="not-dispatched")
+
+    async def prepare(self, sandbox: Any) -> Any:
+        model_spec, plan_path, display_name = self.model_spec, self.plan_path, self.display_name
+        project_root, base_ref, changed_files = self.project_root, self.base_ref, self.changed_files
+        pinned = self.pinned
+
+        # Generate log file path for debugging
+        sanitized_model = sanitize_model_name(model_spec)
+        phase_dir = get_phase_dir(plan_path, 'code-review')
+        phase_dir.mkdir(parents=True, exist_ok=True)
+        log_file = phase_dir / f"log_{sanitized_model}.txt"
+        self.sanitized_model, self.phase_dir, self.log_file = sanitized_model, phase_dir, log_file
+
+        # This model's attempt starts *here*, so any salvage pair an earlier attempt
+        # left in the phase dir stops being outstanding work *here* — before the
+        # provider is invoked, and whatever this attempt goes on to do.
+        #
+        # `get_phase_dir` is stable per plan (`utils/output_handler.py`), so every
+        # run for this plan writes into the same directory, and `--force` clears
+        # only the state file's phase-completion marker (see main()) — it deletes
+        # nothing from disk. Without this call the exact P2 rerun still reproduces
+        # P2: kilocode dies on `User not found.`, `has_salvageable_json` correctly
+        # writes nothing, and the *previous* run's `salvage_task_<stem>.json` is
+        # still dispatched by `dispatch_salvage_tasks`'s glob and still advertised
+        # by main()'s end-of-run `salvage_*.json` scan. A salvage task's
+        # `output_name` IS this model's result file, so what that repairs is a run
+        # that no longer exists, over a slot this run recorded as failed — the
+        # phantom participant the gate exists to prevent, arriving by the one route
+        # the gate cannot see. Confirmed on disk: a real `code-review` phase dir
+        # holds request/task pairs from three separate runs that are long over.
+        #
+        # **Retire-by-rename rather than run-stamping**, deliberately, and the
+        # resumed run is what decides it. Retiring belongs to *the attempt that
+        # would replace the artifact*, and this is only ever reached by a
+        # model that is actually re-running: `run_all_reviews` answers a resume
+        # (`skip_existing`, i.e. no `--rerun-all`) from the existing
+        # `<model>.json` and returns before calling here, so a skipped model keeps
+        # its pair and a re-run model loses one that can only describe an answer it
+        # is about to replace. That is the whole of the shared-phase-dir case a run
+        # stamp was wanted for, without a run id to thread through two writers, two
+        # globs and two reporting blocks — and without the question a stamp cannot
+        # answer, which is what to do with the unstamped pairs already on disk.
+        # What this shape does *not* cover is a model dropped from the selection
+        # between runs: it begins no attempt, so nothing retires its pair. That is
+        # the same residual as its stale `<model>.json`, which the fan-out also
+        # leaves for reaggregation to pick up (see the `--rerun-all` note at the
+        # salvage dispatch in main()), and it belongs to whatever eventually scopes
+        # the phase dir by run rather than to the gate.
+        #
+        # Quiet: the fan-out already prints a line per model per phase, and one
+        # `[SALVAGE_RETIRED]` per re-run model would bury them. The audit trail is
+        # the renamed file, which is not deleted.
+        retire_salvage_artifacts(
+            str(phase_dir), sanitized_model, reason=RETIRE_SUPERSEDED, quiet=True
+        )
+
+        # The same rule for this model's result file, keyed on the scope it
+        # reviewed (D2.2): a `<stem>.json` written against another change is
+        # retired to `.stale-<id|unknown>` before this attempt can fail and leave
+        # it behind, and then the ledger records what THIS attempt is shown. The
+        # skip branch in `run_all_reviews` only sends a result here when its
+        # ledger id differs, but `--rerun-all` reaches here with every result.
+        if self.scope_id is not None:
+            retire_result_from_another_scope(phase_dir, sanitized_model, self.scope_id)
+            record_scope_attempt(phase_dir, sanitized_model, self.scope_id)
+
+        # How this lane reaches the change (D2.3): by path when its adapter can
+        # read the phase dir, inline when it cannot and the whole change fits the
+        # argv cap with nothing omitted, and otherwise not at all. Decided before
+        # `tracker.running`, because an unsupported slot is not dispatched and
+        # costs nothing: it is recorded failed with the reason, so the report names
+        # it like any other lost reviewer, rather than handed a prompt it cannot
+        # act on — which is how two cursor-agent lanes once "reviewed" a change
+        # they never saw.
+        #
+        # A commit brief's run (its state records `commit_range`) with a context
+        # plan hands the frozen snapshot over too (§2.4 "Everyone reads the
+        # snapshot"): an inline lane cannot open it, so its text is one more block
+        # of the bounded payload, and a lane it does not fit is not dispatched.
+        commit_record = commit_report.run_commit_range(plan_path)
+        self.commit_record = commit_record
+        context_plan = commit_report.context_plan_path(
+            commit_record, repo_root=project_root or os.getcwd()
+        )
+        diff_access = None
+        if self.scope_file is not None and self.diff_dir is not None:
+            diff_access = render_diff_access(
+                model_spec,
+                self.scope_file,
+                self.diff_dir,
+                str(phase_dir.absolute()),
+                project_root or os.getcwd(),
+                base_ref=base_ref,
+                coverage=self.diff_coverage or DIFF_COVERAGE_PARTIAL,
+                plan_path=str(plan_path.absolute()),
+                anchor=str(plan_path),
+                context_plan_path=context_plan,
+                **(
+                    {"head_ref": pinned.head, "drifted": list(pinned.drifted)}
+                    if pinned is not None else {}
+                ),
             )
-        return False, None, gate.reason
-    sandbox = gate.sandbox
+            if diff_access.mode == "unsupported":
+                detail = (
+                    f"read scope {diff_access.read_scope}, inline "
+                    f"{diff_access.inline_bytes} B — {diff_access.reason}"
+                )
+                print(f"[REVIEW_UNSUPPORTED] {display_name}: {detail}")
+                return self._failed(f"review unsupported: {detail}", source="not-dispatched")
+        self.diff_access = diff_access
 
-    # Generate log file path for debugging
-    sanitized_model = sanitize_model_name(model_spec)
-    phase_dir = get_phase_dir(plan_path, 'code-review')
-    phase_dir.mkdir(parents=True, exist_ok=True)
-    log_file = phase_dir / f"log_{sanitized_model}.txt"
+        if diff_access is None:
+            plan_text, scope_file_text, diff_dir_text = (
+                str(plan_path.absolute()), NO_SCOPE_MANIFEST_TEXT, NO_DIFF_DIR_TEXT,
+            )
+            diff_access_text, full_scope_ref = NO_DIFF_ACCESS_TEXT, None
+        elif diff_access.mode == "inline":
+            # The lane cannot open the phase dir, so the prompt names no path there:
+            # every pointer is to a labelled block inside `{diff_access}`.
+            plan_text, scope_file_text, diff_dir_text = (
+                INLINE_PLAN_TEXT, INLINE_SCOPE_FILE_TEXT, INLINE_DIFF_DIR_TEXT,
+            )
+            diff_access_text, full_scope_ref = diff_access.text, INLINE_FULL_SCOPE_REF
+        else:
+            plan_text, scope_file_text, diff_dir_text = (
+                str(plan_path.absolute()), str(self.scope_file), str(self.diff_dir),
+            )
+            diff_access_text, full_scope_ref = diff_access.text, str(self.scope_file)
 
-    # This model's attempt starts *here*, so any salvage pair an earlier attempt
-    # left in the phase dir stops being outstanding work *here* — before the
-    # provider is invoked, and whatever this attempt goes on to do.
-    #
-    # `get_phase_dir` is stable per plan (`utils/output_handler.py`), so every
-    # run for this plan writes into the same directory, and `--force` clears
-    # only the state file's phase-completion marker (see main()) — it deletes
-    # nothing from disk. Without this call the exact P2 rerun still reproduces
-    # P2: kilocode dies on `User not found.`, `has_salvageable_json` correctly
-    # writes nothing, and the *previous* run's `salvage_task_<stem>.json` is
-    # still dispatched by `dispatch_salvage_tasks`'s glob and still advertised
-    # by main()'s end-of-run `salvage_*.json` scan. A salvage task's
-    # `output_name` IS this model's result file, so what that repairs is a run
-    # that no longer exists, over a slot this run recorded as failed — the
-    # phantom participant the gate exists to prevent, arriving by the one route
-    # the gate cannot see. Confirmed on disk: a real `code-review` phase dir
-    # holds request/task pairs from three separate runs that are long over.
-    #
-    # **Retire-by-rename rather than run-stamping**, deliberately, and the
-    # resumed run is what decides it. Retiring belongs to *the attempt that
-    # would replace the artifact*, and this function is only ever reached by a
-    # model that is actually re-running: `run_all_reviews` answers a resume
-    # (`skip_existing`, i.e. no `--rerun-all`) from the existing
-    # `<model>.json` and returns before calling here, so a skipped model keeps
-    # its pair and a re-run model loses one that can only describe an answer it
-    # is about to replace. That is the whole of the shared-phase-dir case a run
-    # stamp was wanted for, without a run id to thread through two writers, two
-    # globs and two reporting blocks — and without the question a stamp cannot
-    # answer, which is what to do with the unstamped pairs already on disk.
-    # What this shape does *not* cover is a model dropped from the selection
-    # between runs: it begins no attempt, so nothing retires its pair. That is
-    # the same residual as its stale `<model>.json`, which the fan-out also
-    # leaves for reaggregation to pick up (see the `--rerun-all` note at the
-    # salvage dispatch in main()), and it belongs to whatever eventually scopes
-    # the phase dir by run rather than to the gate.
-    #
-    # Quiet: the fan-out already prints a line per model per phase, and one
-    # `[SALVAGE_RETIRED]` per re-run model would bury them. The audit trail is
-    # the renamed file, which is not deleted.
-    retire_salvage_artifacts(
-        str(phase_dir), sanitized_model, reason=RETIRE_SUPERSEDED, quiet=True
-    )
+        # The resolved scope, in the review order main gave it. The placeholder key
+        # keeps its old name (`tracked_files_list`) because the template binds it;
+        # what it carries is now the scope whatever its source. When the list is
+        # cut, its notice names the manifest as the full list, so a dropped path
+        # never reads as out of scope.
+        tracked_files_list = format_tracked_files_for_prompt(
+            changed_files or [], task_ids=self.task_ids, full_scope_ref=full_scope_ref
+        )
 
-    # The same rule for this model's result file, keyed on the scope it
-    # reviewed (D2.2): a `<stem>.json` written against another change is
-    # retired to `.stale-<id|unknown>` before this attempt can fail and leave
-    # it behind, and then the ledger records what THIS attempt is shown. The
-    # skip branch in `run_all_reviews` only sends a result here when its
-    # ledger id differs, but `--rerun-all` reaches here with every result.
-    if scope_id is not None:
-        retire_result_from_another_scope(phase_dir, sanitized_model, scope_id)
-        record_scope_attempt(phase_dir, sanitized_model, scope_id)
+        # Load prompt template. A commit brief's run (its state records
+        # `commit_range`, read above) gets `commit_review.txt`; every other run, a
+        # direct `--head-ref` one included, keeps `code_review.txt` (§2.6
+        # "Loading").
+        prompt_template = (
+            load_code_review_prompt() if commit_record is None
+            else load_prompt(commit_report.review_prompt_name(commit_record))
+        )
 
-    # How this lane reaches the change (D2.3): by path when its adapter can
-    # read the phase dir, inline when it cannot and the whole change fits the
-    # argv cap with nothing omitted, and otherwise not at all. Decided before
-    # `tracker.running`, because an unsupported slot is not dispatched and
-    # costs nothing: it is recorded failed with the reason, so the report names
-    # it like any other lost reviewer, rather than handed a prompt it cannot
-    # act on — which is how two cursor-agent lanes once "reviewed" a change
-    # they never saw.
-    #
-    # A commit brief's run (its state records `commit_range`) with a context
-    # plan hands the frozen snapshot over too (§2.4 "Everyone reads the
-    # snapshot"): an inline lane cannot open it, so its text is one more block
-    # of the bounded payload, and a lane it does not fit is not dispatched.
-    commit_record = commit_report.run_commit_range(plan_path)
-    context_plan = commit_report.context_plan_path(
-        commit_record, repo_root=project_root or os.getcwd()
-    )
-    diff_access = None
-    if scope_file is not None and diff_dir is not None:
-        diff_access = render_diff_access(
-            model_spec,
-            scope_file,
-            diff_dir,
-            str(phase_dir.absolute()),
-            project_root or os.getcwd(),
-            base_ref=base_ref,
-            coverage=diff_coverage or DIFF_COVERAGE_PARTIAL,
-            plan_path=str(plan_path.absolute()),
-            anchor=str(plan_path),
-            context_plan_path=context_plan,
-            **(
-                {"head_ref": pinned.head, "drifted": list(pinned.drifted)}
-                if pinned is not None else {}
+        # Derive prefix from plan path (same as in main())
+        prefix = derive_prefix(plan_path)
+
+        # Build prompt context for invoke_with_file_output. The implementation
+        # record is read here, per slot, rather than threaded down from main(): it
+        # is three small files, and `run_all_reviews` hands this slot every
+        # other input it needs from the plan path alone.
+        #
+        # Every placeholder the template binds has its key here on every path
+        # (`working_limits`, `output_location` and `output_json_path` are added by
+        # `invoke_with_file_output`): a placeholder with no key fails the slot with
+        # `PROMPT_FORMAT_ERROR`, and it would fail every slot at once.
+        prompt_context = {
+            "plan_path": plan_text,
+            "tracked_files_list": tracked_files_list,
+            # Where the list came from (tracked files, the `git diff` fallback,
+            # `--files`, or nothing).
+            "scope_source": describe_scope_source(self.scope_source, base_ref, pinned),
+            "base_ref": base_ref,
+            "prefix": prefix,
+            "implementation_record": build_implementation_record(plan_path),
+            "scope_file": scope_file_text,
+            "diff_dir": diff_dir_text,
+            "diff_access": diff_access_text,
+            # The round's scope block, rendered per slot from the resolved policy
+            # (plans/scope-policy-and-report-tags.md §3.1): a commit review judges
+            # scope against its brief, a code review against the accepted plan.
+            "scope_policy_guidance": _sp.reviewer_guidance(
+                self.scope_policy,
+                _scope_round.guidance_phase("code-review", commit_review=commit_record is not None),
             ),
+        }
+        if commit_record is not None:
+            # The commit template's own slots (§2.6). The block's pointer names
+            # the brief by the path this lane can open, or the `git log` command
+            # when it cannot open the brief at all.
+            inline_lane = diff_access is not None and diff_access.mode == "inline"
+            prompt_context.update(commit_report.commit_prompt_context(
+                commit_record,
+                brief_text=plan_text,
+                brief_pointer=None if inline_lane else str(plan_path.absolute()),
+                repo_root=project_root,
+                scope_total=len(changed_files or []),
+                inline=inline_lane,
+            ))
+
+        # Determine timeout: use provided override, or get provider-specific default
+        effective_timeout = (
+            self.timeout if self.timeout is not None
+            else get_provider_timeout(self.provider_name, anchor=str(plan_path))
         )
-        if diff_access.mode == "unsupported":
-            detail = (
-                f"read scope {diff_access.read_scope}, inline "
-                f"{diff_access.inline_bytes} B — {diff_access.reason}"
-            )
-            print(f"[REVIEW_UNSUPPORTED] {display_name}: {detail}")
-            unsupported = f"review unsupported: {detail}"
-            if tracker is not None:
-                tracker.failed(model_spec, error=unsupported, source="not-dispatched")
-            return False, None, unsupported
-
-    if diff_access is None:
-        plan_text, scope_file_text, diff_dir_text = (
-            str(plan_path.absolute()), NO_SCOPE_MANIFEST_TEXT, NO_DIFF_DIR_TEXT,
+        return _review_lane.SlotDispatch(
+            prompt_template=prompt_template,
+            prompt_context=prompt_context,
+            output_dir=self.out_dir,
+            invoke_phase="code_review",
+            log_file=str(log_file),
+            timeout=effective_timeout,
+            start_line=lambda attempt, attempt_timeout: (
+                f"[{display_name}] Starting code review with file-based output "
+                f"(attempt {attempt}, timeout: {attempt_timeout}s "
+                f"of a {effective_timeout}s slot)..."
+            ),
+            jail_summary_key=phase_dir,
         )
-        diff_access_text, full_scope_ref = NO_DIFF_ACCESS_TEXT, None
-    elif diff_access.mode == "inline":
-        # The lane cannot open the phase dir, so the prompt names no path there:
-        # every pointer is to a labelled block inside `{diff_access}`.
-        plan_text, scope_file_text, diff_dir_text = (
-            INLINE_PLAN_TEXT, INLINE_SCOPE_FILE_TEXT, INLINE_DIFF_DIR_TEXT,
-        )
-        diff_access_text, full_scope_ref = diff_access.text, INLINE_FULL_SCOPE_REF
-    else:
-        plan_text, scope_file_text, diff_dir_text = (
-            str(plan_path.absolute()), str(scope_file), str(diff_dir),
-        )
-        diff_access_text, full_scope_ref = diff_access.text, str(scope_file)
 
-    # The resolved scope, in the review order main gave it. The placeholder key
-    # keeps its old name (`tracked_files_list`) because the template binds it;
-    # what it carries is now the scope whatever its source. When the list is
-    # cut, its notice names the manifest as the full list, so a dropped path
-    # never reads as out of scope.
-    tracked_files_list = format_tracked_files_for_prompt(
-        changed_files or [], task_ids=task_ids, full_scope_ref=full_scope_ref
-    )
-
-    # Load prompt template. A commit brief's run (its state records
-    # `commit_range`, read above) gets `commit_review.txt`; every other run, a
-    # direct `--head-ref` one included, keeps `code_review.txt` (§2.6
-    # "Loading").
-    prompt_template = (
-        load_code_review_prompt() if commit_record is None
-        else load_prompt(commit_report.review_prompt_name(commit_record))
-    )
-
-    # Derive prefix from plan path (same as in main())
-    prefix = derive_prefix(plan_path)
-
-    # Build prompt context for invoke_with_file_output. The implementation
-    # record is read here, per slot, rather than threaded down from main(): it
-    # is three small files, and `run_all_reviews` hands this function every
-    # other input it needs from the plan path alone.
-    #
-    # Every placeholder the template binds has its key here on every path
-    # (`working_limits`, `output_location` and `output_json_path` are added by
-    # `invoke_with_file_output`): a placeholder with no key fails the slot with
-    # `PROMPT_FORMAT_ERROR`, and it would fail every slot at once.
-    prompt_context = {
-        "plan_path": plan_text,
-        "tracked_files_list": tracked_files_list,
-        # Where the list came from (tracked files, the `git diff` fallback,
-        # `--files`, or nothing).
-        "scope_source": describe_scope_source(scope_source, base_ref, pinned),
-        "base_ref": base_ref,
-        "prefix": prefix,
-        "implementation_record": build_implementation_record(plan_path),
-        "scope_file": scope_file_text,
-        "diff_dir": diff_dir_text,
-        "diff_access": diff_access_text,
-        # The round's scope block, rendered per slot from the resolved policy
-        # (plans/scope-policy-and-report-tags.md §3.1): a commit review judges
-        # scope against its brief, a code review against the accepted plan.
-        "scope_policy_guidance": _sp.reviewer_guidance(
-            scope_policy,
-            _scope_round.guidance_phase("code-review", commit_review=commit_record is not None),
-        ),
-    }
-    if commit_record is not None:
-        # The commit template's own slots (§2.6). The block's pointer names
-        # the brief by the path this lane can open, or the `git log` command
-        # when it cannot open the brief at all.
-        inline_lane = diff_access is not None and diff_access.mode == "inline"
-        prompt_context.update(commit_report.commit_prompt_context(
-            commit_record,
-            brief_text=plan_text,
-            brief_pointer=None if inline_lane else str(plan_path.absolute()),
-            repo_root=project_root,
-            scope_total=len(changed_files or []),
-            inline=inline_lane,
-        ))
-
-    # Determine timeout: use provided override, or get provider-specific default
-    effective_timeout = (
-        timeout if timeout is not None
-        else get_provider_timeout(provider_name, anchor=str(plan_path))
-    )
-    # §7.5 rule 1: ONE deadline for this slot, taken here, before the prompt
-    # measurement and the result baselines below, which it pays for.
-    ladder = slot_ladder(provider_name, effective_timeout, anchor=str(plan_path))
-
-    # The inline cap above bounds the `{diff_access}` block alone, but the
-    # prompt that goes on argv also carries the implementation record, the
-    # file list, the template and the working limits. Measured whole, as it
-    # will be dispatched, so a block that fit is still refused — undispatched,
-    # `[REVIEW_UNSUPPORTED]` like any other inline miss — when the prompt it
-    # sits in would fail the spawn with E2BIG and be recorded as a provider
-    # error. `None` is a lane whose prompt does not travel on argv.
-    if diff_access is not None and diff_access.mode == "inline":
+    def before_dispatch(
+        self, dispatch: "_review_lane.SlotDispatch",
+    ) -> Optional["_review_lane.SlotResult"]:
+        # The inline cap bounds the `{diff_access}` block alone, but the
+        # prompt that goes on argv also carries the implementation record, the
+        # file list, the template and the working limits. Measured whole, as it
+        # will be dispatched, so a block that fit is still refused — undispatched,
+        # `[REVIEW_UNSUPPORTED]` like any other inline miss — when the prompt it
+        # sits in would fail the spawn with E2BIG and be recorded as a provider
+        # error. `None` is a lane whose prompt does not travel on argv.
+        diff_access = self.diff_access
+        if diff_access is None or diff_access.mode != "inline":
+            return None
         prompt_bytes = argv_prompt_bytes(
-            prompt_template,
-            model_spec,
-            prompt_context,
-            out_dir,
+            dispatch.prompt_template,
+            self.model_spec,
+            dispatch.prompt_context,
+            dispatch.output_dir,
             "code_review",
-            timeout=int(effective_timeout),
-            anchor=str(plan_path),
+            timeout=int(dispatch.timeout),
+            anchor=str(self.plan_path),
         )
         if prompt_bytes is not None and prompt_bytes > INLINE_PROMPT_CAP_BYTES:
             detail = (
@@ -3702,242 +3815,274 @@ async def run_single_review(
                 f"{diff_access.inline_bytes} B — rendered prompt {prompt_bytes} B "
                 f"exceeds the {INLINE_PROMPT_CAP_BYTES} B argv cap"
             )
-            print(f"[REVIEW_UNSUPPORTED] {display_name}: {detail}")
-            unsupported = f"review unsupported: {detail}"
+            print(f"[REVIEW_UNSUPPORTED] {self.display_name}: {detail}")
+            return self._failed(f"review unsupported: {detail}", source="not-dispatched")
+        return None
+
+    def ladder_refused(self, reason: str, duration: float) -> "_review_lane.SlotResult":
+        return self._failed(reason, source="not-dispatched")
+
+    def after_ladder(self, run: Any) -> None:
+        # §3.6: record which model served this slot before any of the endings
+        # return, so a fallback that fired is attributed even on the paths
+        # that end in salvage. Only ever populated when a fallback is configured.
+        # The D6 override's provenance (2026-09-17) lands in the same collector,
+        # with or without a served model beside it.
+        details = run.details
+        if self.served_models is not None:
+            entry: Dict[str, Any] = {}
+            if details.get("served_model"):
+                entry["served_model"] = details["served_model"]
+                entry["fallback"] = bool(details.get("served_model_is_fallback"))
+            # A contained rung arrives as its rung id (`landlock`), so map through
+            # the same helper the review-plan collector uses: `bypassed` for the
+            # uncontained rung, `fallback-<rung>` for a contained one.
+            word = sandbox_record_word(details.get("sandbox"))
+            if word:
+                entry["sandbox"] = word
+            # A slot the plugin's jail failed keeps `failure_reason: jail-denied`
+            # and the path on the durable record (F1 item 6, 2026-09-30).
+            entry.update(jail_record_fields(details))
+            if entry:
+                self.served_models[self.model_spec] = entry
+        # Stage U: and what it spent, recorded here for the same reason and before
+        # the same endings — a slot that ends in salvage, or fails outright, spent
+        # what it spent, summed over every attempt. Absent when the adapter reported
+        # nothing; never `{}`, which would read as a free review.
+        if self.usage is not None:
+            spent = run.usage
+            if isinstance(spent, dict) and spent:
+                self.usage[self.model_spec] = spent
+
+    def outcome(
+        self, run: Any, violated: Optional[str], duration: float,
+    ) -> "_review_lane.SlotResult":
+        model_spec, plan_path, display_name = self.model_spec, self.plan_path, self.display_name
+        phase_dir, log_file, sanitized_model = self.phase_dir, self.log_file, self.sanitized_model
+        commit_record = self.commit_record
+        tracker = self.tracker
+        # The last returned attempt's; `{}` when the first dispatch raised.
+        result = run.result or {}
+        output_file = result.get("output_file", "")
+        source = "exception" if run.exception is not None else result.get("source", "unknown")
+
+        # The guard's checks failed the slot (`run_slot` ran them over every
+        # attempt, on the uncontained rung the porcelain check, on the plugin's
+        # jail the mode and home checks, whose `[JAIL_DENIED]` line and denial
+        # count the ladder loop printed per attempt). Failed whatever the
+        # invocation reported — nothing is restored, and nothing it returned is
+        # parsed as a review: `source` records which channel the rejected answer
+        # arrived on, `error` why nothing of it is parsed.
+        if violated is not None:
+            return self._failed(violated, source=source)
+
+        if run.exception is not None:
+            # A dispatch raised, which ended the slot; recorded as that exception
+            # after the checks above, with what every attempt before it spent, as
+            # the review base records it.
+            error_msg = slot_exception_error(run.exception)
+            spent = describe_usage(run.usage)
+            if spent:
+                error_msg = f"{error_msg} (spent {spent})"
+            print(f"[{display_name}] {error_msg}")
+            return self._failed(error_msg, source="exception")
+
+        print(f"[{display_name}] Log saved to: {log_file}")
+        # Only for a slot that answered: a failed invocation carries `output_file`
+        # and no `source`, and "Result will be saved to: <path> (source: unknown)"
+        # two lines above "Agent failed" promised a file nothing would write
+        # (measured 2026-09-17, on every one of a run's three dead slots).
+        if output_file and result["success"]:
+            print(f"[{display_name}] {describe_output_file(output_file, source)}")
+
+        if not result["success"]:
+            # The ladder's own reason when it ended the slot (the 429 chain, a
+            # context overflow's remedies, a budget that refused the retry), and
+            # the attempt's error otherwise, as on the review base.
+            error_msg = run.stop_error(model_spec)
+            # What the failed slot spent, on the one string every artifact of a
+            # failure carries: this ending's `error` is what `save_model_result`
+            # writes to `error_<model>.log` and what `.status.json` records under
+            # `models_failed`, and the triple `run_single_review` returns is
+            # destructured by every caller, so a fourth value has nowhere to go.
+            # Measured 2026-09-17: $25.05 and 137 348 output tokens went into a
+            # claude-code slot that ended on a usage cap, and the only place
+            # either number existed was the raw envelope in `log_<model>.txt`.
+            spent = describe_usage(run.usage)
+            if spent:
+                error_msg = f"{error_msg} (spent {spent})"
+            file_error = result.get("file_error", "")
+            if file_error:
+                print(f"[{display_name}] File error: {file_error}")
+            print(f"[{display_name}] Agent failed ({duration:.1f}s): {error_msg}")
+
+            # Write a salvage request only when the failure output still holds an
+            # answer to repair. "stderr is non-empty" is not that test: a hard
+            # provider failure — kilocode answering `Error: User not found.` on a
+            # dead account, in ANSI colour — passes it with no JSON anywhere in the
+            # stream, and the salvage prompt's own "if nothing recoverable is
+            # present, print an empty array" then writes `[]` over this model's
+            # result path, so a model that never ran is aggregated as one that
+            # reviewed the diff and found nothing. It also spends the operator's
+            # next move on a JSON repair when the fix is `kilocode` auth. With
+            # nothing to salvage the model simply stays failed, which is the D6
+            # row-3 partial-results path already taken by every other dead slot.
+            # `has_salvageable_json` subsumes the old condition: a `stdout_error`
+            # with empty stderr only ever produced a salvage request whose
+            # `raw_output` was the empty string.
+            #
+            # WHICH CHANNEL THE ANSWER IS ON, and this branch used to look at only
+            # one of them. `if not result["success"]` is not merely "the provider
+            # never spoke": it also covers the provider that wrote a truncated or
+            # fenced array and *then* exited non-zero — a kill at the deadline, a
+            # crash on teardown — and that array is on **stdout**, never on stderr.
+            # Gating on stderr alone therefore printed "Provider failed before
+            # producing any JSON — nothing to salvage" about a run that had produced
+            # JSON, and threw a recoverable review away without a word. The
+            # JSON-erroring providers press the same point from the other side:
+            # `opencode run --format json` puts its failure shape on stdout with
+            # stderr empty, and a relayed `{"error": {"code": 401, ...}}` body is
+            # indistinguishable from any HTTP-backed CLI — those reached the
+            # predicate as `""`, so even the verdicts it reached correctly were
+            # reached for the wrong reason. The pre-gate code was equally blind (its
+            # `raw_output` was the empty string), so this closes a latent hole rather
+            # than a regression; it is closed here because site A is the one place
+            # the gate above could make a real loss *visible*.
+            #
+            # **Precedence, not concatenation.** The first non-empty channel wins and
+            # the other is not appended, because `raw_output` is handed to a subagent
+            # as *the* damaged answer to repair (`build_salvage_prompt` in
+            # `utils/subagent_prompts.py`), and gluing a launch banner or an auth
+            # notice onto a truncated array gives that subagent two documents and no
+            # way to tell which one it was asked about — with the same empty-array
+            # fallback waiting when it guesses wrong. stdout is the one that can hold
+            # an answer, so stdout is the one that is asked first.
+            #
+            # `utils/llm_client.py`'s `_attach_stdout_excerpt` attaches
+            # `stdout_excerpt` on all three losing paths — non-zero exit, timeout
+            # kill, and the zero exit whose output would not parse — already
+            # `_redact`ed and `_bound_stream`ed in that order (§4.5/§4.4), and it
+            # **omits the key entirely** when nothing survived rather than setting
+            # `""`. So when no reducer applies, absent and empty mean the same thing,
+            # and stderr still answers for the provider that died before printing a
+            # byte.
+            #
+            # Whatever this picks is also what gets persisted: the gate below judges
+            # `raw_content` and the salvage request stores `raw_content`, so the text
+            # a subagent is asked to repair is the text the decision was made on.
+            # Gating on one string and writing another would let a request be written
+            # for evidence nobody ever saw.
+            #
+            # **And a stream adapter's answer is not its stream.** `salvage_source`
+            # (the rule `failure_output_from_result` applies to the other lane)
+            # reads `details["salvage_text"]` first — the adapter's own reduction of
+            # its full stdout to the assistant's answer text — and, when that key is
+            # present, reads nothing else, even when it is `""`. On pi and omp the
+            # stdout excerpt is JSONL whose `content` arrays pass the gate as
+            # findings: a reviewer killed while a tool ran was sent to salvage over
+            # its own `thinking`/`toolCall` parts (plan:
+            # review-run-scope-salvage-and-failure-visibility §4). Only when no
+            # reducer applies does the stdout-then-stderr order above still hold.
+            details = result.get("details", {}) or {}
+            raw_content = salvage_source(details)
+            timed_out = salvage_failure_kind(result) is not None
+
+            if has_salvageable_json(raw_content):
+                salvage_request = {
+                    "model": model_spec,
+                    "phase": "code_review",
+                    "raw_output": raw_content,
+                    "expected_type": "array",
+                    "expected_schema": {
+                        "fields": salvage_issue_fields(commit_record),
+                        "optional_fields": list(_sp.SCOPE_FIELDS),
+                        "importance_values": list(_importance.MODEL_VALUES),
+                        "type_values": ["bug", "missing", "improvement", "style", "scope"]
+                    },
+                    "output_path": str(phase_dir / f"{sanitized_model}.json"),
+                    "output_json_path": output_file,
+                    "timestamp": datetime.now().isoformat(),
+                    # `"failure": "timeout"` on a run a deadline ended, so the
+                    # executor refuses a salvaged `[]` from it (D4.5): a reviewer
+                    # killed mid-review never reported an empty review.
+                    **salvage_failure_fields(result),
+                }
+                salvage_path = phase_dir / f"salvage_{sanitized_model}.json"
+                with open(salvage_path, 'w', encoding='utf-8') as f:
+                    json.dump(salvage_request, f, indent=2)
+                print(f"[SALVAGE_NEEDED] {salvage_path}")
+                emit_salvage_task(salvage_request, salvage_path, phase_dir, plan_path)
+            elif timed_out and not raw_content.strip():
+                # A deadline, and no answer text at all: the adapter read its whole
+                # stream and found none (a reviewer killed while a tool ran, or
+                # while it was still reasoning), or the run printed nothing. Named
+                # as the timeout it was, not as a provider that never produced JSON.
+                print(
+                    f"[{display_name}] Provider timed out before writing an answer — "
+                    f"nothing to salvage, model recorded as failed"
+                )
+            else:
+                # Say which failure this was, in the same line-per-model channel the
+                # markers use. Silence here would read as "salvage was not reached",
+                # when what happened is that the provider failed before it produced
+                # an answer — an auth, quota or launch failure whose fix is the
+                # provider, not a JSON repair. The stream itself is in the log file
+                # named above; the one-line summary belongs to the adapter's
+                # `describe_failure` hook, which is why it is not re-printed here.
+                print(
+                    f"[{display_name}] Provider failed before producing any JSON — "
+                    f"nothing to salvage, model recorded as failed"
+                )
+
+            # The failure print above is this slot's terminal site, and `error_msg`
+            # is the same string `save_model_result` writes to `error_<model>.log`
+            # and `main()` keys into `failed_models` — one reason, in the table and
+            # in the report's failure list, rather than one phrasing per reader.
+            return self._failed(error_msg, source=source)
+
+        if result.get("misnamed_from"):
+            report_misnamed_result(model_spec, result, phase_dir)
+        print(f"[{display_name}] Completed in {duration:.1f}s (source: {source})")
+
+        # Get the parsed data from result
+        output_data = result.get("data")
+
+        if isinstance(output_data, list):
+            # Validate issues format
+            is_valid, errors = validate_code_review_issues(output_data)
+            if not is_valid:
+                print(f"[{display_name}] Warning: Validation errors: {errors}")
+            # Stored in canonical spelling, as the base lane stores it.
+            _importance.canonicalize(output_data)
+            print(f"[{display_name}] Found {len(output_data)} issues")
+            # `done` at the *return*, not at the completion print two branches up,
+            # even though the print is where `source` is named. The print only says
+            # the provider exited cleanly; whether there is a usable result is
+            # decided here, and the two branches below it return a failure with an
+            # error `main()` keys into `failed_models`. Terminal transitions are
+            # idempotent, so a `done` stamped at the print would freeze those slots
+            # `done` in the table while the report called them failed.
             if tracker is not None:
-                tracker.failed(model_spec, error=unsupported, source="not-dispatched")
-            return False, None, unsupported
+                tracker.done(model_spec, source=source)
+            return _review_lane.SlotResult(model_spec, True, payload=output_data, error=None)
+        elif isinstance(output_data, dict) and "raw" in output_data:
+            # No valid JSON found - write salvage request for Claude Code to process
+            raw_content = output_data["raw"]
+            raw_preview = raw_content[:500] if raw_content else "(empty)"
 
-    # The misnamed-result and requested-result baselines are the slot's, taken
-    # once before its first attempt and handed to every attempt, as the review
-    # base does: a file an attempt wrote before it was killed is still this
-    # slot's answer when a retry writes nothing, and one already there when the
-    # slot started is never read as this slot's.
-    misnamed_baseline = (
-        await phase_thread(
-            misnamed_result_baseline, out_dir, "code_review", model_spec
-        )
-        if run_model_specs is not None else None
-    )
-    requested_baseline = await phase_thread(
-        requested_result_baseline, out_dir, "code_review", model_spec
-    )
+            # Same rule as the hard-failure path above, for the same reason: a reply
+            # with no JSON in it is not a parse failure, and salvage against it can
+            # only print the empty array its prompt falls back to. This branch is
+            # where §40's two write-refusal shapes land — cursor-agent's "I can't
+            # write the requested file while Ask mode is active" and gemini's
+            # "JSON written to …" confirmation for a write that never happened —
+            # and a `[]` recorded for either would be an invented clean review.
+            if not has_salvageable_json(raw_content):
+                print(f"[{display_name}] Response carries no JSON — nothing to salvage")
+                return self._failed(
+                    f"Model produced no JSON output: {raw_preview}", source=source,
+                )
 
-    async def _dispatch(attempt_timeout: int) -> Dict[str, Any]:
-        return await phase_thread(
-            invoke_with_file_output,
-            prompt_template=prompt_template,
-            model_spec=model_spec,
-            prompt_context=prompt_context,
-            output_dir=out_dir,
-            phase="code_review",
-            timeout=attempt_timeout,
-            log_file=str(log_file),
-            prefer_arrays=True,
-            cwd=project_root,
-            anchor=str(plan_path),
-            # Every model of the fan-out, so a result written under the wrong
-            # name is read from where the model put it (live run 10, pi).
-            run_model_specs=run_model_specs,
-            misnamed_baseline=misnamed_baseline,
-            requested_baseline=requested_baseline,
-            **sandbox_fallback_kwargs(sandbox),
-        )
-
-    # The review base's ladder loop (§7.1.b), shared with review-plan: one
-    # deadline per slot, every attempt spawned with what is left of it, the
-    # adapter's verdict deciding each retry, a jail denial never retried, and
-    # the tracker's `running`/`retrying` transitions at each attempt and
-    # backoff. Terminal transitions stay below. See
-    # docs/development/delegation.md#read-and-analyze-executor.
-    run = await dispatch_with_ladder(
-        _dispatch,
-        ladder=ladder,
-        model_spec=model_spec,
-        display_name=display_name,
-        timeout=effective_timeout,
-        start_line=lambda attempt, attempt_timeout: (
-            f"[{display_name}] Starting code review with file-based output "
-            f"(attempt {attempt}, timeout: {attempt_timeout}s "
-            f"of a {effective_timeout}s slot)..."
-        ),
-        jail_summary_key=phase_dir,
-        tracker=tracker,
-    )
-
-    duration = time.time() - start_time
-    if run.refused:
-        # §7.5 rule 4: what is left of the slot cannot hold one worst-case
-        # attempt of this adapter's declared envelope, so nothing was spawned.
-        reason = run.refusal_reason(display_name)
-        print(f"[{display_name}] {reason}")
-        if tracker is not None:
-            tracker.failed(model_spec, error=reason, source="not-dispatched")
-        return False, None, reason
-    # The last returned attempt's; `{}` when the first dispatch raised.
-    result = run.result or {}
-    output_file = result.get("output_file", "")
-    source = "exception" if run.exception is not None else result.get("source", "unknown")
-
-    # §3.6: record which model served this slot before any of the branches
-    # below return, so a fallback that fired is attributed even on the paths
-    # that end in salvage. Only ever populated when a fallback is configured.
-    # The D6 override's provenance (2026-09-17) lands in the same collector,
-    # with or without a served model beside it.
-    details = run.details
-    if served_models is not None:
-        entry: Dict[str, Any] = {}
-        if details.get("served_model"):
-            entry["served_model"] = details["served_model"]
-            entry["fallback"] = bool(details.get("served_model_is_fallback"))
-        # A contained rung arrives as its rung id (`landlock`), so map through
-        # the same helper the review-plan collector uses: `bypassed` for the
-        # uncontained rung, `fallback-<rung>` for a contained one.
-        word = sandbox_record_word(details.get("sandbox"))
-        if word:
-            entry["sandbox"] = word
-        # A slot the plugin's jail failed keeps `failure_reason: jail-denied`
-        # and the path on the durable record (F1 item 6, 2026-09-30).
-        entry.update(jail_record_fields(details))
-        if entry:
-            served_models[model_spec] = entry
-    # Stage U: and what it spent, recorded here for the same reason and before
-    # the same branches — a slot that ends in salvage, or fails outright, spent
-    # what it spent, summed over every attempt. Absent when the adapter reported
-    # nothing; never `{}`, which would read as a free review.
-    if usage is not None:
-        spent = run.usage
-        if isinstance(spent, dict) and spent:
-            usage[model_spec] = spent
-
-    # The guard's checks over every attempt (plan §4.3: ANDed, so a clean
-    # retry cannot excuse an earlier attempt that wrote), ahead of every
-    # branch below: the porcelain check on the uncontained rung, the mode and
-    # home checks on the plugin's jail (whose `[JAIL_DENIED]` line and denial
-    # count the ladder loop printed per attempt). A slot they fail is failed
-    # whatever the invocation reported — nothing is restored, and nothing it
-    # returned is parsed as a review: `source` records which channel the
-    # rejected answer arrived on, `error` why nothing of it is parsed.
-    violated = await guard.finish(run.audits, run.home_checks, summary_key=phase_dir)
-    if violated is not None:
-        if tracker is not None:
-            tracker.failed(model_spec, error=violated, source=source)
-        return False, None, violated
-
-    if run.exception is not None:
-        # A dispatch raised, which ended the slot; recorded as that exception
-        # after the checks above, with what every attempt before it spent, as
-        # the review base records it.
-        error_msg = slot_exception_error(run.exception)
-        spent = describe_usage(run.usage)
-        if spent:
-            error_msg = f"{error_msg} (spent {spent})"
-        print(f"[{display_name}] {error_msg}")
-        if tracker is not None:
-            tracker.failed(model_spec, error=error_msg, source="exception")
-        return False, None, error_msg
-
-    print(f"[{display_name}] Log saved to: {log_file}")
-    # Only for a slot that answered: a failed invocation carries `output_file`
-    # and no `source`, and "Result will be saved to: <path> (source: unknown)"
-    # two lines above "Agent failed" promised a file nothing would write
-    # (measured 2026-09-17, on every one of a run's three dead slots).
-    if output_file and result["success"]:
-        print(f"[{display_name}] {describe_output_file(output_file, source)}")
-
-    if not result["success"]:
-        # The ladder's own reason when it ended the slot (the 429 chain, a
-        # context overflow's remedies, a budget that refused the retry), and
-        # the attempt's error otherwise, as on the review base.
-        error_msg = run.stop_error(model_spec)
-        # What the failed slot spent, on the one string every artifact of a
-        # failure carries: this return's `error` is what `save_model_result`
-        # writes to `error_<model>.log` and what `.status.json` records under
-        # `models_failed`, and the tuple this function returns is destructured
-        # by every caller, so a fourth value has nowhere to go. Measured
-        # 2026-09-17: $25.05 and 137 348 output tokens went into a claude-code
-        # slot that ended on a usage cap, and the only place either number
-        # existed was the raw envelope in `log_<model>.txt`.
-        spent = describe_usage(run.usage)
-        if spent:
-            error_msg = f"{error_msg} (spent {spent})"
-        file_error = result.get("file_error", "")
-        if file_error:
-            print(f"[{display_name}] File error: {file_error}")
-        print(f"[{display_name}] Agent failed ({duration:.1f}s): {error_msg}")
-
-        # Write a salvage request only when the failure output still holds an
-        # answer to repair. "stderr is non-empty" is not that test: a hard
-        # provider failure — kilocode answering `Error: User not found.` on a
-        # dead account, in ANSI colour — passes it with no JSON anywhere in the
-        # stream, and the salvage prompt's own "if nothing recoverable is
-        # present, print an empty array" then writes `[]` over this model's
-        # result path, so a model that never ran is aggregated as one that
-        # reviewed the diff and found nothing. It also spends the operator's
-        # next move on a JSON repair when the fix is `kilocode` auth. With
-        # nothing to salvage the model simply stays failed, which is the D6
-        # row-3 partial-results path already taken by every other dead slot.
-        # `has_salvageable_json` subsumes the old condition: a `stdout_error`
-        # with empty stderr only ever produced a salvage request whose
-        # `raw_output` was the empty string.
-        #
-        # WHICH CHANNEL THE ANSWER IS ON, and this branch used to look at only
-        # one of them. `if not result["success"]` is not merely "the provider
-        # never spoke": it also covers the provider that wrote a truncated or
-        # fenced array and *then* exited non-zero — a kill at the deadline, a
-        # crash on teardown — and that array is on **stdout**, never on stderr.
-        # Gating on stderr alone therefore printed "Provider failed before
-        # producing any JSON — nothing to salvage" about a run that had produced
-        # JSON, and threw a recoverable review away without a word. The
-        # JSON-erroring providers press the same point from the other side:
-        # `opencode run --format json` puts its failure shape on stdout with
-        # stderr empty, and a relayed `{"error": {"code": 401, ...}}` body is
-        # indistinguishable from any HTTP-backed CLI — those reached the
-        # predicate as `""`, so even the verdicts it reached correctly were
-        # reached for the wrong reason. The pre-gate code was equally blind (its
-        # `raw_output` was the empty string), so this closes a latent hole rather
-        # than a regression; it is closed here because site A is the one place
-        # the gate above could make a real loss *visible*.
-        #
-        # **Precedence, not concatenation.** The first non-empty channel wins and
-        # the other is not appended, because `raw_output` is handed to a subagent
-        # as *the* damaged answer to repair (`build_salvage_prompt` in
-        # `utils/subagent_prompts.py`), and gluing a launch banner or an auth
-        # notice onto a truncated array gives that subagent two documents and no
-        # way to tell which one it was asked about — with the same empty-array
-        # fallback waiting when it guesses wrong. stdout is the one that can hold
-        # an answer, so stdout is the one that is asked first.
-        #
-        # `utils/llm_client.py`'s `_attach_stdout_excerpt` attaches
-        # `stdout_excerpt` on all three losing paths — non-zero exit, timeout
-        # kill, and the zero exit whose output would not parse — already
-        # `_redact`ed and `_bound_stream`ed in that order (§4.5/§4.4), and it
-        # **omits the key entirely** when nothing survived rather than setting
-        # `""`. So when no reducer applies, absent and empty mean the same thing,
-        # and stderr still answers for the provider that died before printing a
-        # byte.
-        #
-        # Whatever this picks is also what gets persisted: the gate below judges
-        # `raw_content` and the salvage request stores `raw_content`, so the text
-        # a subagent is asked to repair is the text the decision was made on.
-        # Gating on one string and writing another would let a request be written
-        # for evidence nobody ever saw.
-        #
-        # **And a stream adapter's answer is not its stream.** `salvage_source`
-        # (the rule `failure_output_from_result` applies to the other lane)
-        # reads `details["salvage_text"]` first — the adapter's own reduction of
-        # its full stdout to the assistant's answer text — and, when that key is
-        # present, reads nothing else, even when it is `""`. On pi and omp the
-        # stdout excerpt is JSONL whose `content` arrays pass the gate as
-        # findings: a reviewer killed while a tool ran was sent to salvage over
-        # its own `thinking`/`toolCall` parts (plan:
-        # review-run-scope-salvage-and-failure-visibility §4). Only when no
-        # reducer applies does the stdout-then-stderr order above still hold.
-        details = result.get("details", {}) or {}
-        raw_content = salvage_source(details)
-        timed_out = salvage_failure_kind(result) is not None
-
-        if has_salvageable_json(raw_content):
             salvage_request = {
                 "model": model_spec,
                 "phase": "code_review",
@@ -3951,126 +4096,30 @@ async def run_single_review(
                 },
                 "output_path": str(phase_dir / f"{sanitized_model}.json"),
                 "output_json_path": output_file,
-                "timestamp": datetime.now().isoformat(),
-                # `"failure": "timeout"` on a run a deadline ended, so the
-                # executor refuses a salvaged `[]` from it (D4.5): a reviewer
-                # killed mid-review never reported an empty review.
-                **salvage_failure_fields(result),
+                "timestamp": datetime.now().isoformat()
             }
             salvage_path = phase_dir / f"salvage_{sanitized_model}.json"
             with open(salvage_path, 'w', encoding='utf-8') as f:
                 json.dump(salvage_request, f, indent=2)
+
             print(f"[SALVAGE_NEEDED] {salvage_path}")
             emit_salvage_task(salvage_request, salvage_path, phase_dir, plan_path)
-        elif timed_out and not raw_content.strip():
-            # A deadline, and no answer text at all: the adapter read its whole
-            # stream and found none (a reviewer killed while a tool ran, or
-            # while it was still reasoning), or the run printed nothing. Named
-            # as the timeout it was, not as a provider that never produced JSON.
-            print(
-                f"[{display_name}] Provider timed out before writing an answer — "
-                f"nothing to salvage, model recorded as failed"
+            # Failed *for now*: a salvage subagent may repair this model's result
+            # file minutes from now, and `main()` moves it out of `failed_models`
+            # when it does. The map is the fan-out's record of what the fan-out saw,
+            # so it says what happened here; `record_models_present` is the writer
+            # that reconciles a later repair.
+            return self._failed(
+                f"Could not extract JSON from response: {raw_preview}", source=source,
             )
-        else:
-            # Say which failure this was, in the same line-per-model channel the
-            # markers use. Silence here would read as "salvage was not reached",
-            # when what happened is that the provider failed before it produced
-            # an answer — an auth, quota or launch failure whose fix is the
-            # provider, not a JSON repair. The stream itself is in the log file
-            # named above; the one-line summary belongs to the adapter's
-            # `describe_failure` hook, which is why it is not re-printed here.
-            print(
-                f"[{display_name}] Provider failed before producing any JSON — "
-                f"nothing to salvage, model recorded as failed"
-            )
+        return self._failed(
+            f"Expected JSON array, got {type(output_data).__name__}", source=source,
+        )
 
-        # The failure print above is this slot's terminal site, and `error_msg`
-        # is the same string `save_model_result` writes to `error_<model>.log`
-        # and `main()` keys into `failed_models` — one reason, in the table and
-        # in the report's failure list, rather than one phrasing per reader.
-        if tracker is not None:
-            tracker.failed(model_spec, error=error_msg, source=source)
-        return False, None, error_msg
-
-    if result.get("misnamed_from"):
-        report_misnamed_result(model_spec, result, phase_dir)
-    print(f"[{display_name}] Completed in {duration:.1f}s (source: {source})")
-
-    # Get the parsed data from result
-    output_data = result.get("data")
-
-    if isinstance(output_data, list):
-        # Validate issues format
-        is_valid, errors = validate_code_review_issues(output_data)
-        if not is_valid:
-            print(f"[{display_name}] Warning: Validation errors: {errors}")
-        # Stored in canonical spelling, as the base lane stores it.
-        _importance.canonicalize(output_data)
-        print(f"[{display_name}] Found {len(output_data)} issues")
-        # `done` at the *return*, not at the completion print two branches up,
-        # even though the print is where `source` is named. The print only says
-        # the provider exited cleanly; whether there is a usable result is
-        # decided here, and the two branches below it return `False` with an
-        # error `main()` keys into `failed_models`. Terminal transitions are
-        # idempotent, so a `done` stamped at the print would freeze those slots
-        # `done` in the table while the report called them failed.
-        if tracker is not None:
-            tracker.done(model_spec, source=source)
-        return True, output_data, None
-    elif isinstance(output_data, dict) and "raw" in output_data:
-        # No valid JSON found - write salvage request for Claude Code to process
-        raw_content = output_data["raw"]
-        raw_preview = raw_content[:500] if raw_content else "(empty)"
-
-        # Same rule as the hard-failure path above, for the same reason: a reply
-        # with no JSON in it is not a parse failure, and salvage against it can
-        # only print the empty array its prompt falls back to. This branch is
-        # where §40's two write-refusal shapes land — cursor-agent's "I can't
-        # write the requested file while Ask mode is active" and gemini's
-        # "JSON written to …" confirmation for a write that never happened —
-        # and a `[]` recorded for either would be an invented clean review.
-        if not has_salvageable_json(raw_content):
-            print(f"[{display_name}] Response carries no JSON — nothing to salvage")
-            no_json = f"Model produced no JSON output: {raw_preview}"
-            if tracker is not None:
-                tracker.failed(model_spec, error=no_json, source=source)
-            return False, None, no_json
-
-        salvage_request = {
-            "model": model_spec,
-            "phase": "code_review",
-            "raw_output": raw_content,
-            "expected_type": "array",
-            "expected_schema": {
-                "fields": salvage_issue_fields(commit_record),
-                "optional_fields": list(_sp.SCOPE_FIELDS),
-                "importance_values": list(_importance.MODEL_VALUES),
-                "type_values": ["bug", "missing", "improvement", "style", "scope"]
-            },
-            "output_path": str(phase_dir / f"{sanitized_model}.json"),
-            "output_json_path": output_file,
-            "timestamp": datetime.now().isoformat()
-        }
-        salvage_path = phase_dir / f"salvage_{sanitized_model}.json"
-        with open(salvage_path, 'w', encoding='utf-8') as f:
-            json.dump(salvage_request, f, indent=2)
-
-        print(f"[SALVAGE_NEEDED] {salvage_path}")
-        emit_salvage_task(salvage_request, salvage_path, phase_dir, plan_path)
-        # Failed *for now*: a salvage subagent may repair this model's result
-        # file minutes from now, and `main()` moves it out of `failed_models`
-        # when it does. The map is the fan-out's record of what the fan-out saw,
-        # so it says what happened here; `record_models_present` is the writer
-        # that reconciles a later repair.
-        unparsed = f"Could not extract JSON from response: {raw_preview}"
-        if tracker is not None:
-            tracker.failed(model_spec, error=unparsed, source=source)
-        return False, None, unparsed
-    else:
-        wrong_type = f"Expected JSON array, got {type(output_data).__name__}"
-        if tracker is not None:
-            tracker.failed(model_spec, error=wrong_type, source=source)
-        return False, None, wrong_type
+    def raised(self, exc: Exception) -> Optional["_review_lane.SlotResult"]:
+        # Left to `run_all_reviews`' slot wrapper, which records it with its
+        # own text (`raised_slot_record`), as a direct call raises it.
+        return None
 
 
 async def run_all_reviews(
@@ -5291,21 +5340,11 @@ async def reaggregate_from_existing_files(
         print("\nReaggregation complete!")
         print(f"Report: {report_path}")
 
-        # F2/F3: this reaggregate path never called either recorder, so a
-        # detached --reaggregate run reported `output_files` with nothing in it
-        # and `MULTI_LLM_RESULT.artifacts: []` — the same gap main()'s own
-        # completion site had. Same existence-filtered list as there.
-        report_html_path = str(phase_dir / "report.html")
-        record_output_files(
-            str(phase_dir),
-            report=str(report_path),
-            report_html=report_html_path,
-            grouped=str(grouped_path),
-            validation=str(validation_path),
-            issues=str(issues_path),
-        )
-        record_review_artifacts(
-            report_path, report_html_path, grouped_path, validation_path, issues_path
+        # The report's files handed back on both channels, as every review
+        # lane's completion hands them (utils/review_lane.py).
+        _review_lane.hand_back_report(
+            steps, phase_dir, report=report_path, grouped=grouped_path,
+            validation=validation_path, issues=issues_path,
         )
 
         # `[PARTIAL_RESULTS]` for the models still missing, then the phase
@@ -5447,20 +5486,13 @@ def heal_unrecorded_completion(
         total_issues = sum(
             len(g.get("suggestions", g.get("issues", [])) or []) for g in groups
         )
-    report_html_path = str(phase_dir / "report.html")
-    record_output_files(
-        str(phase_dir),
-        report=str(report_path),
-        report_html=report_html_path,
-        grouped=str(grouped_path),
-        validation=str(validation_path),
-        issues=str(issues_path),
-    )
-    record_review_artifacts(
-        report_path, report_html_path, grouped_path, validation_path, issues_path,
+    steps = code_round_steps()
+    _review_lane.hand_back_report(
+        steps, phase_dir, report=report_path, grouped=grouped_path,
+        validation=validation_path, issues=issues_path,
     )
     _review_lane.record_phase_complete(
-        None, code_round_steps(), state=state, phase_name="code-review",
+        None, steps, state=state, phase_name="code-review",
         phase_dir=str(phase_dir),
     )
     print("Phase 'code-review' was complete but not marked. Auto-healed state.")
@@ -6460,30 +6492,16 @@ async def _main(argv: Optional[List[str]], run: PhaseRun) -> int:
                                          verdicts=verdicts)
             print(f"\nReport saved to: {report_path}")
 
-            # A detached run's caller never saw this stdout, so `status` hands the
-            # artifacts back instead (no-op in the foreground). validation.json and
-            # issues.json are included too (F3): apply-code-fixes reads exactly
-            # those two files, and a missing validation.json makes it treat every
-            # group as needs-human-decision — that was invisible to the host before,
-            # since only report/report_html/grouped were ever recorded here.
-            report_html_path = str(phase_dir / "report.html")
-            grouped_path_out = str(phase_dir / "grouped.json")
-            validation_path_out = str(phase_dir / "validation.json")
-            issues_path_out = str(phase_dir / "issues.json")
-            record_output_files(
-                str(phase_dir),
-                report=str(report_path),
-                report_html=report_html_path,
-                grouped=grouped_path_out,
-                validation=validation_path_out,
-                issues=issues_path_out,
-            )
-
-            # The terminal `MULTI_LLM_RESULT.artifacts` half of the hand-back (F2);
-            # validation.json/issues.json only when they exist.
-            record_review_artifacts(
-                report_path, report_html_path, grouped_path_out,
-                validation_path_out, issues_path_out,
+            # The report's files handed back on both channels, one rule for
+            # every review lane (utils/review_lane.py). validation.json and
+            # issues.json are included (F3): apply-code-fixes reads exactly
+            # those two files, and a missing validation.json makes it treat
+            # every group as needs-human-decision.
+            _review_lane.hand_back_report(
+                steps, phase_dir, report=report_path,
+                grouped=phase_dir / "grouped.json",
+                validation=phase_dir / "validation.json",
+                issues=phase_dir / "issues.json",
             )
 
             # The phase recorded complete in this run's `state`, while the round
