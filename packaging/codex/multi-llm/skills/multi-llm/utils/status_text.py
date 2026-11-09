@@ -16,7 +16,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from . import detach, host_capabilities, metrics, status_file, task_ledger
+from . import detach, host_capabilities, metrics, run_record, status_file, task_ledger
 from .advisory import note_swallowed
 from .task_ledger import (
     MIRROR_ACCEPTED_LABELS as _MIRROR_ACCEPTED_LABELS,
@@ -940,7 +940,7 @@ def _model_timing_text(entry: Dict[str, Any]) -> str:
     ticker also read, and an unrenderable one costs the denominator rather than
     the row.
 
-    F5, 2026-09-20: ``detach._elapsed_since`` catches ``ValueError`` only, but
+    F5, 2026-09-20: ``run_record._elapsed_since`` catches ``ValueError`` only, but
     ``datetime.now() - <aware datetime>`` raises ``TypeError``, so a single
     ``started_at: "2026-09-19T00:00:00Z"`` anywhere in the map took the *whole*
     ``status`` command down with a traceback and exit 1 — which rule 2 maps to
@@ -1693,7 +1693,7 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
         # parser, so one tz-aware stamp written by a future mirror would take
         # the whole poll down instead of costing this row its `(since …)`.
         try:
-            elapsed = detach._elapsed_since(row.get("dispatched_at"))
+            elapsed = run_record._elapsed_since(row.get("dispatched_at"))
         except Exception as exc:
             note_swallowed("status: write mirror in-flight time", exc)
             elapsed = None

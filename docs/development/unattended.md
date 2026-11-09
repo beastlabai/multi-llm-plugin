@@ -27,15 +27,15 @@ distinct from the exit-2 phase-already-complete guard, so a host can tell "needs
 `--human-task <id>=` and an unknown `--force-strategy` are exit **3** at parse time rather
 than argparse's exit 2; `choices` on each parser is the second layer.
 `record_resolution(phase_dir, site_id, decision)` prints `[AUTO_RESOLVED] <site>: <decision>` and, under `--detach`, appends to
-`run.resolutions` via `detach.record_resolution` → `status_file.append_resolution` (a foreground
-`.status.json` still gains no `run` keys — `detach.record_resolution` keeps its
+`run.resolutions` via `run_record.record_resolution` → `status_file.append_resolution` (a foreground
+`.status.json` still gains no `run` keys — `run_record.record_resolution` keeps its
 handle guard, unlike `report_progress`; the `[AUTO_RESOLVED]` line is the foreground
 record).
 
 Auto-resolutions are announced only under `--yes`, so with `--yes`
 unset a run is byte-for-byte what it was. **The apply phases' own two sites (rows 10 and 11) are
 recorded, not just taken**: both fire *before* `run()` crosses the detach boundary,
-where no run handle exists yet and `detach.record_resolution` is a silent no-op — so
+where no run handle exists yet and `run_record.record_resolution` is a silent no-op — so
 `ApplyOrchestratorBase._record_resolution` prints the marker at the site and `_flush_resolutions` replays the entries
 into `run.resolutions` immediately past the boundary.
 

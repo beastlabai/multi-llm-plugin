@@ -564,8 +564,8 @@ class ApplyPhaseReport:
             return
         from . import cli_common as _cli
 
-        from . import detach as _detach
-        _detach.report_progress(
+        from . import run_record as _run_record
+        _run_record.report_progress(
             os.path.join(self.out_dir, self.phase_name), notes=notes,
         )
         _cli.add_notice(join_clauses(notes))

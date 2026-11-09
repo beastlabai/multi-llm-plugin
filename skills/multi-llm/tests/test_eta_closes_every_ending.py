@@ -259,12 +259,12 @@ class TestTheAbortHandlerPrintsIt:
     ):
         import signal as _signal
 
-        from utils import detach, process_control, status_file, stream_bootstrap
+        from utils import detach, process_control, run_record, status_file, stream_bootstrap
 
         monkeypatch.setattr(
             process_control, "install_worker_signal_handlers", lambda _cb: None)
         monkeypatch.setattr(stream_bootstrap, "streams_for_a_signal_handler", lambda: None)
-        monkeypatch.setattr(detach, "_ACTIVE", None)
+        monkeypatch.setattr(run_record, "_ACTIVE", None)
         monkeypatch.setattr(detach, "_sweep_live_clis", lambda: None)
         monkeypatch.setattr(detach, "_restore_codex_trust", lambda: None)
         plan = tmp_path / "plan.md"

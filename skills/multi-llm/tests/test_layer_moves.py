@@ -9,6 +9,9 @@ module it left, where a reader (a test, the CLI surface) still spells it there:
 * **Writes do not.** A patch of the old spelling only shadows it there and
   reaches no code: the code that uses the name reads it in its owner. The
   guard at the end fails any test that writes one, naming the owner to patch.
+
+A name in ``RETIRED`` moved with no alias: reading the old spelling raises, and
+the same guard fails a test that writes it.
 """
 
 import ast
@@ -68,6 +71,17 @@ MOVED: Dict[str, Dict[str, Tuple[str, str]]] = {
         "redact_text": ("utils.redact", "redact_text"),
         "state_home": ("utils.output_handler", "state_home"),
     },
+    "utils.detach": {
+        "_elapsed_since": ("utils.run_record", "_elapsed_since"),
+        "_parse_stamp": ("utils.run_record", "_parse_stamp"),
+        "record_resolution": ("utils.run_record", "record_resolution"),
+        "report_progress": ("utils.run_record", "report_progress"),
+    },
+    "utils.commit_front_door": {
+        "_STAGE_VERSION": ("utils.commit_paths", "_STAGE_VERSION"),
+        "read_stage": ("utils.commit_paths", "read_stage"),
+        "stage_takes_over": ("utils.commit_paths", "stage_takes_over"),
+    },
     "utils.consolidation": {
         "_compute_file_hash": ("utils.output_handler", "_compute_file_hash"),
         "consolidation_is_current": ("utils.output_handler", "consolidation_is_current"),
@@ -122,6 +136,18 @@ MOVED_WHOLE: Dict[str, str] = {
     "finalize_tracking": "utils.tracking",
 }
 
+#: Names that moved with no alias left behind: old module -> {old name:
+#: (owner module, name there)}.
+RETIRED: Dict[str, Dict[str, Tuple[str, str]]] = {
+    # A slot the run rebinds: an alias would be a copy that never sees the handle.
+    "utils.detach": {"_ACTIVE": ("utils.run_record", "_ACTIVE")},
+    # The `util runs` command moved above the registry, which cannot import it back.
+    "utils.run_registry": {
+        "_render_row": ("utils.run_sweep", "_render_row"),
+        "main": ("utils.run_sweep", "main"),
+    },
+}
+
 
 def _module(name):
     return importlib.import_module(name)
@@ -148,11 +174,12 @@ def _whole_names(owner):
 
 
 def _moved_table(old):
-    """{old name: "owner.name"} for every name *old* re-exports."""
+    """{old name: "owner.name"} for every name *old* re-exports or retired."""
     if old in MOVED_WHOLE:
         owner = MOVED_WHOLE[old]
         return {name: f"{owner}.{name}" for name in _whole_names(owner)}
-    return {name: f"{owner}.{there}" for name, (owner, there) in MOVED[old].items()}
+    names = {**MOVED.get(old, {}), **RETIRED.get(old, {})}
+    return {name: f"{owner}.{there}" for name, (owner, there) in names.items()}
 
 
 _ALIASES = [(old, name, owner, there)
@@ -168,6 +195,17 @@ def test_a_moved_name_reads_as_the_owners_object(old, name, owner, there):
 @pytest.mark.parametrize("old", sorted(MOVED))
 def test_the_old_module_defines_none_of_them(old):
     assert not _top_level_definitions(old) & set(MOVED[old])
+
+
+_RETIRED = [(old, name, owner, there)
+            for old, names in RETIRED.items() for name, (owner, there) in names.items()]
+
+
+@pytest.mark.parametrize("old, name, owner, there", _RETIRED,
+                         ids=[f"{a[0]}.{a[1]}" for a in _RETIRED])
+def test_a_retired_name_is_gone_from_its_old_module(old, name, owner, there):
+    assert not hasattr(_module(old), name)
+    assert hasattr(_module(owner), there)
 
 
 @pytest.mark.parametrize("old, owner", sorted(MOVED_WHOLE.items()))
@@ -194,7 +232,7 @@ def _guard_message(old, path, lineno, form, name, owner):
     )
 
 
-@pytest.mark.parametrize("old", sorted({*MOVED, *MOVED_WHOLE}))
+@pytest.mark.parametrize("old", sorted({*MOVED, *MOVED_WHOLE, *RETIRED}))
 def test_no_test_writes_a_moved_name_on_its_old_module(old):
     """This file is the one exception: it exercises those writes on purpose."""
     scanner = MovedNameWriteScanner(_moved_table(old), old.rpartition(".")[2])
@@ -217,9 +255,12 @@ def test_no_test_writes_a_moved_name_on_its_old_module(old):
      "finalize_tracking", "main"),
     ('from unittest import mock\nmock.patch("finalize_tracking.get_all_modified_files")',
      "finalize_tracking", "get_all_modified_files"),
+    ('from utils import detach\nmonkeypatch.setattr(detach, "_ACTIVE", None)',
+     "utils.detach", "_ACTIVE"),
+    ('from utils import detach\ndetach._ACTIVE = handle', "utils.detach", "_ACTIVE"),
 ])
 def test_the_guard_sees_a_write(snippet, old, name):
-    hits = MovedNameWriteScanner(_moved_table(old), old).scan(snippet)
+    hits = MovedNameWriteScanner(_moved_table(old), old.rpartition(".")[2]).scan(snippet)
     assert [hit[2] for hit in hits] == [name]
 
 

@@ -1317,6 +1317,11 @@ Finalization (run by the host AFTER every batch has been applied and verified):
 def main(argv=None) -> int:
     """Main entry point."""
     bootstrap_streams()
+    from utils.commit_front_door import hand_worker_the_stage_applier
+
+    # A worker started here directly (apply-commit-fixes --detach) applies its
+    # stage as the dispatcher's does.
+    hand_worker_the_stage_applier(argv)
     args = ApplyCodeFixesOrchestrator.parse_args(argv)
     orchestrator = ApplyCodeFixesOrchestrator(args)
     return orchestrator.run()

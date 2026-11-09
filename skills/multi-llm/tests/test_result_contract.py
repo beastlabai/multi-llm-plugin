@@ -439,7 +439,7 @@ PASS_THROUGH: Dict[Tuple[str, str], str] = {
         "test_the_status_file checks they are declared",
     ("utils/status_file.py", "remove_status_keys"):
         "writes back the document it read, minus the keys it names: it adds none",
-    ("utils/detach.py", "report_progress"):
+    ("utils/run_record.py", "report_progress"):
         "forwards its `**updates`; progress_keys inventories the keywords of "
         "every report_progress call and flags a `**` spread at one",
     ("utils/detach.py", "progress"):
@@ -600,8 +600,9 @@ class TestEveryWrittenKeyIsDeclared:
 # The walker itself, on made-up sources
 # ---------------------------------------------------------------------------
 
-#: The smallest ``utils/status_file.py`` and ``utils/detach.py`` the progress
-#: inventory needs: the writers it looks for, forwarding the way the real ones do.
+#: The smallest ``utils/status_file.py``, ``utils/detach.py`` and
+#: ``utils/run_record.py`` the progress inventory needs: the writers it looks
+#: for, forwarding the way the real ones do.
 STUB_STATUS_FILE = """
 def write_status(phase_dir, data):
     pass
@@ -622,6 +623,10 @@ from utils import status_file
 class RunHandle:
     def progress(self, **updates):
         status_file.update_progress(self.phase_dir, updates)
+"""
+
+STUB_RUN_RECORD = """
+from utils import status_file
 
 def report_progress(phase_dir, **updates):
     status_file.update_progress(phase_dir, updates)
@@ -659,8 +664,9 @@ class ResultContext:
 
 
 def _sources(**files: str) -> Dict[str, str]:
-    """The two stubs plus made-up files, keyed ``utils_x`` for ``utils/x.py``."""
-    sources = {"utils/status_file.py": STUB_STATUS_FILE, "utils/detach.py": STUB_DETACH}
+    """The three stubs plus made-up files, keyed ``utils_x`` for ``utils/x.py``."""
+    sources = {"utils/status_file.py": STUB_STATUS_FILE, "utils/detach.py": STUB_DETACH,
+               "utils/run_record.py": STUB_RUN_RECORD}
     for name, text in files.items():
         sources[name.replace("_", "/", 1) + ".py"] = textwrap.dedent(text)
     return sources
@@ -849,7 +855,8 @@ class TestTheWalker:
         )
         found = inventory.progress_keys(inventory._Corpus.from_sources(sources))
         assert {"via_module", "via_alias"} <= set(found.keys), found.keys
-        assert not {site for site in found.unresolved if site[0] != "utils/detach.py"}
+        assert not {site for site in found.unresolved
+                    if site[0] not in ("utils/detach.py", "utils/run_record.py")}
 
 
 class TestTheReviewedHoles:

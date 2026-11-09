@@ -42,7 +42,7 @@ writing a second file with a private shape — ``run`` only ever on a detached r
   interval_s, tasks_generated, notes, subagents, write_subagents,
   sandbox_bypassed, sandbox_fallback}`` — reporting only; no external actor advances it, and nothing
   resumes, reaggregates or branches on it. That is why it is the one reserved
-  object a **foreground** run writes too, and why ``detach.report_progress``
+  object a **foreground** run writes too, and why ``run_record.report_progress``
   writes on *every* path: the run handle it consults picks the **door**, never
   whether the write happens. It goes through ``handle.progress`` (which stamps
   that run's heartbeat with it) only when the handle owns the dir being written,
@@ -265,7 +265,7 @@ def status_lock_path(phase_dir: str) -> str:
 
 
 #: Every stamp in the checkpoint (``heartbeat_at``, ``updated_at``, ...): local
-#: time, to the microsecond (``utils/clock.py``); ``detach._elapsed_since``
+#: time, to the microsecond (``utils/clock.py``); ``run_record._elapsed_since``
 #: reads them.
 now_iso = local_iso
 

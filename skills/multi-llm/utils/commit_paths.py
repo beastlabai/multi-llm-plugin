@@ -40,6 +40,7 @@ import re
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Tuple, Union
 
+from .cli_common import EXIT_ERROR as _EXIT_ERROR
 from .git_utils import get_project_root_from_dir, git_path, ignored_paths
 from .output_handler import output_dir_path
 from .provider_registry import ConfigError, get_commit_reviews_dir
@@ -388,3 +389,46 @@ def read_commit_range(brief: PathLike) -> Optional[Dict[str, Any]]:
         return None
     record = document.get("commit_range") if isinstance(document, dict) else None
     return dict(record) if isinstance(record, Mapping) else None
+
+
+# ---------------------------------------------------------------------------
+# A --detach launch's stage
+# ---------------------------------------------------------------------------
+#
+# Under ``--detach`` a commit front door stages what it decided in a file in the
+# phase dir and names it on the worker's argv (``--commit-stage``); the worker
+# applies it once it owns the dir (``commit_front_door.apply_stage``, handed to
+# ``detach`` by the worker's entry). Reading a stage is the path layer's, so the
+# launcher's take-over decision (``detach``) reads it without the front door.
+
+#: The stage file's format; ``commit_front_door._write_stage`` writes it.
+_STAGE_VERSION = 1
+
+
+def read_stage(stage: PathLike) -> Optional[Dict[str, Any]]:
+    """A stage file's payload, or None when it is gone (already applied)."""
+    try:
+        with open(stage, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except FileNotFoundError:
+        return None
+    if not isinstance(data, dict) or data.get("version") != _STAGE_VERSION:
+        raise CommitReviewError(f"ERROR: {stage} is not a commit-review stage this "
+                                f"version can apply", exit_code=_EXIT_ERROR)
+    return data
+
+
+def stage_takes_over(stage: Optional[PathLike]) -> bool:
+    """Whether a launch carrying *stage* may take a live run over with its
+    ``--force``: only when the user typed ``--force``. A restart's
+    synthesised ``--force`` restarts the round and never takes over a live
+    run. True when there is no readable stage (the flag decides)."""
+    if not stage:
+        return True
+    try:
+        data = read_stage(stage)
+    except (CommitReviewError, OSError, ValueError):
+        return True
+    if data is None:
+        return True
+    return bool(data.get("typed_force", True))

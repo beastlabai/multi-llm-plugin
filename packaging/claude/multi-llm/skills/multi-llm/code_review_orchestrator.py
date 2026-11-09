@@ -76,7 +76,8 @@ from utils.state_manager import (
 from utils.output_handler import (
     get_phase_dir, output_dir_path, phase_dir_path, workflow_file_entries,
 )
-from utils.detach import PhaseRun, record_output_files, report_progress
+from utils.detach import PhaseRun, record_output_files
+from utils.run_record import report_progress
 from utils.progress_tracker import FanoutProgress, PhaseProgress
 from utils import importance as _importance
 from utils import review_lane as _review_lane
@@ -5476,6 +5477,11 @@ async def main(argv: Optional[List[str]] = None) -> int:
     phase dir, taken at its entry and released when it returns or exits
     (``detach.PhaseRun``; docs/development/runtime.md, "One writer per phase
     dir")."""
+    from utils.commit_front_door import hand_worker_the_stage_applier
+
+    # A worker started here directly (review-commits --detach) applies its
+    # stage as the dispatcher's does.
+    hand_worker_the_stage_applier(argv)
     with PhaseRun() as run:
         return await _main(argv, run)
 

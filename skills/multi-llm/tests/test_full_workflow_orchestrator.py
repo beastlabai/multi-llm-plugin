@@ -1238,7 +1238,7 @@ class TestEachStepsResultIsKept:
     def _run(self, tmp_path, monkeypatch, capsys, recorded, *, detached=True):
         from types import SimpleNamespace
 
-        from utils import cli_common, detach
+        from utils import cli_common, run_record
 
         def run_mode(self, mode_word, extra):
             notice, counts = recorded.get(mode_word, (None, None))
@@ -1258,7 +1258,7 @@ class TestEachStepsResultIsKept:
         ctx = cli_common.activate_result(cli_common.ResultContext())
         try:
             if detached:
-                monkeypatch.setattr(detach, "_ACTIVE", SimpleNamespace(
+                monkeypatch.setattr(run_record, "_ACTIVE", SimpleNamespace(
                     phase_dir=str(workflow.run_dir), run_id="run-full-1"))
             assert workflow.run() == 0
         finally:

@@ -151,7 +151,7 @@ UTIL_COMMANDS: Dict[str, Tuple[Optional[str], str, str]] = {
     "backup": ("utils.backup", "main", "Back up a file before it is modified."),
     "restore-batch": ("utils.restore_batch", "main",
                       "Restore a failed write batch from its pre-batch snapshot."),
-    "runs": ("utils.run_registry", "main", "List (or --sweep) this project's detached runs."),
+    "runs": ("utils.run_sweep", "main", "List (or --sweep) this project's detached runs."),
     "report-check": ("utils.report_check", "main",
                      "Check a turn's final message copies the printed next "
                      "command (Claude Code Stop hook)."),
@@ -1718,6 +1718,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         from utils.detach import prepare_worker_output
 
         prepare_worker_output()
+        # A commit front door's stage, applied once the worker owns its dir:
+        # the applier sits above `detach`, so it is handed in here.
+        from utils.commit_front_door import hand_worker_the_stage_applier
+
+        hand_worker_the_stage_applier(argv)
     # Line buffering + UTF-8/replace stream encoding, once per invocation: there
     # is exactly one process per invocation, so this covers every mode and every
     # in-process continuation.

@@ -34,6 +34,7 @@ from typing import Any, Callable, ClassVar, Collection, Dict, FrozenSet, List, M
 
 from . import concurrency as _concurrency
 from . import detach as _detach
+from . import run_record as _run_record
 from .atomic_io import read_back_text
 from . import status_file as _status_file
 from . import validation_context as _validation_context
@@ -1530,7 +1531,7 @@ def dispatch_subagent_tasks(
         # Reported before the dispatch, not after it: `report_progress` merges
         # into `progress`, so the step stands while the executor's mirror fills
         # in underneath it (`validating, validation 3/11 ok`).
-        _detach.report_progress(
+        _run_record.report_progress(
             phase_dir, step=_DISPATCH_STEPS.get(label, f"dispatching {label}")
         )
         # A phase whose damaged checkpoint a fresh run replaced trusts no file
@@ -3033,9 +3034,9 @@ def record_sandbox_bypassed(
         ) if rung
     }
     if bypassed:
-        _detach.report_progress(str(phase_dir), sandbox_bypassed=bypassed)
+        _run_record.report_progress(str(phase_dir), sandbox_bypassed=bypassed)
     if contained:
-        _detach.report_progress(str(phase_dir), sandbox_fallback=contained)
+        _run_record.report_progress(str(phase_dir), sandbox_fallback=contained)
     return bypassed
 
 
@@ -7757,7 +7758,7 @@ def base_round_steps() -> "_review_lane.RoundSteps":
         merge_validation_batches=merge_validation_batches,
         write_status=write_status,
         update_status=update_status,
-        report_progress=_detach.report_progress,
+        report_progress=_run_record.report_progress,
         record_next=record_next,
         recorded_usage=recorded_usage,
         recorded_served_models=recorded_served_models,

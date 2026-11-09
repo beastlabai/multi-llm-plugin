@@ -112,6 +112,9 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.review_diff",
         "utils.review_round",
         "utils.routes",
+        # The run record's writers (the active RunHandle, progress, resolutions)
+        # and the checkpoint's stamp reader, which the layers below detach use.
+        "utils.run_record",
         "utils.run_registry",
         "utils.state_file",
         "utils.state_manager",
@@ -263,6 +266,9 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.next_phase",
         "utils.resume_state",
         "utils.run_status",
+        # `util runs [--sweep]`: the registry's listing and sweep, with
+        # detach's close-out and kill handed to the sweep.
+        "utils.run_sweep",
         "utils.status_commands",
         "utils.status_native",
         "utils.status_text",
@@ -272,22 +278,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
 
 #: (importer, target) -> what crosses the edge and where it belongs instead.
 #: Delete an entry once its edge is gone; never add one without a reason.
-KNOWN_UPWARD: Dict[Tuple[str, str], str] = {
-    # The run record lives in detach (L3): its writers dispatch through the
-    # active RunHandle (detach._ACTIVE).
-    ("utils.result_files", "utils.detach"):
-        "report_progress: belongs in a run-record module at L1, with _ACTIVE",
-    ("utils.unattended", "utils.detach"):
-        "record_resolution: belongs in a run-record module at L1, with _ACTIVE",
-    ("utils.run_registry", "utils.detach"):
-        "close_out_entry, stop_recorded_run: the sweep should take them as arguments "
-        "from its CLI",
-    # The front door (L5) also holds the stage a detached worker applies; the
-    # stage's brief writer (commit_brief) reaches apply_code_fixes_orchestrator.
-    ("utils.detach", "utils.commit_front_door"):
-        "apply_stage, stage_takes_over: belong in a commit-stage module at L3, or come "
-        "in from the orchestrator that names the stage",
-}
+KNOWN_UPWARD: Dict[Tuple[str, str], str] = {}
 
 
 #: Dynamic imports whose module name is computed: (importer, the call as

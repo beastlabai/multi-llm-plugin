@@ -916,7 +916,7 @@ def progress_keys(corpus_: Optional[_Corpus] = None) -> Inventory:
                     f"{_site(module, keyword)}: `**{ast.unparse(keyword.value)}` "
                     f"spread into {_call_name(node)}(...)")
 
-    for module, node in _calls_of(c, "utils/detach.py", "report_progress", inventory):
+    for module, node in _calls_of(c, "utils/run_record.py", "report_progress", inventory):
         keywords(module, node)
     for module, node in _calls_of(c, "utils/detach.py", "progress", inventory,
                                   class_name="RunHandle"):

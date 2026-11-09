@@ -1041,7 +1041,7 @@ class TestResolutionRecording:
             un.record_resolution(None, "not-a-site", "x")
 
     def test_a_detached_run_lands_it_in_status_json(self, tmp_path, monkeypatch):
-        from utils import detach, status_file
+        from utils import detach, run_record, status_file
         phase_dir = tmp_path / "review-plan"
         phase_dir.mkdir()
         plan = tmp_path / "p.md"
@@ -1053,7 +1053,7 @@ class TestResolutionRecording:
         status_file.claim_run(str(phase_dir), {
             "run_id": "run-1", "state": "running",
         })
-        monkeypatch.setattr(detach, "_ACTIVE", handle)
+        monkeypatch.setattr(run_record, "_ACTIVE", handle)
         un.record_resolution(str(phase_dir), "model-selection", "defaults.models: a:b")
         run = status_file.read_run(str(phase_dir))
         assert [r["site"] for r in run["resolutions"]] == ["model-selection"]
@@ -1415,7 +1415,7 @@ class TestApplyPhaseRowsAreRecorded:
         `run.resolutions` stayed `[]` on exactly the runs that needed it, because
         `detach.record_resolution` is a no-op until the worker owns the phase dir.
         """
-        from utils import detach, status_file
+        from utils import detach, run_record, status_file
 
         plan = tmp_path / "p.md"
         plan.write_text("# P\n", encoding="utf-8")
@@ -1427,7 +1427,7 @@ class TestApplyPhaseRowsAreRecorded:
             plan_file=str(plan), detached=True,
         )
         status_file.claim_run(str(phase_dir), {"run_id": "run-1", "state": "running"})
-        monkeypatch.setattr(detach, "_ACTIVE", handle)
+        monkeypatch.setattr(run_record, "_ACTIVE", handle)
 
         _stub_apply_run(tmp_path, yes=True)
         capsys.readouterr()

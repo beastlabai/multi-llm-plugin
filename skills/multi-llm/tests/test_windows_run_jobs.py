@@ -39,7 +39,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from utils import cli_common, detach, process_control, run_registry, status_file  # noqa: E402
+from utils import cli_common, detach, process_control, run_registry, run_sweep, status_file  # noqa: E402
 
 SKILL_ROOT = Path(__file__).parent.parent
 WINDOWS_ONLY = pytest.mark.skipif(sys.platform != "win32", reason="the real Win32 calls")
@@ -726,7 +726,7 @@ class TestTheKillSites:
         monkeypatch.setattr(process_control, "process_alive", leader.process_alive)
         monkeypatch.setattr(process_control, "probe", lambda *_a: process_control.ALIVE)
         monkeypatch.setattr(process_control, "_send_ctrl_break", leader.end)
-        [row] = run_registry.sweep(str(root))
+        [row] = run_sweep.sweep(str(root))
         assert (row["run_id"], row["action"]) == (RUN_ID, "killed")
         assert windows.terminated == [NAME] and windows.taskkills == []
         assert ("close", 101) in windows.calls
@@ -827,7 +827,7 @@ class TestTheKillSites:
             })
             os.utime(old, (time.time() - 8 * 86400,) * 2)
             monkeypatch.setattr(process_control, "probe", lambda *_a: process_control.ALIVE)
-            run_registry.sweep(str(root))
+            run_sweep.sweep(str(root))
             assert seen == [(4242, {"start_time": "t0", "pgid": 77})]
             return
         _record(phase, plan, pgid=77)

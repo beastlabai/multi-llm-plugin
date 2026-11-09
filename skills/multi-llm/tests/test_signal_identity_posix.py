@@ -39,7 +39,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tests.test_kill_tree_posix import _Host  # noqa: E402
-from utils import detach, process_control, run_registry, run_status, status_file  # noqa: E402
+from utils import detach, process_control, run_record, run_registry, run_status, run_sweep, status_file  # noqa: E402
 from utils import dispatch_spawn  # noqa: E402
 
 pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
@@ -996,7 +996,7 @@ class TestTheWorkerFinishingDuringAnAbort:
         assert "cleanup:        PENDING" in capsys.readouterr().out
         monkeypatch.setattr(run_registry, "verdict_for", lambda _e: process_control.DEAD)
         calls = _kills(monkeypatch, "killed")
-        [row] = run_registry.sweep(root)
+        [row] = run_sweep.sweep(root)
         assert row["action"] == "closed" and calls[0]["pid"] == _WORKER
         assert status_file.read_run(str(phase))["cleanup"]["state"] == "complete"
         assert not _entry_kept(root) and not clis.exists()
@@ -1102,7 +1102,7 @@ class TestTheSweepTargetsOnlyTheRecordItValidated:
         monkeypatch.setattr(run_registry, "verdict_for", lambda _e: process_control.DEAD)
         real = self._claimed_after_the_read(monkeypatch, phase)
         calls = _kills(monkeypatch, "killed")
-        run_registry.sweep(root)
+        run_sweep.sweep(root)
         assert {(c["run_id"], c["pid"]) for c in calls} == {("run-u77", _WORKER)}
         new = real(str(phase))
         assert (new["run_id"], new["state"]) == ("run-new", "running")
@@ -1128,11 +1128,11 @@ class TestASweepThatCouldNotConfirmTheTeardown:
         # The phase dir belongs to a newer run by now.
         status_file.claim_run(str(phase), {"run_id": "run-new", "state": "running"})
         _kills(monkeypatch, verdict)
-        rows = run_registry.sweep(root)
+        rows = run_sweep.sweep(root)
         assert [(row["action"], row["kill_verdict"]) for row in rows] == [
             ("needs_attention", verdict)]
         assert _entry(root)["cleanup"]["state"] == "incomplete"
-        assert run_registry.main(["--project-root", root, "--sweep"]) == 3
+        assert run_sweep.main(["--project-root", root, "--sweep"]) == 3
         assert "needs_attention" in capsys.readouterr().out
         assert status_file.read_run(str(phase))["run_id"] == "run-new"
 
@@ -1141,13 +1141,13 @@ class TestASweepThatCouldNotConfirmTheTeardown:
         clis = _write_record(phase)
         monkeypatch.setattr(run_registry, "verdict_for", lambda _e: process_control.DEAD)
         _kills(monkeypatch, "unresolved")
-        assert [row["action"] for row in run_registry.sweep(root)] == ["needs_attention"]
+        assert [row["action"] for row in run_sweep.sweep(root)] == ["needs_attention"]
         # A new run claims the dir; the old entry's retry is the old run's.
         status_file.claim_run(str(phase), {
             "run_id": "run-next", "pid": 4200, "process_start_time": "next",
             "pgid": 4200, "state": "running"})
         calls = _kills(monkeypatch, "killed")
-        assert [row["action"] for row in run_registry.sweep(root)] == ["closed"]
+        assert [row["action"] for row in run_sweep.sweep(root)] == ["closed"]
         assert [(c["run_id"], c["pid"], c["start_time"], c["pgid"]) for c in calls] == [
             ("run-u77", _WORKER, "worker", _GROUP)]
         assert calls[0]["members"] == [_cli(_MEMBER, "member", _GROUP)]
@@ -1160,7 +1160,7 @@ class TestASweepThatCouldNotConfirmTheTeardown:
         plan, phase, root = _detached_run(tmp_path)
         monkeypatch.setattr(run_registry, "verdict_for", lambda _e: process_control.DEAD)
         _kills(monkeypatch, "unresolved")
-        rows = run_registry.sweep(root)
+        rows = run_sweep.sweep(root)
         assert [row["action"] for row in rows] == ["needs_attention"]
         assert _entry_kept(root)
 
@@ -1169,7 +1169,7 @@ class TestASweepThatCouldNotConfirmTheTeardown:
         _old(root)
         monkeypatch.setattr(run_registry, "verdict_for", lambda _e: process_control.ALIVE)
         _kills(monkeypatch, "killed")
-        assert [row["action"] for row in run_registry.sweep(root)] == ["killed"]
+        assert [row["action"] for row in run_sweep.sweep(root)] == ["killed"]
         assert not _entry_kept(root)
 
 
@@ -1983,7 +1983,7 @@ class TestARetryRunsTheWholeTeardown:
 
         monkeypatch.setattr(process_control, "kill_run_tree", kill)
         try:
-            rows = run_registry.sweep(root)
+            rows = run_sweep.sweep(root)
         finally:
             process_control.record_cli_identities(None)
         # The prune's kill closes the gate first; the close-out of the run's
@@ -2077,7 +2077,7 @@ class TestAnExecutorTimeoutThatCouldNotStopItsRunner:
         process_control.record_cli_identities(str(phase), "run-u77")
         handle = detach.RunHandle(str(phase), run_id="run-u77", mode="review-plan",
                                   plan_file=str(plan))
-        monkeypatch.setattr(detach, "_ACTIVE", handle)
+        monkeypatch.setattr(run_record, "_ACTIVE", handle)
         token = process_control._record_launch()
         process_control._record_spawned(token, proc)
         try:
@@ -2109,7 +2109,7 @@ class TestAnExecutorTimeoutThatCouldNotStopItsRunner:
         monkeypatch.setattr(process_control, "_CLI_RECORD", [])
         handle = detach.RunHandle(str(phase), run_id="run-u77", mode="review-plan",
                                   plan_file=str(plan), detached=False)
-        monkeypatch.setattr(detach, "_ACTIVE", handle)
+        monkeypatch.setattr(run_record, "_ACTIVE", handle)
         assert executor._kill_timed_out(proc, _RUNNER) == "unresolved"
         assert "cleanup" not in status_file.read_run(str(phase))
         assert f"pid {_RUNNER}" in capsys.readouterr().err
@@ -2841,7 +2841,7 @@ class TestEveryUnconfirmedTimeoutKillIsReported:
         process_control.record_cli_identities(str(phase), "run-u77")
         handle = detach.RunHandle(str(phase), run_id="run-u77", mode="review-plan",
                                   plan_file=str(plan))
-        monkeypatch.setattr(detach, "_ACTIVE", handle)
+        monkeypatch.setattr(run_record, "_ACTIVE", handle)
         try:
             proc = types.SimpleNamespace(pid=_RUNNER, returncode=None, kill=lambda: None)
             assert executor._kill_timed_out(proc, _RUNNER) == verdict

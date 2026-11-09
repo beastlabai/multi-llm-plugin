@@ -1210,7 +1210,7 @@ class TestTheFanoutReportsProgressWhileItRuns:
 
         with patch.object(cro, "run_single_review", new=_answering_review()), \
              patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0), \
-             patch.object(base._detach, "report_progress", record):
+             patch.object(base._run_record, "report_progress", record):
             results = asyncio.run(cro.run_all_reviews(
                 ["cursor-agent:auto", "claude-code:sonnet", "codex:gpt-5.5"],
                 plan_path, tmp_path, 30, 3,
@@ -1245,7 +1245,7 @@ class TestTheFanoutReportsProgressWhileItRuns:
 
         with patch.object(cro, "run_single_review", new=_answering_review()), \
              patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0), \
-             patch.object(base._detach, "report_progress", record):
+             patch.object(base._run_record, "report_progress", record):
             results = asyncio.run(cro.run_all_reviews(
                 ["cursor-agent:auto", "claude-code:sonnet"],
                 plan_path, tmp_path, 30, 2,
@@ -1288,7 +1288,7 @@ class TestThisLanesOwnFanoutCarriesTheMapAndTheTicker:
         plan_path.write_text("# plan\n", encoding="utf-8")
         specs = ["cursor-agent:auto", "claude-code:sonnet", "codex:gpt-5.5"]
         calls = []
-        real_report_progress = base._detach.report_progress
+        real_report_progress = base._run_record.report_progress
 
         def record(phase_dir, **updates):
             calls.append(dict(updates))
@@ -1296,7 +1296,7 @@ class TestThisLanesOwnFanoutCarriesTheMapAndTheTicker:
 
         with patch.object(cro, "run_single_review", new=_answering_review()), \
              patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0), \
-             patch.object(base._detach, "report_progress", record):
+             patch.object(base._run_record, "report_progress", record):
             asyncio.run(cro.run_all_reviews(specs, plan_path, tmp_path, 30, 3))
 
         seeded = calls[0]["models"]

@@ -1212,7 +1212,7 @@ class TestValidationJsonIsNamedOnBothChannels:
     and `apply_task_suggestions_orchestrator.load_data` hard-fails without it."""
 
     def _aggregate(self, phase_dir, temp_dir, with_validation: bool):
-        from utils import detach, status_file
+        from utils import run_record, status_file
         from utils.json_extractor import sanitize_model_name
 
         suggestions = [{
@@ -1239,8 +1239,8 @@ class TestValidationJsonIsNamedOnBothChannels:
         plan_path = temp_dir / "test-plan.md"
         plan_path.write_text("# Test Plan\n\n## Overview\nTest.\n", encoding="utf-8")
 
-        saved = detach._ACTIVE
-        detach._ACTIVE = _FakeRunHandle(phase_dir)
+        saved = run_record._ACTIVE
+        run_record._ACTIVE = _FakeRunHandle(phase_dir)
         try:
             aggregate_results(
                 prefix="test-plan",
@@ -1252,7 +1252,7 @@ class TestValidationJsonIsNamedOnBothChannels:
                 plan_path=str(plan_path),
             )
         finally:
-            detach._ACTIVE = saved
+            run_record._ACTIVE = saved
         return status_file.read_status(phase_dir).get("output_files") or {}
 
     def test_validation_json_is_recorded_as_an_output_file(self, phase_dir, temp_dir):

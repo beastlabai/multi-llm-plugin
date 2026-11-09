@@ -645,6 +645,7 @@ def consume_document(plan_path: Path, result_path: str) -> int:
     # `done` run beside `phase state: subagents_failed` — measured 2026-09-14,
     # on the successful retry the opencode plugin then showed the session model.
     from utils import detach as _detach
+    from utils import run_record as _run_record
     from utils.status_file import update_status as _update_status
 
     phase_dir = str(get_phase_dir(plan_path, PHASE_NAME))
@@ -668,7 +669,7 @@ def consume_document(plan_path: Path, result_path: str) -> int:
     # `tasks 10/10` that pair rendered read as a live count of tasks.md, and
     # stayed 10/10 after apply-task-suggestions split two tasks into four
     # (2026-10-04, Claude Code racing re-run).
-    _detach.report_progress(phase_dir, step="complete", tasks_generated=len(tasks))
+    _run_record.report_progress(phase_dir, step="complete", tasks_generated=len(tasks))
     print(f"\nTask generation complete: {len(tasks)} task(s) in {tasks_path}")
     # No "Next: uv run … review-tasks" line here (issue #17, 2026-10-02): it sat
     # beside `[NEXT_COMMAND]` in the log, and a dispatcher command is not a

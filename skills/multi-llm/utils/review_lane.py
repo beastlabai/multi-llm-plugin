@@ -55,6 +55,7 @@ from . import held_folder as _held_folder
 from . import interactive as _interactive
 from . import result_files as _result_files
 from . import review_round as _review_round
+from . import run_record as _run_record
 from . import run_registry as _run_registry
 from . import scope_policy as _sp
 from . import scope_round as _scope_round
@@ -1479,7 +1480,7 @@ async def close_fanout(
     # Both counters, on the post-salvage truth: `models_done` counts finished
     # slots (every one by now), `models_succeeded` the ones with a result. No
     # `models` key, so the map the fan-out's sweep froze stays as it is.
-    _detach.report_progress(
+    _run_record.report_progress(
         phase_dir, step="grouping",
         models_total=len(model_specs),
         models_done=len(model_specs),
@@ -1676,7 +1677,7 @@ async def _salvage_in_process(
     (``record_models_salvaged``), since terminal transitions are idempotent.
     """
     phase_dir = str(lane.phase_dir)
-    _detach.report_progress(phase_dir, step="salvage")
+    _run_record.report_progress(phase_dir, step="salvage")
     salvage_ticker = PhaseProgress(phase_dir, anchor=str(lane.plan_path))
     salvage_ticker.start_ticker()
     try:
@@ -2287,7 +2288,7 @@ async def _resume_round(
         )
         return RoundOutcome(groups=groups, verdicts=claim.verdicts)
 
-    _detach.report_progress(phase_dir, step="validation_pending")
+    _run_record.report_progress(phase_dir, step="validation_pending")
     print(f"Only {batches_found}/{total_batches} batch files found.")
     print("Wait for all validation subagents to complete before reaggregating.")
     return RoundOutcome(handed_off=True)
@@ -2322,7 +2323,7 @@ async def _materialize_round(
     # the previous round's batches is cleared: nothing of this one has run yet.
     claim.check("reopen the phase for validation")
     steps.reopen_phase_for_validation(plan_path, phase_name, phase_dir)
-    _detach.report_progress(phase_dir, step="validation_pending", subagents=None)
+    _run_record.report_progress(phase_dir, step="validation_pending", subagents=None)
 
     total_batches = batched_tasks["total_batches"]
     stats = batched_tasks.get("batching_stats", {})

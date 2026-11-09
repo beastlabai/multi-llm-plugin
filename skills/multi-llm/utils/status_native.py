@@ -17,7 +17,7 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from . import detach, status_views, task_ledger
+from . import detach, run_record, status_views, task_ledger
 from .advisory import note_swallowed
 from .task_ledger import (
     TALLY_DONE as _TALLY_DONE,
@@ -604,7 +604,7 @@ def _native_emit_time(directory: Path) -> Optional[float]:
         note_swallowed("status: native emit time", exc)
         document = None
     record = document.get("native_run") if isinstance(document, dict) else None
-    emitted = detach._parse_stamp(
+    emitted = run_record._parse_stamp(
         record.get("emitted_at") if isinstance(record, dict) else None)
     if emitted is not None:
         try:
@@ -630,7 +630,7 @@ def _run_started_after_native_emit(view: Mapping[str, Any], directory: Path) -> 
     readable start (a foreground run records none) keeps the stamp's
     reading, as does an emit with no readable time."""
     run = view.get("run") if isinstance(view.get("run"), Mapping) else {}
-    started = detach._parse_stamp(run.get("started_at"))
+    started = run_record._parse_stamp(run.get("started_at"))
     if started is None:
         return False
     emitted = _native_emit_time(directory)

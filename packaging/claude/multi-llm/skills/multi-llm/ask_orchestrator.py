@@ -97,8 +97,8 @@ from utils.detach import (
     classify_run,
     lock_path,
     record_output_files,
-    report_progress,
 )
+from utils.run_record import report_progress
 from utils.progress_tracker import DEADLINE_ERROR, FanoutProgress, PhaseProgress
 from utils.review_orchestrator_base import (
     backfill_deadline_losses,

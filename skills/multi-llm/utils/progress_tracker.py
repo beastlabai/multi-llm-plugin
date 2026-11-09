@@ -66,7 +66,7 @@ rather than a preference:
 
 Top-level imports stay light on purpose. ``utils.run_status`` reuses the
 formatters below to render ``status --view run``, and ``status`` must stay a
-sub-second command, so ``utils.detach``, ``utils.status_file`` and
+sub-second command, so ``utils.run_record``, ``utils.status_file`` and
 ``utils.provider_registry`` are imported lazily inside the functions that need
 them rather than dragged in by every importer of this module.
 """
@@ -209,7 +209,7 @@ def _now_iso() -> str:
 
     Single-sourced from ``status_file.now_iso`` — the same writer as
     ``heartbeat_at`` — so every ISO stamp in ``.status.json`` parses with one
-    reader (``detach._elapsed_since``) rather than with two that disagree about
+    reader (``run_record._elapsed_since``) rather than with two that disagree about
     the timezone suffix.
     """
     from . import status_file
@@ -396,12 +396,12 @@ def entry_elapsed_s(
         return None
 
     # One ISO parser for the whole checkpoint (`heartbeat_at`, `dispatched_at`,
-    # `started_at`), imported lazily so `status` does not pay for the detach
-    # subtree just to format a row.
-    from . import detach
+    # `started_at`), the run record's, imported lazily like the rest of this
+    # module's run-record reads.
+    from . import run_record
 
     dispatched = entry.get("dispatched_at")
-    live = detach._elapsed_since(
+    live = run_record._elapsed_since(
         dispatched if dispatched else entry.get("started_at"), now
     )
     if live is None:
@@ -463,18 +463,18 @@ def entry_queued_s(
     if entry.get("ended_at"):
         return _stored_duration(entry.get("queued_s"))
 
-    from . import detach
+    from . import run_record
 
     if awaits_first_dispatch(entry):
-        return detach._elapsed_since(entry.get("started_at"), now)
+        return run_record._elapsed_since(entry.get("started_at"), now)
     dispatched = entry.get("dispatched_at")
     if not dispatched:
         return None
     stored = _stored_duration(entry.get("queued_s"))
     if stored is not None:
         return stored
-    start = detach._parse_stamp(entry.get("started_at"))
-    end = detach._parse_stamp(dispatched)
+    start = run_record._parse_stamp(entry.get("started_at"))
+    end = run_record._parse_stamp(dispatched)
     if start is None or end is None:
         return None
     try:
@@ -504,9 +504,9 @@ def entry_stagger_remaining_s(
         return None
     from datetime import datetime
 
-    from . import detach
+    from . import run_record
 
-    when = detach._parse_stamp(entry.get("stagger_until"))
+    when = run_record._parse_stamp(entry.get("stagger_until"))
     if when is None:
         return None
     try:
@@ -1518,9 +1518,9 @@ class FanoutProgress:
         """
         done, succeeded, total = self.counts()
         try:
-            from . import detach
+            from . import run_record
 
-            detach.report_progress(
+            run_record.report_progress(
                 self.phase_dir,
                 models=self.snapshot(),
                 models_done=done,

@@ -392,11 +392,15 @@ the review step under it instead of taking it again, so the round stays owned th
 `brief and state left unchanged`. **Under `--detach` the launcher publishes nothing:** it writes the
 header, `commit_range` and any new context-plan snapshot to `<phase dir>/.commit-stage-<hex>.json`,
 names it with the hidden `--commit-stage` (dropped from replay like `--revs`), and the worker applies
-it right after `_acquire_lock` (`commit_front_door.apply_stage`), before the phase reads the brief. A refused or re-attached
+it right after `_acquire_lock` (`commit_front_door.apply_stage`), before the phase reads the brief.
+`detach` sits below the front door, so the worker's entry hands it that applier
+(`commit_front_door.hand_worker_the_stage_applier`): the dispatcher and, for a worker started directly, the
+three orchestrators the doors run (`code_review_orchestrator`, `apply_code_fixes_orchestrator`,
+`improve_commits_orchestrator`). A refused or re-attached
 launch deletes its stage and a worker that loses the lock applies nothing; a brief that does not exist yet
 is the exception, created by the launcher with an exclusive create. The restart's synthesised
 `--force --rerun-all` never takes over a live run: in `detach.launch` only a typed `--force` does, which
-the stage records as `typed_force`.
+the stage records as `typed_force` (`commit_paths.stage_takes_over`).
 
 **What step 7 records.** Three readers take the invocation record as it stands: `maybe_detach`'s mode
 check, the detached child's argv (`detach.build_worker_argv`) and `_emit_user_next_step`, which answers

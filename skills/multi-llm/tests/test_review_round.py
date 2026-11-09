@@ -2857,14 +2857,14 @@ class TestTheRegistryDecidesAndAMalformedRecordRefuses:
         """Codex's sequence: the run's entry carries what its checkpoint does;
         the sweep confirms the worker gone and drops the entry, leaving the
         checkpoint's value as it was. Every entry then goes on."""
-        from utils import run_registry
+        from utils import run_registry, run_sweep
 
         _stopped_run(tmp_path, cleanup)
         entry = _kept_entry(tmp_path / "p.md", cleanup, phase_dir=tmp_path, pid=_GONE_PID,
                             pgid=None)
         self._refused(tmp_path, "foreground")
         _refusal_names(capsys.readouterr().err, cleanup, entry, tmp_path)
-        rows = run_registry.sweep(run_registry.resolve_project_root(str(tmp_path / "p.md")))
+        rows = run_sweep.sweep(run_registry.resolve_project_root(str(tmp_path / "p.md")))
         assert [(row["run_id"], row["action"]) for row in rows] == [(_LEFT, "closed")]
         assert not entry.exists()
         assert _status(tmp_path)["run"]["cleanup"] == cleanup, "the checkpoint's value stays"

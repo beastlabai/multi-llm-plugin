@@ -353,14 +353,14 @@ class TestImplementOrchestratorWiring:
 
         Mirrors ``test_unattended.TestApplyPhaseRowsAreRecorded.
         test_a_detached_apply_run_lands_both_in_status_json``: a fake
-        ``RunHandle`` is installed as ``detach._ACTIVE`` (claimed via
+        ``RunHandle`` is installed as ``run_record._ACTIVE`` (claimed via
         ``status_file.claim_run``, never ``.start()``, so no lock/heartbeat/
         signal-handler machinery runs) and the orchestrator is driven in the
         foreground (no ``--detach``/``--internal-worker``) — ``detach.
         record_resolution``/``record_output_files`` only check whether
         ``_ACTIVE`` names this phase dir, not how it got there.
         """
-        from utils import detach, status_file
+        from utils import detach, run_record, status_file
 
         _seed_generate_tasks(repo)
         repo.monkeypatch.setenv("MOCK_LLM_EDITS", json.dumps([
@@ -387,7 +387,7 @@ class TestImplementOrchestratorWiring:
             plan_file=str(repo.plan), detached=True,
         )
         status_file.claim_run(str(phase_dir), {"run_id": "run-1", "state": "running"})
-        monkeypatch.setattr(detach, "_ACTIVE", handle)
+        monkeypatch.setattr(run_record, "_ACTIVE", handle)
 
         code = implement_orchestrator.main([
             "--plan-file", str(repo.plan), "--yes", "--exec-subagents",
@@ -973,7 +973,7 @@ class TestFullStackDetachedImplement:
             pytest.skip("the POSIX double-spawn path; Windows is covered in CI")
         import time
 
-        from utils import detach, status_file
+        from utils import detach, run_record, status_file
 
         _seed_generate_tasks(repo)
         stub = tmp_path / "uv-stub"

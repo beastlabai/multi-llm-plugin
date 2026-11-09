@@ -878,12 +878,12 @@ class TestTheHostIsToldWhatWasProduced:
     `tasks.md`, the plan edit, or how many tasks had been generated."""
 
     def _consume_detached(self, tmp_path, monkeypatch, capsys):
-        from utils import detach, status_file
+        from utils import run_record, status_file
 
         plan = _plan(tmp_path)
         _materialize(plan)
         _persist(plan, _valid_document())
-        monkeypatch.setattr(detach, "_ACTIVE", _FakeRunHandle(_phase_dir(plan)))
+        monkeypatch.setattr(run_record, "_ACTIVE", _FakeRunHandle(_phase_dir(plan)))
         assert multi_llm.main(["generate-tasks", str(plan), "--yes", "--reaggregate"]) == 0
         capsys.readouterr()
         return plan, status_file.read_status(str(_phase_dir(plan)))

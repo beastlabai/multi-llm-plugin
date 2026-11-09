@@ -774,8 +774,8 @@ def publish_result_notes(phase_dir: os.PathLike | str) -> None:
 
 def _publish(phase_dir: str, notes: List[str]) -> None:
     try:
-        from . import detach as _detach
-        _detach.report_progress(phase_dir, notes=list(notes))
+        from . import run_record as _run_record
+        _run_record.report_progress(phase_dir, notes=list(notes))
     except Exception:  # noqa: BLE001 - reporting never fails a slot
         pass
 

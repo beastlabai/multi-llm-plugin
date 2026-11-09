@@ -81,11 +81,14 @@ from .commit_paths import (  # noqa: F401
     PINNED_PATTERN,
     _PINNED_RE,
     read_commit_range,
+    read_stage,
     _relative_to_root,
     repo_root_of,
     _slug,
     SLUG_PATTERN,
     _SLUG_RE,
+    stage_takes_over,
+    _STAGE_VERSION,
     _start_dir,
 )
 
@@ -120,7 +123,6 @@ STAGE_FLAG = "--commit-stage"
 #: never moves it.
 STAGE_PREFIX = ".commit-stage-"
 STAGE_SUFFIX = ".json"
-_STAGE_VERSION = 1
 
 #: How ``util commit-brief`` names itself in its messages, and the composite
 #: whose native leg it prepares (its parser is the one the tokens are read
@@ -1324,40 +1326,12 @@ def _write_stage(directory: Path, *, mode: str, brief: Path, cr: Any, base_ref: 
     return path
 
 
-def read_stage(stage: PathLike) -> Optional[Dict[str, Any]]:
-    """A stage file's payload, or None when it is gone (already applied)."""
-    try:
-        with open(stage, "r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except FileNotFoundError:
-        return None
-    if not isinstance(data, dict) or data.get("version") != _STAGE_VERSION:
-        raise CommitReviewError(f"ERROR: {stage} is not a commit-review stage this "
-                                f"version can apply", exit_code=_EXIT_ERROR)
-    return data
-
-
-def stage_takes_over(stage: Optional[PathLike]) -> bool:
-    """Whether a launch carrying *stage* may take a live run over with its
-    ``--force``: only when the user typed ``--force``. A restart's
-    synthesised ``--force`` restarts the round and never takes over a live
-    run. True when there is no readable stage (the flag decides)."""
-    if not stage:
-        return True
-    try:
-        data = read_stage(stage)
-    except (CommitReviewError, OSError, ValueError):
-        return True
-    if data is None:
-        return True
-    return bool(data.get("typed_force", True))
-
-
 def apply_stage(stage: PathLike) -> None:
     """Apply a ``--detach`` launch's stage, in the worker, once it owns the dir.
 
     Called by ``detach.RunHandle`` right after ``_acquire_lock`` (a worker
-    that loses the lock applies nothing): the restart's archive, the new
+    that loses the lock applies nothing; the worker's entry hands it over,
+    :func:`hand_worker_the_stage_applier`): the restart's archive, the new
     context-plan snapshot, the new header, then ``commit_range`` through
     ``StateManager.record_commit_range``; then the stage is deleted. The
     archive and dropped-decision lines go to the worker's log. A stage that
@@ -1385,6 +1359,26 @@ def apply_stage(stage: PathLike) -> None:
         path.unlink()
     except FileNotFoundError:
         pass
+
+
+def hand_worker_the_stage_applier(argv: Optional[Sequence[str]] = None) -> None:
+    """In a detached worker (*argv*, default ``sys.argv[1:]``, carries
+    ``--internal-worker``), hand ``detach`` :func:`apply_stage`, which it calls
+    right after the worker's lock. ``detach`` sits below this module and imports
+    nothing above its layer (docs/development/dispatcher.md#import-layers).
+
+    Every entry a staged worker starts from calls this before its phase: the
+    dispatcher (``multi_llm.main``) and, run directly by path or ``-m``, the
+    orchestrators the front doors run (``code_review_orchestrator``,
+    ``apply_code_fixes_orchestrator``, ``improve_commits_orchestrator``). Any
+    other process is handed nothing.
+    """
+    from .cli_common import INTERNAL_FLAG_PREFIX
+    from .detach import register_commit_stage_applier
+
+    tokens = sys.argv[1:] if argv is None else argv
+    if INTERNAL_FLAG_PREFIX + "worker" in tokens:
+        register_commit_stage_applier(apply_stage)
 
 
 def header_identity(*, base: Optional[str], head: str, focus: Optional[str],

@@ -1360,7 +1360,12 @@ class TestStage:
         commit_review.apply_stage(stage)
         assert "code-review" not in _state(brief)["phases_completed"]
 
-    def test_the_worker_applies_the_stage_right_after_its_lock(self, repo, fronted):
+    def test_the_worker_applies_the_stage_right_after_its_lock(self, repo, fronted,
+                                                               monkeypatch):
+        from utils import commit_front_door
+
+        # The applier a worker's entry hands it (hand_worker_the_stage_applier).
+        monkeypatch.setattr(detach, "_COMMIT_STAGE_APPLIER", commit_front_door.apply_stage)
         stage = self._staged(repo, "--revs", "last 2 commits", "--focus", "X")
         brief = _brief_of(repo, _sha(repo, "HEAD~2"), _sha(repo, "HEAD"))
         handle = detach.RunHandle(str(output_dir_for_brief(brief) / "code-review"), run_id="r1",
@@ -1373,6 +1378,59 @@ class TestStage:
             handle._lock.release()
         assert _state(brief)["commit_range"]["focus"] == "X"
         assert not stage.exists()
+
+    def test_a_worker_with_no_applier_stops_before_it_changes_anything(
+            self, repo, fronted, monkeypatch):
+        """``detach`` sits below the front door and is handed its applier; a
+        stage that arrives without one stops the worker like a failed apply."""
+        monkeypatch.setattr(detach, "_COMMIT_STAGE_APPLIER", None)
+        stage = self._staged(repo, "--revs", "last 2 commits", "--focus", "X")
+        brief = _brief_of(repo, _sha(repo, "HEAD~2"), _sha(repo, "HEAD"))
+        phase = output_dir_for_brief(brief) / "code-review"
+        handle = detach.RunHandle(str(phase), run_id="r1", mode="review-code",
+                                  plan_file=str(brief), detached=False,
+                                  commit_stage=str(stage))
+        handle._acquire_lock()
+        with pytest.raises(detach.DetachError, match="could not apply the commit-review stage"):
+            handle._apply_commit_stage()
+        assert stage.exists()
+        assert not (output_dir_for_brief(brief) / "state.json").exists()
+        # The lock was given up with the refusal.
+        other = process_control.PhaseLock(detach.lock_path(str(phase)))
+        other.acquire({"run_id": "other", "pid": os.getpid(),
+                       "process_start_time": process_control.process_start_time(os.getpid())})
+        other.release()
+
+    def test_the_dispatcher_hands_a_worker_the_stage_applier(self, monkeypatch, capsys):
+        from utils import commit_front_door
+
+        monkeypatch.setattr(detach, "_COMMIT_STAGE_APPLIER", None)
+        monkeypatch.setattr(detach, "prepare_worker_output", lambda: None)
+        monkeypatch.setattr(multi_llm, "_dispatch", lambda argv, ctx: 0)
+        assert multi_llm.main(["review-code", "--internal-worker"]) == 0
+        assert detach._COMMIT_STAGE_APPLIER is commit_front_door.apply_stage
+        monkeypatch.setattr(detach, "_COMMIT_STAGE_APPLIER", None)
+        assert multi_llm.main(["review-code"]) == 0
+        assert detach._COMMIT_STAGE_APPLIER is None, "only a worker is handed it"
+        capsys.readouterr()
+
+    @pytest.mark.parametrize("argv", [None, ["--plan-file", "x.md"]],
+                             ids=["sys.argv", "argv"])
+    def test_only_a_worker_is_handed_the_stage_applier(self, monkeypatch, argv):
+        """The helper every staged worker's entry calls (the dispatcher and
+        the orchestrators the front doors run, entered directly)."""
+        from utils import commit_front_door
+
+        monkeypatch.setattr(detach, "_COMMIT_STAGE_APPLIER", None)
+        monkeypatch.setattr(sys, "argv", ["code_review_orchestrator.py", "--plan-file", "x.md"])
+        commit_front_door.hand_worker_the_stage_applier(argv)
+        assert detach._COMMIT_STAGE_APPLIER is None, "only a worker is handed it"
+        worker = ["--internal-worker", "--internal-run-id", "r1"]
+        if argv is None:
+            monkeypatch.setattr(sys, "argv", [*sys.argv, *worker])
+        commit_front_door.hand_worker_the_stage_applier(
+            None if argv is None else [*argv, *worker])
+        assert detach._COMMIT_STAGE_APPLIER is commit_front_door.apply_stage
 
     def test_a_worker_that_loses_the_lock_applies_nothing(self, repo, fronted):
         stage = self._staged(repo, "--revs", "last 2 commits", "--focus", "X")

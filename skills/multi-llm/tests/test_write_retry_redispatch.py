@@ -454,11 +454,11 @@ def test_a_failed_dispatch_with_no_result_file_draws_no_verdict_warning(env):
 @pytest.mark.parametrize("mode", ["full", "improve-plan", "improve-code"])
 def test_parent_runtime_files_are_not_runner_edits(env, mode):
     from types import SimpleNamespace
-    from utils import detach
+    from utils import run_record
 
     parent = env.out_dir / mode
     parent.mkdir()
-    env.monkeypatch.setattr(detach, "_ACTIVE", SimpleNamespace(phase_dir=str(parent)))
+    env.monkeypatch.setattr(run_record, "_ACTIVE", SimpleNamespace(phase_dir=str(parent)))
     scheduler = env.scheduler([env.apply_task(0)])
     before = scheduler._sweep.census()
     for name in (".status.json", ".status.lock", "orchestrator-run.log"):
@@ -477,11 +477,11 @@ def test_parent_runtime_files_are_not_runner_edits(env, mode):
 
 def test_report_reask_survives_parent_heartbeat_and_log_updates(env):
     from types import SimpleNamespace
-    from utils import detach, write_batch_scheduler as scheduler_module
+    from utils import run_record, write_batch_scheduler as scheduler_module
 
     parent = env.out_dir / "full"
     parent.mkdir()
-    env.monkeypatch.setattr(detach, "_ACTIVE", SimpleNamespace(phase_dir=str(parent)))
+    env.monkeypatch.setattr(run_record, "_ACTIVE", SimpleNamespace(phase_dir=str(parent)))
     env.edits([_patch_edit(env.plan)], prose=True)
     env.monkeypatch.setenv("MOCK_LLM_REPAIR_RESULT", json.dumps(GOOD))
     original = scheduler_module.dispatch_task

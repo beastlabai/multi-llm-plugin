@@ -50,9 +50,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     bootstrap_streams()
     from utils import commit_front_door
 
-    return commit_front_door.front_door(
-        MODE, list(sys.argv[1:] if argv is None else argv)
-    )
+    tokens = list(sys.argv[1:] if argv is None else argv)
+    # A worker started here directly applies its stage as the dispatcher's does.
+    commit_front_door.hand_worker_the_stage_applier(tokens)
+    return commit_front_door.front_door(MODE, tokens)
 
 
 if __name__ == "__main__":

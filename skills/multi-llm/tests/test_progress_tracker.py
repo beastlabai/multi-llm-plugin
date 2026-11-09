@@ -38,7 +38,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from utils import detach
+from utils import detach, run_record
 from utils import progress_tracker
 from utils import status_file
 from utils.progress_tracker import (
@@ -1459,12 +1459,12 @@ class TestTickerLifetime:
     def test_a_write_failure_never_reaches_the_gather(
         self, tmp_path, clock, lines, monkeypatch, capsys
     ):
-        from utils import detach
+        from utils import run_record
 
         def explode(*_args, **_kwargs):
             raise OSError("read-only file system")
 
-        monkeypatch.setattr(detach, "report_progress", explode)
+        monkeypatch.setattr(run_record, "report_progress", explode)
 
         async def scenario():
             tracker = FanoutProgress(tmp_path, SPECS, interval_s=5, timeout=1800)
@@ -1634,7 +1634,7 @@ class TestAbortRetiresTheMapOnDisk:
         # leaks into every later test in the session. Registering the *current*
         # value (None) first is what gets it put back at teardown, whatever the
         # test does with the handle afterwards.
-        monkeypatch.setattr(detach, "_ACTIVE", None)
+        monkeypatch.setattr(run_record, "_ACTIVE", None)
         plan = tmp_path / "a plan.md"
         plan.write_text("# Plan\n", encoding="utf-8")
         phase = tmp_path / "a_plan" / "review-plan"
@@ -2101,7 +2101,7 @@ class TestAFullRunRetiresTheMapsOfThePhasesItDrove:
         monkeypatch.setattr(
             process_control, "install_worker_signal_handlers", lambda _cb: None
         )
-        monkeypatch.setattr(detach, "_ACTIVE", None)
+        monkeypatch.setattr(run_record, "_ACTIVE", None)
         handle = detach.RunHandle(
             str(full), run_id=run_id, mode=mode, plan_file=str(plan),
             detached=False,

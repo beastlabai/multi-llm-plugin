@@ -412,7 +412,7 @@ class TestTheFanOutReportsProgressWhileItRuns:
         ] + (["--force"] if force else [])
         calls = []
         self.dispatched = []
-        real = base._detach.report_progress
+        real = base._run_record.report_progress
 
         def record(phase_dir, **updates):
             calls.append(dict(updates))
@@ -425,7 +425,7 @@ class TestTheFanOutReportsProgressWhileItRuns:
         with patch.object(
             base, "invoke_with_file_output", side_effect=dispatch,
         ), patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0), patch.object(
-            base._detach, "report_progress", record
+            base._run_record, "report_progress", record
         ):
             assert asyncio.run(rpo.main(argv)) == 0
         return calls
@@ -799,7 +799,7 @@ class TestTheMapIsCompleteBeforeTheFirstSlotStarts:
             "--max-parallel", str(len(self.MODELS)),
         ]
         calls = []
-        real = base._detach.report_progress
+        real = base._run_record.report_progress
 
         def record(phase_dir, **updates):
             calls.append(dict(updates))
@@ -809,7 +809,7 @@ class TestTheMapIsCompleteBeforeTheFirstSlotStarts:
             base, "invoke_with_file_output",
             side_effect=lambda **kwargs: _ok_reply(kwargs["model_spec"]),
         ), patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0), patch.object(
-            base._detach, "report_progress", record
+            base._run_record, "report_progress", record
         ):
             assert asyncio.run(rpo.main(argv)) == 0
         return base.get_phase_dir(plan, "review-plan"), calls, emitted
@@ -865,7 +865,7 @@ class TestTheMapIsCompleteBeforeTheFirstSlotStarts:
         # launch write, so the disk as its first invocation *enters* is exactly
         # what a poll landing in that window would render.
         snapshots = []
-        real = base._detach.report_progress
+        real = base._run_record.report_progress
 
         def record(phase_dir, **updates):
             if not snapshots:
@@ -878,7 +878,7 @@ class TestTheMapIsCompleteBeforeTheFirstSlotStarts:
             base, "invoke_with_file_output",
             side_effect=lambda **kwargs: _ok_reply(kwargs["model_spec"]),
         ), patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0), patch.object(
-            base._detach, "report_progress", record
+            base._run_record, "report_progress", record
         ):
             assert asyncio.run(rpo.main(argv)) == 0
 
@@ -1605,7 +1605,7 @@ class TestThePhaseTickerOutlivesTheFanOut:
         phase_dir = base.get_phase_dir(plan, "review-plan")
         maps = {}
         window = {}
-        real = base._detach.report_progress
+        real = base._run_record.report_progress
 
         def record(pd, **updates):
             real(pd, **updates)
@@ -1653,7 +1653,7 @@ class TestThePhaseTickerOutlivesTheFanOut:
             base, "dispatch_subagent_tasks", new=blocking_dispatch
         ), patch.object(
             base, "merge_validation_batches", new=merged
-        ), patch.object(base._detach, "report_progress", record):
+        ), patch.object(base._run_record, "report_progress", record):
             assert asyncio.run(rpo.main(argv)) == 0
 
         # The assertion the defect fails: the dispatch really was reached, and

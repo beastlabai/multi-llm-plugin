@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 
 import multi_llm
-from utils import cli_common, detach, next_phase, process_control, run_status, status_file
+from utils import cli_common, detach, next_phase, process_control, run_record, run_status, status_file
 from utils.state_manager import get_or_create_state
 
 import tests.test_check_gate_fixture as gate
@@ -85,7 +85,7 @@ class TestTheWorkerRecordsItsRoute:
         tmp_path.mkdir()
         monkeypatch.setattr(
             process_control, "install_worker_signal_handlers", lambda _cb: None)
-        monkeypatch.setattr(detach, "_ACTIVE", None)
+        monkeypatch.setattr(run_record, "_ACTIVE", None)
         monkeypatch.setattr(detach, "_sweep_live_clis", lambda: None)
         monkeypatch.setattr(detach, "_restore_codex_trust", lambda: None)
         monkeypatch.chdir(tmp_path)

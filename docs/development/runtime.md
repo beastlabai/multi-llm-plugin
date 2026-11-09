@@ -132,7 +132,7 @@ objects, `run` (the process machine `starting → running → {done, failed, abo
 `process_start_time` identity, `exit_code`, `error`,
 `resolutions`) and `progress` (display only). `run` is the
 detached worker's alone (only `claim_run` writes it); `progress` is written
-by **every** run, foreground or detached — `detach.report_progress` falls back to
+by **every** run, foreground or detached — `run_record.report_progress` falls back to
 `status_file.update_progress` when no handle owns the phase dir, so the invariant is "a foreground
 `.status.json` gains a `progress` object and still no `run`
 object", not "gains no new keys". `claim_run` drops the predecessor's `run`, `progress` and
@@ -680,7 +680,8 @@ say so rather than report the run cleanly stopped, and keep what they need to tr
   nor written.
 - `util runs --sweep` closes out an entry whose worker is gone, or whose `cleanup` is not
   `complete`, from the entry's own identities (`detach.close_out_entry`), never from the phase
-  dir's current record. A kill that was `survived`, `unresolved`, `skipped` or raised leaves the
+  dir's current record. The registry decides what each entry needs (`run_registry.sweep`); the
+  close-out and the prune's kill are `detach`'s, which `utils/run_sweep.py` (the command) hands it. A kill that was `survived`, `unresolved`, `skipped` or raised leaves the
   entry `needs_attention` (the kill's verdict in the row), and the sweep exits 3. Another abort or
   sweep tries again; one that confirms every process stopped writes `complete`, and the entry and
   the CLI record go. A record that may miss a process stays incomplete for good: check by hand,

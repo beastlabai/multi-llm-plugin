@@ -50,7 +50,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 from . import (
     output_handler,
@@ -58,6 +58,16 @@ from . import (
     run_registry,
     status_file,
     stream_bootstrap,
+)
+from . import run_record as _run_record
+# The run record's writers and stamp reader live in run_record (L1), which the
+# layers below read: re-exported here for reading only. The active handle is
+# run_record._ACTIVE; patch it there (docs/development/dispatcher.md#import-layers).
+from .run_record import (  # noqa: F401 - re-exported for reading only
+    _elapsed_since,
+    _parse_stamp,
+    record_resolution,
+    report_progress,
 )
 from .advisory import note_swallowed
 from .atomic_io import atomic_write_text
@@ -627,67 +637,9 @@ VERDICT_ABORTED = RUN_STATE_ABORTED
 TERMINAL_VERDICTS = (VERDICT_DONE, VERDICT_FAILED, VERDICT_ABORTED)
 
 
-def _elapsed_since(stamp: Any, now: Optional[float] = None) -> Optional[float]:
-    """Seconds since an ISO timestamp, or ``None`` when it is absent/unreadable.
-
-    The one ISO reader for the whole checkpoint (``heartbeat_at``,
-    ``started_at``, ``dispatched_at``, and every ``progress.models`` row), so its
-    failure modes are ``status``'s failure modes.
-
-    **A timezone-aware stamp is one of them** (F4, 2026-09-20). Every writer here
-    is ``status_file.now_iso`` → ``datetime.now().isoformat()``, which is naive,
-    but a hand-edited or foreign file is exactly what ``read_status``'s contract
-    says must not make ``status`` crash — and
-    ``datetime.fromisoformat("2026-09-19T10:14:03Z")`` parses to an *aware*
-    datetime on 3.11+ (that ``Z`` form is the schema example in the plan, and
-    what the JS tests emit), after which ``datetime.now() - when`` raises
-    ``TypeError``, not the ``ValueError`` this only used to catch. One aware
-    ``started_at`` anywhere in the map therefore took down the whole command.
-    Normalised rather than refused, because a stamp we *can* read is worth an
-    honest elapsed: an aware stamp is converted to this machine's local wall
-    clock, the same clock the naive stamps are already on.
-    """
-    from datetime import datetime
-
-    when = _parse_stamp(stamp)
-    if when is None:
-        return None
-    try:
-        reference = datetime.now() if now is None else datetime.fromtimestamp(now)
-        return max((reference - when).total_seconds(), 0.0)
-    except (ValueError, TypeError, OverflowError, OSError):
-        return None
-
-
-def _parse_stamp(stamp: Any) -> Optional[Any]:
-    """An ISO stamp as a naive local ``datetime.datetime``, or ``None`` if unreadable.
-
-    The parsing half of :func:`_elapsed_since`, split out (2026-09-21) for the
-    one stamp the checkpoint carries that lies in the *future*:
-    ``progress.models[*].stagger_until``, which
-    ``progress_tracker.entry_stagger_remaining_s`` reads as a countdown rather
-    than an age. ``_elapsed_since`` clamps at zero, so a future stamp through it
-    reads ``0`` — honest for an age, useless for a countdown — and a second
-    ``fromisoformat`` call site would be a second place to forget the aware-stamp
-    normalisation F4 was about. Same failure modes, same answer: anything that
-    does not parse is ``None``, never a raise.
-    """
-    from datetime import datetime
-
-    if not stamp:
-        return None
-    try:
-        when = datetime.fromisoformat(str(stamp))
-        if when.tzinfo is not None:
-            when = when.astimezone().replace(tzinfo=None)
-    except (ValueError, TypeError, OverflowError, OSError):
-        return None
-    return when
-
-
 def heartbeat_age(run: Dict[str, Any], now: Optional[float] = None) -> Optional[float]:
     """Seconds since the last heartbeat, or ``None`` when none was recorded."""
-    return _elapsed_since(run.get("heartbeat_at"), now)
+    return _run_record._elapsed_since(run.get("heartbeat_at"), now)
 
 
 def effective_age(run: Dict[str, Any], now: Optional[float] = None) -> Optional[float]:
@@ -703,7 +655,7 @@ def effective_age(run: Dict[str, Any], now: Optional[float] = None) -> Optional[
     age = heartbeat_age(run, now)
     if age is not None:
         return age
-    return _elapsed_since(run.get("started_at"), now)
+    return _run_record._elapsed_since(run.get("started_at"), now)
 
 
 def _open_recommendation(phase_dir: str, recommendation: Any) -> Any:
@@ -1647,12 +1599,28 @@ def decode_replay_flags(raw: Optional[str]) -> List[str]:
 # The worker side
 # ---------------------------------------------------------------------------
 
-_ACTIVE: Optional["RunHandle"] = None
-
-
 def active_run() -> Optional["RunHandle"]:
     """The run this process owns, if it is a detached worker."""
-    return _ACTIVE
+    return _run_record._ACTIVE
+
+
+#: Applies a commit front door's ``--detach`` stage in the worker, right after
+#: its lock (``RunHandle._apply_commit_stage``): ``commit_front_door.apply_stage``,
+#: which publishes the brief through the commit-brief writer, above this
+#: module's layer. So the worker's entry hands it in when the worker starts
+#: (``commit_front_door.hand_worker_the_stage_applier``, called by the
+#: dispatcher and by each orchestrator a front door runs), and this module
+#: imports nothing above its layer (docs/development/dispatcher.md#import-layers).
+#: A stage that arrives with no applier stops the worker as one that fails to
+#: apply does.
+_COMMIT_STAGE_APPLIER: Optional[Callable[[str], None]] = None
+
+
+def register_commit_stage_applier(applier: Optional[Callable[[str], None]]) -> None:
+    """Hand in the function that applies a commit front door's stage
+    (:data:`_COMMIT_STAGE_APPLIER`)."""
+    global _COMMIT_STAGE_APPLIER
+    _COMMIT_STAGE_APPLIER = applier
 
 
 # ---------------------------------------------------------------------------
@@ -1849,7 +1817,7 @@ def _takes_over(args: Any) -> bool:
     §2.1), and the stage records which it was."""
     force = bool(getattr(args, "force", False))
     if force and getattr(args, "commit_stage", None):
-        from .commit_front_door import stage_takes_over
+        from .commit_paths import stage_takes_over
 
         force = stage_takes_over(getattr(args, "commit_stage", None))
     return force
@@ -2688,7 +2656,6 @@ class RunHandle:
     # -- startup --------------------------------------------------------
     def start(self) -> None:
         """Take the dir, publish identity, start beating. Raises on conflict."""
-        global _ACTIVE
         self._acquire_lock()
         # Under the lock, before this run's first write: a mode with no
         # `PhaseRun` entry stops here too.
@@ -2779,7 +2746,7 @@ class RunHandle:
         status_file.update_run(
             self.phase_dir, {"state": RUN_STATE_RUNNING}, expect_run_id=self.run_id
         )
-        _ACTIVE = self
+        _run_record._ACTIVE = self
         print(f"[DETACHED_RUN] run_id={self.run_id} pid={identity['pid']} "
               f"phase_dir={self.phase_dir}")
 
@@ -2799,8 +2766,10 @@ class RunHandle:
         if not self.commit_stage:
             return
         try:
-            from .commit_front_door import apply_stage
-
+            apply_stage = _COMMIT_STAGE_APPLIER
+            if apply_stage is None:
+                raise RuntimeError("no stage applier was handed to this worker "
+                                   "(register_commit_stage_applier)")
             apply_stage(self.commit_stage)
         except Exception as exc:  # noqa: BLE001 - any failure stops the worker
             self._lock.release()
@@ -2982,7 +2951,6 @@ class RunHandle:
         its slots, and rewriting its map from here could only overwrite honest
         endings with ``cancelled``.
         """
-        global _ACTIVE
         if self._closed:
             return
         self._closed = True
@@ -3040,8 +3008,8 @@ class RunHandle:
             run_registry.remove_entry(self.project_root, self.run_id)
             _discard_cli_record(self.phase_dir, self.run_id)
         self._lock.release()
-        if _ACTIVE is self:
-            _ACTIVE = None
+        if _run_record._ACTIVE is self:
+            _run_record._ACTIVE = None
 
     def _atexit(self) -> None:
         """Backstop: no run may be left parked at ``running``.
@@ -3202,7 +3170,7 @@ def finish_active_run(
     *result_state* is the dispatcher's result-context state; see
     :meth:`RunHandle.finish` for how it is bounded.
     """
-    handle = _ACTIVE
+    handle = _run_record._ACTIVE
     if handle is not None:
         handle.finish(exit_code, error=error, result_state=result_state)
 
@@ -3220,7 +3188,7 @@ def note_left_running(pid: Optional[int], pgid: Optional[int],
     elsewhere no record holds an identity a later kill could use. A cleanup
     already open (an abort under way) is left to its kill. ``True`` once
     written. Never raises."""
-    handle = _ACTIVE
+    handle = _run_record._ACTIVE
     try:
         if (handle is None or handle._closed
                 or process_control._CLI_RECORD[:1] != [(handle.phase_dir, handle.run_id)]):
@@ -3238,72 +3206,6 @@ def note_left_running(pid: Optional[int], pgid: Optional[int],
         return False
 
 
-def report_progress(phase_dir: str, **updates: Any) -> None:
-    """Merge *updates* into this phase's reserved ``progress`` object — on every
-    run, foreground or detached.
-
-    The invariant narrowed when the foreground path landed: "a foreground run's
-    ``.status.json`` gains no new keys" became **"a foreground ``.status.json``
-    gains a ``progress`` object and still no ``run`` object"**. That is the whole
-    of the change a reader has to hold. ``progress`` is display-only — nothing
-    resumes, reaggregates or branches on it — while ``run`` is the *process*
-    machine, and only a detached worker's ``claim_run`` ever writes it. So "with
-    ``--detach`` unset, behavior is unchanged" still holds everywhere a reader
-    actually decides something, and a foreground run stops being a phase dir that
-    reports nothing for the length of a fan-out.
-
-    The handle decides **which door** the write goes through, never *whether* it
-    happens. Three cases, and the last one is the non-obvious half:
-
-    * **No handle** (``_ACTIVE is None``) — the foreground, and also a Claude Code
-      native-background run, which is a foreground run inside a background Bash.
-      Write straight through :func:`status_file.update_progress`. That is the
-      entire foreground path, and it deliberately lands under the *same* reserved
-      object in the *same* shape a detached run writes, so one renderer serves
-      both and no second file is invented for the foreground.
-    * **The handle owns this phase dir** — through ``handle.progress``, so a
-      detached worker keeps one door onto its own checkpoint and anything that
-      later has to travel with a run (the heartbeat stamp, the run_id
-      compare-and-set) has a single place to attach.
-    * **A handle owned by a *different* phase dir** — written **directly, into
-      the dir the caller named** (F3, 2026-09-20). This branch used to drop the
-      write silently, and the stated reason — "one run's ticker would scribble
-      into another run's map" — conflated two directories that are never the
-      same one: a tracker writes to the dir it was *built for* and has no way to
-      address the handle's, so no scribbling was ever possible. What the drop
-      really cost was ``full --detach``, which claims ``{plan}/full/`` and then
-      calls each phase's ``main()`` in process while every phase tracker targets
-      ``{plan}/<phase>/``: **every** progress write of the longest-running mode
-      the tool has was discarded, silently, so the log filled with ``[PROGRESS]``
-      lines while ``status --phase review-plan`` showed no map, no counters and
-      no step at all. What the handle legitimately guards is its own record —
-      the heartbeat stamp and the ``run_id`` compare-and-set — which is why a
-      foreign dir goes through ``update_progress`` rather than ``handle.progress``
-      and why ``record_output_files``/``record_resolution`` keep the guard
-      wholesale: those really are the detached hand-back.
-
-    All three branches end in ``status_file.update_status`` under
-    ``checkpoint_lock`` — the critical section that already serializes the 10 s
-    heartbeat thread against the orchestrator's main-thread phase transitions — so
-    the new foreground writer adds no race. ``progress`` merges key by key at its
-    top level, so a write here never erases a sibling another site wrote
-    (``step``, ``sandbox_bypassed``, ``sandbox_fallback``, the ``subagents`` /
-    ``write_subagents`` executor mirrors). The merge is one level *deep* only: a nested value such as
-    the per-model ``models`` map is a single key, and a write carrying it replaces
-    the stored map wholesale rather than deep-merging into it.
-    """
-    handle = _ACTIVE
-    # No handle, or a handle that owns some *other* dir: the same direct write,
-    # into the dir the caller named. The only thing the handle adds is its own
-    # record's heartbeat stamp, and that belongs to its own dir alone.
-    if handle is None or os.path.abspath(handle.phase_dir) != os.path.abspath(
-        str(phase_dir)
-    ):
-        status_file.update_progress(str(phase_dir), updates)
-        return
-    handle.progress(**updates)
-
-
 def record_output_files(phase_dir: str, **paths: Any) -> None:
     """Record this phase's artifacts in ``output_files`` — detached runs only.
 
@@ -3312,7 +3214,7 @@ def record_output_files(phase_dir: str, **paths: Any) -> None:
     what a detached run produced and never has to read the log on the success
     path. Only paths that exist are recorded; a foreground run writes nothing.
     """
-    handle = _ACTIVE
+    handle = _run_record._ACTIVE
     if handle is None or os.path.abspath(handle.phase_dir) != os.path.abspath(str(phase_dir)):
         return
     existing = {
@@ -3339,7 +3241,7 @@ def record_step_results(
     that never got this far (aborted, crashed) leaves an earlier run's record,
     which ``status`` reads as no record at all.
     """
-    handle = _ACTIVE
+    handle = _run_record._ACTIVE
     if handle is None or os.path.abspath(handle.phase_dir) != os.path.abspath(str(phase_dir)):
         return
     status_file.update_status(phase_dir, {"step_results": {
@@ -3357,14 +3259,6 @@ def recorded_step_results(view: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(record, dict) and run.get("run_id") and record.get("run_id") == run["run_id"]:
         return record
     return {}
-
-
-def record_resolution(phase_dir: str, site: str, decision: str) -> None:
-    """Record one auto-resolved decision point, for a detached run only."""
-    handle = _ACTIVE
-    if handle is None or os.path.abspath(handle.phase_dir) != os.path.abspath(str(phase_dir)):
-        return
-    handle.resolution(site, decision)
 
 
 # ---------------------------------------------------------------------------

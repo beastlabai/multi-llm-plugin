@@ -2402,12 +2402,12 @@ class TestAdditiveUntilAsked:
         """F5's second half: `grouping` stood for the whole validation dispatch,
         so a poll could not tell a phase that had eleven batches in flight from
         one that had finished grouping and stalled (measured 2026-09-16)."""
-        from utils import detach as detach_module
+        from utils import run_record
         from utils.review_orchestrator_base import dispatch_subagent_tasks
 
         seen = []
         monkeypatch.setattr(
-            detach_module, "report_progress",
+            run_record, "report_progress",
             lambda phase_dir, **updates: seen.append((str(phase_dir), updates)),
         )
         monkeypatch.setattr(

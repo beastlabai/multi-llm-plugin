@@ -3031,7 +3031,7 @@ def record_human_answers(run: ImplementRun) -> Optional[int]:
     )
     # F8: no run handle is claimed before the detach boundary, so recording
     # against the phase dir here would be a silent no-op
-    # (`detach.record_resolution` only writes when `_ACTIVE` names that phase
+    # (`run_record.record_resolution` only writes when `_ACTIVE` names that phase
     # dir). The decision is buffered, as `ApplyOrchestratorBase._record_resolution`
     # / `_flush_resolutions` do, and replayed past the boundary.
     if (human_task_ids and run.human_task_strategy and run.unattended

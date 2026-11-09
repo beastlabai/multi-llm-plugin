@@ -550,7 +550,8 @@ strings never make an edge. A call with literal arguments is an edge, relative o
 whole graph is parsed with `ast` in under a second.
 
 `KNOWN_UPWARD` in the same file lists the upward edges that existed when the map was drawn (29),
-each with the names that cross it and where they belong; 4 remain. It only shrinks:
+each with the names that cross it and where they belong; none remain, so it is empty. It only
+shrinks:
 
 - **A new upward edge** fails with the importer, the target, every import site and the names that
   cross. Move those names down to the importer's layer or lower and let the old module re-import
@@ -562,6 +563,14 @@ each with the names that cross it and where they belong; 4 remain. It only shrin
   there; the old module's own code reads the owner. `tests/test_layer_moves.py` lists every alias
   (`MOVED`, and `MOVED_WHOLE` for `finalize_tracking.py`, whose body is `utils/tracking.py`),
   checks that each reads as the owner's object, and fails any test that writes one: patch the owner.
+  A name that moved with no alias is in `RETIRED` (a slot the run rebinds, such as
+  `run_record._ACTIVE`, of which an alias would be a stale copy, or a name that moved up a layer);
+  the same guard fails a test that writes its old spelling.
+- **Passing a value in** replaces an upward import when the code that needs it sits above the
+  importer: `run_registry.sweep` takes `detach`'s close-out and kill from `utils/run_sweep.py`, and
+  `detach` applies a commit front door's stage through the applier a worker's entry hands it
+  (`commit_front_door.hand_worker_the_stage_applier`, called by `multi_llm.main` and by the
+  orchestrators the front doors run, which a worker can also be started through directly).
 - **A stale entry**, whose import is gone or no longer points upward, fails until it is deleted.
 - **A new module** fails until it has a layer; the message gives the range its imports and importers
   allow. Choose by role: moving an existing module to another layer is a design change, reviewed

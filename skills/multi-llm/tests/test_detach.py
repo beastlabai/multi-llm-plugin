@@ -43,7 +43,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import multi_llm  # noqa: E402
 import modes as mode_table  # noqa: E402
-from utils import cli_common, detach, process_control, run_registry, run_status, unattended  # noqa: E402
+from utils import cli_common, detach, process_control, run_record, run_registry, run_status, run_sweep, unattended  # noqa: E402
 from utils import progress_tracker, status_file, status_text  # noqa: E402
 from tests.source_cache import python_files, source_text, source_tree
 
@@ -993,7 +993,7 @@ class TestForegroundProgressWrites:
         """The `handle is None` branch, gated on the handle and not on a flag."""
         plan = _plan(tmp_path)
         phase = _phase_dir(plan)
-        monkeypatch.setattr(detach, "_ACTIVE", None)
+        monkeypatch.setattr(run_record, "_ACTIVE", None)
 
         detach.report_progress(
             str(phase), step="fanout", models_total=4, models_done=1
@@ -1028,7 +1028,7 @@ class TestForegroundProgressWrites:
         owned = _phase_dir(plan, "full")
         other = _phase_dir(plan, "review-plan")
         handle = _HandleFor(owned)
-        monkeypatch.setattr(detach, "_ACTIVE", handle)
+        monkeypatch.setattr(run_record, "_ACTIVE", handle)
 
         detach.report_progress(
             str(other), step="fanout", models_done=1, models_total=4
@@ -1069,7 +1069,7 @@ class TestForegroundProgressWrites:
         """
         plan = _plan(tmp_path)
         phase = _phase_dir(plan)
-        monkeypatch.setattr(detach, "_ACTIVE", None)
+        monkeypatch.setattr(run_record, "_ACTIVE", None)
 
         # The siblings, written the way their real sites write them.
         detach.report_progress(str(phase), step="fanout", models_total=2)
@@ -1127,7 +1127,7 @@ class TestForegroundProgressWrites:
         genuinely detached run.
         """
         plan = _plan(tmp_path)
-        monkeypatch.setattr(detach, "_ACTIVE", None)
+        monkeypatch.setattr(run_record, "_ACTIVE", None)
 
         done = _phase_dir(plan, "review-plan")
         status_file.write_status(
@@ -2840,12 +2840,12 @@ class TestStatusSurface:
         })
         handle = _HandleFor(run_dir)
         handle.run_id = run_id
-        monkeypatch.setattr(detach, "_ACTIVE", handle)
+        monkeypatch.setattr(run_record, "_ACTIVE", handle)
         detach.record_step_results(str(run_dir), row.phase, steps if steps is not None else [
             {"phase": review, "validation_counts": self.STEP_COUNTS},
             {"phase": apply, "notice": self.STEP_NOTICE},
         ], [str(report)])
-        monkeypatch.setattr(detach, "_ACTIVE", None)
+        monkeypatch.setattr(run_record, "_ACTIVE", None)
         status_file.update_run(
             str(run_dir), ending or {"state": "done", "exit_code": 0}, expect_run_id=run_id)
         return run_dir, report
@@ -3722,7 +3722,7 @@ class TestRegistry:
         eight_days = time.time() - 8 * 86400
         os.utime(old, (eight_days, eight_days))
 
-        rows = run_registry.sweep(str(root), kill=False)
+        rows = run_sweep.sweep(str(root), kill=False)
         assert {row["run_id"]: row["action"] for row in rows} == {
             "live": "kept", "recycled": "closed", "ancient": "pruned",
         }
