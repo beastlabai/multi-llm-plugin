@@ -81,6 +81,7 @@ from utils.output_handler import (
 from utils.detach import PhaseRun, record_output_files, report_progress
 from utils.progress_tracker import DEADLINE_ERROR, FanoutProgress, PhaseProgress
 from utils import importance as _importance
+from utils import review_lane as _review_lane
 from utils import review_round as _review_round
 from utils import scope_policy as _sp
 from utils import scope_round as _scope_round
@@ -161,7 +162,6 @@ from utils.validation import (
     ValidationContextError,
     bind_document_text,
     decode_document,
-    ensure_prompt_sidecars,
     excerpt_context_reported,
     host_views_lock,
     legacy_context_round_reason,
@@ -170,16 +170,13 @@ from utils.validation import (
     RoundProvenance,
     ValidationRound,
     materialize_validation_round,
-    resolved_reaggregate_command,
 )
 from utils.subagent_prompts import (
     CODE_REVIEW_VALIDATION_GUIDANCE,
     code_review_validation_guidance,
 )
 from utils.subagent_tasks import (
-    TaskFileError,
     build_inputs,
-    read_task_file,
     write_salvage_task_file,
 )
 from utils.interactive import ModelSelectionError, select_models
@@ -5430,10 +5427,6 @@ async def reaggregate_from_existing_files(
                     grouped_path, json.dumps(save_groups_payload(grouped), indent=2))
             print(f"Grouped issues saved to: {grouped_path}")
 
-        validated_groups_for_report = None
-        # The validation.json bytes the report's verdicts come from, when they do.
-        verdicts: Optional[_review_round.Verdicts] = None
-
         # Task 2.10: a contract-1 round built from an over-limit plan is never
         # reused — retired whole (renamed, kept) and rematerialized below.
         legacy_round = (
@@ -5447,220 +5440,63 @@ async def reaggregate_from_existing_files(
                 reason="validation built from truncated context (contract 1)",
             )
 
-        # Check if we're merging validation batch results
-        if not grouped:
-            validated_groups_for_report = []
-            claim.publish(validation_path, "[]\n", "write validation.json")
-        elif not args.skip_validation and validation_tasks_path.exists():
-            print("\nMerging validation batch results...")
-            # Same resume guard as the plan-review path: a v1 file (no prompts to
-            # recover) or moved inputs both mean "re-materialize this phase", not
-            # "interpret it anyway". Exit 3, nothing dispatched.
-            try:
-                batch_metadata = read_task_file(
-                    str(validation_tasks_path),
-                    phase_dir=str(phase_dir),
-                    current_inputs=build_inputs(
-                        plan_file=str(plan_path),
-                        grouped_file=str(grouped_path),
-                        # Recut from the same groups and the files as they are
-                        # now: a reviewed file edited between fan-out and this
-                        # merge moves this hash, and only this hash — `diff_base`
-                        # names the ref the diff was taken against and sits
-                        # still for any edit on the near side of it.
-                        reviewed_code=build_reviewed_code_excerpt(
-                            grouped, project_root=project_root, **pinned_kw,
-                        ),
-                        # A commit brief's frozen context plan: its snapshot
-                        # as it is now, against what the round recorded.
-                        **(
-                            {"context_plan_sha256": context_plan_snapshot_sha256(
-                                plan_snapshot, git_root,
-                            )}
-                            if plan_snapshot and plan_sha256 else {}
-                        ),
-                    ),
-                )
-            except TaskFileError as task_file_error:
-                print(f"ERROR: {task_file_error}", file=sys.stderr)
-                # Identical to the sibling guard in review_orchestrator_base: the
-                # refusal exits here, outside any handler, so nothing below can
-                # go on to complete the phase.
-                sys.exit(task_file_error.exit_code)
-            # §2.3 step 5 / 2.9: re-hash the snapshots the stored prompts name,
-            # rebinding a moved phase dir; a changed or missing one is exit 3.
-            verify_round_context(
-                batch_metadata, str(phase_dir), str(validation_tasks_path)
-            )
-            # The base lane's round resolution, step for step
-            # (`review_orchestrator_base.reaggregate_from_existing_files`): a
-            # stale `prompt_path` is rebound and persisted before any batch is
-            # handed out, then only a whole round is merged. A missing batch is
-            # dispatched under `--exec-subagents` or waited for, never merged:
-            # the merge reads a missing file as `validation_failed`
-            # (docs/development/review-results.md).
-            with host_views_lock(str(phase_dir)):
-                if ensure_prompt_sidecars(batch_metadata, str(phase_dir)):
-                    # Native hosts reread the JSON, not this in-memory document.
-                    from utils.subagent_executor import _atomic_write_json
-
-                    try:
-                        with claim.held("rewrite validation_tasks.json"):
-                            _atomic_write_json(str(validation_tasks_path), batch_metadata)
-                    except OSError as exc:
-                        print(
-                            f"ERROR: Could not persist repaired prompt metadata to "
-                            f"{validation_tasks_path}: {exc}. Fix task-file write access "
-                            "and retry reaggregation before dispatching native subagents.",
-                            file=sys.stderr,
-                        )
-                        sys.exit(EXIT_NEEDS_HUMAN)
-            total_batches = batch_metadata.get("total_batches", 0)
-            batches_found = sum(
-                1 for batch in batch_metadata.get("batches", [])
-                if (phase_dir / f"validation_batch_{batch['batch_index']}.json").exists()
-            )
-
-            # The shared merge: batch files -> validation.json (with the
-            # executor's own runner attribution, F3) -> groups. No broad
-            # `except` around it: a merge that raises is an error, not a
-            # completed phase with no verdicts.
-            if batches_found == total_batches and total_batches > 0:
-                print(f"All {total_batches} batch files found, merging...")
-                validated_groups_for_report = merge_validation_batches(
-                    str(phase_dir), batch_metadata, grouped, str(validation_path),
-                    claim=claim,
-                )
-                verdicts = claim.verdicts
-            else:
-                # An unfinished round reopens the phase before any batch is
-                # handed out, the state a fresh hand-off leaves: an earlier
-                # `--reaggregate --skip-validation` may have recorded it
-                # complete.
-                claim.check("reopen the phase for validation")
-                reopen_phase_for_validation(plan_path, "code-review", phase_dir)
-                if await dispatch_in_round(
-                    claim, dispatch_subagent_tasks,
-                    args,
-                    task_file=str(validation_tasks_path),
-                    phase_dir=str(phase_dir),
-                    phase="code-review",
-                    document=batch_metadata,
-                    plan_path=str(plan_path),
-                    label="validation",
-                    retry_command=resolved_reaggregate_command(batch_metadata),
-                ):
-                    # D3b: the still-incomplete batches ran in this process (the
-                    # completed ones are skipped by their result files, D3i).
-                    validated_groups_for_report = merge_validation_batches(
-                        str(phase_dir), batch_metadata, grouped, str(validation_path),
-                        claim=claim,
-                    )
-                    verdicts = claim.verdicts
-                else:
-                    # The host hand-off's pair, as at the materialization site.
-                    report_progress(str(phase_dir), step="validation_pending")
-                    print(f"Only {batches_found}/{total_batches} batch files found.")
-                    print("Wait for all validation subagents to complete before reaggregating.")
-                    return EXIT_OK
-        elif not args.skip_validation:
-            # No validation batches exist - need to prepare them
-            print("\nPreparing batched validation for subagent execution...")
-            # One read of the plan, bound to this phase dir's own snapshot
-            # (§2.3 step 5): the plan block names it, never the live plan.
-            plan_document = bind_plan_for_validation(str(plan_path), str(phase_dir))
-            with host_views_lock(str(phase_dir)):
-                batched_tasks = materialize_validation_round(code_review_validation_round(
-                    [g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
-                    args=args, plan_path=plan_path, phase_dir=phase_dir,
-                    plan_document=plan_document, base_ref=base_ref,
-                    project_root=project_root, git_root=git_root, pinned=pinned,
-                    plan_snapshot=plan_snapshot, plan_sha256=plan_sha256,
-                    scope_round_policy=scope_round_policy, state=state,
-                    round_id=claim.round_id,
-                ))
-
-                # Save validation task instructions
-                claim.publish(validation_tasks_path, json.dumps(batched_tasks, indent=2),
-                              "write validation_tasks.json")
-
-            # 2026-09-21, the remaining lane-parity gap: the phase machine's own
-            # word for the stretch that starts here, written UNCONDITIONALLY the
-            # way `review_orchestrator_base` writes it at both of its own
-            # materialization sites — before the dispatch, not only on the
-            # host-driven return below. The `--exec-subagents` branch does not
-            # return here; it dispatches, and that dispatch is the second long
-            # stretch of the phase (62 s of a measured 516 s run). Without this
-            # write it ran under `state: models_complete`, the word the fan-out
-            # left behind, while `progress.step` read `validating` — exactly the
-            # `phase state: grouping_complete` / `progress: validating`
-            # disagreement the base lane fixed on 2026-09-16, and a checkpoint
-            # that misreports which stretch it is in is what rule 2's
-            # instant-return test tells a polling agent to read. A new round
-            # also reopens a phase an earlier `--skip-validation` run recorded
-            # complete.
-            claim.check("reopen the phase for validation")
-            reopen_phase_for_validation(plan_path, "code-review", phase_dir)
-
-            total_batches = batched_tasks["total_batches"]
-            stats = batched_tasks.get("batching_stats", {})
-
-            if total_batches == 1:
-                print(f"\n[VALIDATION_PENDING] {validation_tasks_path}")
-            else:
-                print(f"\n[VALIDATION_BATCHES_PENDING] {validation_tasks_path}")
-                print(f"Batches: {total_batches}")
-
-            print(f"\nValidation prepared for subagent execution.")
-            print(f"Groups to validate: {stats.get('total_groups', len(grouped))}")
-
-            # Resolved here, from the running skill dir, because the task file
-            # stores only the durable mode + plan pair (D1c).
-            reaggregate_cmd = resolved_reaggregate_command(batched_tasks)
-
-            # D3b: with --exec-subagents this process dispatches the batch itself
-            # and continues to the merge below instead of exiting at the marker.
-            if await dispatch_in_round(
-                claim, dispatch_subagent_tasks,
-                args,
-                task_file=str(validation_tasks_path),
-                phase_dir=str(phase_dir),
-                phase="code-review",
-                document=batched_tasks,
-                plan_path=str(plan_path),
-                label="validation",
-                retry_command=reaggregate_cmd,
-            ):
-                validated_groups_for_report = merge_validation_batches(
-                    str(phase_dir), batched_tasks, grouped, str(validation_path),
-                    claim=claim,
-                )
-                verdicts = claim.verdicts
-            else:
-                # The plan as the user typed it (fix round 14).
-                reaggregate_cmd = resolved_reaggregate_command(
-                    batched_tasks, typed_plan=True,
-                )
-                print("\nAfter validation completes, run:")
-                print(f"  {reaggregate_cmd or ''}")
-                record_next(reaggregate_cmd or None)
-                # The phase machine's own word for this stretch, plus the
-                # poller's copy of it — the pair `review_orchestrator_base`
-                # writes at its own host hand-off. Without them this return
-                # left `state: models_complete` beside `progress.step:
-                # grouping`, and neither word is terminal: `run_status`'s
-                # checkpoint view therefore read every host-validated code
-                # review as still in flight, so a foreground run rendered
-                # "running in foreground (…)" until `--reaggregate` finished it
-                # and `next` on a finished detached one waited the whole
-                # `poll_s` before exiting 0. A host-driven hand-off IS this
-                # process's ending, which is why both words are listed in
-                # `CHECKPOINT_TERMINAL_STATES` / `CHECKPOINT_TERMINAL_STEPS`.
-                update_status(str(phase_dir), {"state": "validation_pending"})
-                report_progress(str(phase_dir), step="validation_pending")
-                return EXIT_OK  # Exit early - the host handles validation
-        else:
-            print("\nSkipping validation (--skip-validation flag set)")
+        # Zero groups, `--skip-validation`, a materialized round to merge or
+        # resume, or a new round: one resolution for every review lane
+        # (utils/review_lane.py).
+        steps = _review_lane.RoundSteps(
+            verify_round_context=verify_round_context,
+            bind_plan_for_validation=bind_plan_for_validation,
+            reopen_phase_for_validation=reopen_phase_for_validation,
+            retire_stale_validation_round=retire_stale_validation_round,
+            dispatch_in_round=dispatch_in_round,
+            dispatch_subagent_tasks=dispatch_subagent_tasks,
+            merge_validation_batches=merge_validation_batches,
+        )
+        outcome = await _review_lane.resolve_validation_round(
+            claim, args, steps,
+            phase_name="code-review", phase_dir=str(phase_dir),
+            plan_path=str(plan_path), grouped=grouped,
+            validation_path=str(validation_path),
+            current_inputs=lambda: build_inputs(
+                plan_file=str(plan_path),
+                grouped_file=str(grouped_path),
+                # Recut from the same groups and the files as they are now: a
+                # reviewed file edited between fan-out and this merge moves
+                # this hash, and only this hash — `diff_base` names the ref the
+                # diff was taken against and sits still for any edit on the
+                # near side of it.
+                reviewed_code=build_reviewed_code_excerpt(
+                    grouped, project_root=project_root, **pinned_kw,
+                ),
+                # A commit brief's frozen context plan: its snapshot as it is
+                # now, against what the round recorded.
+                **(
+                    {"context_plan_sha256": context_plan_snapshot_sha256(
+                        plan_snapshot, git_root,
+                    )}
+                    if plan_snapshot and plan_sha256 else {}
+                ),
+            ),
+            build_round=lambda plan_document: code_review_validation_round(
+                [g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
+                args=args, plan_path=plan_path, phase_dir=phase_dir,
+                plan_document=plan_document, base_ref=base_ref,
+                project_root=project_root, git_root=git_root, pinned=pinned,
+                plan_snapshot=plan_snapshot, plan_sha256=plan_sha256,
+                scope_round_policy=scope_round_policy, state=state,
+                round_id=claim.round_id,
+            ),
+            findings="issues",
+        )
+        if outcome.handed_off:
+            return EXIT_OK
+        # The validation.json bytes the report's verdicts come from, when they do.
+        verdicts = outcome.verdicts
+        # With validation skipped the report shows the groups on disk, as the
+        # base lane's report and this lane's fan-out do.
+        validated_groups_for_report = (
+            outcome.groups if outcome.groups is not None else grouped
+        )
 
         # Generate report. `served_models` is what the fan-out recorded in the
         # checkpoint (§3.6's attribution and the D6 override's `sandbox:
@@ -5742,10 +5578,8 @@ async def reaggregate_from_existing_files(
         report_progress(str(phase_dir), step="complete")
 
         # The fan-out's ending, shared: a host-driven review finishes here.
-        # With no verdicts (`--skip-validation`) the groups on disk are counted,
-        # as the base lane's report does.
         return finish_code_review(
-            phase_dir, validated_groups_for_report or grouped, args,
+            phase_dir, validated_groups_for_report, args,
             total_issues=len(all_issues),
         )
 
@@ -6661,9 +6495,11 @@ async def _main(argv: Optional[List[str]], run: PhaseRun) -> int:
 
         # Save per-model results
         failed_models: Dict[str, str] = {}
-        for model_spec, (success, issues, error) in list(results.items()):
-            if not save_model_result(prefix, model_spec, success, issues, error, phase_dir):
-                failed_models[model_spec] = error or "Unknown error"
+        for model_spec, slot in _review_lane.slot_results(results).items():
+            if not save_model_result(
+                prefix, model_spec, slot.success, slot.payload, slot.error, phase_dir,
+            ):
+                failed_models[model_spec] = slot.error or "Unknown error"
                 # The round is aggregated from `results`, not from the files:
                 # issues that could not be saved are failed there too, or the
                 # report would count a failed model's issues.
@@ -6688,6 +6524,13 @@ async def _main(argv: Optional[List[str]], run: PhaseRun) -> int:
         # another run replaced while its models ran stops here
         # (utils/review_round.py).
         claim.check("record its models and group their results")
+
+        # The slots that ran without a sandbox, mirrored for the poller before
+        # any ending below, the all-failed exit included: every slot failing
+        # does not make them sandboxed (docs/development/review-results.md,
+        # "The shared review lane"). `models_served` is the durable copy.
+        record_sandbox_bypassed(str(phase_dir), served_models)
+        announce_retired_rungs(prior_served, served_models, anchor=str(plan_path))
 
         # D3b: a salvage task exists for every model whose output would not parse
         # (emit_salvage_task materialized it above). With --exec-subagents this
@@ -6791,9 +6634,12 @@ async def _main(argv: Optional[List[str]], run: PhaseRun) -> int:
             # each loss and to exit 3 when every requested reviewer failed.
             # Without it that reaggregate finds no recorded failure and names
             # the models only with the "no result file" gap reason, at exit 0.
+            # `models_served` too: a slot that ran without a sandbox did so
+            # whether or not it then failed.
             update_status(str(phase_dir), {
                 "models_completed": [],
                 "models_failed": failed_models,
+                **({"models_served": served_models} if served_models else {}),
             })
             print("\nERROR: All models failed")
             for model_spec, reason in failed_models.items():
@@ -6839,9 +6685,6 @@ async def _main(argv: Optional[List[str]], run: PhaseRun) -> int:
             # `--reaggregate` reads back.
             **({"usage": usage} if usage else {}),
         })
-        # D6 override (2026-09-17): the poller's copy, under `progress`.
-        record_sandbox_bypassed(str(phase_dir), served_models)
-        announce_retired_rungs(prior_served, served_models, anchor=str(plan_path))
         # Both counters, restated on the post-salvage truth. `models_done` is
         # the *terminal* count — every slot has finished by now, which is what
         # the retired slot counter meant by "done" and what a live progress line
@@ -6999,13 +6842,15 @@ async def _main(argv: Optional[List[str]], run: PhaseRun) -> int:
                             scope_round_policy=scope_round_policy, state=state,
                             round_id=claim.round_id,
                         ))
+                        batched_tasks["format_version"] = CURRENT_FORMAT_VERSION
 
                         # Save validation task instructions, and the same
-                        # unconditional checkpoint word as the `--reaggregate` site
-                        # above, for the same reason: the stretch starts here, not
-                        # at the host-driven return further down, so the word is
-                        # written before the dispatch that may never come back to
-                        # write it. Both while the round is this run's.
+                        # unconditional checkpoint word as the shared reaggregate
+                        # (utils/review_lane.py), for the same reason: the
+                        # stretch starts here, not at the host-driven return
+                        # further down, so the word is written before the
+                        # dispatch that may never come back to write it. Both
+                        # while the round is this run's.
                         validation_tasks_path = phase_dir / "validation_tasks.json"
                         with claim.held("write validation_tasks.json"):
                             _review_round.replace_file(
@@ -7066,14 +6911,28 @@ async def _main(argv: Optional[List[str]], run: PhaseRun) -> int:
                         print("\nAfter validation completes, run:")
                         print(f"  {reaggregate_cmd}")
                         record_next(reaggregate_cmd)
-                        # The same pair the `--reaggregate` hand-off above
-                        # writes, and for the same reason: this return is the
-                        # phase's ending on a host-driven run, so the checkpoint
-                        # has to say so or every reader treats the run as still
-                        # in flight. The phase ticker's teardown line lands
-                        # after this write (its `finally` below), so the log's
-                        # last `[PROGRESS]` reads `step: validation_pending`.
-                        update_status(str(phase_dir), {"state": "validation_pending"})
+                        # The base fan-out's hand-off fields. This return is
+                        # the phase's ending on a host-driven run, so the
+                        # checkpoint has to say so or every reader treats the
+                        # run as still in flight. The phase ticker's teardown
+                        # line lands after this write (its `finally` below), so
+                        # the log's last `[PROGRESS]` reads `step:
+                        # validation_pending`. The follow-up is persisted in its
+                        # durable, rebindable form (mode word, plan path and
+                        # replay flags), never as the resolved command printed
+                        # above: `status` rebuilds it from the running skill dir
+                        # (`detach.resolved_reaggregate_command`).
+                        update_status(str(phase_dir), {
+                            "state": "validation_pending",
+                            "stdout_markers": (
+                                ["VALIDATION_BATCHES_PENDING"] if total_batches > 1
+                                else ["VALIDATION_PENDING"]
+                            ),
+                            "validation_tasks_path": str(validation_tasks_path),
+                            **cli_common.durable_reaggregate_fields(
+                                "code_review_orchestrator.py", str(plan_path),
+                            ),
+                        })
                         report_progress(str(phase_dir), step="validation_pending")
                         return  # Exit early - Claude Code handles validation
                 else:

@@ -2235,14 +2235,15 @@ class TestTheValidationStretchIsNamedBeforeItIsDispatched:
     def test_both_lanes_write_it_at_the_same_point_in_their_source(self):
         """Parity with the base lane, asserted structurally rather than by run.
 
-        The two orchestrators materialize `validation_tasks.json` at four sites
-        between them, and the invariant is one sentence: every one of them
-        writes `state: validation_pending` before it reaches
-        `dispatch_subagent_tasks`. A behavioural test covers this lane's two;
-        this covers all four, so a fifth site added to either file is caught by
-        the same rule rather than by whoever remembers. A site may write the
-        word itself or through the base's `reopen_phase_for_validation`, which
-        writes it (and reopens a completed phase) for both lanes' reaggregate.
+        `validation_tasks.json` is materialized at three sites: each lane's
+        fan-out and the reaggregate both lanes share (`utils/review_lane.py`).
+        The invariant is one sentence: every one of them writes `state:
+        validation_pending` before it reaches `dispatch_subagent_tasks`. A
+        behavioural test covers this lane's two paths; this covers every site,
+        so a new one added to any of the files is caught by the same rule
+        rather than by whoever remembers. A site may write the word itself or
+        through the base's `reopen_phase_for_validation`, which writes it (and
+        reopens a completed phase) for the shared reaggregate.
         """
         marker = '{"state": "validation_pending"}'
         reopen = "reopen_phase_for_validation("
@@ -2255,16 +2256,17 @@ class TestTheValidationStretchIsNamedBeforeItIsDispatched:
             "`reopen_phase_for_validation` no longer writes "
             "`state: validation_pending`, so the sites that call it do not either"
         )
-        for rel in ("code_review_orchestrator.py",
-                    "utils/review_orchestrator_base.py"):
+        for rel, expected in (("code_review_orchestrator.py", 1),
+                              ("utils/review_orchestrator_base.py", 1),
+                              ("utils/review_lane.py", 1)):
             body = (SKILL_ROOT / rel).read_text(encoding="utf-8")
             sites = [
                 i for i in range(len(body))
                 if body.startswith(("json.dump(batched_tasks", "json.dumps(batched_tasks"), i)
             ]
-            assert len(sites) == 2, (
+            assert len(sites) == expected, (
                 f"{rel} materializes a validation document at {len(sites)} "
-                "sites; the parity rule below is written for two"
+                f"sites; the parity rule below is written for {expected}"
             )
             for start in sites:
                 nxt = body.index(dispatch, start)

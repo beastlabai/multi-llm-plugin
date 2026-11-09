@@ -14,6 +14,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [Importance levels](#importance-levels)
 - [Grouping and section references](#grouping-and-section-references)
 - [Consolidation batches](#consolidation-batches)
+- [The shared review lane](#the-shared-review-lane)
 - [Reaggregation and result identity](#reaggregation-and-result-identity)
 - [Round identity](#round-identity)
 - [Malformed result entries](#malformed-result-entries)
@@ -53,13 +54,14 @@ review-code's two completion sites, the fan-out and `--reaggregate`, end in one
 `finish_code_review` (the summary, `record_high_priority_groups` and the `--fail-on-high`
 gate), reached after the phase is recorded complete, so the host-driven route records the
 count and holds the gate too; a `--skip-validation` reaggregate counts the groups on disk,
-as the base report does. Its `--reaggregate` resolves a validation round the way the base
-lane does: stale prompt sidecars are rebound and persisted, a whole round of
-`validation_batch_<n>.json` is merged, a partial one is dispatched under `--exec-subagents`
-or answered `Only n/m batch files found.` with the phase left open. The merge reads a
-missing batch as `validation_failed`, so it is never handed a partial round. On neither
-lane does a broad `except` surround the merge or the dispatch: one that raises ends the
-command with the phase open, never completed with no `validation.json`.
+as the base report does. Both lanes' `--reaggregate` resolve a validation round through
+one function ([The shared review lane](#the-shared-review-lane)): stale prompt sidecars
+are rebound and persisted, a whole round of `validation_batch_<n>.json` is merged, a
+partial one is dispatched under `--exec-subagents` or answered `Only n/m batch files
+found.` with the phase left open. The merge reads a missing batch as `validation_failed`,
+so it is never handed a partial round. No broad `except` surrounds the merge or the
+dispatch: one that raises ends the command with the phase open, never completed with no
+`validation.json`.
 
 Both lanes' `--reaggregate` reopen the phase wherever they hand a round out, a partial one
 or a newly built one, through the base's `reopen_phase_for_validation`: `state:
@@ -251,6 +253,56 @@ under-report.
   group of the batch becomes a singleton. In 9 recorded rounds whose task files predate embedded
   prompts, models invented ids ("group_3", slugs); the merge showed those clusters by the model's
   indices and the same groups again as missing singletons, and decisions on them reached no group.
+
+## The shared review lane
+
+The review base runs review-plan and review-tasks; `code_review_orchestrator.py` runs
+review-code. `utils/review_lane.py` holds what the two lanes share, so a fix made once
+reaches both, and `tests/test_review_lane_parity.py` runs each scenario below on both
+lanes offline (real phase dirs, grouping, rounds and reports; only the model slots
+stubbed). A scenario that passes on one lane and fails on the other is drift.
+
+- **`SlotResult`** is one model slot's outcome: `model_spec`, `success`, `payload`,
+  `error`, `source`, `details` and the salvage `failure` kind. `payload` is only ever the
+  answer of a completed run; a losing run's text stays in `details` for salvage. Both
+  fan-outs' save loops read their slots through `slot_results`, which takes review-plan's
+  record dict and review-code's `(success, issues, error)` triple; the slots themselves
+  still return their lane's own shape.
+- **`resolve_validation_round`** is what a `--reaggregate` does with the validation round
+  beside its grouping. Zero groups retire the previous round and write `validation.json`
+  as `[]`. `--skip-validation` reads and writes nothing, and the report then shows the
+  groups in `grouped.json`. A `validation_tasks.json` on disk is refused (exit 3) when its
+  inputs or snapshots moved, its prompt sidecars are rebound and persisted, and a whole
+  round is merged while a partial one is dispatched under `--exec-subagents` or handed to
+  the host with the phase reopened. With no task file a new round is built, stamped with
+  `format_version`, published, the phase reopened and `progress.subagents` cleared before
+  the dispatch or the hand-off. Each lane passes what is its own: the task file's current
+  inputs (`current_inputs`) and its round builder (`build_round`). The review base's steps
+  come in as a `RoundSteps` built from the calling lane's own module, so a test that
+  patches one of them there reaches the shared code, and the module never imports the
+  base. The base lane keeps one branch in front of it: a `validation.json` bound to the
+  grouping beside it is reused rather than re-merged.
+
+Both lanes also record these the same way:
+
+- a fan-out whose every slot failed records `models_served` and
+  `progress.sandbox_bypassed` before its exit 3: a slot that ran unsandboxed did so
+  whether or not it then failed;
+- the host hand-off that ends a fan-out records `stdout_markers`, `validation_tasks_path`
+  and the follow-up in its durable form (`reaggregate_mode`, `plan_file`,
+  `replay_flags`, `cli_common.durable_reaggregate_fields`), so `status` names the
+  `--reaggregate` that advances the phase;
+- a `--detach` launcher writes no `state.json` before its boundary, neither a first
+  run's file nor a `--force` clear of the phase's completion: a launch refused at the
+  boundary leaves the file as it found it, and the worker runs the same pre-flight and
+  writes it.
+
+What stays different between the lanes, as the lane's own code: the code-review scope,
+diff set and pinned ranges; commit templates; the scope-ledger resume rule; the `model`
+then `source_model` stamp order on reaggregated issues (`grouped_sha256` hashes the
+file's bytes); the per-issue report with its numbering footer, and `issues.json`; the
+stale-implement guard; consolidation (review-plan) and the tasks document
+(review-tasks). review-code's partial-completion guard has no base counterpart.
 
 ## Reaggregation and result identity
 

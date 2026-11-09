@@ -223,13 +223,13 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 | `[TESTS_NOT_RUN]` | `utils/apply_orchestrator_base.py`<br>`utils/next_phase.py` `TESTS_NOT_RUN_MARKER` | `SKILL.md`<br>`instructions/apply-code-fixes.md`<br>`instructions/implement.md`<br>`instructions/improve-code.md`<br>`instructions/improve-commits.md`<br>`references/summary-format.md` | The line `util next-command` prints above a stopped native implement's commands when nothing ran the repository's tests… |
 | `[USAGE_LIMIT]` | `utils/providers/claude_code.py` `USAGE_LIMIT_TAG` | not for the host: runner-diagnostic | The tag `ClaudeCodeProvider.describe_failure` puts in front of a 429 whose sentence says the *account* is out of budget rather than the… |
 | `[UV_MISSING]` | `packaging/opencode/src/index.mjs`<br>`utils/unattended.py` | not for the host: operator-cli | — |
-| `[VALIDATION_BATCHES_PENDING]` | `code_review_orchestrator.py`<br>`utils/review_orchestrator_base.py` | `instructions/review-code.md`<br>`instructions/review-plan.md`<br>`instructions/review-tasks.md` | — |
+| `[VALIDATION_BATCHES_PENDING]` | `code_review_orchestrator.py`<br>`utils/review_lane.py`<br>`utils/review_orchestrator_base.py` | `instructions/review-code.md`<br>`instructions/review-plan.md`<br>`instructions/review-tasks.md` | — |
 | `[VALIDATION_CONTEXT_CITED]` | `utils/validation_sections.py` | not for the host: run-notice | — |
 | `[VALIDATION_CONTEXT_EXCERPTED]` | `utils/validation.py` | not for the host: run-notice | — |
 | `[VALIDATION_CONTEXT_OUTSIDE_ROOT]` | `utils/review_orchestrator_base.py` | not for the host: run-notice | — |
 | `[VALIDATION_CONTEXT_REBOUND]` | `utils/validation.py` | not for the host: run-notice | — |
 | `[VALIDATION_CONTEXT_TRUNCATED]` | `code_review_orchestrator.py`<br>`utils/validation.py` | not for the host: run-notice | — |
-| `[VALIDATION_PENDING]` | `code_review_orchestrator.py`<br>`utils/review_orchestrator_base.py` | `instructions/review-code.md`<br>`instructions/review-plan.md`<br>`instructions/review-tasks.md` | — |
+| `[VALIDATION_PENDING]` | `code_review_orchestrator.py`<br>`utils/review_lane.py`<br>`utils/review_orchestrator_base.py` | `instructions/review-code.md`<br>`instructions/review-plan.md`<br>`instructions/review-tasks.md` | — |
 | `[VALIDATION_RETIRED]` | `utils/review_orchestrator_base.py` | not for the host: run-notice | — |
 | `[VALIDATION_TASKS_OVERSIZE]` | `utils/validation.py` | not for the host: run-notice | — |
 | `[WARN]` | `ask_orchestrator.py`<br>`utils/provider_outcome.py`<br>`utils/providers/claude_code.py` `warn_gate_once()`<br>`utils/providers/pi.py` `warn_gate_once()`<br>+2 more | `instructions/ask.md`<br>`references/summary-format.md` | — |

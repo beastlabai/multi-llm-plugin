@@ -696,15 +696,14 @@ class TestTheCallSites:
         report = (phase_dir / "report.md").read_text(encoding="utf-8")
         assert f"**Commit brief:** {plan.name}" in report
         assert f"[COMMIT_RANGE] {base[:7]}..{head[:7]} (1 commit, 1 file, +1 −1)" in report
-        if not reaggregate:
-            # The fan-out's --skip-validation report keeps its groups.
-            assert f"Introduced by `{head[:7]}` — c1: rewrite line three" in report
+        # A --skip-validation report keeps its groups, on the fan-out and on
+        # a reaggregate alike (docs/development/review-results.md, "The shared
+        # review lane").
+        assert f"Introduced by `{head[:7]}` — c1: rewrite line three" in report
         data = json.loads((phase_dir / "report_data.json").read_text(encoding="utf-8"))
         assert data["commitRange"]["head"] == head
-        # A --skip-validation reaggregate reports no groups (as for any plan),
-        # so only the fan-out's page carries a group to attribute.
-        assert list(data["commitRange"]["attribution"].values()) == (
-            [] if reaggregate else [{"introducedBy": head, "source": "blame"}])
+        assert list(data["commitRange"]["attribution"].values()) == [
+            {"introducedBy": head, "source": "blame"}]
 
     def test_a_plan_run_is_left_unattributed(self, commit_repo):
         root, base, head, record, plan = commit_repo

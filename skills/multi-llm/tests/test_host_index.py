@@ -471,7 +471,7 @@ class TestTheViewsLock:
 
     @pytest.mark.parametrize("module", [
         "code_review_orchestrator.py", "utils/review_orchestrator_base.py",
-        "utils/apply_orchestrator_base.py",
+        "utils/review_lane.py", "utils/apply_orchestrator_base.py",
     ])
     def test_every_caller_that_changes_a_round_holds_the_lock(self, module):
         """A materialization with its caller's write of the task file, a repair

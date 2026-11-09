@@ -38,6 +38,7 @@ from . import progress_tracker as _progress
 from . import readonly_audit as _readonly_audit
 from . import result_files as _result_files
 from . import review_round as _review_round
+from . import review_lane as _review_lane
 from . import scope_policy as _sp
 from . import scope_round as _scope_round
 from .progress_tracker import DEADLINE_ERROR, FanoutProgress, PhaseProgress
@@ -7727,23 +7728,7 @@ async def reaggregate_from_existing_files(
                 retire_stale_validation(phase_dir, reason=stale_reason)
                 honour_validation_file = False
 
-        if not grouped:
-            # Zero groups: nothing to validate, and no round to materialize,
-            # merge or resume — a leftover validation_tasks.json is bound to the
-            # grouping just rewritten and must not be read against it.
-            validated_groups_for_report = []
-            # So it retires with the rest of that round, and `validation.json`
-            # is written as `[]`, the fan-out's empty branch and code-review's
-            # reaggregate alike. The regroup above retired `validation.json`
-            # alone and put nothing in its place, so apply-suggestions exited 1
-            # on the missing file after a reaggregate that found nothing
-            # (measured 2026-10-09; plan improve-plan-and-improve-code §2.3,
-            # *Empty apply outcomes*).
-            retire_stale_validation_round(
-                phase_dir, reason="review returned no suggestions"
-            )
-            claim.publish(validation_path, "[]\n", "write validation.json")
-        elif honour_validation_file:
+        if grouped and honour_validation_file:
             # §2.3 step 5 / 2.9 apply to reused verdicts too, not only to the
             # batch-merge branch below: a merged validation.json whose batch
             # hashes still match says nothing about the snapshots its prompts
@@ -7794,129 +7779,33 @@ async def reaggregate_from_existing_files(
                 print(f"Warning: Could not load validation.json: {e}")
                 validated_groups_for_report = None
                 verdicts = None
-
-        # Check if batched validation completed
-        elif os.path.exists(validation_tasks_path) and not args.skip_validation:
-            print("\nFound validation_tasks.json, checking for completed batches...")
-            # A phase dir outlives the run that wrote it, and with prompts embedded a
-            # task file is a snapshot: a run started under one skill version and
-            # resumed under the other would silently mis-spawn, and a plan edited
-            # between materialization and resume leaves prompts that still validate
-            # cleanly while reviewing text nobody is looking at any more. Both fail
-            # loudly here (exit 3) rather than dispatching anything.
-            try:
-                batch_metadata = read_task_file(
-                    validation_tasks_path,
-                    phase_dir=phase_dir,
-                    current_inputs=build_inputs(
-                        plan_file=str(plan_path),
-                        grouped_file=grouped_path,
-                        # review-tasks embeds the task list in every prompt, so an
-                        # edit to it between materialization and resume is as stale
-                        # as an edited plan. Absent for every other phase, and
-                        # unrecorded hashes are simply not compared.
-                        tasks_file=(extra_validation_metadata or {}).get("tasks_file"),
-                    ),
-                )
-            except TaskFileError as task_file_error:
-                print(f"ERROR: {task_file_error}", file=sys.stderr)
-                sys.exit(task_file_error.exit_code)
-            # §2.3 step 5 / 2.9: the snapshots this round's prompts name are
-            # re-hashed before anything is reused or dispatched, and a moved or
-            # copied phase dir rebinds its prompts to the copy's own snapshot.
-            # A missing or changed snapshot refuses the round (exit 3).
-            verify_round_context(batch_metadata, phase_dir, validation_tasks_path)
-            # The recorded `prompt_path` is a derived convenience field like
-            # `output_path`, so it goes stale the moment a phase dir is moved or
-            # copied — and a host following it would then hand a subagent a file
-            # that is missing, or one somebody edited. Re-derive from the
-            # loaded-from dir and rewrite anything that is not `prompt` byte for
-            # byte, before a single batch is dispatched.
-            with host_views_lock(phase_dir):
-                if ensure_prompt_sidecars(batch_metadata, phase_dir):
-                    # Native hosts reread the JSON, not this in-memory document. Publish
-                    # rebound pointers and removed fallback fields before handing off.
-                    from .subagent_executor import _atomic_write_json
-
-                    try:
-                        with claim.held("rewrite validation_tasks.json"):
-                            _atomic_write_json(validation_tasks_path, batch_metadata)
-                    except OSError as exc:
-                        print(
-                            f"ERROR: Could not persist repaired prompt metadata to "
-                            f"{validation_tasks_path}: {exc}. Fix task-file write access "
-                            "and retry reaggregation before dispatching native subagents.",
-                            file=sys.stderr,
-                        )
-                        sys.exit(3)
-            total_batches = batch_metadata.get("total_batches", 0)
-            batches_found = 0
-            for batch in batch_metadata.get("batches", []):
-                batch_file = os.path.join(phase_dir, f"validation_batch_{batch['batch_index']}.json")
-                if os.path.exists(batch_file):
-                    batches_found += 1
-
-            # No broad `except` around the merge or the dispatch, as on the
-            # code-review lane: one that raises is an error, never a completed
-            # phase with no verdicts (docs/development/review-results.md).
-            if batches_found == total_batches and total_batches > 0:
-                print(f"All {total_batches} batch files found, merging...")
-                validated_groups_for_report = merge_validation_batches(
-                    phase_dir, batch_metadata, grouped, validation_path, claim=claim,
-                )
-                verdicts = claim.verdicts
-            else:
-                # An unfinished round reopens the phase before any batch is
-                # handed out: an earlier `--reaggregate --skip-validation`
-                # may have recorded it complete.
-                claim.check("reopen the phase for validation")
-                reopen_phase_for_validation(plan_path, phase_name, phase_dir)
-                if await dispatch_in_round(
-                    claim, dispatch_subagent_tasks,
-                    args,
-                    task_file=validation_tasks_path,
-                    phase_dir=phase_dir,
-                    phase=phase_name,
-                    document=batch_metadata,
-                    plan_path=str(plan_path),
-                    label="validation",
-                    # D2 row 10: this path used to pass none, so its own
-                    # failure printed the "re-run the same command" fallback
-                    # — a flag-less hint by omission. The document's triple,
-                    # live flags winning.
-                    retry_command=resolved_reaggregate_command(batch_metadata),
-                ):
-                    # D3b on the reaggregate path: a run resumed with
-                    # --exec-subagents dispatches the still-incomplete batches
-                    # itself (completed ones are skipped by their result
-                    # files, D3i) rather than telling a host to go run
-                    # subagents it may not have.
-                    validated_groups_for_report = merge_validation_batches(
-                        phase_dir, batch_metadata, grouped, validation_path,
-                        claim=claim,
-                    )
-                    verdicts = claim.verdicts
-                else:
-                    # The host hand-off's progress word, as at the
-                    # materialization site below.
-                    _detach.report_progress(phase_dir, step="validation_pending")
-                    concluded = True
-                    print(f"Only {batches_found}/{total_batches} batch files found.")
-                    print("Wait for all validation subagents to complete before reaggregating.")
-                    return
-
-        elif not args.skip_validation:
-            # Host-neutral: this print runs on every host that dispatches
-            # subagent validation (opencode, codex, claude-code, ...), and
-            # naming Claude Code here contradicted the runner the log names a
-            # few lines later (measured 2026-09-16: an opencode-driven run
-            # printed this beside 11 lines correctly naming opencode).
-            print("\nPreparing batched validation for subagent execution...")
-            # A re-materialized round is a new round with a new snapshot
-            # (§2.3 step 5), bound from one read of the plan as it is now.
-            plan_document = bind_plan_for_validation(str(plan_path), phase_dir)
-            with host_views_lock(phase_dir):
-                batched_tasks = materialize_validation_round(review_validation_round(
+        else:
+            # Zero groups, `--skip-validation`, a materialized round to merge
+            # or resume, or a new round: one resolution for every review lane
+            # (utils/review_lane.py).
+            steps = _review_lane.RoundSteps(
+                verify_round_context=verify_round_context,
+                bind_plan_for_validation=bind_plan_for_validation,
+                reopen_phase_for_validation=reopen_phase_for_validation,
+                retire_stale_validation_round=retire_stale_validation_round,
+                dispatch_in_round=dispatch_in_round,
+                dispatch_subagent_tasks=dispatch_subagent_tasks,
+                merge_validation_batches=merge_validation_batches,
+            )
+            outcome = await _review_lane.resolve_validation_round(
+                claim, args, steps,
+                phase_name=phase_name, phase_dir=phase_dir, plan_path=plan_path,
+                grouped=grouped, validation_path=validation_path,
+                # review-tasks embeds the task list in every prompt, so an edit
+                # to it since materialization is as stale as an edited plan.
+                # Absent for every other phase, and unrecorded hashes are not
+                # compared.
+                current_inputs=lambda: build_inputs(
+                    plan_file=str(plan_path),
+                    grouped_file=grouped_path,
+                    tasks_file=(extra_validation_metadata or {}).get("tasks_file"),
+                ),
+                build_round=lambda plan_document: review_validation_round(
                     grouped, args=args, phase_name=phase_name, phase_dir=phase_dir,
                     plan_path=plan_path, plan_content=plan_content,
                     plan_document=plan_document, orchestrator_script=orchestrator_script,
@@ -7924,80 +7813,14 @@ async def reaggregate_from_existing_files(
                     scope_round_policy=scope_round_policy, scope_state=scope_state,
                     scope_recorded_baseline=scope_recorded_baseline,
                     round_id=claim.round_id,
-                ))
-                batched_tasks["format_version"] = CURRENT_FORMAT_VERSION
-
-                claim.publish(validation_tasks_path, json.dumps(batched_tasks, indent=2),
-                              "write validation_tasks.json")
-
-            # The phase machine's own word for this stretch. `status` printed
-            # `phase state: grouping_complete` beside `progress: validating` for
-            # the whole validation run (measured 2026-09-16) because
-            # `validation_pending` — documented in utils/status_file.py since D4
-            # — was never written by anything. A new round also reopens a phase
-            # an earlier `--skip-validation` run recorded complete.
-            claim.check("reopen the phase for validation")
-            reopen_phase_for_validation(plan_path, phase_name, phase_dir)
-            # And the progress word, as the first run's hand-off writes it.
-            # The executor mirror still describes the PREVIOUS round's
-            # batches (16/16 done), and nothing of this round has been
-            # dispatched yet, so it is cleared rather than left beside the
-            # new step; a dispatch below rewrites it from scratch.
-            _detach.report_progress(
-                phase_dir, step="validation_pending", subagents=None
+                ),
+                findings="suggestions",
             )
-
-            total_batches = batched_tasks["total_batches"]
-            stats = batched_tasks.get("batching_stats", {})
-
-            if total_batches == 1:
-                print(f"\n[VALIDATION_PENDING] {validation_tasks_path}")
-            else:
-                print(f"\n[VALIDATION_BATCHES_PENDING] {validation_tasks_path}")
-                print(f"Batches: {total_batches}")
-
-            print(f"\nValidation prepared for subagent execution.")
-            print(f"Groups to validate: {stats.get('total_groups', len(grouped))}")
-
-            # Resolved here, from the running skill dir, because the task file
-            # stores only the durable mode + plan pair (D1c).
-            reaggregate_cmd = resolved_reaggregate_command(batched_tasks)
-
-            # D3b: with --exec-subagents this process continues past the marker
-            # instead of exiting — dispatch the batch, then fall through to the
-            # merge below and finish the phase in one invocation. The marker is
-            # still printed above (logs and .status.json), but it is
-            # informational on this path.
-            if await dispatch_in_round(
-                claim, dispatch_subagent_tasks,
-                args,
-                task_file=validation_tasks_path,
-                phase_dir=phase_dir,
-                phase=phase_name,
-                document=batched_tasks,
-                plan_path=str(plan_path),
-                label="validation",
-                retry_command=reaggregate_cmd,
-            ):
-                validated_groups_for_report = merge_validation_batches(
-                    phase_dir, batched_tasks, grouped, validation_path, claim=claim,
-                )
-                verdicts = claim.verdicts
-            else:
-                # The plan as the user typed it (fix round 14).
-                reaggregate_cmd = resolved_reaggregate_command(
-                    batched_tasks, typed_plan=True,
-                )
-                print("\nAfter validation completes, run:")
-                print(f"  {reaggregate_cmd or ''}")
-                # The single follow-up a native-subagent host is owed, also
-                # exposed on the dispatcher's MULTI_LLM_RESULT line so a host
-                # that cannot parse prose does not have to regex-mine stdout.
-                record_next(reaggregate_cmd or None)
+            if outcome.handed_off:
                 concluded = True
                 return
-        else:
-            print("\nSkipping validation (--skip-validation flag set)")
+            validated_groups_for_report = outcome.groups
+            verdicts = outcome.verdicts
 
         # Build list of successful models. The failure map is the one read back
         # above (after `record_models_present`) — this used to hard-code `{}`,
@@ -8327,6 +8150,13 @@ async def _review_orchestration(
 
     # Guard against re-running already-completed phase
     state_guard = get_or_create_state(Path(plan_path))
+    # A `--detach` launcher writes no state before the boundary: its launch can
+    # still be refused (the detached ceiling, a run that appeared since), and a
+    # refusal must leave state.json as it found it. Its worker runs this same
+    # pre-flight and writes it (docs/development/review-results.md, "The shared
+    # review lane").
+    detach_launcher = bool(getattr(args, "detach", False)) and not getattr(
+        args, "internal_worker", False)
     # Materialize `state.json` on the phase's first run (2026-10-05). Nothing
     # else writes it before the phase completes, so on a plan's first phase
     # the instructions' `util metrics start --state-file {plan}/state.json`
@@ -8335,12 +8165,14 @@ async def _review_orchestration(
     # host shrugged it off and the phase lost its ETA baseline. Written here,
     # after the completed-phase guard would have refused and before any
     # model runs, so the record of the run exists as soon as the run does.
-    _ensure_state_file(state_guard)
+    if not detach_launcher:
+        _ensure_state_file(state_guard)
     if state_guard.is_phase_completed(phase_name) and not args.force:
         sys.exit(report_already_completed(phase_name, phase_dir))
     elif args.force and state_guard.is_phase_completed(phase_name):
         state_guard.state.get("phases_completed", {}).pop(phase_name, None)
-        state_guard.save()
+        if not detach_launcher:
+            state_guard.save()
         print("NOTE: Cleared previous phase completion (--force mode)")
 
     # Mutual exclusivity check
@@ -8598,12 +8430,8 @@ async def _review_orchestration(
 
     # Save per-model results
     failed_models: Dict[str, str] = {}
-    for model_spec, result in results.items():
-        success = result["success"]
-        output = result["output"]
-        error = result["error"]
-
-        # `output` is the answer of a run that completed and is `None` on every
+    for model_spec, slot in _review_lane.slot_results(results).items():
+        # `payload` is the answer of a run that completed and is `None` on every
         # losing path; `failure_output` is the text a losing run left behind, and
         # only salvage may read it. Keeping them separate across this call is
         # what stops a crashed provider whose stdout happened to parse from being
@@ -8613,12 +8441,12 @@ async def _review_orchestration(
         # in `failure_output_from_result`, which is the same rule
         # `code_review_orchestrator`'s salvage site A applies to the other lane.
         if not save_model_result(
-            prefix, model_spec, success, output, error, out_dir, phase_dir,
-            salvage_phase_name,
-            failure_output=failure_output_from_result(result),
-            failure=result.get(SALVAGE_FAILURE_KEY),
+            prefix, model_spec, slot.success, slot.payload, slot.error, out_dir,
+            phase_dir, salvage_phase_name,
+            failure_output=failure_output_from_result(slot.details),
+            failure=slot.failure,
         ):
-            failed_models[model_spec] = error or "Unknown error"
+            failed_models[model_spec] = slot.error or "Unknown error"
 
     # F11: a model `run_models_concurrent`'s deadline cancelled has no result
     # file and, so far, no failure entry either. Same helper review-code uses,
@@ -8895,7 +8723,7 @@ async def _review_orchestration(
 
                     validation_tasks_path = os.path.join(phase_dir, "validation_tasks.json")
                     # The task file and the phase machine's own word for this
-                    # stretch (see the matching write on the reaggregate path),
+                    # stretch (the shared reaggregate writes it too, utils/review_lane.py),
                     # published together while the round is this run's.
                     with claim.held("write validation_tasks.json"):
                         _review_round.replace_file(
