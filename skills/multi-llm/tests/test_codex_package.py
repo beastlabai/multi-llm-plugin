@@ -923,8 +923,9 @@ _ALLOWED_ABSOLUTE = {
         "/proc/self/ns/pid", "/proc/self/stat"},
     f"{PAYLOAD}/utils/run_registry.py": {"/proc"},
     # `/proc/self/fd`: the O_TMPFILE restore links its unnamed staging file
-    # through its own descriptor's entry (U87).
-    f"{PAYLOAD}/utils/write_safety.py": {"/proc/self/fd"},
+    # through its own descriptor's entry (U87); the helper moved from
+    # write_safety into held_folder with the held walk (U89).
+    f"{PAYLOAD}/utils/held_folder.py": {"/proc/self/fd"},
     # `/dev/shm` beside `/tmp`: step 1b's denied toolchain paths, named in the
     # repo-wide developer message (plan codex-sandbox-unavailable step 1b).
     f"{PAYLOAD}/utils/providers/codex.py": {"/dev/null", "/tmp", "/dev/shm", "/dev/ptmx", "/dev/pts"},

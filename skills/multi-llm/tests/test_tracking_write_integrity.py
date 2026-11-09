@@ -29,7 +29,7 @@ def test_hash_restamp_failure_preserves_entire_state(tmp_path, monkeypatch):
     state_path.write_text(original)
     plan.write_text("# New plan")
 
-    def fail_replace(*_):
+    def fail_replace(*_, **__):
         raise OSError("disk failure")
 
     monkeypatch.setattr(finalize_tracking.os, "replace", fail_replace)
