@@ -13,8 +13,8 @@ helper modules split out of it (stated in the scheduler's module docstring):
 * **The modules import down only**: `commit_write_guard`, `check_records`,
   `verification_lines`, `human_task_plan`, `stop_answers`, `batch_prompt`,
   `write_outcomes`, `write_context`, `write_verify`, `write_sweep`, `write_eta`,
-  `write_reports`, `write_stop`, `batch_prompt_builder`, and none of them
-  imports the scheduler.
+  `write_reports`, `write_stop`, `batch_prompt_builder`, `write_commit_leg`,
+  `write_check_holds`, `write_resume`, and none of them imports the scheduler.
 """
 
 import ast
@@ -46,6 +46,9 @@ from utils import (  # noqa: E402
     write_reports,
     write_stop,
     batch_prompt_builder,
+    write_commit_leg,
+    write_check_holds,
+    write_resume,
 )
 
 #: Lowest first: each module may import only the ones before it.
@@ -64,6 +67,9 @@ OWNERS = {
     "write_reports": write_reports,
     "write_stop": write_stop,
     "batch_prompt_builder": batch_prompt_builder,
+    "write_commit_leg": write_commit_leg,
+    "write_check_holds": write_check_holds,
+    "write_resume": write_resume,
 }
 SCHEDULER = "write_batch_scheduler"
 
@@ -211,27 +217,27 @@ class TestEveryReaderGoesThroughTheOwner:
         assert len(_qualified_reads(SCHEDULER)) > 50
         assert sum(len(_qualified_reads(name)) for name in [SCHEDULER, *OWNERS]) > 150
 
+    @staticmethod
+    def _commit_leg(state):
+        """The scheduler's commit guard leg over a run of *state*."""
+        return write_commit_leg.CommitGuardLeg(
+            SimpleNamespace(state=SimpleNamespace(state=state), kind="apply_code_fixes"),
+            effects_lock=None, refused=None,
+        )
+
     def test_a_patch_on_the_owner_reaches_the_schedulers_own_code(self):
-        scheduler = write_batch_scheduler.WriteBatchScheduler.__new__(
-            write_batch_scheduler.WriteBatchScheduler)
-        scheduler.state = SimpleNamespace(state={"pinned": True})
-        scheduler.kind = "apply_code_fixes"
         guard = {"files": {}}
         with mock.patch.object(commit_write_guard, "commit_guard_of",
                                return_value=guard) as fake:
-            assert scheduler._commit_guard() is guard
+            assert self._commit_leg({"pinned": True}).guard() is guard
         fake.assert_called_once_with({"pinned": True}, "apply_code_fixes")
 
     def test_a_patch_on_the_scheduler_reaches_none_of_it(self):
         """The unsupported write the guard below refuses, pinned to its
         documented effect: a shadow in the scheduler that no code reads."""
-        scheduler = write_batch_scheduler.WriteBatchScheduler.__new__(
-            write_batch_scheduler.WriteBatchScheduler)
-        scheduler.state = SimpleNamespace(state={})
-        scheduler.kind = "apply_code_fixes"
         with mock.patch.object(write_batch_scheduler, "commit_guard_of",
                                return_value={"never": "read"}, create=True) as fake:
-            assert scheduler._commit_guard() is None
+            assert self._commit_leg({}).guard() is None
         assert fake.call_count == 0
         assert "commit_guard_of" not in vars(write_batch_scheduler)
         assert write_batch_scheduler.commit_guard_of is commit_write_guard.commit_guard_of
@@ -311,7 +317,7 @@ class TestTheGuardSeesTheScheduler:
 
     @pytest.mark.parametrize("snippet", [
         'monkeypatch.setattr(write_batch_scheduler, "dispatch_task", None)',
-        'monkeypatch.setattr(write_batch_scheduler, "WRITE_FINGERPRINT_FILENAME", ".x")',
+        'monkeypatch.setattr(write_batch_scheduler, "PARTIAL_SUMMARY_LINE", ".x")',
         'monkeypatch.setattr(check_records, "decomposition_graph", None)',
         'mock.patch("utils.check_records.decomposition_graph")',
         'found = write_batch_scheduler.split_accepted_findings([], {})',

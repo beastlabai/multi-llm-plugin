@@ -59,7 +59,7 @@ needs-human with a `check-findings` stop record (`StopAccount.record_check_block
 `## Not Run: Upstream Check Reported Problems`, `blocked_by_check` in the report and mirror); a check with findings on
 record, completed and not accepted (`rerunnable_checks`), is materialized again on
 `--resume`, answered with `--human-task <id>=done|skip|retry`, and re-dispatched on retry or when the
-tree changed since the run ended (`_check_findings_rerun`; `_restamp_check_trees` stamps the tree the
+tree changed since the run ended (`CheckHolds.check_findings_rerun`; `CheckHolds.restamp_check_trees` stamps the tree the
 run left); on the native leg `util batch-done --check findings` records the held dependents and prints
 `[CHECK_BLOCKED]`, `util write-prompt` refuses them (`[WRITE_PROMPT_BLOCKED]`) and
 `util finalize-tracking --mark-completed` refuses while one is left.
@@ -78,7 +78,7 @@ cleared the hold).
 round 13, the rerun-5 check-gate fixture). A check whose reply said `failed` while
 listing findings counts as done on `--resume` when its verdict stamp reads
 ok/`check-findings` (`_findings_from_a_failed_claim`; the runner's `failed` stays in the
-file), so `_check_findings_rerun` decides its re-run as for any check.
+file), so `CheckHolds.check_findings_rerun` decides its re-run as for any check.
 
 A task refused before any runner started (the write policy, the grant, the snapshot, the census, the
 result contract) is recorded `failed` with its reason through `_record_batch_effects`

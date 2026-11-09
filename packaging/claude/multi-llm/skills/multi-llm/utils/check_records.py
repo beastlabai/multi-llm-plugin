@@ -49,7 +49,7 @@ from .state_manager import IMPLEMENT_TASK_GRAPH_KEY
 _IMPLEMENT_TASK_ID = re.compile(r"^T[0-9]{3}\Z")
 
 #: The line an implement run prints per check task that reported problems
-#: (``WriteBatchScheduler._check_findings_lines``, racing re-run 4).
+#: (``CheckHolds.check_findings_lines``, racing re-run 4).
 CHECK_FINDINGS_MARKER = "[CHECK_FINDINGS]"
 
 
@@ -65,7 +65,7 @@ def check_findings_line(task_id: str, findings: Sequence[str]) -> str:
     )
 
 #: The line a code phase prints per batch whose own check failed after its
-#: edits (``WriteBatchScheduler._batch_check_lines``, ``util batch-done
+#: edits (``CheckHolds.batch_check_lines``, ``util batch-done
 #: --own-check findings`` on a code batch; fix round 14).
 BATCH_CHECK_MARKER = "[BATCH_CHECK_FAILED]"
 
@@ -155,7 +155,7 @@ def batch_check_line(
 ) -> str:
     """The :data:`BATCH_CHECK_MARKER` line for a code batch whose own report
     says a check it ran fails, or could not run; both legs print it
-    (``WriteBatchScheduler._batch_check_lines``, ``util batch-done``). Fix
+    (``CheckHolds.batch_check_lines``, ``util batch-done``). Fix
     round 16 (Codex racing 06r): it says the claim is the batch's own report
     and quotes it — T006's own words said its corrected check passed. Fix
     round 28: its own-check *note*, when it gave one, quoted after it
@@ -255,7 +255,7 @@ def _findings_from_a_failed_claim(data: Any) -> bool:
     runner wrote them: the claim is never the verdict (F1). Resume's
     definition of done read the claim alone, so such a check was never
     done and every plain ``--resume`` dispatched it again on unchanged
-    files, past the rule that keeps its findings (``_check_findings_rerun``;
+    files, past the rule that keeps its findings (``CheckHolds.check_findings_rerun``;
     fix round 13). Only the scheduler's own stamp turns the claim into
     done-evidence, and only for exactly that verdict.
     """
@@ -338,7 +338,7 @@ def unlanded_on_record(phase_dir: str, state: Any) -> List[str]:
     ``applied`` reply that moved not one byte ``completed`` (OpenCode racing
     run 5's T016). Its result file says so — the verdict is stamped
     ``clean-failure`` at ``ok`` — and the scheduler dispatches such a result
-    again (:meth:`WriteBatchScheduler._result_counts_as_done`), but
+    again (:meth:`ResumeEvidence.result_counts_as_done`), but
     ``--resume`` materializes only unfinished tasks, so it never got the
     chance. These are the ids ``implement_orchestrator`` hands out again: a
     task ``state.json`` records ``completed`` whose own result file
@@ -465,7 +465,7 @@ def transitive_dependents(tasks: Sequence[Dict[str, Any]], task_id: str) -> List
 
     Over each task's ``depends_on``; the one graph walk both legs use for
     the tasks a check with findings holds back (the scheduler's
-    ``_dependents_of``, ``util batch-done --check findings``). Pass the
+    ``CheckHolds.dependents_of``, ``util batch-done --check findings``). Pass the
     whole graph (:func:`decomposition_graph`), not a resume's subset.
     """
     dependents: Dict[str, List[str]] = {}
@@ -682,7 +682,7 @@ def accepted_checks_section(checks: Sequence[Tuple[str, str, List[str]]]) -> str
 
 #: The line a code task prints when its own check reported only findings the
 #: user accepted for a check (``--human-task <check>=done``): both legs
-#: (``WriteBatchScheduler._batch_check_lines``, ``util batch-done``), in place
+#: (``CheckHolds.batch_check_lines``, ``util batch-done``), in place
 #: of :data:`BATCH_CHECK_MARKER` for those findings (fix round 22).
 BATCH_CHECK_ACCEPTED_MARKER = "[BATCH_CHECK_ACCEPTED]"
 

@@ -74,7 +74,7 @@ class EtaLines:
         self.closed = False
         #: The tasks a check this run recorded with findings holds back, out
         #: of the `[ETA]` total from that check's own line on (fix round 21),
-        #: before `_block_dependents_of_checks` holds them for the loop. Fix
+        #: before `CheckHolds.block_dependents_of_checks` holds them for the loop. Fix
         #: round 22: each with its check, which the closing line names.
         self.held: Dict[str, str] = {}
         #: Fix round 22 (live run 9 #1): the tasks this run dispatched that

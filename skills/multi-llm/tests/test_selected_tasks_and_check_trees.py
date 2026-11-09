@@ -168,7 +168,7 @@ class TestColocatedCodeIsInTheCheckTree:
             repo.phase_dir.parent, kind="implement", phase_dir=repo.phase_dir,
             repo_root=repo.root,
         )
-        return scheduler._tree_fingerprint()
+        return scheduler._checks.tree_fingerprint()
 
     def test_both_legs_see_colocated_source_but_ignore_workflow_bookkeeping(self, repo):
         code = self._code(repo)

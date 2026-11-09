@@ -1849,7 +1849,7 @@ def _native_check_reruns(
     check whose findings hold tasks back out again on every ``--resume``, so a
     resume the user changed nothing for spent a new subagent (~23k tokens) on
     the same findings — the executor refuses that run
-    (``WriteBatchScheduler._check_findings_rerun``). A check is kept — not in
+    (``CheckHolds.check_findings_rerun``). A check is kept — not in
     the batches, its findings standing, the tasks after it held — when the
     files git sees are the ones its stamp recorded
     (``state.json``'s ``task_check_trees``: ``util batch-done`` stamps it,
@@ -1916,7 +1916,7 @@ def _executor_check_stamp(
 
     ``verdict.tree_fingerprint`` of ``{phase}/implement_batch_<id>.json``
     (``WriteBatchScheduler._stamp_verdict``, re-stamped with the tree the run
-    left by its ``_restamp_check_trees``), the same digest
+    left by its ``CheckHolds.restamp_check_trees``), the same digest
     ``write_prompt.check_tree_fingerprint`` takes. Only a verdict that is an
     ``ok`` check with findings, and the very findings ``state.json`` holds
     (*findings*), so a stamp is never read off another run of the check than
@@ -2140,11 +2140,11 @@ def _kept_labels(state: StateManager, plan: Any = None) -> Dict[str, str]:
     answers on record, in the words the executor's ``resume: kept`` line and
     summary.md use (``human_task_plan.answered_done_label``); and a
     check whose findings stand, not accepted, as
-    ``write_batch_scheduler.KEPT_WITH_FINDINGS_LABEL`` (fix round 20, live
+    ``task_ledger.KEPT_WITH_FINDINGS_LABEL`` (fix round 20, live
     run 8 #6: 01b and 01c listed T002 as if it had passed)."""
     from types import SimpleNamespace
 
-    from utils.write_batch_scheduler import KEPT_WITH_FINDINGS_LABEL
+    from utils.task_ledger import KEPT_WITH_FINDINGS_LABEL
     from utils.check_records import rerunnable_checks
     from utils.human_task_plan import (
         answered_done_label,

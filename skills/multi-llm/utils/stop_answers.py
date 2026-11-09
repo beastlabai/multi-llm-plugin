@@ -188,7 +188,7 @@ class FailedAnswerable:
     not_rerun: bool = False
     #: A check task (it declares no file) whose failure a resume does not run
     #: again while the files are unchanged (the executor's
-    #: ``_unchanged_since_failure``; fix round 22, :func:`compose_resume_why`):
+    #: ``CheckHolds.unchanged_since_failure``; fix round 22, :func:`compose_resume_why`):
     #: only one whose verdict carries the tree it failed on, or one the run
     #: already kept (fix round 23).
     check: bool = False
@@ -542,7 +542,7 @@ def executor_check_stamp(
 
     ``verdict.tree_fingerprint`` of ``{phase}/implement_batch_<id>.json``
     (:meth:`WriteBatchScheduler._stamp_verdict`, re-stamped with the tree the
-    run left by its ``_restamp_check_trees``), the same digest
+    run left by its ``CheckHolds.restamp_check_trees``), the same digest
     ``write_prompt.check_tree_fingerprint`` takes. Only a verdict that is an
     ``ok`` check with findings, and the very findings ``state.json`` holds
     (*findings*), so a stamp is never read off another run of the check than

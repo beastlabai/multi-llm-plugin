@@ -325,7 +325,7 @@ def main(argv=None) -> int:
 def _restamp_check_trees(state_path: Path) -> None:
     """Stamp each check whose findings hold tasks with the tree as the run
     leaves it (fix round 14, the native counterpart of the executor's
-    ``WriteBatchScheduler._restamp_check_trees``).
+    ``CheckHolds.restamp_check_trees``).
 
     ``util batch-done --check findings`` stamps the tree when the check is
     recorded, and the tasks that do not depend on it go on and edit files

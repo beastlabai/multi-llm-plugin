@@ -48,8 +48,10 @@ import itertools
 import json
 import os
 import sys
+import threading
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 from unittest import mock
 
@@ -60,6 +62,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils import landlock_dispatch  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
 from utils import write_batch_scheduler as wbs  # noqa: E402
+from utils import write_commit_leg  # noqa: E402
+from utils import write_sweep  # noqa: E402
 from utils import write_verdict as verdict  # noqa: E402
 from utils.providers.base import SANDBOX_RUNG_PLUGIN_LANDLOCK  # noqa: E402
 from utils.write_safety import PolicyViolation  # noqa: E402
@@ -570,7 +574,13 @@ def _scheduler(case: Case, root: Path) -> Tuple[Any, Dict[str, Any]]:
     scheduler._replaced_targets = set()
     scheduler._told_checks = {}
     scheduler._listed_outcomes = {}
-    scheduler._commit_watch_before = {}
+    # The sweep's audit rows and the commit guard's restore run for real,
+    # over the same root; the sweep and the watch read below are faked.
+    run = SimpleNamespace(repo_root=str(root))
+    scheduler._sweep = write_sweep.ContainmentSweep(run)
+    scheduler._commit = write_commit_leg.CommitGuardLeg(
+        run, effects_lock=threading.Lock(), refused=None,
+    )
     scheduler._target_identity_before = Identities({TASK_ID: (1, 100)}, calls)
     after = {"none": (1, 100), "swapped": (1, 200), "gone": None,
              "off_rung": (1, 200)}[case.replaced]
@@ -594,7 +604,7 @@ def _scheduler(case: Case, root: Path) -> Tuple[Any, Dict[str, Any]]:
         watch = ([WATCHED], commit_apply, {"protected": [WATCHED]})
     else:
         watch = ([], None, None)
-    scheduler._commit_watch_after = _traced(lambda task_id: watch, calls, "commit-watch")
+    scheduler._commit.watch_after = _traced(lambda task_id: watch, calls, "commit-watch")
     return scheduler, probes
 
 

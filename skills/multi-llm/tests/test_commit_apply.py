@@ -1877,11 +1877,13 @@ class TestASymlinkedContextPlan:
     def test_the_executor_denies_the_target_as_the_context_plan(self, repo):
         import types
 
-        from utils.write_batch_scheduler import WriteBatchScheduler
+        from utils.write_commit_leg import CommitGuardLeg
         from utils.write_safety import CONTEXT_PLAN_RULE, PolicyViolation, WritePolicy
 
         policy = WritePolicy(root=str(repo), allow=["**"], deny=[])
-        WriteBatchScheduler._commit_protect(types.SimpleNamespace(policy=policy), {
+        CommitGuardLeg(
+            types.SimpleNamespace(policy=policy), effects_lock=None, refused=None,
+        ).protect({
             "head": "0" * 40, "protected": {}, "context_plan": "docs/plan-link.md",
             "context_plan_targets": {"docs/plan.md": "id"},
         })

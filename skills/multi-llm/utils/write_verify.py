@@ -8,10 +8,14 @@ and saying so when nothing ran the tests (:meth:`VerifyStep.note_unverified_on_s
 and recording what the phase changed in ``tracked_files`` after each batch and
 at the end (:meth:`VerifyStep.record_batch_tracking`,
 :meth:`VerifyStep.finalize_tracking`). It holds no state of its own.
+:class:`VerifyCommand` runs the command: in a process group (a Job Object on
+Windows) of its own, its output bounded, and a timeout that ends the whole
+tree and words what the kill confirmed (:meth:`VerifyCommand.run`,
+:meth:`VerifyCommand.kill_tree`).
 
-``WriteBatchScheduler`` composes it with the run's ``RunContext`` and hands it
-the few things it calls back: the command runner, which stays on the scheduler
-(``_run_verify_command``), the tests line worded from the batches' checks, the
+``WriteBatchScheduler`` composes both with the run's ``RunContext`` and hands
+``VerifyStep`` the few things it calls back: the command runner
+(``VerifyCommand.run``), the tests line worded from the batches' checks, the
 stop's headline and the task lookup
 (docs/development/write-scheduler.md#where-the-schedulers-helpers-live).
 """
@@ -19,18 +23,24 @@ stop's headline and the task lookup
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import batch_prompt as _batch_prompt
 from . import check_records as _check_records
+from . import process_control as _process_control
+from . import subagent_executor as _executor
 from . import write_context as _write_context
 from .batch_ledger import touched_files
 from .cli_common import EXIT_NEEDS_HUMAN
 from .provider_registry import get_verify_command, get_verify_settings
 from .batch_reply import WRITE_APPLIED, WRITE_PARTIAL
+from .subagent_executor import _host_env_guards
 from .subagent_tasks import PHASE_BY_WRITE_KIND
 
 #: How much of the verification command's output travels in the result payload,
@@ -66,7 +76,8 @@ class VerifyStep:
     ``_effects_lock``, which every in-memory ``state.json`` write of the run
     takes; *finalize* is the scheduler's ``finalize``. The four callables
     reach the scheduler's ``_task_by_id``, ``_unverified_text``,
-    ``StopAccount.set_stop_headline`` and ``_run_verify_command``, looked up at each call.
+    ``StopAccount.set_stop_headline`` and ``VerifyCommand.run``, looked up at
+    each call.
     """
 
     def __init__(
@@ -166,7 +177,7 @@ class VerifyStep:
         with `cwd` at the pinned repo root — the same root every containment
         check resolves against — and bounded by `driver.verify_timeout_s`, which
         is a bound on the whole process group and not just on `/bin/sh`
-        (the scheduler's ``_run_verify_command``). It is logged before it starts and again
+        (:meth:`VerifyCommand.run`). It is logged before it starts and again
         with its exit code once it ends.
         """
         if self._ctx.kind not in _batch_prompt.CODE_WRITE_KINDS:
@@ -451,3 +462,237 @@ class VerifyStep:
             f"[write-subagents] tracked_files now names {len(entries)} "
             f"file(s): {named}{more}"
         )
+
+
+# ---------------------------------------------------------------------------
+# The command runner
+# ---------------------------------------------------------------------------
+
+#: How much of the command's output is read back off disk before redaction and
+#: the tail cap (:data:`VERIFY_TAIL_CHARS`). `capture_output=True` buffered a whole build in this
+#: process to hand 2000 characters of it to a report (F6); a bounded read off the
+#: end of the capture file is the same tail at a fixed cost.
+VERIFY_OUTPUT_CAP_BYTES = 64 * 1024
+
+#: SIGTERM→SIGKILL grace for a timed-out command's process group, then how long
+#: the reaping wait holds. The same shape `subagent_executor` uses on a runner.
+VERIFY_KILL_GRACE_S = 0.5
+VERIFY_REAP_S = 5.0
+
+#: Recorded when the command produced no exit status of its own, in the shell's
+#: own vocabulary so a reader of `verification.exit_code` learns nothing private.
+VERIFY_EXIT_TIMEOUT = 124
+VERIFY_EXIT_NOT_RUN = 127
+
+
+def _verify_timeout_note(
+    timeout: int, verdict: Optional[str], pid: int, pgid: Optional[int],
+) -> str:
+    """The line a timed-out verify command's output ends with, from its kill's
+    *verdict* (``kill_tree``). Only ``killed`` and
+    ``gone`` confirm the command stopped (``subagent_executor._unconfirmed_kill``);
+    every other verdict, ``None`` for a kill that raised included, names the
+    pid and says the command may still be running, never that it was killed
+    (docs/development/write-scheduler.md, "When the verify command times out")."""
+    reason = _executor._unconfirmed_kill(verdict)
+    if reason is None:
+        if verdict == "gone":
+            return (f"\n(timed out after {timeout}s: the command had already stopped, "
+                    f"and nothing of its process group still runs — verdict {verdict})")
+        return (f"\n(killed after {timeout}s: SIGTERM then SIGKILL to the command's "
+                f"whole process group — verdict {verdict})")
+    who = f"pid {pid}" + (f", process group {pgid}" if pgid is not None else "")
+    if verdict == "skipped":
+        # The kill could not trust the command's pid to name it any more.
+        return (f"\n(timed out after {timeout}s: termination attempted, but no signal "
+                f"was sent, so the command ({who}) may still be running — "
+                f"verdict {verdict})")
+    if verdict == "unresolved":
+        # What ran in its group that could not be identified as the command's
+        # got nothing.
+        return (f"\n(timed out after {timeout}s: not every process of the command "
+                f"({who}) could be confirmed stopped; what could not be identified as "
+                f"the command's was not signalled and may still be running — "
+                f"verdict {verdict})")
+    return (f"\n(timed out after {timeout}s: termination attempted, but the command "
+            f"({who}) could not be confirmed stopped: {reason}, so it may still be "
+            f"running — verdict {verdict})")
+
+
+class VerifyCommand:
+    """``driver.verify_command``'s runner (F3/F4, F6): the shell string in a
+    process group of its own (a Job Object on Windows), its output bounded,
+    and a timeout that ends the whole tree and says what the kill confirmed
+    (docs/development/write-scheduler.md, "When the verify command times out").
+
+    Built once per run by the scheduler over the run's ``RunContext``: it runs
+    in ``ctx.repo_root``, composes its environment for ``ctx.anchor`` and warns
+    through ``ctx.log``. :meth:`VerifyStep.run` calls :meth:`run`.
+    """
+
+    def __init__(self, ctx: _write_context.RunContext) -> None:
+        self._ctx = ctx
+
+    def run(self, command: str, timeout: int) -> Tuple[int, str]:
+        """Run the shell string; return ``(exit_code, output)`` (F3/F4, F6).
+
+        Three things the old one-line ``subprocess.run(shell=True, timeout=…)``
+        could not do, each measured 2026-09-16:
+
+        * **Stop the check.** ``run``'s timeout SIGKILLs ``/bin/sh`` and nothing
+          else, and the documented ``pnpm typecheck && pnpm lint:fix`` shape is
+          exactly the one where the shell cannot exec into the command — so the
+          phase reported ``exited 124`` while ``node`` kept the CPU, reparented
+          to init. The child is its own process-group leader here
+          (``process_control.new_process_group_kwargs``) and a timeout takes the
+          whole group down through ``kill_tree``, the same facade and the same
+          escalation the runner spawn uses. On Windows, which has no groups,
+          the command starts in a Job Object of its own
+          (``process_control.popen_tree``) and the timeout ends that job.
+        * **Bound the wait.** A grandchild that inherited the capture pipes keeps
+          ``communicate()`` blocked past the deadline, so ``verify_timeout_s``
+          was not a bound at all. Both streams go to one temp file instead:
+          ``wait`` bounds on the direct child, and no descriptor this process
+          reads is held by anything that outlived the kill.
+        * **Bound the memory.** Only the last :data:`VERIFY_OUTPUT_CAP_BYTES` are
+          read back — a failing build prints megabytes and what names the failure
+          is the end of it, which is why the record keeps a tail in the first
+          place.
+        """
+        env = self.env()
+        try:
+            sink = tempfile.TemporaryFile(prefix="multi_llm_verify_")
+        except OSError as exc:  # pragma: no cover - no writable temp dir
+            return VERIFY_EXIT_NOT_RUN, (
+                f"verification output could not be captured: {exc}"
+            )
+        with sink:
+            try:
+                proc, job = _process_control.popen_tree(  # noqa: S602 - a shell string is the contract
+                    command, shell=True, cwd=self._ctx.repo_root,
+                    stdin=subprocess.DEVNULL, stdout=sink,
+                    stderr=subprocess.STDOUT, env=env,
+                    **_process_control.new_process_group_kwargs(),
+                )
+            except OSError as exc:  # pragma: no cover - the shell itself is missing
+                return VERIFY_EXIT_NOT_RUN, (
+                    f"verification command could not be started: {exc}"
+                )
+            try:
+                # Read the group while the leader is alive: `os.getpgid` stops
+                # answering once it is reaped, and the group is what still
+                # holds the build's children.
+                pgid = _process_control.process_group_id(proc.pid)
+                note = ""
+                try:
+                    exit_code = int(proc.wait(timeout=timeout))
+                except subprocess.TimeoutExpired:
+                    verdict = self.kill_tree(proc, pgid, job)
+                    exit_code = VERIFY_EXIT_TIMEOUT
+                    note = _verify_timeout_note(timeout, verdict, proc.pid, pgid)
+            finally:
+                if job is not None:
+                    job.close()
+            return exit_code, self.output_tail(sink) + note
+
+    def kill_tree(
+        self, proc: Any, pgid: Optional[int], job: Any = None,
+    ) -> Optional[str]:
+        """SIGTERM → SIGKILL the timed-out command *and its group*, then reap it.
+        Returns ``kill_tree``'s verdict; ``None`` when the kill raised (the
+        command was then sent a kill through its job or its ``Popen``,
+        unconfirmed).
+
+        ``start_time=None`` is how an unverified kill is *requested*: this pid is
+        a child still held open here, not a record read off disk, so there is
+        nothing to corroborate and no recycled pid to protect; as ``child``,
+        unreaped until the wait below, it anchors its pid and group through the
+        kill where the owned kill runs (Linux, glibc or musl; see ``kill_tree``).
+        *job* is the command's Windows Job Object, the group's stand-in there.
+
+        Only ``killed`` and ``gone`` confirm the command stopped, the executor's
+        rule for its timed-out runner (``subagent_executor._unconfirmed_kill``):
+        a ``survived`` that is only the command's own zombie becomes ``killed``
+        once its exit is confirmed (``process_control.own_child_stopped``), and
+        any other outcome is logged as a warning naming the pid, which a
+        detached run's record keeps for a later abort or sweep
+        (``detach.note_left_running``; docs/development/write-scheduler.md,
+        "When the verify command times out").
+        """
+        verdict: Optional[str]
+        try:
+            verdict = _process_control.kill_tree(
+                proc.pid, start_time=None, pgid=pgid,
+                escalate_after_s=VERIFY_KILL_GRACE_S, poll_interval_s=0.05,
+                job=job, child=proc,
+            )
+            if verdict == "survived" and _process_control.own_child_stopped(proc, pgid):
+                verdict = "killed"
+        except Exception:  # noqa: BLE001 - teardown must never mask the timeout
+            verdict = None
+            if job is None or not job.terminate():
+                try:
+                    proc.kill()
+                except OSError:  # pragma: no cover - already gone
+                    pass
+        try:
+            proc.wait(timeout=VERIFY_REAP_S)
+        except subprocess.TimeoutExpired:  # pragma: no cover - survived SIGKILL
+            pass
+        reason = _executor._unconfirmed_kill(verdict)
+        if reason is not None:
+            detach = sys.modules.get(f"{__package__}.detach") if __package__ else None
+            kept = detach is not None and detach.note_left_running(proc.pid, pgid, verdict)
+            self._ctx.log(
+                f"[write-subagents] warning: the timed-out verification command "
+                f"pid {proc.pid} (process group {pgid if pgid is not None else '?'}) "
+                f"could not be confirmed stopped (kill verdict {verdict}): {reason}, "
+                f"so it may still be running. Check it by hand"
+                + ("; the run's record keeps it for status --abort." if kept else ".")
+            )
+        return verdict
+
+    def output_tail(self, sink: Any) -> str:
+        """The last :data:`VERIFY_OUTPUT_CAP_BYTES` the command wrote, as text."""
+        try:
+            size = sink.seek(0, os.SEEK_END)
+            sink.seek(max(0, size - VERIFY_OUTPUT_CAP_BYTES))
+            raw = sink.read()
+        except (OSError, ValueError):  # pragma: no cover - sink already closed
+            return ""
+        if isinstance(raw, bytes):
+            return raw.decode("utf-8", errors="replace")
+        return raw or ""
+
+    def env(self) -> Optional[Dict[str, str]]:
+        """The environment ``driver.verify_command`` runs with (F6).
+
+        Composed by the same function the runner spawn uses
+        (``providers.base.build_child_env``) instead of being inherited wholesale
+        from ``os.environ``: the running host's own ``env_guards`` — the
+        nested-session marker and the session-scoped ids this dispatcher was
+        handed — are stripped, and an operator who turned ``env_allowlist`` on
+        gets this check reduced to the same deny-by-default set a runner sees.
+        There is no provider (this is the repository's own command, not an agent
+        CLI), so nothing adapter-specific applies, and ``None`` means "inherit
+        unchanged" exactly as it does at the two spawn sites.
+
+        The reason it is worth composing at all: the *string* is config and a run
+        cannot change it, but the **scripts it invokes** — `package.json`'s
+        `typecheck`, a `Makefile` target — are files the write subagent was just
+        allowed to edit, so this command is inside the phase's own blast radius.
+        `docs/configuration.md`'s safety section says so too.
+        """
+        from .providers.base import build_child_env
+        try:
+            guards, passthrough = _host_env_guards()
+            return build_child_env(
+                None, provider_env={}, host_guards=guards,
+                host_passthrough=passthrough, anchor=self._ctx.anchor,
+            )
+        except Exception as exc:  # noqa: BLE001 - env policy must not fail a check
+            self._ctx.log(
+                f"[write-subagents] warning: could not compose the verification "
+                f"environment ({exc}); inheriting this process's unchanged"
+            )
+            return None

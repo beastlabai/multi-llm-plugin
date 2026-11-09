@@ -210,7 +210,7 @@ class TestTheBuilder:
         _assert_clean(env)
 
     def test_the_repository_verification_command(self):
-        """`write_batch_scheduler._verify_env` composes with no provider."""
+        """`write_verify.VerifyCommand.env` composes with no provider."""
         with patch.dict(os.environ, _leaky(), clear=False):
             env = base.build_child_env(None, provider_env={})
         _assert_clean(env)

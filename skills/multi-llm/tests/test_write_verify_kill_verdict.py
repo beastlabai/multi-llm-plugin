@@ -1,6 +1,6 @@
 """What a timed-out ``driver.verify_command`` reports about its kill.
 
-``WriteBatchScheduler._kill_verify_tree`` keeps the executor's rule for its
+``write_verify.VerifyCommand.kill_tree`` keeps the executor's rule for its
 timed-out runner (``subagent_executor._unconfirmed_kill``): only ``killed`` and
 ``gone`` confirm the command stopped, and a ``survived`` that is only the
 command's own zombie becomes ``killed`` once its exit is confirmed. Every other
@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils import process_control  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
 from utils import write_batch_scheduler as wbs  # noqa: E402
+from utils import write_verify  # noqa: E402
 from tests.scheduler_support import make_scheduler  # noqa: E402
 
 PID = 4242
@@ -81,8 +82,8 @@ def _kill_answers(monkeypatch, verdict, *, zombie=False):
             raise verdict
         return verdict
 
-    monkeypatch.setattr(wbs._process_control, "kill_tree", kill_tree)
-    monkeypatch.setattr(wbs._process_control, "own_child_stopped",
+    monkeypatch.setattr(write_verify._process_control, "kill_tree", kill_tree)
+    monkeypatch.setattr(write_verify._process_control, "own_child_stopped",
                         lambda child, pgid: zombie)
     return calls
 
@@ -107,7 +108,7 @@ class TestOnlyKilledAndGoneConfirmAStop:
         _kill_answers(monkeypatch, verdict)
         proc = _Proc()
 
-        assert scheduler._kill_verify_tree(proc, PGID) == verdict
+        assert scheduler._verify_command.kill_tree(proc, PGID) == verdict
         assert _warnings(scheduler) == []
         assert left_running == []
         assert proc.waited == 1 and proc.killed == 0
@@ -118,7 +119,7 @@ class TestOnlyKilledAndGoneConfirmAStop:
         once its exit and an empty group are confirmed it was killed."""
         _kill_answers(monkeypatch, "survived", zombie=True)
 
-        assert scheduler._kill_verify_tree(_Proc(), PGID) == "killed"
+        assert scheduler._verify_command.kill_tree(_Proc(), PGID) == "killed"
         assert _warnings(scheduler) == []
         assert left_running == []
 
@@ -127,7 +128,7 @@ class TestOnlyKilledAndGoneConfirmAStop:
                                                   left_running, verdict):
         _kill_answers(monkeypatch, verdict)
 
-        assert scheduler._kill_verify_tree(_Proc(), PGID) == verdict
+        assert scheduler._verify_command.kill_tree(_Proc(), PGID) == verdict
         [warning] = _warnings(scheduler)
         assert f"pid {PID} (process group {PGID})" in warning
         assert f"kill verdict {verdict}" in warning
@@ -140,7 +141,7 @@ class TestOnlyKilledAndGoneConfirmAStop:
             self, scheduler, monkeypatch, left_running):
         _kill_answers(monkeypatch, "survived", zombie=False)
 
-        assert scheduler._kill_verify_tree(_Proc(), PGID) == "survived"
+        assert scheduler._verify_command.kill_tree(_Proc(), PGID) == "survived"
         assert len(_warnings(scheduler)) == 1
 
     def test_a_kill_that_raised_is_none_and_falls_back_unconfirmed(
@@ -148,7 +149,7 @@ class TestOnlyKilledAndGoneConfirmAStop:
         _kill_answers(monkeypatch, RuntimeError("no /proc"))
         proc = _Proc()
 
-        assert scheduler._kill_verify_tree(proc, PGID) is None
+        assert scheduler._verify_command.kill_tree(proc, PGID) is None
         assert proc.killed == 1, "the fallback kill still goes to the command"
         [warning] = _warnings(scheduler)
         assert f"pid {PID}" in warning and "kill verdict None" in warning
@@ -159,7 +160,7 @@ class TestOnlyKilledAndGoneConfirmAStop:
                                                left_running):
         _kill_answers(monkeypatch, "survived")
 
-        scheduler._kill_verify_tree(_Proc(), None)
+        scheduler._verify_command.kill_tree(_Proc(), None)
         [warning] = _warnings(scheduler)
         assert f"pid {PID} (process group ?)" in warning
 
@@ -168,7 +169,7 @@ class TestOnlyKilledAndGoneConfirmAStop:
         monkeypatch.setattr(detach, "note_left_running", lambda *args: True)
         _kill_answers(monkeypatch, "unresolved")
 
-        scheduler._kill_verify_tree(_Proc(), PGID)
+        scheduler._verify_command.kill_tree(_Proc(), PGID)
         [warning] = _warnings(scheduler)
         assert "the run's record keeps it for status --abort" in warning
 
@@ -177,7 +178,7 @@ class TestOnlyKilledAndGoneConfirmAStop:
         calls = _kill_answers(monkeypatch, "killed")
         proc = _Proc()
 
-        scheduler._kill_verify_tree(proc, PGID, job=None)
+        scheduler._verify_command.kill_tree(proc, PGID, job=None)
         [(pid, kwargs)] = calls
         assert pid == PID
         assert kwargs["start_time"] is None and kwargs["child"] is proc
@@ -225,9 +226,9 @@ class TestThroughTheRunner:
                 raise verdict
             return verdict
 
-        monkeypatch.setattr(wbs._process_control, "kill_tree", kill_then_report)
-        monkeypatch.setattr(scheduler, "_verify_env", lambda: None)
-        exit_code, tail = scheduler._run_verify_command("echo started; exec sleep 30", 1)
+        monkeypatch.setattr(write_verify._process_control, "kill_tree", kill_then_report)
+        monkeypatch.setattr(scheduler._verify_command, "env", lambda: None)
+        exit_code, tail = scheduler._verify_command.run("echo started; exec sleep 30", 1)
         assert exit_code == wbs.VERIFY_EXIT_TIMEOUT
         assert "started" in tail
         return tail
@@ -264,7 +265,7 @@ class TestThroughTheRunner:
             launched.append(args)
             return real(args, **kwargs)
 
-        monkeypatch.setattr(wbs._process_control, "popen_tree", recorded)
-        monkeypatch.setattr(scheduler, "_verify_env", lambda: None)
-        assert scheduler._run_verify_command("exit 0", 5) == (0, "")
+        monkeypatch.setattr(write_verify._process_control, "popen_tree", recorded)
+        monkeypatch.setattr(scheduler._verify_command, "env", lambda: None)
+        assert scheduler._verify_command.run("exit 0", 5) == (0, "")
         assert launched == ["exit 0"]

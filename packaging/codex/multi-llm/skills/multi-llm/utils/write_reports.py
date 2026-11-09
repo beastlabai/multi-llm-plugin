@@ -37,6 +37,8 @@ from .subagent_executor import (
     STATUS_OK,
     WRITE_APPLIED,
     BatchReport,
+    ExecutorError,
+    RunnerRejected,
     TaskOutcome,
     _atomic_write_json,
     batch_check_could_not_run,
@@ -887,3 +889,36 @@ class WriteReports:
             if str(task.get("task_id", "")) == task_id:
                 return int(task.get("batch_index", 0))
         return None
+
+    def record_refusal(self, exc: ExecutorError, batch_index: int) -> None:
+        """I11: name the refusal in ``.status.json``, with nothing in flight.
+
+        Plan codex-sandbox-unavailable-findings-and-fixes §5 I11 (2026-09-30):
+        after a batch-0 refusal the status file still listed ``apply-batch-0``
+        as "in flight (since 0m 9s)". The in-flight entry is closed by
+        ``_dispatch_one``'s ``finally`` before the mirror above is written;
+        this records what ended the run in the read path's own close-out
+        words (``review_orchestrator_base._print_executor_refusal``):
+        ``runner_rejected`` for a refused runner, ``executor_refused`` for any
+        other pre-dispatch refusal — both terminal to ``status``, which renders
+        the repair off ``reason_code``. Best-effort, like every mirror write.
+        """
+        from . import status_file as _status_file
+        rejected = isinstance(exc, RunnerRejected)
+        try:
+            self._sweep.clear_in_flight()
+            _status_file.update_status(self._ctx.phase_dir, {
+                "state": "runner_rejected" if rejected else "executor_refused",
+                "reason_code": (
+                    (getattr(exc, "reason_code", "") or "") if rejected else ""
+                ) or type(exc).__name__,
+                "runner": (getattr(exc, "spec", "") or "") if rejected else "",
+                "runner_key": (getattr(exc, "key", "") or "") if rejected else "",
+                "refused_batch": batch_index,
+                "progress": {"write_subagents": {
+                    **self.mirror_snapshot(),
+                    "in_flight": [],
+                }},
+            })
+        except Exception:  # noqa: BLE001 - observability must not fail a phase
+            pass

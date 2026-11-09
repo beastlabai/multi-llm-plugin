@@ -699,7 +699,7 @@ say so rather than report the run cleanly stopped, and keep what they need to tr
   runner by that identity. A foreground run records no launches, so the warning and the error are
   all there is.
 - The write scheduler's timeout kill of `driver.verify_command`
-  (`WriteBatchScheduler._kill_verify_tree`) keeps the same rule, through the same
+  (`VerifyCommand.kill_tree`) keeps the same rule, through the same
   `_unconfirmed_kill`, and the same `detach.note_left_running` record; its output's closing note
   names the verdict ([write scheduler contract](write-scheduler.md#write-scheduler-contract),
   "When the verify command times out").

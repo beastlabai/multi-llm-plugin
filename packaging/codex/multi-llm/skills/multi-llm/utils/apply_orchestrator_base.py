@@ -1015,7 +1015,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
 
         An apply phase takes only ``skip``, only on ``--resume`` and only on
         the ``--exec-subagents`` leg, whose own stop record the answer is
-        checked against (``WriteBatchScheduler._check_partial_skips``). The
+        checked against (``ResumeEvidence.check_partial_skips``). The
         native leg's host records such a batch itself (``util batch-done
         --skipped``). Anything else is exit 3, before any work.
         """
@@ -1686,7 +1686,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # its batch did not apply is offered again, on both legs); every other
         # record drops it (`processed_record_counts`). On the
         # executor leg a record the executor wrote drops nothing: its resume
-        # evidence is the result file on disk (`_done_evidence`), under the
+        # evidence is the result file on disk (`ResumeEvidence.done_evidence`), under the
         # batch's own id. Records and human decisions are looked up by
         # `group_join_ids`: the stamped id, or the plain content hash only
         # where it names one group, so one same-content group's record never
@@ -3341,7 +3341,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
 
         Each signal is dated against the review's latest completion
         (:meth:`_review_completed_at`) and compared strictly, as the
-        scheduler's ``_earlier_report_rows`` compares: a processed record by
+        scheduler's ``ResumeEvidence.earlier_report_rows`` compares: a processed record by
         its ``timestamp``, the report by its ``written_at`` (its mtime when
         that is missing or unreadable), a batch result by its mtime. One older
         than the review is an earlier cycle's: the phase dir and ``state.json``

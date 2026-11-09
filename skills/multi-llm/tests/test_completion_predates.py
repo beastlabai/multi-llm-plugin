@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import check_workflow_prerequisites as prereq  # noqa: E402
 from utils import (  # noqa: E402
-    apply_orchestrator_base, improve_workflow, write_batch_scheduler, write_safety,
+    apply_orchestrator_base, improve_workflow, write_resume, write_safety,
 )
 from utils.state_manager import StateManager, _parse_completion_time  # noqa: E402
 
@@ -202,7 +202,7 @@ class TestPhaseWordsOnly:
 
 #: The modules that date a record against its review.
 READERS = {
-    "write_batch_scheduler": write_batch_scheduler,
+    "write_resume": write_resume,
     "check_workflow_prerequisites": prereq,
     "apply_orchestrator_base": apply_orchestrator_base,
     "improve_workflow": improve_workflow,

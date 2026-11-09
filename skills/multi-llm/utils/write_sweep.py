@@ -9,7 +9,8 @@ the paths that moved outside any in-flight declared set, adopted into the task's
 snapshot so they can be restored (:meth:`ContainmentSweep.undeclared_writes`,
 which consumes the dispatch's census exactly once). A sibling running beside it
 is accounted for: its declared paths are ignored, and a path both windows saw
-move is ``shared`` (fix round 15).
+move is ``shared`` (fix round 15). The audit line's rows for what it observed,
+reversible or not, are built here too (:meth:`ContainmentSweep.observed_with_undeclared`).
 
 Census registration and closing happen under the sweep's one lock, so a sibling
 cannot start writing between a read and its removal. A path ``driver.write_paths``
@@ -28,7 +29,7 @@ import subprocess
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Collection, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Collection, Dict, List, Optional, Sequence, Tuple
 
 from . import git_utils as _git_utils
 from . import prior_changes as _prior_changes
@@ -992,3 +993,35 @@ class ContainmentSweep:
                 swept - self._ignored_and_harmless(task_id, swept, sources, after)
             )
         return sorted(moved)
+
+    def observed_with_undeclared(
+        self, snapshot: TaskSnapshot, undeclared: UndeclaredWrites
+    ) -> Dict[str, Any]:
+        """``snapshot.observed()`` plus a row per undeclared write, for the audit.
+
+        Every observed path is in the audit line whether or not it could be made
+        reversible, and each says which it is: an operator reading this log has to
+        be able to tell "restore-batch will undo this" from "this one needs a
+        human", and silence on the second is how the first gets assumed.
+        """
+        observed = snapshot.observed()
+        restorable = set(undeclared.restorable)
+        for relative in undeclared.paths:
+            row = observed.get(relative)
+            if row is None:
+                row = {
+                    "sha256_before": None,
+                    "sha256_after": file_sha256(
+                        os.path.join(self._ctx.repo_root, relative)
+                    ),
+                }
+                observed[relative] = row
+            row["declared"] = False
+            row["rollback"] = "retained" if relative in restorable else "unavailable"
+            row["note"] = (
+                "observed by the post-run sweep, outside any declared set"
+                if relative in restorable else
+                "observed by the post-run sweep, outside any declared set; no "
+                "pre-run bytes were retained for it, so it cannot be restored"
+            )
+        return observed

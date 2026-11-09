@@ -23,6 +23,7 @@ and the refusals on the result (``result.refusals``).
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import threading
@@ -57,8 +58,9 @@ class StopAccount:
 
     Built once per run by the scheduler. *effects_lock* is the scheduler's
     ``_effects_lock``; *user_commands* the host's own spelling of the ways
-    forward. The callables reach the scheduler's methods, looked up at each
-    call.
+    forward. The callables reach the scheduler's methods and the mirror's
+    (``WriteReports.mirror_snapshot``, ``WriteReports.mirror_status``), looked
+    up at each call.
     """
 
     def __init__(
@@ -74,6 +76,8 @@ class StopAccount:
         restamp_check_trees: Callable[..., Any],
         tree_fingerprint: Callable[[], Optional[str]],
         started_a_runner: Callable[..., bool],
+        mirror_snapshot: Callable[[], Dict[str, Any]],
+        mirror_status: Callable[..., None],
     ) -> None:
         self._ctx = ctx
         self._effects_lock = effects_lock
@@ -85,6 +89,8 @@ class StopAccount:
         self._restamp_check_trees = restamp_check_trees
         self._tree_fingerprint = tree_fingerprint
         self._started_a_runner = started_a_runner
+        self._mirror_snapshot = mirror_snapshot
+        self._mirror_status = mirror_status
 
     def stop_message(
         self, batch_index: int, outcomes: Sequence[TaskOutcome],
@@ -835,7 +841,7 @@ class StopAccount:
         ``resume_why`` beside its ``answers``. A check is judged on the tree
         as the stop leaves it, taken once and only when a check needs
         judging (:meth:`verdict_holds_tree`, the comparison
-        :meth:`_unchanged_since_failure` and :meth:`_check_findings_rerun`
+        :meth:`CheckHolds.unchanged_since_failure` and :meth:`CheckHolds.check_findings_rerun`
         make)."""
         tree: List[Optional[str]] = []
 
@@ -864,9 +870,9 @@ class StopAccount:
     ) -> bool:
         """Whether a resume on *tree* keeps *task_id*'s check from running:
         its result file holds a check's verdict (a failed one under
-        *failed*, as :meth:`_unchanged_since_failure` reads it) stamped with
+        *failed*, as :meth:`CheckHolds.unchanged_since_failure` reads it) stamped with
         that very tree (``verdict.tree_fingerprint``), the comparison
-        :meth:`_unchanged_since_failure` and :meth:`_check_findings_rerun`
+        :meth:`CheckHolds.unchanged_since_failure` and :meth:`CheckHolds.check_findings_rerun`
         make. No file, no stamp, another tree or a tree git cannot measure:
         the resume dispatches it again (fix round 23)."""
         if tree is None:
@@ -1515,3 +1521,67 @@ class StopAccount:
                 plan, _check_records.decomposition_graph(self._ctx.tasks, self._ctx.state), statuses)
         except Exception:  # noqa: BLE001 - advisory wording, never fatal
             return None
+
+    def record_answer_refusal(
+        self, result: Any, refused_skips: Mapping[str, str],
+    ) -> None:
+        """Keep a refused ``--human-task <batch>=skip`` where the tool routes
+        read a stop (fix round 19).
+
+        Review of fix round 18: the refusal was printed and nothing else, so
+        the result line named no ``error`` (the tool's needs-human message
+        said "Its result line names no error", run 7's #4 shape) and the
+        mirror still held the stop the answer was refused for, whose
+        ``answers`` ``util next-command --blocked`` handed back as the way
+        forward — the answer just refused. The stop record now says the
+        answer was refused, in a headline the orchestrator records as the
+        result line's ``error``; it keeps the answers of the earlier stop
+        that name no refused batch (an answer typed for the wrong batch
+        leaves the right one standing), and the mirror's other rows are the
+        earlier run's, untouched: this run dispatched nothing. *refused_skips*
+        is ``ResumeEvidence.refused_skips``: each refused task id and why.
+        """
+        refused = dict(refused_skips)
+        earlier = self._mirror_snapshot()
+        before = earlier.get("stop") if isinstance(earlier.get("stop"), dict) else {}
+        refused_flags = {f"{task_id}=skip" for task_id in refused}
+        kept = [
+            dict(entry) for entry in (before.get("answers") or [])
+            if isinstance(entry, dict)
+            and not refused_flags.intersection(entry.get("flags") or [])
+        ]
+        named = "; ".join(
+            f"--human-task {task_id}=skip: {why}" for task_id, why in refused.items()
+        )
+        result.stop = {
+            "batch_index": None,
+            "failed_task_ids": [],
+            "task_id": None,
+            "kind": "answer-refused",
+            "what": f"cannot take {named}",
+            "refused_answers": [
+                ["--human-task", f"{task_id}=skip"] for task_id in refused
+            ],
+            "not_run": [],
+            "acceptable": False,
+            "not_rerun": False,
+            **({"answers": kept} if kept else {}),
+        }
+        self.set_stop_headline(result.stop)
+        if not earlier:
+            # No earlier run left a mirror to patch: this run's own.
+            self._mirror_status(result)
+            return
+        from . import status_file as _status_file
+        try:
+            # The phase-level `state` stays the earlier run's: this run
+            # changed nothing a status reader would count.
+            _status_file.update_status(self._ctx.phase_dir, {
+                "progress": {"write_subagents": {
+                    **earlier,
+                    "in_flight": [],
+                    "stop": copy.deepcopy(result.stop),
+                }},
+            })
+        except Exception:  # noqa: BLE001 - observability must not fail a phase
+            pass

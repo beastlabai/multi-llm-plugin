@@ -1166,7 +1166,7 @@ class TestNoGuardRunsUnchanged:
 
 
 class TestTheResumeBindingUnderAGuard:
-    """D2g's resume binding (``_task_fingerprint``) leaves the prompt's
+    """D2g's resume binding (``ResumeEvidence.task_fingerprint``) leaves the prompt's
     protected-path clause out under a guard. A ``--resume`` grows the
     protected set whenever its re-check protects a file edited by hand, and a
     completed batch must not read as made from changed inputs and be applied
@@ -1189,18 +1189,18 @@ class TestTheResumeBindingUnderAGuard:
             [self._task(env, rules[0])], kind="apply_code_fixes",
             state=_guarded_state(env, _guard(head, expect={})), respond=_runner(env, {}),
         )
-        bound = [guarded._task_fingerprint(self._task(env, rule)) for rule in rules]
+        bound = [guarded._evidence.task_fingerprint(self._task(env, rule)) for rule in rules]
         assert bound[0] == bound[1] == bound[2]
-        assert guarded._task_fingerprint(self._task(env, rules[1], title="b")) != bound[1]
+        assert guarded._evidence.task_fingerprint(self._task(env, rules[1], title="b")) != bound[1]
         other_plan = code_only_rule("plans/other.md", protected=["src/b.py"],
                                     protected_head=head)
-        assert guarded._task_fingerprint(self._task(env, other_plan)) != bound[1]
+        assert guarded._evidence.task_fingerprint(self._task(env, other_plan)) != bound[1]
 
         plain = env.scheduler(
             [self._task(env, rules[0])], kind="apply_code_fixes",
             state=FakeState(env.tmp_path / "plain-state.json"), respond=_runner(env, {}),
         )
-        assert plain._task_fingerprint(self._task(env, rules[0])) != plain._task_fingerprint(
+        assert plain._evidence.task_fingerprint(self._task(env, rules[0])) != plain._evidence.task_fingerprint(
             self._task(env, rules[1]))
 
 

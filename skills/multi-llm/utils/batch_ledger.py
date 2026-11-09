@@ -171,7 +171,7 @@ def verdict_record(
             (not outcome.ok and not outcome.files_touched and not outcome.not_rerun)
             or (outcome.ok and outcome.check_findings)
         ):
-            # `_unchanged_since_failure`, `_check_findings_rerun` (fix round 11).
+            # `CheckHolds.unchanged_since_failure`, `CheckHolds.check_findings_rerun` (fix round 11).
             data["tree_fingerprint"] = tree_fingerprint()
     if outcome.batch_check is not None:
         data["batch_check"] = check_record(outcome.batch_check)
@@ -202,7 +202,7 @@ def verdict_record(
         data["skipped_items"] = declined_record(outcome.skipped_items)
     if task is not None:
         # So a resume whose selection renumbered the batch finds this result
-        # by its items (`_done_evidence`) and still compares the inputs.
+        # by its items (`ResumeEvidence.done_evidence`) and still compares the inputs.
         data["task_id"] = outcome.task_id
         data["expected_ids"] = [str(i) for i in (task.get("expected_ids") or [])]
         data["inputs_fingerprint"] = inputs_fingerprint(task)

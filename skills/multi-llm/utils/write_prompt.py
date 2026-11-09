@@ -537,7 +537,7 @@ _policy_violation_for = policy_violation_for
 # ahead of it, a stop, a `--resume`), so before this command binds the prompt
 # the host is about to hand a subagent, every fix file the batch declares is
 # held to the content the guard saved for it — the executor's
-# `WriteBatchScheduler._commit_recheck`, through the same shared helpers. A
+# `CommitGuardLeg.recheck`, through the same shared helpers. A
 # batch that fails gets no prompt: `[COMMIT_FIXES_STALE]` is printed in place
 # of `[WRITE_PROMPT]`, its outcome is recorded in `state.json` with the keys
 # `util batch-done` writes, and the host goes on to the next batch. No-op
@@ -652,7 +652,7 @@ def commit_bind(phase_dir: Path, task_id: str) -> bool:
     so its ``util batch-done`` counts only a change made while the batch ran:
     ``commit_apply.bind_watched``, saved in the guard under
     ``state_file_lock``. The executor reads the same ids just before it
-    dispatches a batch (``WriteBatchScheduler._commit_watch_begin``); here
+    dispatches a batch (``CommitGuardLeg.watch_begin``); here
     the bind is the last moment before the host hands the prompt over.
 
     True when recorded. Without a guard, for another kind, a human task, or
@@ -690,7 +690,7 @@ def held_by_check(phase_dir: Path, task_id: str) -> Optional[Tuple[str, List[str
 
     Fix round 11: on the native leg the host dispatches each task itself, so
     the plugin's hold on the tasks that depend on a check that reported
-    problems (the executor leg's ``WriteBatchScheduler._block_dependents_of_checks``)
+    problems (the executor leg's ``CheckHolds.block_dependents_of_checks``)
     is enforced here, where the host gets each task's prompt. The held
     checks are ``state.json``'s (``check_records.rerunnable_checks``:
     findings on record, recorded completed, not accepted with
@@ -890,7 +890,7 @@ def check_tree_fingerprint(phase_dir: Path) -> Optional[str]:
     """One digest of the files git sees, the plugin's own trees left out.
 
     ``git_utils.worktree_fingerprint`` with the exclusions the executor's
-    ``WriteBatchScheduler._tree_fingerprint`` uses (workflow artifacts and
+    ``CheckHolds.tree_fingerprint`` uses (workflow artifacts and
     ``.multi-llm/``, keeping colocated code), so both legs mean the same thing by "the
     files changed". The native leg stamps it on a check with findings
     (``util batch-done``, re-stamped by ``util finalize-tracking`` with the

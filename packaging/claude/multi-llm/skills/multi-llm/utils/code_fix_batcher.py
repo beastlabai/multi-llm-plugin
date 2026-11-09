@@ -555,8 +555,8 @@ def without_protected_clause(prompt: str) -> str:
     """*prompt* with the protected-path clause of :func:`code_only_rule`
     taken out, or unchanged when it holds none.
 
-    The write executor's resume binding (``WriteBatchScheduler.
-    _task_fingerprint``, D2g) hashes a commit review's fix prompts through
+    The write executor's resume binding (``write_resume.ResumeEvidence.
+    task_fingerprint``, D2g) hashes a commit review's fix prompts through
     this. The clause lists the guard's protected set, and that set grows
     between a stopped apply and its ``--resume`` whenever the guard's re-check
     protects a file edited by hand since (plans/review-commits.md §2.7, §2.8).

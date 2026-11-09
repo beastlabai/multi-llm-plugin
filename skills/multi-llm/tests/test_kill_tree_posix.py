@@ -1335,7 +1335,7 @@ class TestTheVerifyKillSaysWhatItSent:
     kill sent them; ``skipped`` sent nothing."""
 
     def _timed_out(self, monkeypatch, tmp_path, verdict):
-        from utils import write_batch_scheduler as wbs
+        from utils import write_verify
 
         real_kill = process_control.kill_tree
 
@@ -1343,15 +1343,14 @@ class TestTheVerifyKillSaysWhatItSent:
             real_kill(pid, **kwargs)
             return verdict
 
-        monkeypatch.setattr(wbs._process_control, "kill_tree", kill_then_report)
-        scheduler = object.__new__(wbs.WriteBatchScheduler)
-        scheduler.repo_root = tmp_path
+        monkeypatch.setattr(write_verify._process_control, "kill_tree", kill_then_report)
         # An unconfirmed kill is logged as a warning naming the pid.
         self.logged = []
-        scheduler.log = self.logged.append
-        monkeypatch.setattr(scheduler, "_verify_env", lambda: None, raising=False)
-        exit_code, tail = scheduler._run_verify_command("echo started; exec sleep 30", 1)
-        assert exit_code == wbs.VERIFY_EXIT_TIMEOUT
+        runner = write_verify.VerifyCommand(types.SimpleNamespace(
+            repo_root=tmp_path, anchor=None, log=self.logged.append))
+        monkeypatch.setattr(runner, "env", lambda: None)
+        exit_code, tail = runner.run("echo started; exec sleep 30", 1)
+        assert exit_code == write_verify.VERIFY_EXIT_TIMEOUT
         assert "started" in tail
         return tail
 

@@ -1,9 +1,12 @@
 """The facts one write phase's run is about, shared by the scheduler's collaborators.
 
 ``WriteBatchScheduler`` hands a :class:`RunContext` to each collaborator it
-composes (``write_verify.VerifyStep``, ``write_sweep.ContainmentSweep``,
-``write_eta.EtaLines``, ``write_reports.WriteReports``, ``write_stop.StopAccount``,
-``batch_prompt_builder.BatchPromptBuilder``) instead of sharing ``self`` with them: what a collaborator may read about the run is the
+composes (``write_verify.VerifyStep`` and ``VerifyCommand``,
+``write_sweep.ContainmentSweep``, ``write_eta.EtaLines``,
+``write_reports.WriteReports``, ``write_stop.StopAccount``,
+``batch_prompt_builder.BatchPromptBuilder``, ``write_commit_leg.CommitGuardLeg``,
+``write_check_holds.CheckHolds``, ``write_resume.ResumeEvidence``) instead of
+sharing ``self`` with them: what a collaborator may read about the run is the
 list of fields below, and nothing it does can reassign one
 (docs/development/write-scheduler.md#where-the-schedulers-helpers-live).
 
@@ -25,7 +28,7 @@ from .write_safety import safety_dir
 
 #: Write kinds whose ``output_name`` is keyed by the task id
 #: (``subagent_tasks.implement_output_name``) rather than a batch position.
-#: ``_warn_stale_result_files`` (N6) scopes its stale-file sweep to this set:
+#: ``ResumeEvidence.warn_stale_result_files`` (N6) scopes its stale-file sweep to this set:
 #: a positional kind's result filenames have never been renamed, so there is
 #: no earlier naming to be stale relative to.
 _ID_KEYED_WRITE_KINDS = frozenset({"implement"})

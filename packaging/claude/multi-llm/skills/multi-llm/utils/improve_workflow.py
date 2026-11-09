@@ -2001,7 +2001,7 @@ class ImproveWorkflow(fwo.FullWorkflow):
 
         A report written before the review's latest completion is an earlier
         cycle's and names nothing, the scheduler's own rule
-        (``_earlier_report_rows``); a missing date on either side keeps it. A
+        (``ResumeEvidence.earlier_report_rows``); a missing date on either side keeps it. A
         missing or unreadable report names nothing, so an apply with nothing
         to fix lists no file it did not write.
 
