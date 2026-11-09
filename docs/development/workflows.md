@@ -585,6 +585,46 @@ name the closing scan never reads. When that move fails the file stays where it 
 evidence, and the scan withholds it (`answers_left_in_place`): the slot stays failed, and its
 failure line says the file was left in place.
 
+**Earlier and unfinished answers.** Only text a slot wrote itself can count as its answer.
+Past the sandbox gate, before its dispatch, the slot removes what an earlier run left: the
+`partial_<model>.md` (`remove_earlier_partial`), the `origin_<model>.txt` (`remove_earlier_origin`),
+then, under `--rerun-all`, the `answer_<model>.md` (`remove_earlier_answer`). Each removal is
+attempted directly: only its own `FileNotFoundError` shows the file absent, and any other error
+ends the slot `not-dispatched`, naming the file to move. A refusal keeps the earlier answer: the
+answer goes last, so a refusal over the partial or the origin record never reaches it, and a
+refusal over the answer writes the origin record back as it was read before its removal
+(`put_back_earlier_origin`; a write that fails too leaves the answer reading "origin not
+recorded"). A partial is never the last run's text when an earlier answer or its origin record is
+there, since the slot that answered removed it before it was asked. A slot that went ahead would
+leave the earlier partial named as its own, for `--accept-partial` to count; having written
+nothing, count the earlier answer as its own; or, when its own origin record failed to write,
+show its answer with the earlier one's origin. For a model nothing withheld, the record the
+slot's arm wrote is taken out again (`restore_unarmed`): the earlier answer passed its checks in
+its own run, so a resume keeps it, with its own origin record. `--rerun-all` asks every model for
+a new answer, so `close` never counts an answer it did not produce: a model it never dispatched
+(refused at the sandbox gate or over a file it could not remove, unrecorded, or still queued at
+the deadline) fails with its own reason, its earlier answer named as kept and not counted, and
+the run's state and exit code follow (`failed`, exit 3, when no model answered).
+
+The resume skip reads the answer file directly (`probe_answer`) and tells three outcomes apart:
+missing or empty asks the model again, readable skips it, and a read error, or bytes that are not
+UTF-8 text, ends the slot `not-dispatched`, the file and its origin record left for a later
+resume. A slot asked over an answer it could not read would, having written nothing, read it at
+step 1 once readable and count it, with a new origin record, as its own. No answer read raises:
+an unreadable file is never counted, and the closing scan goes on to the other models' answers.
+
+A stdout answer is written to `answer_<model>.md` atomically, and so is `answers.md`
+(`publish_atomically`, which keeps the file's mode, unlike the owner-only records): a write that
+fails, a full disk say, leaves the path as it was, never a cut prefix that the closing scan or a
+resume would count. The slot then fails with that error, its whole text kept as the partial for
+`--accept-partial`. A file the model wrote at the answer path as well, one step 1 could not read,
+never moves over that partial: it stays in place, withheld with `UNFINISHED_ANSWER_REASON`
+(below), and takes the partial's name only when the partial could not be written
+(`unpublished_answer_ending`). Because `answers.md` is replaced rather than written through, a
+symlink at `answers.md` is replaced by a regular file: a report linked to another place stops
+being updated there, and the link's target is left as it was. `tests/test_ask_answer_persistence.py`
+holds the cases.
+
 **Withheld answers.** An answer is reused only from a slot whose safety checks passed, as on
 the review lanes ([Withheld slot answers](review-results.md#withheld-slot-answers)): the
 question folder's `.status.json` keeps the same two maps, `models_rejected` and

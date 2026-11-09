@@ -3805,11 +3805,27 @@ class TestProvenance:
         origin_of(d, CODEX_SPEC).write_text("fallback", encoding="utf-8")
         inv = FakeInvoker()
         # `--rerun-all`, or resume would skip the answer before the gate is asked.
-        assert run_ask(ask_argv(plan, CODEX_SPEC, extra=("--rerun-all",)), inv) == 0
+        # It asked for a new answer, so the earlier one is not this run's: the
+        # model fails with the refusal, and its answer and record stay.
+        assert run_ask(ask_argv(plan, CODEX_SPEC, extra=("--rerun-all",)), inv) == 3
         assert inv.calls == []
-        assert read_status(d)["progress"]["models"][CODEX_SPEC]["source"] == "not-dispatched"
-        assert provenance_of(d, CODEX_SPEC) == self.LINES["fallback"]
+        status = read_status(d)
+        assert status["progress"]["models"][CODEX_SPEC]["source"] == "not-dispatched"
+        assert status["models_completed"] == []
+        assert status["models_failed"][CODEX_SPEC].startswith("[SANDBOX_UNAVAILABLE]")
+        assert status["answer_origins"]["kept"] == 0
+        assert provenance_of(d, CODEX_SPEC) is None
+        assert failed_line(d, CODEX_SPEC).endswith(
+            f"answer_{stem_of(CODEX_SPEC)}.md, an earlier run's answer, was kept as "
+            "it was (not counted: --rerun-all asks every model again)")
+        assert answer_of(d, CODEX_SPEC).read_text(encoding="utf-8") == "An earlier answer."
         assert origin_of(d, CODEX_SPEC).read_text(encoding="utf-8") == "fallback"
+
+        # A resume keeps it, with the line of the run that produced it.
+        assert run_ask(ask_argv(plan, CODEX_SPEC), inv) == 0
+        assert inv.calls == []
+        assert provenance_of(d, CODEX_SPEC) == self.LINES["fallback"]
+        assert read_status(d)["answer_origins"]["kept"] == 1
 
     def test_a_failed_record_write_warns_and_the_answer_still_counts(
         self, plan, monkeypatch, capsys

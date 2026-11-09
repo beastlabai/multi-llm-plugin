@@ -76,6 +76,18 @@ def _block(path):
     (Path(path) / "keep").write_text("", encoding="utf-8")
 
 
+def _blocking_during(invoker, *paths):
+    """*invoker*, taking each of *paths* with a directory during its call:
+    after the dispatch removed what an earlier run left there, which it
+    refuses to ask over, and before the slot sets its answer aside."""
+    def call(*args, **kwargs):
+        for path in paths:
+            _block(path)
+        return invoker(*args, **kwargs)
+
+    return call
+
+
 def _printed(capsys):
     """Both streams: a fail-closed stop prints on stderr."""
     captured = capsys.readouterr()
@@ -411,9 +423,6 @@ def test_a_deadline_loss_whose_file_stays_is_never_resumed(plan, monkeypatch):
     """The fan-out's deadline cuts the slot while its checks run; its answer
     file can be neither moved nor copied aside, so it stays in place."""
     d = qdir(plan, "Q")
-    d.mkdir(parents=True)
-    _block(partial_of(d, SPEC))
-    _block(d / f"error_{STEM}.log")
     slow = [True]
     real = slot_guard.SlotGuard.finish
 
@@ -426,7 +435,8 @@ def test_a_deadline_loss_whose_file_stays_is_never_resumed(plan, monkeypatch):
     monkeypatch.setattr(rob, "PROVIDER_STAGGER_DELAY", 0.0)
     inv = FakeInvoker()
     inv.configure(SPEC, write_file=True, content="Never checked")
-    assert run_ask(ask_argv(plan, SPEC, extra=("--timeout", "1")), inv) == 3
+    blocking = _blocking_during(inv, partial_of(d, SPEC), d / f"error_{STEM}.log")
+    assert run_ask(ask_argv(plan, SPEC, extra=("--timeout", "1")), blocking) == 3
     assert answer_of(d, SPEC).read_text(encoding="utf-8") == "Never checked"
     assert SPEC in read_status(d)[UNCHECKED]
 
@@ -594,12 +604,10 @@ def _unfinished_and_left(plan):
     """Run 1: the checks pass, the provider times out after writing a draft,
     and the draft can be neither moved nor copied aside."""
     d = qdir(plan, "Q")
-    d.mkdir(parents=True)
-    _block(partial_of(d, SPEC))
-    _block(d / f"error_{STEM}.log")
     inv = FakeInvoker()
     inv.configure(SPEC, write_file=True, content="A draft", result=timeout_result())
-    assert run_ask(ask_argv(plan, SPEC), inv) == 3
+    blocking = _blocking_during(inv, partial_of(d, SPEC), d / f"error_{STEM}.log")
+    assert run_ask(ask_argv(plan, SPEC), blocking) == 3
     assert answer_of(d, SPEC).read_text(encoding="utf-8") == "A draft"
     for blocked in (partial_of(d, SPEC), d / f"error_{STEM}.log"):
         (blocked / "keep").unlink()
