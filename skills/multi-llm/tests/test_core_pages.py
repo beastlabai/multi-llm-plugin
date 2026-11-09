@@ -140,15 +140,61 @@ def test_no_page_prints_more_than_its_size(repo, mode, size, capsys):
         assert printed <= limit or one_line, (header.group(0), printed)
 
 
+def _host_section_invariants(pages, joined, host="codex"):
+    """What paging promises about the ``--host`` section, wherever the cuts fall.
+
+    The cuts depend on every byte before them, the skill path included, so no
+    test may say which page the heading lands on. The contract: the section is
+    the tail of the paged text, after the core's end line, and the cutter keeps
+    its lines whole, so the heading is whole on exactly one page.
+    """
+    heading = multi_llm._VERB_HEADING  # noqa: SLF001
+    section = multi_llm._verb_section(host)  # noqa: SLF001
+    assert joined.endswith(section)
+    assert joined.count(heading) == 1
+    end_line = f"{multi_llm.CORE_END_MARKER} review-plan\n"
+    assert joined.index(end_line) + len(end_line) <= joined.index(heading)
+    holding = [i for i, (_h, _b, body) in enumerate(pages) if heading in body]
+    assert len(holding) == 1
+    # Not on page 1: the core comes first; and every page after the one that
+    # holds the heading is section text and nothing else.
+    assert holding[0] > 0
+    later = "".join(body for _h, _b, body in pages[holding[0] + 1:])
+    assert section.endswith(later)
+
+
 def test_the_host_section_is_paged_with_the_core(repo, capsys):
     pages = _all_pages("review-plan", capsys, 3_001, "--host", "codex")
     joined = "".join(body for _h, _b, body in pages)
     assert joined == _file_text("review-plan", capsys, "--host", "codex")
-    assert multi_llm._VERB_HEADING in pages[-1][2]  # noqa: SLF001
+    _host_section_invariants(pages, joined)
     plain = _all_pages("review-plan", capsys, 3_001)
     # The sha covers what is paged, the --host section included.
     assert pages[0][0]["sha"] != plain[0][0]["sha"]
     assert joined.startswith("".join(body for _h, _b, body in plain))
+
+
+#: Lengths of a simulated skill path, in characters. The path is rendered into
+#: the core, so it moves every cut after it; these span the checkouts a
+#: worktree, a CI runner and a plugin cache give, including the length (86) at
+#: which the heading falls before the last page.
+SKILL_PATH_LENGTHS = [*range(21, 142, 10), 86, 121]
+
+
+@pytest.mark.parametrize("length", SKILL_PATH_LENGTHS, ids=lambda n: f"path-{n}")
+def test_the_host_section_paging_does_not_depend_on_the_skill_path(
+    repo, capsys, monkeypatch, length
+):
+    fake = Path("/" + "s" * (length - 1))
+    real_render = multi_llm.render_instruction_text
+    monkeypatch.setattr(
+        multi_llm, "render_instruction_text", lambda text, _base: real_render(text, fake)
+    )
+    pages = _all_pages("review-plan", capsys, 3_001, "--host", "codex")
+    joined = "".join(body for _h, _b, body in pages)
+    assert str(fake) in joined
+    assert joined == _file_text("review-plan", capsys, "--host", "codex")
+    _host_section_invariants(pages, joined)
 
 
 def test_the_default_size_pages_every_core_and_reads_the_biggest_in_four(repo, capsys):
