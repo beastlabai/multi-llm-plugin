@@ -1680,6 +1680,172 @@ def reset_hermetic_state() -> None:
         _USER_CONFIG_MEMO.clear()
 
 
+#: How many steps in a row may end with finish reason ``unknown`` having
+#: printed nothing before :class:`LoopWatch` stops the CLI. ``run``'s session
+#: loop leaves only on a finish other than ``tool-calls`` or ``unknown``
+#: (1.19.5's embedded bundle), so a cut stream or an HTTP 200 carrying an error
+#: body re-sends the same request without end: the two captures did ~16 empty
+#: steps a second for 240 s (docs/development/providers.md#a-cli-that-loops has
+#: the measurements). Real sessions show short streaks that recover, the longest
+#: 2, so the threshold keeps a 10x margin over them.
+LOOP_EMPTY_STEPS = 20
+
+#: The longest stdout line :class:`LoopWatch` parses. A step's own events are a
+#: few hundred bytes; anything longer is a text or tool event, so it counts as
+#: printed without being parsed or kept.
+LOOP_LINE_MAX = 64 * 1024
+
+_LOOP_FINISH = "unknown"
+
+
+def _step_ids(event: Dict[str, Any], part_type: str) -> Optional[Tuple[str, str]]:
+    """``(sessionID, messageID)`` of a step boundary whose part is a
+    *part_type* carrying both ids, as 1.19.5 prints every one; else ``None``."""
+    part = event.get("part")
+    if not isinstance(part, dict) or part.get("type") != part_type:
+        return None
+    session, message = event.get("sessionID"), part.get("messageID")
+    if not (isinstance(session, str) and session and isinstance(message, str) and message):
+        return None
+    return session, message
+
+
+class LoopWatch:
+    """The stdout watch :meth:`OpenCodeProvider.stream_watch` hands each
+    dispatch: fed ``--format json`` bytes as they arrive, it returns the stop
+    reason once :data:`LOOP_EMPTY_STEPS` steps in a row ended with
+    ``step_finish`` reason ``unknown`` and nothing else between them.
+
+    A step is a well-formed ``step_start`` (a ``step-start`` part with a
+    session and a message id) closed by the ``step_finish`` of the same
+    session and message, and each one counts once. A boundary out of order
+    (a finish with no open step or for another one, a start inside an open
+    step, a malformed start or finish) ends the streak, and nothing counts
+    until the next well-formed start. A step that printed anything (a
+    ``text``, ``tool_use``, ``reasoning`` or ``error`` event, a type this
+    release does not emit, a line that is not an event or is longer than
+    :data:`LOOP_LINE_MAX`) or that finished with any other reason ends the
+    streak too, so the watch only ever trips on a stream it recognises.
+    State is a counter, the open step's ids and one partial line of at most
+    :data:`LOOP_LINE_MAX` bytes.
+    """
+
+    def __init__(self, limit: int = LOOP_EMPTY_STEPS) -> None:
+        self.limit = max(1, int(limit))
+        #: Empty ``unknown`` steps in a row so far.
+        self.streak = 0
+        #: ``(sessionID, messageID)`` of the open step's ``step_start``, or
+        #: ``None`` between steps.
+        self._open: Optional[Tuple[str, str]] = None
+        self._printed = False
+        self._pending = bytearray()
+        self._skipping = False
+        self._step_ts: Optional[float] = None
+        self._streak_ts: Optional[float] = None
+        self._last_ts: Optional[float] = None
+
+    def __call__(self, chunk: bytes) -> Optional[str]:
+        start = 0
+        while start <= len(chunk):
+            end = chunk.find(b"\n", start)
+            if end < 0:
+                self._hold(chunk[start:])
+                return None
+            piece = chunk[start:end]
+            start = end + 1
+            if self._skipping:
+                self._skipping = False
+                continue
+            if self._pending:
+                piece = bytes(self._pending) + piece
+                self._pending.clear()
+            if len(piece) > LOOP_LINE_MAX:
+                self._saw_output()
+                continue
+            reason = self._line(piece)
+            if reason:
+                return reason
+        return None
+
+    def _hold(self, rest: bytes) -> None:
+        """Keep a line's start until its newline arrives; one past the bound is
+        output and is dropped up to its newline."""
+        if self._skipping or not rest:
+            return
+        if len(self._pending) + len(rest) > LOOP_LINE_MAX:
+            self._pending.clear()
+            self._skipping = True
+            self._saw_output()
+            return
+        self._pending += rest
+
+    def _saw_output(self) -> None:
+        self._printed = True
+        self.streak = 0
+
+    def _out_of_order(self) -> None:
+        """A step boundary that does not close or open one well-formed step:
+        the streak ends and no step is open until the next well-formed start."""
+        self._open = None
+        self.streak = 0
+
+    def _line(self, raw: bytes) -> Optional[str]:
+        text = raw.decode("utf-8", errors="replace").strip()
+        if not text:
+            return None
+        try:
+            event = json.loads(text)
+        except ValueError:
+            event = None
+        if not isinstance(event, dict):
+            self._saw_output()
+            return None
+        kind = event.get("type")
+        stamp = event.get("timestamp")
+        stamp = float(stamp) if isinstance(stamp, (int, float)) else None
+        if kind == "step_start":
+            step = _step_ids(event, "step-start")
+            if step is None or self._open is not None:
+                self._out_of_order()
+                return None
+            self._open = step
+            self._printed = False
+            self._step_ts = stamp
+            return None
+        if kind != "step_finish":
+            self._saw_output()
+            return None
+        step = _step_ids(event, "step-finish")
+        if step is None or step != self._open:
+            self._out_of_order()
+            return None
+        self._open = None
+        empty = event["part"].get("reason") == _LOOP_FINISH and not self._printed
+        self._printed = False
+        if not empty:
+            self.streak = 0
+            return None
+        if self.streak == 0:
+            self._streak_ts = self._step_ts if self._step_ts is not None else stamp
+        self.streak += 1
+        self._last_ts = stamp
+        if self.streak < self.limit:
+            return None
+        return self._reason()
+
+    def _reason(self) -> str:
+        span = ""
+        if self._streak_ts is not None and self._last_ts is not None:
+            span = f" within {max(0.0, self._last_ts - self._streak_ts) / 1000:.1f}s"
+        return (
+            f"opencode looped: {self.streak} steps in a row{span} ended with finish "
+            f'reason "{_LOOP_FINISH}" and printed no text or tool call, and opencode '
+            f"re-sends the request after such a step without ever exiting (the "
+            f"provider most likely cut its stream or answered HTTP 200 with an error "
+            f"body; its stderr log may say which)"
+        )
+
+
 class _OpenCodeText(NamedTuple):
     """What :meth:`OpenCodeProvider._scan_text_parts` collected."""
 
@@ -3070,3 +3236,9 @@ class OpenCodeProvider(LLMProvider):
             return "".join(scan.last_message)
         except Exception:  # noqa: BLE001 - the hook must never raise
             return ""
+
+    def stream_watch(self) -> Optional[Callable[[bytes], Optional[str]]]:
+        """A fresh :class:`LoopWatch` for one dispatch, on every profile and
+        both lanes: a looping ``run`` writes the same stream whatever it was
+        asked to do (docs/development/providers.md#a-cli-that-loops)."""
+        return LoopWatch()

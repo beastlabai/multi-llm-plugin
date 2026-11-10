@@ -62,6 +62,14 @@ the rule-7 allowance, and takes the same admission test as every other grant
 (OpenCode racing run 5: T016 said ``applied``, named ``index.html``, and
 ``index.html`` was byte-for-byte unchanged).
 
+Rule 10 is this module's own (2026-11-10): ``record(..., stream_stopped=True)``
+is the caller's word that the adapter's stdout watch stopped the attempt, a CLI
+that kept re-sending the same failing request by itself without exiting
+(opencode's loop, docs/development/providers.md#a-cli-that-loops). Its status
+keeps its rung and name (``runner_error``), but, as rule 6(b) refuses to repeat a
+chain the vendor already ran, the identical dispatch is not sent again
+(``stream_stopped``); the transport budget is left unspent.
+
 The status vocabulary and the D3k rung table live here rather than in
 ``subagent_executor`` because the ladder is now their only consumer;
 ``subagent_executor`` re-exports every name it used to define, so nothing that
@@ -244,6 +252,9 @@ STOP_TERMINAL = "terminal_status"
 STOP_VENDOR_ALREADY_RETRIED = "vendor_already_retried_rate_limit"
 #: Rule 8: the caller said the identical dispatch must not be re-sent.
 STOP_NOT_REPEATABLE = "not_repeatable"
+#: Rule 10: the adapter's stdout watch stopped a CLI that kept re-sending the
+#: request by itself; the identical dispatch would repeat that loop.
+STOP_STREAM_STOPPED = "stream_stopped"
 
 #: The reason an :class:`Action` carries when it grants the schema-repair
 #: re-ask, and the value a lane records on the attempt that re-ask produces.
@@ -426,7 +437,8 @@ class RetryLadder:
     # -- rule 2 and rule 6 ------------------------------------------------
 
     def record(
-        self, status: str, *, repairable: bool = True, repeatable: bool = True
+        self, status: str, *, repairable: bool = True, repeatable: bool = True,
+        stream_stopped: bool = False,
     ) -> Action:
         """Report an attempt's classified status; get the next move.
 
@@ -440,6 +452,9 @@ class RetryLadder:
         changed files — turns a transport retry or a rate-limit backoff into a
         stop, or into the rule-7 re-ask when the attempt is ``repairable`` and
         the allowance has one left.
+
+        ``stream_stopped`` (rule 10) is the caller's word that the adapter's
+        stdout watch stopped the attempt: its transport retry becomes a stop.
         """
         self._last_status = status
 
@@ -471,6 +486,19 @@ class RetryLadder:
 
         if status in BACKOFF_STATUSES:
             return self._record_rate_limited()
+
+        if stream_stopped and status in RETRYABLE_STATUSES:
+            # Rule 10: the CLI already re-sent the request over and over by
+            # itself before its watch stopped it; the same dispatch repeats it.
+            self.stop_reason = STOP_STREAM_STOPPED
+            return Action(
+                retry=False,
+                reason=(
+                    f"{status}, and the CLI's stdout watch stopped it after it had "
+                    f"re-sent the request by itself, so the same dispatch is not "
+                    f"sent again"
+                ),
+            )
 
         if status in RETRYABLE_STATUSES:
             return self._record_transport(status)

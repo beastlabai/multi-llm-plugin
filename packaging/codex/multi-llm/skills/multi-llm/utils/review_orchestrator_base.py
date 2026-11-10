@@ -82,6 +82,7 @@ from .json_extractor import (
     sanitize_model_name,
 )
 from .schema_validator import drop_non_record_entries
+from .provider_outcome import STREAM_STOP_KEY
 from .llm_client import (
     ERROR_TIMEOUT,
     FAILURE_CATEGORY_KEY,
@@ -2789,7 +2790,11 @@ async def dispatch_with_ladder(
         # (kept for the closing summary) and the in-stream denial count.
         report_jail_outcome(display_name, details, jail_summary_key)
         run.status = attempt_ladder_status(result, details)
-        run.action = ladder.record(run.status)
+        # A stop the adapter's stdout watch asked for is never sent again
+        # (rule 10; docs/development/providers.md#a-cli-that-loops).
+        run.action = ladder.record(
+            run.status, stream_stopped=bool(details.get(STREAM_STOP_KEY))
+        )
         if not run.action.retry:
             break
         if run.action.delay:

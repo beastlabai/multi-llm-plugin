@@ -13,6 +13,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [Model catalog snapshots](#model-catalog-snapshots)
 - [Provider output channels](#provider-output-channels)
 - [Capturing a CLI's streams](#capturing-a-clis-streams)
+  - [A CLI that loops](#a-cli-that-loops)
 - [Reading a capture](#reading-a-capture)
   - [Launch diagnostics](#launch-diagnostics)
 - [Usage reporting](#usage-reporting)
@@ -745,6 +746,84 @@ real pipes, as the tests use, has nothing to take, and its own `communicate` ans
 `TestLaneACaptureEndsWithTheCliAndIsBounded` in `tests/test_llm_client.py`, the capped-stdout row
 in `tests/test_lane_b_structured_output.py`, and the held-pipe and capture-bound rows beside the
 surviving-grandchild test in `tests/test_subagent_executor.py`.
+
+### A CLI that loops
+
+opencode 1.19.5 never exits when the provider cuts a stream before its finish chunk, or answers
+HTTP 200 with an error body. `run`'s session loop leaves only on a finish other than `tool-calls`
+or `unknown` (read from the binary's embedded bundle), and both failures finish a step as
+`unknown` with nothing printed. So it re-sends the same request with no backoff until something
+kills it. Offline against `tests/container/failserver.py`, the `truncated` and `error-envelope`
+captures made 3,887 and 3,456 requests in 240 s, about 16 empty steps a second, 2.7 MB of stdout,
+stderr empty. Only the slot's deadline stopped them. Against a real provider that is a whole slot
+timeout of requests, each possibly billed for its prompt.
+
+An adapter can therefore declare a **stdout watch**, `LLMProvider.stream_watch()`, and opencode
+does (`opencode.LoopWatch`):
+
+- **One mechanism, both lanes.** Each lane asks the adapter once per attempt
+  (`process_capture.provider_watch`) and hands the watch to its `PipeCapture`. The drain feeds it
+  each stdout chunk as it is read. When it returns a reason, `PipeCapture.communicate` prints one
+  `[STREAM_STOP]` line and raises `StreamStopped`, a `TimeoutExpired`. Each lane's own timeout
+  handler then stops the CLI exactly as at the deadline (Lane A's `_stop_and_note` sweep, the
+  executor's `_kill_timed_out`, each with its Windows Job Object), and its bounded drain collects
+  the rest. There is no stop code of its own. The wait polls the watch every
+  `process_capture.WATCH_POLL_S` (0.1 s) only while a watch is live. An adapter without one is
+  waited on exactly as before, and Lane A passes `stream_watch=` to `_run_provider_cli` only when
+  there is one.
+- **The verdict.** The attempt is `timed_out` with `stream_stop` set to the watch's reason. Both
+  lanes record it as **`runner_error`**: the CLI was answering a failed provider response, not
+  running out of time. The failure line is the reason plus how soon the stop came
+  (`process_capture.stopped_early_text`), for example `opencode looped: 20 steps in a row within
+  0.7s ended with finish reason "unknown" and printed no text or tool call, and opencode re-sends
+  the request after such a step without ever exiting (...). Stopped after 1.2s rather than at its
+  600s timeout`. The fan-out keeps the reason as `details.stream_stop` and keeps `error_code:
+  TIMEOUT`, because the plugin cut the run short and the salvage gate must refuse a salvaged `[]`
+  from it as from a deadline kill. The executor records `runner_error` with the same reason,
+  measured against its per-task timeout, and a write batch it stopped is never reported as
+  having run out of time.
+- **No identical retry.** A `runner_error` normally earns a transport retry. A loop stop does not:
+  the CLI had already re-sent the same request 20 times by itself, and nothing in the captures
+  shows a fresh process changing the failing response. Each lane hands the ladder the explicit
+  `stream_stop` metadata (`details["stream_stop"]` on the fan-out, `_Capture.stream_stop` in the
+  executor) as `RetryLadder.record(..., stream_stopped=True)`. That is rule 10, which stops the slot
+  (`stream_stopped`) the way rule 6(b) refuses to repeat a rate-limit chain a CLI already ran, and
+  leaves `driver.subagent_retries` unspent. The status and its failure line stay as above.
+- **opencode's signal.** A streak of `opencode.LOOP_EMPTY_STEPS` (20) steps, each a `step_start`
+  and a `step_finish` with reason `unknown` and nothing between them. A step counts once, and
+  only when it is a well-formed `step_start` (a `step-start` part with a session and a message
+  id, as 1.19.5 prints every one) closed by the `step_finish` of the same session and message. A
+  boundary out of order (a finish with no open step or for another one, a second start, a
+  malformed start or finish) ends the streak, and nothing counts until the next well-formed
+  start. Any other event (`text`,
+  `tool_use`, `reasoning`, `error`, a type 1.19.5 does not emit), a line that is not an event or is
+  longer than `LOOP_LINE_MAX` (64 KiB), or any other finish reason ends the streak. Tokens are not
+  read: the looped steps carry none, and a loop that bills tokens is the costlier one to leave
+  running. A stream the watch does not recognise never trips it, so a release that changes these
+  events falls back to the deadline.
+- **Why 20.** In 11,187 steps of 1,607 real opencode sessions in a developer's local session
+  store (up to 132 steps in one session, 28 sessions past 48 steps), 13 steps finished `unknown`,
+  none with a text or tool part (reasoning and snapshot patches only, which `run --format json`
+  does not print). The longest streak was 2. In 10 of the 11 sessions an ordinary step came next
+  (`tool-calls` or `stop`): a real provider hiccup that opencode's re-send recovers from. The
+  eleventh session ended on a step that never finished. 20 keeps a 10x margin over that. On the
+  captures it stops the cut stream 0.7 s and the error body 1.6 s into the stream (opencode's own
+  timestamps), after 20 requests instead of about 3,900. A slow loop, where each failed step
+  first spends a minute reasoning, can still reach the deadline first. That is no worse than
+  before, and it is the case where a recovery is likeliest.
+- **A watch must stay cheap and safe.** It runs on the drain thread, keeps a counter, the open
+  step's ids and one partial line, and a raise drops it (the wait then runs to the deadline).
+  Before acting on a stop, the wait checks whether the CLI has exited. One that already has is
+  reaped and returns its own ending, so a watch that tripped on the early steps of a run that
+  then answered and exited stops nothing, and `stream_stop` stays `None`.
+
+Tests: `tests/test_opencode_loop_watch.py` (the watch over every committed opencode stream, the
+two loop heads in `tests/fixtures/opencode/loop/`, a 60-step legitimate run with short `unknown`
+streaks, unpaired, duplicate and malformed boundaries, chunking down to one byte; a run that
+exited 0 after the watch tripped, on both drains; both lanes stopping a looping fake CLI through
+their real kill path, and the verdicts they record), the watch rows in
+`tests/test_process_capture.py`, rule 10 in `tests/test_retry_ladder.py`, and the no-second-dispatch
+row on both lanes in `tests/test_lane_a_ladder.py`.
 
 ## Reading a capture
 

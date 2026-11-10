@@ -209,6 +209,9 @@ class _Capture:
     #: pid it was about; ``None`` when no timeout kill was made.
     kill_verdict: Optional[str] = None
     kill_pid: Optional[int] = None
+    #: Set only with ``timed_out``: the adapter's stdout watch asked for the
+    #: stop, and this is its reason (``process_capture.StreamStopped``).
+    stream_stop: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -720,8 +723,12 @@ def _spawn_in_context(
         try:
             # Bounded, and the wait ends with the runner, not with the last
             # process holding its pipes (`process_capture`).
+            # The adapter's stdout watch, if it declares one, ends the wait
+            # early; the stop below is the timeout's own
+            # (docs/development/providers.md#a-cli-that-loops).
             streams = process_capture.PipeCapture(
                 proc, max_bytes=_task_result.MAX_STREAM_BYTES, grace_s=TIMEOUT_DRAIN_S,
+                watch=process_capture.provider_watch(provider),
             )
             stdout, stderr = streams.communicate(input=stdin_text, timeout=timeout)
             capture.duration = time.time() - start
@@ -738,6 +745,7 @@ def _spawn_in_context(
             capture.stdout = stdout
             capture.stderr = stderr
             capture.capped_streams = streams.capped
+            capture.stream_stop = streams.stream_stop
         except OSError as exc:
             _kill_timed_out(proc, pgid, job)
             _drain_after_kill(streams or proc, None)

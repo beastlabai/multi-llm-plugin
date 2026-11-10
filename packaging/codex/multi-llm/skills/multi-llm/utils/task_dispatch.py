@@ -1489,8 +1489,11 @@ def decide_next(
         # A prose reply after edits (the pre-retry check): the same
         # re-ask an unreadable report gets, never the batch again.
         repairable = True
+    # A stop the adapter's stdout watch asked for is never sent again
+    # (rule 10; docs/development/providers.md#a-cli-that-loops).
     action = ladder.record(
-        status, repairable=repairable, repeatable=guard.repeatable
+        status, repairable=repairable, repeatable=guard.repeatable,
+        stream_stopped=bool(getattr(capture, "stream_stop", None)),
     )
     if guard.partial_if_refused is not None and not action.retry:
         # The re-ask was refused for want of budget: the edits stay

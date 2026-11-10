@@ -34,7 +34,7 @@ from .providers.base import (
 )
 from .providers.result_envelope import is_clean_envelope
 from .redact import redact_text
-from .retry_ladder import STATUS_TIMEOUT, STATUS_UNPARSEABLE
+from .retry_ladder import STATUS_RUNNER_ERROR, STATUS_TIMEOUT, STATUS_UNPARSEABLE
 
 
 # Error codes for consistent error reporting
@@ -53,7 +53,8 @@ class Capture:
     ended, how long it took and what the capture cut.
 
     One ending holds: ``launch_error`` (nothing ran), ``timed_out`` (the
-    deadline killed it; ``exit_code`` is ``None``), or an ``exit_code``. The
+    plugin stopped it, at the deadline or, with ``stream_stop``, when its
+    stdout watch asked; ``exit_code`` is ``None``), or an ``exit_code``. The
     streams are kept as the spawn returned them, never coerced: a stand-in
     spawn may hand back ``None``. The executor's ``dispatch_spawn._Capture``
     carries the same stream fields, and its readers take this value too.
@@ -79,6 +80,10 @@ class Capture:
     #: had spawned, as the ``"; <verdicts>"`` suffix of the timeout's log line
     #: (D3.3), or ``""``.
     tree_sweep: str = ""
+    #: Set only with ``timed_out``: the adapter's stdout watch, not the
+    #: deadline, asked for the stop, and this is its reason
+    #: (``process_capture.StreamStopped``); ``None`` for a deadline kill.
+    stream_stop: Optional[str] = None
 
 
 #: The jail's read-back for one child that ran (``llm_client._jail_after_child``
@@ -682,11 +687,17 @@ def _attach_usage(
 #: ``exit_zero_failure_category`` of an exit 0 that left no answer (absent for
 #: an adapter that is not ``EXIT0_CLASSIFIABLE``), ``unparseable_result`` for a
 #: capped stdout, :func:`rejected_answer_category` for a parsed answer the
-#: file-output layer rejected, or ``timeout`` for a deadline kill.
+#: file-output layer rejected, ``timeout`` for a deadline kill, or
+#: ``runner_error`` for a stop the adapter's stdout watch asked for.
 #: ``review_orchestrator_base.attempt_ladder_status`` hands it to the retry
 #: ladder instead of re-classifying the error line; see
 #: docs/development/delegation.md#read-and-analyze-executor.
 FAILURE_CATEGORY_KEY = "failure_category"
+
+#: ``details`` key for the reason an adapter's stdout watch stopped the child
+#: (``Capture.stream_stop``, opencode's ``provider loop``); absent otherwise
+#: (docs/development/providers.md#a-cli-that-loops).
+STREAM_STOP_KEY = "stream_stop"
 
 
 def rejected_answer_category(
@@ -1015,13 +1026,21 @@ def outcome_from_capture(
     # How the run ended: the result's first keys, the error line before the
     # jail has read the run back, and the failure category.
     if timed_out:
-        error_line = f"{provider_name} timed out after {timeout}s"
+        stop = capture.stream_stop
+        if stop:
+            error_line = process_capture.stopped_early_text(
+                stop, capture.duration, f"its {timeout}s timeout" if timeout else "its timeout",
+            )
+        else:
+            error_line = f"{provider_name} timed out after {timeout}s"
         details: Dict[str, Any] = {
             "provider": provider_name,
             "model": model,
             "timeout": timeout,
             "duration_seconds": capture.duration,
         }
+        if stop:
+            details[STREAM_STOP_KEY] = stop
         result: Dict[str, Any] = {
             "success": False,
             "error": error_line,
@@ -1030,7 +1049,13 @@ def outcome_from_capture(
         }
         # A deadline kill is a timeout whatever the partial streams say, as on
         # the executor lane (`_classify_pre_parse`), so the adapter is not asked.
-        classified, category = True, STATUS_TIMEOUT
+        # A stop the adapter's stdout watch asked for is `runner_error`: the
+        # CLI looped, it did not run out of time. `details["stream_stop"]` is
+        # what tells the ladder not to send it again. `ERROR_TIMEOUT` stays,
+        # since the plugin cut the run short, so a salvaged `[]` from it is
+        # refused as from a deadline kill
+        # (docs/development/providers.md#a-cli-that-loops).
+        classified, category = True, (STATUS_RUNNER_ERROR if stop else STATUS_TIMEOUT)
     elif exited_nonzero:
         error_line = _exit_line(provider, provider_name, capture)
         # The adapter's own verdict, read while the streams are held. The

@@ -814,6 +814,7 @@ def _run_provider_cli(
     input: Optional[str] = None,
     timeout: Optional[float] = None,
     capture_output: bool = False,
+    stream_watch: Optional[process_capture.StreamWatch] = None,
     **popen_kwargs: Any,
 ) -> subprocess.CompletedProcess:
     """Run one Lane A provider CLI: ``subprocess.run``'s contract, and its tree.
@@ -841,6 +842,11 @@ def _run_provider_cli(
     process holding an inherited pipe closes it. The streams that passed the
     bound ride out as ``capped_streams`` on the ``CompletedProcess`` and on the
     ``TimeoutExpired``.
+
+    *stream_watch* (the adapter's ``stream_watch()``, passed only when it
+    declares one) watches stdout as it arrives; when it asks for a stop, the
+    CLI is stopped exactly as on the deadline and the ``TimeoutExpired``
+    carries the watch's reason as ``stream_stop`` (``None`` on a deadline).
 
     A ``KeyboardInterrupt`` (or anything else) raised while waiting does the same
     sweep and is re-raised, so the interrupt still ends the run (decision 11.9).
@@ -871,6 +877,7 @@ def _run_provider_cli(
             try:
                 streams = process_capture.PipeCapture(
                     proc, max_bytes=LANE_A_MAX_STREAM_BYTES, grace_s=LANE_A_DRAIN_S,
+                    watch=stream_watch,
                 )
                 stdout, stderr = streams.communicate(input=input, timeout=timeout)
             except subprocess.TimeoutExpired as exc:
@@ -881,6 +888,7 @@ def _run_provider_cli(
                 )
                 expired.tree_sweep = sweep
                 expired.capped_streams = streams.capped
+                expired.stream_stop = streams.stream_stop
                 raise expired from None
             except BaseException:
                 _stop_and_note(proc, job)
@@ -1693,6 +1701,10 @@ def _run_dispatch(prepared: PreparedDispatch) -> Capture:
             # For the lane, in case this attempt raises before its
             # `details["home_check"]` is returned (armed_homes_window).
             _note_armed_home(jail)
+        # Passed only when the adapter declares a watch, so every other
+        # adapter's spawn call (and a test's `subprocess.run` stand-in) is
+        # unchanged (docs/development/providers.md#a-cli-that-loops).
+        watch = process_capture.provider_watch(prepared.provider)
         completed = _run_provider_cli(
             prepared.cmd,
             capture_output=True,
@@ -1720,6 +1732,7 @@ def _run_dispatch(prepared: PreparedDispatch) -> Capture:
                 if prepared.stdin_text is not None
                 else {"stdin": subprocess.DEVNULL}
             ),
+            **({"stream_watch": watch} if watch is not None else {}),
         )
     return Capture(
         stdout=completed.stdout,
@@ -1744,8 +1757,10 @@ def _decoded_partial(stream: Any) -> str:
 def _timed_out_capture(expired: subprocess.TimeoutExpired, start_time: float) -> Capture:
     """A deadline kill's capture: what ``_run_provider_cli`` re-raised with, the
     bytes read before the deadline plus what the bounded post-sweep drain
-    collected, and what the sweep did."""
+    collected, what the sweep did, and the stdout watch's reason when it, not
+    the deadline, asked for the stop."""
     duration = time.time() - start_time
+    stop = getattr(expired, "stream_stop", None)
     return Capture(
         stdout=_decoded_partial(expired.stdout),
         stderr=_decoded_partial(expired.stderr),
@@ -1754,6 +1769,7 @@ def _timed_out_capture(expired: subprocess.TimeoutExpired, start_time: float) ->
         capped_streams=_capped_streams(expired),
         stream_bound=LANE_A_MAX_STREAM_BYTES,
         tree_sweep=_describe_tree_sweep(expired),
+        stream_stop=stop if isinstance(stop, str) and stop else None,
     )
 
 

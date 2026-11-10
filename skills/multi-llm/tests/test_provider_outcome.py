@@ -36,7 +36,7 @@ TAIL_HELPERS = frozenset({
 #: The fields both lanes' captures share, the stream half.
 STREAM_FIELDS = (
     "stdout", "stderr", "exit_code", "timed_out", "duration", "launch_error",
-    "capped_streams",
+    "capped_streams", "stream_stop",
 )
 
 

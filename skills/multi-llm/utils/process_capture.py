@@ -42,6 +42,16 @@ The rules:
   still running holds only its pipe and an end-of-file flag, never the capture,
   its buffers or the ``Popen``, so a caller that drops the capture frees them
   however long a survivor keeps the pipe.
+* **A watch can end the wait early.** An adapter's
+  :meth:`~utils.providers.base.LLMProvider.stream_watch` is fed every stdout
+  chunk as the drain reads it. The first reason it returns makes
+  :meth:`PipeCapture.communicate` raise :class:`StreamStopped`, a
+  ``TimeoutExpired``, so the lane stops the CLI through its own timeout path
+  (the process-tree kill, the Windows job) and collects the rest as after a
+  deadline. Nothing here kills anything. A CLI that already exited when the
+  stop would be acted on returns as it ended. A watch that raises is dropped
+  and the wait runs to the deadline as before
+  (docs/development/providers.md#a-cli-that-loops).
 
 How: right after the spawn, the capture takes the real pipe objects off the
 ``Popen`` (its ``stdin``/``stdout``/``stderr`` become ``None``) and drains the
@@ -74,7 +84,7 @@ import subprocess
 import sys
 import threading
 import time
-from typing import Any, Dict, FrozenSet, Optional, Tuple
+from typing import Any, Callable, Dict, FrozenSet, Optional, Tuple
 
 #: Per-stream capture bound. A real answer stays far below it: the largest
 #: stream on record is about 6.25 MB.
@@ -102,6 +112,50 @@ _POLL_S = 0.2
 _MIN_GRACE_S = 0.2
 
 _STREAMS = ("stdout", "stderr")
+
+#: A stdout watch: fed each chunk the drain reads (bytes, in order, cut
+#: anywhere), it returns ``None`` to let the CLI run on or, once, the reason the
+#: CLI should be stopped now (:meth:`LLMProvider.stream_watch`).
+StreamWatch = Callable[[bytes], Optional[str]]
+
+#: How often a watched wait checks whether its watch asked for a stop: the
+#: longest a stop waits after the watch decided.
+WATCH_POLL_S = 0.1
+
+
+class StreamStopped(subprocess.TimeoutExpired):
+    """The wait ended because the stdout watch asked for a stop, not because the
+    deadline passed. A ``TimeoutExpired``, so each lane's timeout handler stops
+    the CLI and drains it as after a deadline; :attr:`reason` is the watch's."""
+
+    def __init__(self, cmd: Any, timeout: Optional[float], reason: str,
+                 output: Any = None, stderr: Any = None) -> None:
+        super().__init__(cmd, timeout, output=output, stderr=stderr)
+        self.reason = reason
+
+    def __str__(self) -> str:
+        return f"Command '{self.cmd}' was stopped by its stream watch: {self.reason}"
+
+
+def provider_watch(provider: Any) -> Optional[StreamWatch]:
+    """A fresh stdout watch from *provider*'s ``stream_watch()``, or ``None``
+    when it declares none or the call raises: a watch is never a reason for a
+    dispatch to fail."""
+    hook = getattr(provider, "stream_watch", None)
+    if not callable(hook):
+        return None
+    try:
+        watch = hook()
+    except Exception:  # noqa: BLE001 - see the docstring
+        return None
+    return watch if callable(watch) else None
+
+
+def stopped_early_text(reason: str, after_s: float, deadline: str) -> str:
+    """The failure line both lanes give a CLI its stdout watch stopped: the
+    watch's reason, then how soon it was stopped, against *deadline* (the
+    lane's words for the limit it would otherwise have run to)."""
+    return f"{reason}. Stopped after {after_s:.1f}s rather than at {deadline}"
 
 
 def oversized_stream_message(stream: str, max_bytes: int) -> str:
@@ -142,26 +196,57 @@ class _Sink:
         return self.total > self.limit
 
 
+class _Tripwire:
+    """A stdout watch and its verdict, shared by the drain that feeds it and the
+    wait that reads it; it holds nothing of the capture."""
+
+    __slots__ = ("watch", "reason", "tripped")
+
+    def __init__(self, watch: StreamWatch) -> None:
+        self.watch: Optional[StreamWatch] = watch
+        self.reason: Optional[str] = None
+        self.tripped = threading.Event()
+
+    def feed(self, chunk: bytes) -> None:
+        watch = self.watch
+        if watch is None:
+            return
+        try:
+            reason = watch(chunk)
+        except Exception:  # noqa: BLE001 - a watch never stops the drain
+            self.watch = None
+            return
+        if reason:
+            self.watch = None
+            self.reason = str(reason)
+            self.tripped.set()
+
+
 class _Outlet:
     """One output pipe as its drain sees it: the pipe, where its bytes go, and
     its end of file. A drain holds this and nothing else; :meth:`detach` drops
-    the sink, after which what the drain reads is discarded."""
+    the sink and the watch, after which what the drain reads is discarded."""
 
-    __slots__ = ("stream", "fd", "sink", "eof")
+    __slots__ = ("stream", "fd", "sink", "eof", "tripwire")
 
     def __init__(self, stream: Any, fd: int, sink: _Sink) -> None:
         self.stream = stream
         self.fd = fd
         self.sink: Optional[_Sink] = sink
         self.eof = threading.Event()
+        self.tripwire: Optional[_Tripwire] = None
 
     def take(self, chunk: bytes) -> None:
         sink = self.sink
         if sink is not None:
             sink.add(chunk)
+        tripwire = self.tripwire
+        if tripwire is not None:
+            tripwire.feed(chunk)
 
     def detach(self) -> None:
         self.sink = None
+        self.tripwire = None
 
     def finish(self) -> None:
         _close(self.stream)
@@ -377,6 +462,10 @@ class PipeCapture:
     *selectable* picks the drain: ``True`` the POSIX selector threads, ``False``
     one blocking thread per pipe (the only kind Windows supports). ``None``
     picks by platform.
+
+    *watch* (a :data:`StreamWatch`, or ``None``) is fed every stdout chunk the
+    drain reads; once it returns a reason, :meth:`communicate` raises
+    :class:`StreamStopped` and :attr:`stream_stop` keeps the reason.
     """
 
     def __init__(
@@ -386,6 +475,7 @@ class PipeCapture:
         max_bytes: int = MAX_STREAM_BYTES,
         grace_s: float = DRAIN_S,
         selectable: Optional[bool] = None,
+        watch: Optional[StreamWatch] = None,
     ) -> None:
         self.proc = proc
         self.max_bytes = max_bytes
@@ -399,6 +489,8 @@ class PipeCapture:
         self._feed: Optional[_Feed] = None
         self._timed_out = False
         self._announced: set = set()
+        self._tripwire: Optional[_Tripwire] = None
+        self._stream_stop: Optional[str] = None
         for name in _STREAMS:
             stream = getattr(proc, name, None)
             fd = None if stream is None else _fileno(stream)
@@ -410,6 +502,10 @@ class PipeCapture:
             # Popen.communicate no longer reads this pipe, so it stops waiting
             # for the pipe's end of file and waits for the process instead.
             setattr(proc, name, None)
+        if watch is not None and "stdout" in self._outlets:
+            # Before the drain starts, so the watch sees the first byte.
+            self._tripwire = _Tripwire(watch)
+            self._outlets["stdout"].tripwire = self._tripwire
         stdin = getattr(proc, "stdin", None)
         if stdin is not None and _fileno(stdin) is not None:
             # Nor writes stdin: a survivor holding it unread would keep it
@@ -451,30 +547,43 @@ class PipeCapture:
         """The streams that passed :attr:`max_bytes`."""
         return frozenset(name for name, sink in self._sinks.items() if sink.capped)
 
+    @property
+    def stream_stop(self) -> Optional[str]:
+        """The watch's reason when :meth:`communicate` ended the wait on it
+        (raising :class:`StreamStopped`), else ``None``: a watch that decided
+        after the CLI had already exited stopped nothing."""
+        return self._stream_stop
+
     def communicate(self, input: Any = None, timeout: Optional[float] = None) -> Tuple[Any, Any]:
         """``proc.communicate(input=input, timeout=timeout)``, with the output
         from this capture for the pipes it drains and stdin fed by it.
 
         Raises ``TimeoutExpired`` carrying the output read so far when the
-        process outlives *timeout*; the pipes stay open and drained, so a later
-        call (after a stop) collects the rest. Raises what encoding *input*
-        raised before anything is sent, and, once, a write error on stdin that
-        ``communicate`` would not have ignored, unless a call already timed out
-        (the run has failed; its drain must still collect the output).
+        process outlives *timeout*, or :class:`StreamStopped` (one) as soon as
+        the stdout watch asks for a stop; the pipes stay open and drained, so a
+        later call (after a stop) collects the rest. Raises what encoding
+        *input* raised before anything is sent, and, once, a write error on
+        stdin that ``communicate`` would not have ignored, unless a call already
+        timed out (the run has failed; its drain must still collect the output).
         """
         if self._passthrough:
             return self.proc.communicate(input=input, timeout=timeout)
         started = time.monotonic()
         self._send(input)
         try:
-            out, err = self.proc.communicate(timeout=timeout)
+            out, err = self._wait(timeout)
         except subprocess.TimeoutExpired as exc:
             self._timed_out = True
-            expired = subprocess.TimeoutExpired(
-                exc.cmd, exc.timeout,
-                output=self._text("stdout", exc.output),
-                stderr=self._text("stderr", exc.stderr),
-            )
+            output = self._text("stdout", exc.output)
+            stderr = self._text("stderr", exc.stderr)
+            if isinstance(exc, StreamStopped):
+                expired: subprocess.TimeoutExpired = StreamStopped(
+                    exc.cmd, exc.timeout, exc.reason, output=output, stderr=stderr,
+                )
+            else:
+                expired = subprocess.TimeoutExpired(
+                    exc.cmd, exc.timeout, output=output, stderr=stderr,
+                )
             self._announce_caps()
             raise expired from None
         # The CLI is gone: what it did not read of its stdin, nothing will.
@@ -509,6 +618,46 @@ class PipeCapture:
                 _close(stream)
         for outlet in self._outlets.values():
             outlet.detach()
+
+    def _wait(self, timeout: Optional[float]) -> Tuple[Any, Any]:
+        """``proc.communicate(timeout=timeout)``, in slices of
+        :data:`WATCH_POLL_S` while a watch is live, so a stop the watch asks
+        for ends the wait within one slice. The first wait only: once a call
+        has timed out (the lane is stopping the CLI), the watch has no say.
+
+        A CLI that has already exited when the stop would be acted on is reaped
+        and returns as it ended: its exit decides, not the watch's verdict on
+        steps it went on to finish (docs/development/providers.md#a-cli-that-loops).
+        """
+        tripwire = self._tripwire
+        if tripwire is None or self._timed_out:
+            return self.proc.communicate(timeout=timeout)
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            # `poll()` reaps an exited CLI, so the slice below returns at once.
+            if tripwire.tripped.is_set() and self.proc.poll() is None:
+                self._stream_stop = tripwire.reason or "the stream watch asked for a stop"
+                self._announce_stop(timeout)
+                raise StreamStopped(getattr(self.proc, "args", None), timeout,
+                                    self._stream_stop)
+            step = WATCH_POLL_S
+            if deadline is not None:
+                step = max(0.0, min(step, deadline - time.monotonic()))
+            try:
+                return self.proc.communicate(timeout=step)
+            except subprocess.TimeoutExpired as exc:
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired(
+                        exc.cmd, timeout, output=exc.output, stderr=exc.stderr,
+                    ) from None
+
+    def _announce_stop(self, timeout: Optional[float]) -> None:
+        deadline = f"its {timeout}s deadline" if timeout else "an exit it will not make"
+        print(
+            f"[STREAM_STOP] pid {getattr(self.proc, 'pid', None)}: "
+            f"{self._stream_stop}. Stopping it now rather than waiting for {deadline}.",
+            file=sys.stderr, flush=True,
+        )
 
     # -- the drain -------------------------------------------------------------
 

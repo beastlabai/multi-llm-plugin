@@ -50,9 +50,9 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 
 ## Counts
 
-- Emitted markers: 189
+- Emitted markers: 190
 - Cited by an instruction, reference, `SKILL.md` or shim template: 113
-- Declared not-for-the-host: 76
+- Declared not-for-the-host: 77
 - Neither (must be zero): 0
 
 ## Registry
@@ -218,6 +218,7 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 | `[SKIP]` | `ask_orchestrator.py`<br>`code_review_orchestrator.py`<br>`utils/review_orchestrator_base.py` | `SKILL.md`<br>`instructions/review-code.md`<br>`instructions/review-plan.md`<br>`instructions/review-tasks.md`<br>`references/host-capabilities.md`<br>`references/interrupted-run-recovery.md`<br>+1 more | — |
 | `[STATE_REPLACED]` | `utils/commit_front_door.py` `STATE_REPLACED` | not for the host: run-notice | Step 6 replaced a `state.json` that did not parse |
 | `[STREAM_CAP]` | `utils/process_capture.py` | not for the host: runner-diagnostic | — |
+| `[STREAM_STOP]` | `utils/process_capture.py` | not for the host: runner-diagnostic | — |
 | `[TASKS_GRAPH_OK]` | `utils/tasks_graph_check.py` | `instructions/apply-task-suggestions.md` | — |
 | `[TASKS_GRAPH_WARNING]` | `utils/tasks_graph_check.py` `WARNING_PREFIX` | `instructions/apply-task-suggestions.md` | — |
 | `[TASKS_MISSING]` | `implement_orchestrator.py` | `instructions/implement.md`<br>`references/implement-prerequisites.md` | — |

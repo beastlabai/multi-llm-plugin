@@ -66,7 +66,11 @@ rows:
       kit's deadline killed it (exit 143), the stdout nothing but 3,886
       `step_start` / `step_finish` pairs with zero tokens and `reason:
       "unknown"`, stderr empty. A killed run is a harness artifact, so it is
-      not graded; in a real dispatch the slot's timeout is the only bound.
+      not graded. multi-llm detects this stream through `LoopWatch`, requests
+      an early stop after 20 consecutive empty `unknown` finishes, and records
+      `runner_error` with `TIMEOUT`, with the deadline as the fallback; the
+      regression heads and stop-path tests live in `loop/` and
+      `test_opencode_loop_watch.py`.
 
   ephemeral-only:
     stdout: rows/ephemeral-only.stdout.txt
@@ -118,7 +122,9 @@ rows:
       The same endless loop as `truncated`: failserver `--mode errbody` (HTTP
       200 whose body is an error object) gave 3,456 requests and ~2.4 MB of
       zero-token `step_start` / `step_finish` pairs in 240 s, killed at the
-      kit's deadline (exit 143), stderr empty. Not graded, for the same reason.
+      kit's deadline (exit 143), stderr empty. Not graded, for the same
+      reason, and multi-llm detects and stops it through `LoopWatch` the same
+      way.
 
   exit-zero-failure:
     stdout: rows/ephemeral-only.stdout.txt

@@ -1349,6 +1349,25 @@ class LLMProvider(ABC):
         """
         return None
 
+    def stream_watch(self) -> Optional[Callable[[bytes], Optional[str]]]:
+        """A fresh watch over one dispatch's stdout, or ``None`` (the default:
+        the CLI runs until it exits or its deadline).
+
+        Both spawn lanes ask once per attempt and hand the watch to
+        ``process_capture.PipeCapture``, whose drain feeds it each stdout chunk
+        as it is read (bytes, cut anywhere). The first non-empty string it
+        returns is why the CLI should stop now: the lane stops it through its
+        own timeout path, records the attempt as ``runner_error`` with that
+        reason as its failure line, and does not send the same dispatch again
+        (``RetryLadder`` rule 10). Declare one only for a CLI measured to
+        loop without exiting, with a signal no finished or recovering run
+        shows; an unrecognised stream must return ``None``, so a CLI release
+        that changes its output falls back to the deadline. The watch runs on
+        the drain thread: it must be cheap and bounded, and a raise drops it
+        (docs/development/providers.md#a-cli-that-loops).
+        """
+        return None
+
     def parse_version(self, stdout: str, stderr: str) -> Optional[str]:
         """Recover the CLI version from ``version_cmd`` output (D3m).
 

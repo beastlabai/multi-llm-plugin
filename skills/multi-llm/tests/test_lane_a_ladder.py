@@ -853,8 +853,13 @@ def _patch_adapter(monkeypatch, adapter, name, value):
     monkeypatch.setitem(vars(adapter), name, value)
 
 
-def _replay(monkeypatch, tmp_path, provider_name, stdout, stderr, exit_code, *, kill=False):
-    """The real ``invoke_with_file_output`` over a captured row, spawn stubbed."""
+def _replay(
+    monkeypatch, tmp_path, provider_name, stdout, stderr, exit_code, *, kill=False,
+    stream_stop=None,
+):
+    """The real ``invoke_with_file_output`` over a captured row, spawn stubbed.
+    *stream_stop* makes the kill one the adapter's stdout watch asked for, as
+    ``_run_provider_cli`` raises it."""
     import contextlib
     import subprocess
 
@@ -865,7 +870,9 @@ def _replay(monkeypatch, tmp_path, provider_name, stdout, stderr, exit_code, *, 
 
     def fake_run(cmd, **kwargs):
         if kill:
-            raise subprocess.TimeoutExpired(cmd, 30, output=stdout, stderr=stderr)
+            expired = subprocess.TimeoutExpired(cmd, 30, output=stdout, stderr=stderr)
+            expired.stream_stop = stream_stop
+            raise expired
         return subprocess.CompletedProcess(cmd, exit_code, stdout, stderr)
 
     @contextlib.contextmanager
@@ -1113,3 +1120,42 @@ def test_a_deadline_kill_is_a_timeout_whatever_the_row_streamed(
         stdout=stdout, stderr=stderr, timed_out=True,
     )
     assert _lane_a_dispatches(monkeypatch, result, provider_name) == lane_b
+
+
+#: The reason opencode's stdout watch gives (``opencode.LoopWatch``), in short.
+_LOOP_STOP = (
+    'opencode looped: 20 steps in a row ended with finish reason "unknown" and '
+    "printed no text or tool call"
+)
+
+
+@pytest.mark.parametrize("stopped", [True, False], ids=["loop-stop", "ordinary-runner-error"])
+def test_a_loop_stop_is_never_sent_again_on_either_lane(monkeypatch, tmp_path, stopped):
+    """A run the stdout watch stopped had already re-sent its failing request
+    20 times: ``runner_error``, and no identical re-dispatch on either lane
+    (docs/development/providers.md#a-cli-that-loops). An ordinary
+    ``runner_error`` keeps its transport retry on both."""
+    from utils.provider_outcome import STREAM_STOP_KEY
+    from utils.provider_registry import get_provider
+    from utils.retry_ladder import STATUS_RUNNER_ERROR
+    from utils.review_orchestrator_base import attempt_ladder_status
+
+    head = (_FIXTURES / "opencode" / "loop" / "truncated.head.stdout.txt").read_text(
+        encoding="utf-8")
+    if stopped:
+        _, result = _replay(monkeypatch, tmp_path, "opencode", head, "", None,
+                            kill=True, stream_stop=_LOOP_STOP)
+        assert result["details"][STREAM_STOP_KEY] == _LOOP_STOP
+        capture = {"stdout": head, "stderr": "", "timed_out": True,
+                   "stream_stop": _LOOP_STOP}
+    else:
+        _patch_adapter(monkeypatch, get_provider("opencode"), "classify_failure",
+                       lambda *a, **k: None)
+        _, result = _replay(monkeypatch, tmp_path, "opencode", "", "boom", 1)
+        assert STREAM_STOP_KEY not in result["details"]
+        capture = {"stdout": "", "stderr": "boom", "exit_code": 1}
+    assert attempt_ladder_status(result, result["details"]) == STATUS_RUNNER_ERROR
+    lane_a = _lane_a_dispatches(monkeypatch, result, "opencode")
+    lane_b = _lane_b_dispatches(monkeypatch, tmp_path / "lane-b", "opencode", **capture)
+    expected = 1 if stopped else 1 + _ROW_RETRIES
+    assert (lane_a, lane_b) == (expected, expected)

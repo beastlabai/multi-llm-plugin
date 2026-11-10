@@ -203,6 +203,7 @@ NOT_FOR_HOST: Dict[str, str] = {
     "[SANDBOX_RUNG_RETIRED]": "runner-diagnostic",
     "[SANDBOX_UNAVAILABLE]": "runner-diagnostic",
     "[STREAM_CAP]": "runner-diagnostic",
+    "[STREAM_STOP]": "runner-diagnostic",
     "[USAGE_LIMIT]": "runner-diagnostic",
     # metrics
     "[METRICS_CONFLICT]": "metrics-note",

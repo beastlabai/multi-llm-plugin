@@ -530,7 +530,9 @@ counters above, and §7.5's two composition tests against the adapter's **declar
 re-ask — takes the same test in `record()`, so a slot whose attempt ran keeps that
 attempt's status with the refusal as `Action.note`, 2026-10-05), and an adapter that
 declares `retries_rate_limit: true` gets no identical rate-limit re-dispatch, because that would repeat
-a chain its own CLI already ran.
+a chain its own CLI already ran. For the same reason an attempt the adapter's stdout watch stopped
+keeps its `runner_error` but gets no identical re-dispatch either (rule 10, `stream_stopped`; see
+[a CLI that loops](providers.md#a-cli-that-loops)).
 
 The ladder is provider-free by construction (the envelope is read structurally) and each lane keeps
 only its own three-line loop: `task_dispatch.dispatch_task` blocks, `review_orchestrator_base.dispatch_with_ladder` awaits — the

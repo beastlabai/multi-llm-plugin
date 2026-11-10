@@ -633,3 +633,126 @@ def test_a_capped_stdout_is_never_audited_clean():
     assert capped["clean"] is False and "capture bound" in capped["reason"]
     # A default run carries no verdict either way.
     assert llm_client._readonly_audit(provider, stream, None, complete=False) is None
+
+
+# --------------------------------------------------------------------------- #
+# The stdout watch (docs/development/providers.md#a-cli-that-loops)
+# --------------------------------------------------------------------------- #
+
+_PRINTS_FOREVER = (
+    "import sys, time\n"
+    "while True:\n"
+    "    sys.stdout.write('tick\\n'); sys.stdout.flush(); time.sleep(0.01)\n"
+)
+
+
+class _CountTicks:
+    """Asks for a stop at the fifth ``tick`` line, and records each chunk."""
+
+    def __init__(self, at=5):
+        self.at, self.seen, self.chunks = at, 0, 0
+
+    def __call__(self, chunk):
+        self.chunks += 1
+        self.seen += chunk.count(b"tick\n")
+        return f"saw {self.seen} ticks" if self.seen >= self.at else None
+
+
+def _reap(proc, capture):
+    proc.kill()
+    return capture.communicate(timeout=10.0)
+
+
+@DRAINS
+def test_a_watch_ends_the_wait_long_before_the_deadline(selectable, capsys):
+    proc = _spawn(_PRINTS_FOREVER)
+    watch = _CountTicks()
+    capture = _capture(proc, selectable, watch=watch)
+    started = time.monotonic()
+    try:
+        with pytest.raises(process_capture.StreamStopped) as caught:
+            capture.communicate(timeout=120.0)
+        waited = time.monotonic() - started
+        assert waited < 30.0, waited
+        # A TimeoutExpired, so a lane's timeout handler stops the CLI.
+        assert isinstance(caught.value, subprocess.TimeoutExpired)
+        assert caught.value.reason.startswith("saw ") and caught.value.timeout == 120.0
+        assert caught.value.stdout.startswith("tick\n")
+        assert capture.stream_stop == caught.value.reason
+        assert "[STREAM_STOP]" in capsys.readouterr().err
+        # The watch is dropped once it decided, and the stop's own second
+        # call collects the rest without being stopped again.
+        chunks = watch.chunks
+        out, _err = _reap(proc, capture)
+        assert out.startswith("tick\n") and len(out) >= len(caught.value.stdout)
+        assert watch.chunks == chunks
+    finally:
+        capture.close()
+
+
+@DRAINS
+def test_a_watch_that_never_decides_leaves_the_exit_and_the_deadline_alone(selectable):
+    proc = _spawn("print('done')")
+    capture = _capture(proc, selectable, watch=lambda chunk: None)
+    try:
+        assert capture.communicate(timeout=30.0) == ("done\n", "")
+        assert proc.returncode == 0 and capture.stream_stop is None
+    finally:
+        capture.close()
+    proc = _spawn(_PRINTS_FOREVER)
+    capture = _capture(proc, selectable, watch=lambda chunk: None)
+    try:
+        with pytest.raises(subprocess.TimeoutExpired) as caught:
+            capture.communicate(timeout=0.5)
+        assert not isinstance(caught.value, process_capture.StreamStopped)
+        assert caught.value.timeout == 0.5 and caught.value.stdout.startswith("tick\n")
+        assert capture.stream_stop is None
+        _reap(proc, capture)
+    finally:
+        capture.close()
+
+
+@DRAINS
+def test_a_watch_that_raises_is_dropped_and_the_cli_runs_on(selectable):
+    calls = []
+
+    def broken(chunk):
+        calls.append(chunk)
+        raise ValueError("a watch bug")
+
+    proc = _spawn(
+        "import sys, time\n"
+        "for _ in range(3):\n"
+        "    print('line', flush=True); time.sleep(0.05)\n"
+    )
+    capture = _capture(proc, selectable, watch=broken)
+    try:
+        assert capture.communicate(timeout=30.0) == ("line\n" * 3, "")
+        assert proc.returncode == 0 and capture.stream_stop is None
+        assert len(calls) == 1
+    finally:
+        capture.close()
+
+
+def test_provider_watch_never_fails_a_dispatch():
+    class _None:
+        def stream_watch(self):
+            return None
+
+    class _Raises:
+        def stream_watch(self):
+            raise RuntimeError("no")
+
+    class _NotCallable:
+        def stream_watch(self):
+            return "watch"
+
+    watch = _CountTicks()
+
+    class _Declares:
+        def stream_watch(self):
+            return watch
+
+    for provider in (object(), _None(), _Raises(), _NotCallable()):
+        assert process_capture.provider_watch(provider) is None
+    assert process_capture.provider_watch(_Declares()) is watch

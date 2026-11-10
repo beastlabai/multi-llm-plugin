@@ -43,6 +43,7 @@ from . import task_outcome as _task_outcome
 from . import task_result as _task_result
 from . import runner_selection as _runner_selection
 from . import dispatch_spawn as _dispatch_spawn
+from . import process_capture
 from . import process_control
 from .redact import _REDACTIONS, _replace_group, redact_text
 
@@ -65,6 +66,19 @@ def _classify_pre_parse(capture: _dispatch_spawn._Capture) -> Tuple[str, str]:
         pid = getattr(capture, "kill_pid", None)
         verdict = getattr(capture, "kill_verdict", None)
         reason = process_control.unconfirmed_kill(verdict) if pid is not None else None
+        # A stop the adapter's stdout watch asked for (a CLI that loops instead
+        # of exiting) is the fan-out's verdict too: `runner_error`, never "ran
+        # out of time", and the ladder sends it no identical retry
+        # (docs/development/providers.md#a-cli-that-loops).
+        stop = getattr(capture, "stream_stop", None)
+        if stop:
+            line = process_capture.stopped_early_text(
+                stop, getattr(capture, "duration", 0.0) or 0.0, "its per-task timeout",
+            )
+            if reason is not None:
+                line += (f"; it could not be confirmed stopped (kill verdict {verdict}, "
+                         f"pid {pid}): {reason}, so it may still be running")
+            return STATUS_RUNNER_ERROR, line
         if reason is not None:
             return STATUS_TIMEOUT, (
                 f"the runner exceeded its per-task timeout and could not be "

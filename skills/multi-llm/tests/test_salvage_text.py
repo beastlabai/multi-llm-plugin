@@ -313,7 +313,11 @@ _RIG_CASES = (
 #: permission whose text parts are only narration, and the raw stream passed
 #: the gate on its tool parts.
 OPENCODE_LABELS: Dict[str, str] = {
-    f"capture/{OC_PIN}/{case}.jsonl": "none" for case in _RIG_CASES
+    **{f"capture/{OC_PIN}/{case}.jsonl": "none" for case in _RIG_CASES},
+    # The heads of the two runs that looped on a failed response (loop/README.md):
+    # empty steps only, no text part at all.
+    "loop/error-envelope.head.stdout.txt": "none",
+    "loop/truncated.head.stdout.txt": "none",
 }
 
 

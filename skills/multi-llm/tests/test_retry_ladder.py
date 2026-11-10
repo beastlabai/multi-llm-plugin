@@ -717,3 +717,32 @@ class TestRule8AnAttemptThatChangedFilesIsNotSentAgain:
         ladder.next_attempt()
         assert ladder.record(STATUS_UNPARSEABLE).retry is True
         assert ladder.schema_repairs_left == 0
+
+
+class TestRule10ALoopStopIsNotSentAgain:
+    """An attempt the adapter's stdout watch stopped (opencode's loop on a
+    failed provider response, docs/development/providers.md#a-cli-that-loops)
+    keeps its ``runner_error`` status and gets no identical re-dispatch: the
+    CLI had already re-sent the request by itself, as rule 6(b)'s vendor
+    retries had. ``stream_stopped`` is the caller's explicit word for it."""
+
+    def test_no_retry_and_the_budget_is_untouched(self):
+        from utils.retry_ladder import STOP_STREAM_STOPPED
+
+        ladder = _ladder(Clock(), retries=1)
+        ladder.next_attempt()
+        action = ladder.record(STATUS_RUNNER_ERROR, stream_stopped=True)
+        assert action.retry is False and action.delay == 0.0
+        assert ladder.stop_reason == STOP_STREAM_STOPPED
+        assert STATUS_RUNNER_ERROR in action.reason and "re-sent" in action.reason
+        assert ladder.transport_retries_left == 1
+        assert ladder.next_attempt() is None
+        assert ladder.spawns == 1
+
+    def test_an_ordinary_runner_error_keeps_its_retry(self):
+        ladder = _ladder(Clock(), retries=1)
+        ladder.next_attempt()
+        assert ladder.record(STATUS_RUNNER_ERROR).retry is True
+        assert ladder.next_attempt() is not None
+        assert ladder.record(STATUS_RUNNER_ERROR, stream_stopped=False).retry is False
+        assert ladder.stop_reason == STOP_EXHAUSTED_ATTEMPTS

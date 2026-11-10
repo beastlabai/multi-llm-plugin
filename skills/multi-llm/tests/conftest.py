@@ -268,6 +268,9 @@ def _lane_a_spawn_honours_a_faked_subprocess_run(monkeypatch):
 
     def spawn(cmd, **kwargs):
         if subprocess.run is not _STDLIB_SUBPROCESS_RUN:
+            # The adapter's stdout watch is the real spawn's argument, never
+            # `subprocess.run`'s: a fake process has no stream to watch.
+            kwargs.pop("stream_watch", None)
             return subprocess.run(cmd, **kwargs)
         return real_spawn(cmd, **kwargs)
 
