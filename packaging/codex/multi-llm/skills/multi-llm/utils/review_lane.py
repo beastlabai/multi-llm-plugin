@@ -1928,6 +1928,7 @@ async def resolve_validation_round(
     scope_round_policy: Any,
     scope_baseline: Optional[Mapping[str, Any]],
     findings: str,
+    follow_up: Optional[Callable[[Mapping[str, Any]], Optional[str]]] = None,
 ) -> RoundOutcome:
     """Resolve a ``--reaggregate``'s validation round, the same way on every lane.
 
@@ -1961,7 +1962,12 @@ async def resolve_validation_round(
     *findings* names what the review returned ("suggestions", "issues") in the
     zero-group retirement's reason. *scope_round_policy* and *scope_baseline*
     are the round on record's scope policy and baseline, from which reused
-    verdicts get their validation-stage decision again.
+    verdicts get their validation-stage decision again. *follow_up* is the
+    lane's ``--reaggregate`` command for a task document, in the spelling the
+    user typed (``ReviewLane.round_follow_up(..., typed=True)``, the command
+    the fan-out's hand-off names); every hand-off here prints it and puts it on
+    the result line. ``None`` rebuilds it from the document
+    (``resolved_reaggregate_command``).
     """
     validation_tasks_path = os.path.join(phase_dir, "validation_tasks.json")
 
@@ -2045,16 +2051,23 @@ async def resolve_validation_round(
         print("\nSkipping validation (--skip-validation flag set)")
         return RoundOutcome()
 
+    def typed_follow_up(document: Mapping[str, Any]) -> Optional[str]:
+        if follow_up is not None:
+            return follow_up(document)
+        return resolved_reaggregate_command(dict(document), typed_plan=True)
+
     if os.path.exists(validation_tasks_path):
         return await _resume_round(
             claim, args, steps, phase_name=phase_name, phase_dir=phase_dir,
             plan_path=plan_path, grouped=grouped, validation_path=validation_path,
             validation_tasks_path=validation_tasks_path, current_inputs=current_inputs,
+            follow_up=typed_follow_up,
         )
     return await _materialize_round(
         claim, args, steps, phase_name=phase_name, phase_dir=phase_dir,
         plan_path=plan_path, grouped=grouped, validation_path=validation_path,
         validation_tasks_path=validation_tasks_path, build_round=build_round,
+        follow_up=typed_follow_up,
     )
 
 
@@ -2219,8 +2232,14 @@ async def _resume_round(
     validation_path: str,
     validation_tasks_path: str,
     current_inputs: Callable[[], Dict[str, Any]],
+    follow_up: Callable[[Mapping[str, Any]], Optional[str]],
 ) -> RoundOutcome:
-    """The round a task file on disk describes: merged whole, or handed out."""
+    """The round a task file on disk describes: merged whole, or handed out.
+
+    A round still missing batch files is handed back as the fan-out handed it
+    out: the missing files are named, and the ``--reaggregate`` to run once
+    they are written is printed and put on the result line (*follow_up*), so a
+    host reading only that line knows the round is not finished."""
     print("\nFound validation_tasks.json, checking for completed batches...")
     # A task file whose inputs moved since materialization, or that an older
     # skill version wrote, is refused before anything is dispatched (exit 3,
@@ -2252,11 +2271,11 @@ async def _resume_round(
                 sys.exit(3)
 
     total_batches = batch_metadata.get("total_batches", 0)
-    batches_found = sum(
-        1 for batch in batch_metadata.get("batches", [])
-        if os.path.exists(
-            os.path.join(phase_dir, f"validation_batch_{batch['batch_index']}.json"))
-    )
+    missing_batches = [
+        name for name in _batch_names(batch_metadata)
+        if not os.path.exists(os.path.join(phase_dir, name))
+    ]
+    batches_found = len(batch_metadata.get("batches", [])) - len(missing_batches)
     if batches_found == total_batches and total_batches > 0:
         print(f"All {total_batches} batch files found, merging...")
         groups = steps.merge_validation_batches(
@@ -2288,7 +2307,15 @@ async def _resume_round(
 
     _run_record.report_progress(phase_dir, step="validation_pending")
     print(f"Only {batches_found}/{total_batches} batch files found.")
-    print("Wait for all validation subagents to complete before reaggregating.")
+    if missing_batches:
+        print(f"Missing: {', '.join(missing_batches)} (tasks: {validation_tasks_path})")
+    print("Wait for all validation subagents to complete before reaggregating, "
+          "or add --exec-subagents to run the missing batches in this process.")
+    # The follow-up the round's first hand-off named, on the result line too.
+    reaggregate_cmd = follow_up(batch_metadata)
+    print("\nAfter validation completes, run:")
+    print(f"  {reaggregate_cmd or ''}")
+    steps.record_next(reaggregate_cmd or None)
     return RoundOutcome(handed_off=True)
 
 
@@ -2304,6 +2331,7 @@ async def _materialize_round(
     validation_path: str,
     validation_tasks_path: str,
     build_round: Callable[[BoundDocument], ValidationRound],
+    follow_up: Callable[[Mapping[str, Any]], Optional[str]],
 ) -> RoundOutcome:
     """A new round for *grouped*: published, then dispatched or handed out."""
     print("\nPreparing batched validation for subagent execution...")
@@ -2354,11 +2382,11 @@ async def _materialize_round(
         return RoundOutcome(groups=groups, verdicts=claim.verdicts)
 
     # The plan as the user typed it, when that names the same file.
-    reaggregate_cmd = resolved_reaggregate_command(batched_tasks, typed_plan=True)
+    reaggregate_cmd = follow_up(batched_tasks)
     print("\nAfter validation completes, run:")
     print(f"  {reaggregate_cmd or ''}")
     # The one follow-up a native-subagent host is owed, also on the result line.
-    cli_common.record_next(reaggregate_cmd or None)
+    steps.record_next(reaggregate_cmd or None)
     return RoundOutcome(handed_off=True)
 
 

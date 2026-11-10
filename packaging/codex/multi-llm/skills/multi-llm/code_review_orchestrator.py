@@ -466,11 +466,16 @@ class CodeLane:
     ) -> Optional[str]:
         # Fully resolved, in a commit review's commit mode, and still starting
         # with `uv run` (Claude Code's `Bash(uv:*)` allow rule matches it);
-        # the typed form names the plan as the user typed it.
+        # the typed form names the plan as the user typed it. The live
+        # invocation's flags win; without one, the task file's stored
+        # `replay_flags`, as `resolved_reaggregate_command` falls back on the
+        # other lanes (D2's precedence rule).
         return commit_spelling.spell_retry_command(
             self.mode, self.plan_path, '--reaggregate',
             **({"typed_plan": cli_common.typed_plan_for(self.plan_path)} if typed else {}),
-            flags=cli_common.current_replay_flags(mode=self.mode),
+            flags=cli_common.current_replay_flags(
+                document.get("replay_flags"), mode=self.mode,
+            ),
         )
 
     def round_steps(self) -> "_review_lane.RoundSteps":
@@ -4789,8 +4794,10 @@ def _format_issue(
             ``report_parser.parse_issue_descriptions`` reads the same
             description as before.
     """
-    file_ref = issue.get("file", "unknown")
-    line_range = issue.get("line_range")
+    # Both normalised on arrival (`normalize_issue_shapes`); a caller that
+    # hands raw model output still gets a location, never an IndexError.
+    file_ref = str(issue.get("file") or "unknown")
+    line_range = _usable_line_range(issue.get("line_range"))
     if line_range:
         file_ref += f":{line_range[0]}-{line_range[1]}"
 
@@ -4850,9 +4857,14 @@ def _format_issue(
         "",
     ])
 
-    # Include validation reason for invalid or needs-human-decision issues
+    # Include validation reason for invalid or needs-human-decision issues.
+    # Every line of it is quoted, so a reason of several paragraphs, or one
+    # holding a `---` line, stays out of the description the apply phase reads
+    # back (`report_parser.parse_issue_descriptions`).
     if validation_reason and validation_status in ("invalid", "needs-human-decision", "validation_failed"):
-        lines.append(f"> **Validation Reason:** {rm.neutralize_model_text(validation_reason)}")
+        first, *rest = rm.neutralize_model_text(validation_reason).split("\n")
+        lines.append(f"> **Validation Reason:** {first}")
+        lines.extend(f"> {line}".rstrip() for line in rest)
         lines.append("")
 
     lines.extend([
@@ -5060,6 +5072,8 @@ async def reaggregate_from_existing_files(
             issue["source_model"] = model     # grouping attributes by this one
         # A salvage or an older run wrote whichever case it was given.
         _importance.canonicalize(issues)
+        # Read back in the shapes the fan-out grouped (normalize_issue_shapes).
+        normalize_issue_shapes(issues, model)
 
     # Every model's issues read back, one rule for every review lane: the
     # canonical specs from the checkpoint, one file per logical model (W3),
@@ -5235,6 +5249,9 @@ async def reaggregate_from_existing_files(
                 getattr(state, "state", {}) or {}, "code-review"
             ),
             findings="issues",
+            # The command the fan-out's hand-off names: a commit review's is
+            # spelled in its commit mode.
+            follow_up=lambda document: lane.round_follow_up(document, typed=True),
         )
         if outcome.handed_off:
             return EXIT_OK
@@ -6712,6 +6729,101 @@ async def _group_validate_and_report(
     )
 
 
+#: A line number, a ``"40-42"`` range (hyphen, en dash or colon) or an
+#: ``"L40-L42"`` one, as text.
+_LINE_TEXT_RE = re.compile(r"\s*L?(\d+)\s*(?:[-\u2013:]\s*L?(\d+))?\s*")
+
+
+def _line_number(value: Any) -> Optional[int]:
+    """*value* as a line number, ``None`` when it is not one."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str) and value.strip().isdecimal():
+        return int(value.strip())
+    return None
+
+
+def _usable_line_range(value: Any) -> Optional[List[int]]:
+    """*value* as the ``[start, end]`` the schema asks for, ``None`` when no
+    line can be read from it. One line (``[42]``, ``42``, ``"42"``) is
+    ``[42, 42]``."""
+    if isinstance(value, (list, tuple)):
+        numbers = [_line_number(item) for item in value[:2]]
+        if not numbers or None in numbers:
+            return None
+        return [numbers[0], numbers[-1]]
+    if isinstance(value, str):
+        match = _LINE_TEXT_RE.fullmatch(value)
+        if not match:
+            return None
+        start = int(match.group(1))
+        return [start, int(match.group(2)) if match.group(2) else start]
+    number = _line_number(value)
+    return None if number is None else [number, number]
+
+
+def normalize_issue_shapes(issues: List[Dict[str, Any]], model: str) -> None:
+    """Give each issue's ``title``, ``file`` and ``line_range`` the shapes
+    every reader takes, in place, with one warning naming *model* and what
+    changed.
+
+    All three are model output, and the report, the grouping, the issue map
+    and fix batching key on ``title`` and ``file`` and read ``line_range`` as
+    ``[start, end]`` (the issue schema), so a reply of another shape must not
+    crash the report after every model ran, and every ``--reaggregate`` after
+    it. A title that is a list or an object becomes its text, a path list
+    keeps its first path, one line becomes ``[n, n]``, and a field nothing
+    usable can be read from is removed; the issue itself is always kept. Run
+    on arrival, where importance is canonicalized: the fan-out's issues and
+    every reaggregate's read-back, so both group the same records
+    (docs/development/review-results.md, "Malformed result entries").
+    """
+    changes: List[str] = []
+    for number, issue in enumerate(issues, 1):
+        title = issue.get("title")
+        if isinstance(title, (list, tuple, dict)):
+            issue["title"] = (
+                " ".join(str(part) for part in title)
+                if not isinstance(title, dict) else json.dumps(title, sort_keys=True)
+            )
+            changes.append(f"issue {number}: title {title!r} -> {issue['title']!r}")
+        label = f"issue {number} ({report_markdown.inline_text(issue.get('title'))[:60]!r})"
+        if "file" in issue and not isinstance(issue["file"], str):
+            raw = issue["file"]
+            paths = [p for p in raw if isinstance(p, str) and p] if isinstance(raw, (list, tuple)) else []
+            if paths:
+                issue["file"] = paths[0]
+                changes.append(f"{label}: file {raw!r} -> {paths[0]!r}")
+            else:
+                del issue["file"]
+                changes.append(f"{label}: file {raw!r} removed")
+        raw_range = issue.get("line_range")
+        if raw_range is None or (
+            isinstance(raw_range, list) and len(raw_range) == 2
+            and all(type(line) is int for line in raw_range)
+        ):
+            continue
+        usable = _usable_line_range(raw_range)
+        if usable is None:
+            del issue["line_range"]
+            changes.append(f"{label}: line_range {raw_range!r} removed")
+        else:
+            issue["line_range"] = usable
+            changes.append(f"{label}: line_range {raw_range!r} -> {usable!r}")
+    if changes:
+        listed = "; ".join(changes[:3]) + ("; …" if len(changes) > 3 else "")
+        print(
+            f"WARNING: {model} gave {len(changes)} issue field(s) in a shape "
+            f"the report cannot use: {listed}.\n  Normalised; every issue is "
+            f"kept, and every other model's are aggregated as usual.",
+            file=sys.stderr,
+        )
+
+
 def _save_raw_issues(
     results: Mapping[str, Tuple[bool, Any, Any]], *, plan_path: Path,
 ) -> List[Dict[str, Any]]:
@@ -6721,9 +6833,9 @@ def _save_raw_issues(
     all_issues = []
     for model_spec, (success, issues, _) in results.items():
         if success and issues:
-            for issue in drop_non_record_entries(
-                issues, model_spec, noun="issues"
-            ):
+            records = drop_non_record_entries(issues, model_spec, noun="issues")
+            normalize_issue_shapes(records, model_spec)
+            for issue in records:
                 issue["model"] = model_spec
                 all_issues.append(issue)
     # An in-process salvage's file reaches `results` in the case it

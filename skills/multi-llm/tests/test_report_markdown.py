@@ -20,6 +20,7 @@ from apply_code_fixes_orchestrator import find_edited_issue_descriptions  # noqa
 from utils import report_markdown as rm  # noqa: E402
 from utils.consolidation import generate_consolidated_report  # noqa: E402
 from utils.report_parser import (  # noqa: E402
+    description_edited,
     find_edited_descriptions,
     parse_consolidated_skipped_groups,
     parse_consolidated_validation_overrides,
@@ -63,6 +64,7 @@ class TestTheGrammar:
         "a\r\nb\rc\n-[x]Mark valid",
         "```\n## not a heading in a fence\n- [ ] still a box\n```",
         "# one hash stays\n#no space\n- not a box\n* [x] other marker",
+        "--- a/app.py\n+++ b/app.py\n---\n  ----\n\\--- already escaped",
     ]
 
     @pytest.mark.parametrize("text", TRICKY)
@@ -79,6 +81,12 @@ class TestTheGrammar:
             assert not header.search(written), (header.pattern, written)
         for label in rm.CHECKBOX_LABELS:
             assert not rm.is_checked(written, label), (label, written)
+
+    @pytest.mark.parametrize("text", TRICKY)
+    def test_neutralized_text_cannot_end_a_block(self, text):
+        # `report_parser` ends a description's block at a `---` or `###` line.
+        written = "\n" + rm.neutralize_model_text(text)
+        assert "\n---" not in written and "\n###" not in written, written
 
     def test_lines_that_are_not_structure_are_left_alone(self):
         text = "# Heading\n- a list item\n* [x] another marker\nsee ## G2 mid-line"
@@ -477,6 +485,108 @@ class TestCodeLaneForgery:
         assert find_edited_issue_descriptions(path, groups, {1: (1, 1), 2: (2, 1)}) == {}
 
 
+class TestCodeLaneDescriptionsReadBack:
+    """An untouched review-code report never reads as edited, whatever the
+    description or the validation reason holds; a real edit still does, and
+    carries the description alone (the rule both lanes share,
+    ``report_parser.description_edited``)."""
+
+    ISSUE_MAP = {1: (1, 1), 2: (2, 1)}
+    DIFF_DESC = ("The retry loop never backs off. Suggested change:\n\n"
+                 "--- a/src/retry.py\n+++ b/src/retry.py\n@@ -3 +3 @@\n"
+                 "-    sleep(0)\n+    sleep(2 ** attempt)\n\nAlso cap the attempts.")
+    TWO_PARAGRAPHS = "The claim is plausible.\n\nBut the plan puts retries out of scope."
+
+    def test_a_rule_line_in_a_description_is_no_edit(self, tmp_path):
+        path, groups = _code_report(tmp_path, attacker_desc=self.DIFF_DESC)
+        assert find_edited_issue_descriptions(path, groups, self.ISSUE_MAP) == {}
+
+    @pytest.mark.parametrize("reason", [
+        TWO_PARAGRAPHS,
+        "Unclear.\n---\nA rule line inside the reason.",
+        "Line one.\n\n\n\nAfter several blank lines.",
+    ])
+    def test_a_reason_of_several_paragraphs_stays_out_of_the_description(
+        self, tmp_path, reason,
+    ):
+        path, groups = _code_report(tmp_path, attacker_desc="The description.",
+                                    attacker_reason=reason)
+        assert parse_issue_descriptions(path)[2] == "The description."
+        assert find_edited_issue_descriptions(path, groups, self.ISSUE_MAP) == {}
+
+    #: An edit above the rule line, one below it, and one that cuts the
+    #: description at it: each is read back whole, as the user left it.
+    EDITS = [
+        pytest.param("The retry loop never backs off.", "The retry loop spins.", id="above"),
+        pytest.param("Also cap the attempts.", "Also cap the attempts at 10.", id="below"),
+        pytest.param("\n\n--- a/src/retry.py\n+++ b/src/retry.py\n@@ -3 +3 @@\n"
+                     "-    sleep(0)\n+    sleep(2 ** attempt)\n\nAlso cap the attempts.",
+                     "", id="cut-at-the-rule"),
+    ]
+
+    @pytest.mark.parametrize("old, new", EDITS)
+    def test_an_edit_around_the_rule_line_is_read_whole(self, tmp_path, old, new):
+        path, groups = _code_report(tmp_path, attacker_desc=self.DIFF_DESC)
+        _edit_report(path, rm.neutralize_model_text(old), rm.neutralize_model_text(new))
+
+        edited = find_edited_issue_descriptions(path, groups, self.ISSUE_MAP)
+
+        assert edited == {2: (self.DIFF_DESC, self.DIFF_DESC.replace(old, new, 1))}
+
+    @pytest.mark.parametrize("old, new", EDITS)
+    def test_the_plan_lane_reads_it_whole_too(self, tmp_path, old, new):
+        groups = _plan_groups(attacker_desc=self.DIFF_DESC)
+        attacker = groups[1]["suggestions"][0]
+        path = _plan_report(tmp_path, groups)
+        assert find_edited_descriptions(path, groups) == {}
+        _edit_report(path, rm.neutralize_model_text(old), rm.neutralize_model_text(new))
+
+        edited = find_edited_descriptions(path, groups)
+
+        assert list(edited.values()) == [(self.DIFF_DESC, self.DIFF_DESC.replace(old, new, 1))]
+        assert set(edited) <= {attacker["suggestion_hash"], attacker["display_hash"]}
+
+    def test_a_rule_line_is_written_escaped_and_read_back_as_written(self, tmp_path):
+        path, _ = _code_report(tmp_path, attacker_desc=self.DIFF_DESC)
+        assert "\n\\--- a/src/retry.py\n" in Path(path).read_text(encoding="utf-8")
+        assert parse_issue_descriptions(path)[2] == self.DIFF_DESC
+
+    def test_an_older_report_cut_at_the_rule_line_is_no_edit(self, tmp_path):
+        """Written before the escape (no marker), the block stops at the rule
+        line; that cut alone is not the user's edit."""
+        path, groups = _code_report(tmp_path, attacker_desc=self.DIFF_DESC)
+        text = Path(path).read_text(encoding="utf-8")
+        Path(path).write_text(_legacy(text, self.DIFF_DESC), encoding="utf-8")
+        assert find_edited_issue_descriptions(path, groups, self.ISSUE_MAP) == {}
+
+    def test_an_edit_under_a_long_reason_carries_the_description_alone(self, tmp_path):
+        path, groups = _code_report(tmp_path, attacker_desc="The description.",
+                                    attacker_reason=self.TWO_PARAGRAPHS)
+        text = Path(path).read_text(encoding="utf-8")
+        Path(path).write_text(
+            text.replace("The description.", "The description, edited.", 1),
+            encoding="utf-8",
+        )
+        edited = find_edited_issue_descriptions(path, groups, self.ISSUE_MAP)
+        assert edited == {2: ("The description.", "The description, edited.")}
+
+    def test_both_lanes_share_one_rule(self):
+        cut = self.DIFF_DESC.split("\n---", 1)[0]
+        assert not description_edited(self.DIFF_DESC, cut)
+        # An escaped report is never cut at model text: the cut is the user's.
+        assert description_edited(self.DIFF_DESC, cut, escaped=True)
+        assert not description_edited(
+            "d", "> **Validation Reason:** a\n>\n> b\n\nd", escaped=True)
+        assert description_edited("d", "d, edited")
+
+
+def _edit_report(path: str, old: str, new: str) -> None:
+    """Replace *old* with *new* once in the report, as a user's edit would."""
+    text = Path(path).read_text(encoding="utf-8")
+    assert old in text, old
+    Path(path).write_text(text.replace(old, new, 1), encoding="utf-8")
+
+
 # ---------------------------------------------------------------------------
 # Consolidated report
 # ---------------------------------------------------------------------------
@@ -564,12 +674,12 @@ class TestOnlyAnEscapedReportIsUnescaped:
     def test_code_lane(self, tmp_path, desc):
         path, groups = _code_report(tmp_path, attacker_desc=desc)
         issue_map = {1: (1, 1), 2: (2, 1)}
-        # The block starts with the validation reason (read past on compare).
-        assert parse_issue_descriptions(path)[2].endswith("\n\n" + desc)
+        # The validation reason above it is not part of the description.
+        assert parse_issue_descriptions(path)[2] == desc
         assert find_edited_issue_descriptions(path, groups, issue_map) == {}
         text = Path(path).read_text(encoding="utf-8")
         Path(path).write_text(_legacy(text, desc), encoding="utf-8")
-        assert parse_issue_descriptions(path)[2].endswith("\n\n" + desc)
+        assert parse_issue_descriptions(path)[2] == desc
         assert find_edited_issue_descriptions(path, groups, issue_map) == {}
 
     def test_a_legacy_description_cut_at_its_own_rule_is_no_edit(self, tmp_path):

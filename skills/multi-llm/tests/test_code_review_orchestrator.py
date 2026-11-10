@@ -2131,6 +2131,117 @@ class TestTheHostValidationHandOffIsTerminal:
         assert status["progress"]["step"] == "validation_pending", status["progress"]
 
 
+class TestModelIssueShapesNeverCrashTheReport:
+    """A reviewer's ``line_range: [42]``, a bare ``42``, a list for ``file`` or
+    ``title``: model output in a shape the report indexes otherwise. Each is
+    normalised on arrival, on the fan-out and on every reaggregate, with one
+    warning naming the model; the report is written and no issue is lost
+    (docs/development/review-results.md, "Malformed result entries")."""
+
+    @pytest.mark.parametrize("field, raw, expected", [
+        ("line_range", [42], [42, 42]),
+        ("line_range", 42, [42, 42]),
+        ("line_range", "42", [42, 42]),
+        ("line_range", "40-42", [40, 42]),
+        ("line_range", [3, 9, 12], [3, 9]),
+        ("line_range", ["3", "9"], [3, 9]),
+        ("line_range", [3.0, 9.0], [3, 9]),
+        ("line_range", ["a", "b"], None),
+        ("line_range", {"start": 1}, None),
+        ("line_range", [True, False], None),
+        ("line_range", [], None),
+        ("file", ["src/a.py", "src/b.py"], "src/a.py"),
+        ("file", None, None),
+        ("file", {"path": "src/a.py"}, None),
+        ("title", ["Retry", "loop"], "Retry loop"),
+    ])
+    def test_a_field_is_normalised_or_removed_and_the_model_named(
+        self, capsys, field, raw, expected,
+    ):
+        issue = {"title": "T", "desc": "d", "file": "src/a.py", "line_range": [1, 2]}
+        issue[field] = raw
+
+        cro.normalize_issue_shapes([issue], "gemini:flash")
+
+        if expected is None:
+            assert field not in issue
+        else:
+            assert issue[field] == expected
+        assert "gemini:flash" in capsys.readouterr().err
+
+    def test_a_well_formed_issue_is_left_alone(self, capsys):
+        issue = {"title": "T", "desc": "d", "file": "src/a.py", "line_range": [1, 2]}
+        before = json.dumps(issue)
+
+        cro.normalize_issue_shapes([issue, {"title": "U", "desc": "e", "file": "b.py"}], "m")
+
+        assert json.dumps(issue) == before
+        assert capsys.readouterr().err == ""
+
+    @pytest.mark.parametrize("line_range", [[42], 42, "x"])
+    def test_format_issue_takes_a_raw_line_range(self, line_range):
+        lines = cro._format_issue(1, {"title": "T", "desc": "d", "file": "src/a.py",
+                                      "line_range": line_range})
+        assert any("**File:**" in line for line in lines)
+
+    ODD = [
+        {"title": "One line", "desc": "d1", "importance": "high",
+         "file": "src/a.py", "line_range": [42], "type": "bug"},
+        {"title": ["Two", "files"], "desc": "d2", "importance": "medium",
+         "file": ["src/a.py", "src/b.py"], "line_range": 7, "type": "bug"},
+    ]
+
+    def test_the_reaggregate_writes_the_report(self, tmp_path):
+        plan_path = TestTheHostValidationHandOffIsTerminal._tree(tmp_path)
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        phase_dir = tmp_path / "phase"
+        phase_dir.mkdir()
+        (phase_dir / "cursor-agent_auto.json").write_text(
+            json.dumps(self.ODD), encoding="utf-8"
+        )
+        args = _make_args(plan_path, reaggregate=True, skip_validation=True)
+
+        with patch.object(cro, "get_or_create_state",
+                          return_value=TestTheHostValidationHandOffIsTerminal._fake_state()), \
+             patch.object(cro, "get_phase_dir", return_value=phase_dir), \
+             patch.object(cro, "validate_git_ref",
+                          side_effect=lambda r: r or "HEAD~1"), \
+             patch.object(cro, "get_project_root", return_value=str(tmp_path)), \
+             patch.object(cro, "build_unsanitize_map", return_value={}):
+            asyncio.run(cro.reaggregate_from_existing_files(
+                "plan", out_dir, plan_path, args
+            ))
+
+        report = (tmp_path / "plan" / "code-review" / "report.md").read_text(encoding="utf-8")
+        assert "`src/a.py:42-42`" in report
+        assert "`src/a.py:7-7`" in report
+        assert "Two files" in report
+
+    def test_the_fanout_writes_the_report(self, tmp_path):
+        plan_path = TestTheHostValidationHandOffIsTerminal._tree(tmp_path)
+        phase_dir = cro.get_phase_dir(plan_path, "code-review")
+        args = _make_args(plan_path, skip_validation=True)
+        issues = json.loads(json.dumps(self.ODD))
+
+        with patch.object(cro, "parse_args", return_value=args), \
+             patch.object(cro, "get_or_create_state",
+                          return_value=TestTheHostValidationHandOffIsTerminal._fake_state()), \
+             patch("utils.interactive.resolve_models",
+                          return_value=["cursor-agent:auto"]), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
+             patch.object(cro, "validate_git_ref",
+                          side_effect=lambda r: r or "HEAD~1"), \
+             patch.object(cro, "get_project_root", return_value=str(tmp_path)), \
+             patch.object(cro, "run_all_reviews", new=AsyncMock(
+                 return_value={"cursor-agent:auto": (True, issues, None)})):
+            asyncio.run(cro.main())
+
+        report = (phase_dir / "report.md").read_text(encoding="utf-8")
+        assert "`src/a.py:42-42`" in report
+        assert "Two files" in report
+
+
 class TestTheValidationStretchIsNamedBeforeItIsDispatched:
     """The word is written where the stretch begins, not where it may end.
 

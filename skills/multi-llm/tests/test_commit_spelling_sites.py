@@ -364,6 +364,44 @@ class TestTheBuilder:
         assert ctx.user_next_step["command"] == f"{CC}--apply-commit-fixes {PINNED}"
 
 
+class TestTheRoundFollowUp:
+    """review-code's ``--reaggregate`` follow-up (``CodeLane.round_follow_up``,
+    the command both of a round's hand-offs name): without a live invocation
+    record, the task file's stored ``replay_flags`` are replayed, then spelled
+    back like every other site, so a front door's flags never reach it."""
+
+    STORED = ["--base-ref", BASE, "--models", "cursor-agent:auto",
+              "--scope-policy", "expand"]
+
+    @staticmethod
+    def _lane(path: Path):
+        return code_review_orchestrator.CodeLane(
+            plan_path=path, phase_dir=path.parent / "code-review", prefix=path.stem)
+
+    def test_a_commit_review_keeps_the_stored_flags_in_its_own_spelling(self, here):
+        brief = _seed(here, **REVIEWED)
+        command = self._lane(brief).round_follow_up({"replay_flags": self.STORED},
+                                                    typed=True)
+        tokens = shlex.split(command)
+        assert tokens[tokens.index("review-commits") + 1] == PINNED, command
+        assert "--models cursor-agent:auto --scope-policy expand --reaggregate" in command
+        _clean(command)
+
+    def test_a_plan_keeps_every_stored_flag(self, here):
+        plan = _plan(here, head_ref=False)
+        command = self._lane(plan).round_follow_up({"replay_flags": self.STORED})
+        assert command.endswith(
+            f"review-code {plan} --base-ref {BASE} --models cursor-agent:auto "
+            f"--scope-policy expand --reaggregate"), command
+
+    def test_a_live_invocation_of_the_mode_wins(self, here):
+        plan = _plan(here, head_ref=False)
+        cli_common.record_invocation("review-code", ["--models", "codex:gpt-5.5"])
+        command = self._lane(plan).round_follow_up({"replay_flags": self.STORED})
+        assert "--models codex:gpt-5.5" in command
+        assert "--scope-policy" not in command, command
+
+
 class TestResumeAndPhaseCommands:
     def test_resume_command_answers_for_either_word(self, here):
         brief = _seed(here, **APPLYING)

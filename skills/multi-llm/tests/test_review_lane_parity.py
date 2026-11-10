@@ -32,6 +32,7 @@ sys.path.insert(0, str(SKILL_ROOT))
 
 import code_review_orchestrator as cro  # noqa: E402
 import review_plan_orchestrator as rpo  # noqa: E402
+from utils import cli_common  # noqa: E402
 from utils import detach  # noqa: E402
 from utils import review_lane  # noqa: E402
 from utils import review_orchestrator_base as rob  # noqa: E402
@@ -538,6 +539,32 @@ class TestReaggregate:
         assert f"Only 1/{tasks['total_batches']} batch files found." in out
         assert not (lane.phase_dir / "validation.json").exists()
         assert not lane.phase_completed()
+        assert lane.status()["state"] == "validation_pending"
+
+    def test_an_unfinished_round_hands_back_the_command_its_hand_off_named(
+        self, lane, capsys,
+    ):
+        """The partial stop tells a host reading only the result line what to
+        do: the missing batches are named, and ``next`` is the
+        ``--reaggregate`` the round's first hand-off put there, not ``null``
+        (docs/development/review-results.md, "Snapshots and empty review
+        outcomes")."""
+        # The dispatcher's result context, where `next` is recorded.
+        first = cli_common.ResultContext(lane.mode, lane.phase)
+        partial = cli_common.ResultContext(lane.mode, lane.phase)
+        with patch.object(cli_common, "_ACTIVE", first):
+            tasks = _round_handed_to_the_host(lane)
+        _write_batch(lane, tasks["batches"][0])
+        capsys.readouterr()
+
+        with patch.object(cli_common, "_ACTIVE", partial):
+            assert lane.reaggregate() == 0
+
+        out = capsys.readouterr().out
+        assert first.next and "--reaggregate" in first.next
+        assert partial.next == first.next
+        assert f"validation_batch_{tasks['batches'][1]['batch_index']}.json" in out
+        assert "validation_batch_0.json," not in out.split("Missing:", 1)[1].split("\n", 1)[0]
         assert lane.status()["state"] == "validation_pending"
 
     def test_a_whole_round_is_merged_and_completed(self, lane):

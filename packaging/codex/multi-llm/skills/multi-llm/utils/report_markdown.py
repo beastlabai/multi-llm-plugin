@@ -18,7 +18,8 @@ that knows both sides, so model text can never pass for structure:
 - **Model text is written inert.** :func:`inline_text` puts a field on one
   line (header titles, metadata fields), and :func:`neutralize_model_text`
   backslash-escapes every line of a text block that could read as a header
-  (``##``) or a box (``- [``). The escape renders as the same characters and
+  (``##``), a box (``- [``) or the ``---`` rule that ends a block. The escape
+  renders as the same characters and
   :func:`restore_model_text` undoes it exactly, so a description read back for
   an edit is the model's own text, not the escaped copy. Only a report whose
   first line is :data:`ESCAPED_TEXT_MARKER` was written that way
@@ -270,10 +271,13 @@ def sections(
 _LINE_BREAK_RE = re.compile(r"\r\n?|\n")
 
 #: A line that could read as structure: after indentation and any run of
-#: backslashes, a ``##`` header or a ``- [`` box. Escaping adds one backslash
-#: to the run and restoring removes one, so the two are exact inverses.
-_STRUCTURE_LINE_RE = re.compile(r"^([ \t]*)(\\*)(?=##|-[ \t]*\[)", re.MULTILINE)
-_ESCAPED_LINE_RE = re.compile(r"^([ \t]*)\\(\\*)(?=##|-[ \t]*\[)", re.MULTILINE)
+#: backslashes, a ``##`` header, a ``- [`` box or a ``---`` rule (where
+#: ``report_parser`` ends a description's block, so a quoted diff header or a
+#: model's own rule would cut the description there). Escaping adds one
+#: backslash to the run and restoring removes one, so the two are exact
+#: inverses.
+_STRUCTURE_LINE_RE = re.compile(r"^([ \t]*)(\\*)(?=##|-[ \t]*\[|---)", re.MULTILINE)
+_ESCAPED_LINE_RE = re.compile(r"^([ \t]*)\\(\\*)(?=##|-[ \t]*\[|---)", re.MULTILINE)
 
 
 def inline_text(value: Any) -> str:
@@ -292,9 +296,10 @@ def neutralize_model_text(value: Any) -> str:
     """Model text for a block (a description, a reason), inert as structure.
 
     Line breaks become ``\\n`` and every line that could read as a ``##``
-    header or a ``- [`` box gets a backslash before its marker: ``\\## G2:``
-    and ``\\- [x] Skip`` render as the same characters but no parser in
-    ``report_parser`` reads them. :func:`restore_model_text` is the inverse.
+    header, a ``- [`` box or a ``---`` rule gets a backslash before its
+    marker: ``\\## G2:``, ``\\- [x] Skip`` and ``\\--- a/app.py`` render as
+    the same characters but no parser in ``report_parser`` reads them as
+    structure. :func:`restore_model_text` is the inverse.
     """
     if value is None:
         return ""
@@ -308,8 +313,8 @@ def restore_model_text(text: str) -> str:
     A description parsed out of ``report.md`` is compared with the original
     and, when the user edited it, handed to the apply prompt; both want the
     model's own text, not the escaped copy. Only for a report that
-    :func:`has_escaped_text`: in an older one a backslash before ``##`` or
-    ``- [`` is the model's own and stays.
+    :func:`has_escaped_text`: in an older one a backslash before ``##``,
+    ``- [`` or ``---`` is the model's own and stays.
     """
     if not text:
         return text

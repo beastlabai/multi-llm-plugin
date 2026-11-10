@@ -60,10 +60,21 @@ as the base report does. Both lanes' `--reaggregate` resolve a validation round 
 one function ([The shared review lane](#the-shared-review-lane)): stale prompt sidecars
 are rebound and persisted, a whole round of `validation_batch_<n>.json` is merged, a
 partial one is dispatched under `--exec-subagents` or answered `Only n/m batch files
-found.` with the phase left open. The merge reads a missing batch as `validation_failed`,
-so it is never handed a partial round. No broad `except` surrounds the merge or the
-dispatch: one that raises ends the command with the phase open, never completed with no
-`validation.json`.
+found.` with the phase left open. That answer is a hand-off like the round's first one:
+it names the missing batch files and the task file, prints the lane's `--reaggregate`
+and records it as the result line's `next` (exit 0, as the first hand-off), so a host
+that reads only the result line is not told the command finished. The merge reads a
+missing batch as `validation_failed`, so it is never handed a partial round. A batch file
+is model output a native host wrote unchecked, and its shape is never assumed
+(`validation._batch_verdicts`): one that does not parse, or holds no list of verdict
+objects (`groups` an object or a string, a bare string or number), leaves its groups
+`validation_failed` with a reason and one `[merge]` line naming the file and its model;
+an entry that is not an object is dropped and the rest of the batch merges, but
+never by position (a dropped entry may have been any group's slot), so only index
+matches place verdicts and the groups left over stay `validation_failed`; a
+`group_hash` that is not text is a foreign hash. No broad `except` surrounds the merge or
+the dispatch: one that raises ends the command with the phase open, never completed with
+no `validation.json`.
 
 Both lanes' `--reaggregate` reopen the phase wherever they hand a round out, a partial one
 or a newly built one, through the base's `reopen_phase_for_validation`: `state:
@@ -382,7 +393,12 @@ model slots stubbed). A scenario that passes on one lane and fails on the other 
   reopened. With no task file a new round is built, stamped with `format_version`,
   published, the phase reopened and `progress.subagents` cleared before the dispatch or
   the hand-off. Each lane passes what is its own: the task file's current inputs
-  (`current_inputs`) and its round builder (`build_round`).
+  (`current_inputs`), its round builder (`build_round`) and the `--reaggregate` both
+  hand-offs print and record as `next` (`follow_up`; review-code passes
+  `round_follow_up(typed=True)`, so a commit review's is spelled in its commit mode, as
+  the fan-out's hand-off spells it). Both lanes replay the live invocation's flags, or
+  without one the task file's stored `replay_flags`, before the commit spelling drops
+  the flags a front door synthesises.
 - **`record_phase_complete` and `complete_reaggregate`** are the completion every ending
   that records the phase runs: the round checked (`claim.check`), the phase marked in
   `state.json`, the phase machine's `state: complete` and the last `progress.step`; a
@@ -956,6 +972,17 @@ review-code aggregates from memory, so its loop also marks such a model failed i
 result file nested deeper than the decoder's stack is read as one that does not parse
 (`json_extractor.parse_file_content`).
 
+**An issue's `title`, `file` and `line_range` reach review-code's readers in the schema's
+shapes.** The report, the grouping, the issue map and fix batching key on `title` and `file`
+and index `line_range` as `[start, end]`; the slot's schema check only warns, so a reviewer
+citing one line (`"line_range": [42]`) crashed the report after every model had run, and every
+`--reaggregate` after it. `code_review_orchestrator.normalize_issue_shapes` runs where importance
+is canonicalized, on the fan-out (`_save_raw_issues`) and on every reaggregate's read-back, so
+both group the same records: a title that is a list or an object becomes its text, a path list
+keeps its first path, one line (`[42]`, `42`, `"42"`) becomes `[42, 42]` and `"40-42"`
+`[40, 42]`, and a field nothing usable can be read from is removed. The issue is always kept,
+and one warning on stderr names the model and what changed.
+
 ## Report payload
 
 `html_report_generator.generate_html_report` is the view, its embedding and its sidecar. The view is
@@ -1092,8 +1119,9 @@ so model text must never read as structure:
   `consolidated_header`) and boxes (`checkbox_line`, labels in `CHECKBOX_LABELS`) through the module.
   A field on a header or `**Field:**` line goes through `inline_text` (line breaks become spaces), a
   text block (description, validation reason, failure message, a "Needs Human Review" reason)
-  through `neutralize_model_text`, which puts a backslash before a line's `##` or `- [` marker. The
-  line renders as the same characters and no parser reads it. `report.md` (plan, task and code
+  through `neutralize_model_text`, which puts a backslash before a line's `##`, `- [` or `---`
+  marker (`---` is where a description's block ends, so a quoted diff header or a model's own
+  rule would cut it). The line renders as the same characters and no parser reads it. `report.md` (plan, task and code
   review) starts with `ESCAPED_TEXT_MARKER`, an HTML comment that says so.
 - **Parsers** read a header only at column 0 and a ticked box only at a line start, one line at a
   time (`is_checked`, `first_checked` in precedence order). The old patterns matched mid-line and
@@ -1113,6 +1141,18 @@ so model text must never read as structure:
   before `##` or `- [` is the model's own and stays. The writers before the marker put the title on
   the first line and model text never comes first, so no report can claim it. `_is_block_cut` checks
   both renderings, each read back as the parser reads it.
+- **One rule decides an edit, on every lane** (`report_parser.description_edited`, used by
+  `find_edited_descriptions` and `apply_code_fixes_orchestrator.find_edited_issue_descriptions`):
+  the normalised texts differ. In a report written with the escape (`escaped_report`) a model's
+  `---` or `###` line is escaped, so every description is read whole and an edit anywhere in it
+  (above or below a quoted diff header, or a cut) reaches the apply prompt whole. In an older
+  report such a line ended the block, so a description read back as the original cut there
+  (`_is_block_cut`) is no edit and the apply prompt keeps the whole original. review-code writes
+  an issue's validation reason between its metadata line and its description with every line
+  quoted (`> `), and `parse_issue_descriptions` drops that blockquote, so a reason of several
+  paragraphs, or one holding a `---` line, is neither an edit nor part of the description a real
+  edit hands on. A report written before the quoting keeps the old reading of a reason's later
+  paragraphs until a reaggregate rewrites it.
 - **Mixed headers are refused.** Every group and suggestion header carries a bracket hash or none
   does, so an unhashed `## G{N}:` or `### G{N}S{M}:` in a report that also has hashed ones is not
   the writer's: `hashed_headers` tells the parsers to ignore it (with a warning) instead of resolving

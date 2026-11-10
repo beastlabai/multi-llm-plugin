@@ -335,6 +335,30 @@ def parse_skipped_group_suggestions(report_path: str) -> Set[str]:
     return skipped_hashes
 
 
+def _drop_validation_reason(text: str) -> str:
+    """*text* less every ``> **Validation Reason:**`` blockquote: the line
+    that opens it and the ``>`` lines that continue it.
+
+    review-code's report writes an issue's validation reason between its
+    metadata line and its description, every line of it quoted
+    (``code_review_orchestrator._format_issue``), so the reason, however many
+    paragraphs it has, is never read as part of the description.
+    """
+    result_lines = []
+    in_validation_blockquote = False
+    for line in text.split('\n'):
+        stripped = line.strip()
+        if stripped.startswith('> **Validation Reason:**'):
+            in_validation_blockquote = True
+            continue
+        if in_validation_blockquote:
+            if stripped.startswith('>'):
+                continue
+            in_validation_blockquote = False
+        result_lines.append(line)
+    return '\n'.join(result_lines)
+
+
 def normalize_description(desc: str) -> str:
     """Normalize description for comparison (strip whitespace, remove validation blockquotes).
 
@@ -349,34 +373,7 @@ def normalize_description(desc: str) -> str:
         return ""
 
     # Normalize CRLF to LF
-    text = desc.replace('\r\n', '\n')
-
-    # Remove validation reason blockquotes (> **Validation Reason:** and continuation lines)
-    # Pattern matches lines starting with > **Validation Reason:** and subsequent > lines
-    lines = text.split('\n')
-    result_lines = []
-    in_validation_blockquote = False
-
-    for line in lines:
-        stripped = line.strip()
-
-        # Check if this line starts a validation reason blockquote
-        if stripped.startswith('> **Validation Reason:**'):
-            in_validation_blockquote = True
-            continue
-
-        # Check if we're in a validation blockquote and this is a continuation
-        if in_validation_blockquote:
-            if stripped.startswith('>'):
-                # Still in the validation blockquote, skip this line
-                continue
-            else:
-                # No longer in the validation blockquote
-                in_validation_blockquote = False
-
-        result_lines.append(line)
-
-    text = '\n'.join(result_lines)
+    text = _drop_validation_reason(desc.replace('\r\n', '\n'))
 
     # Collapse multiple spaces to single space (but preserve newlines)
     text = re.sub(r' +', ' ', text)
@@ -465,7 +462,9 @@ def parse_issue_descriptions(report_path: str) -> Dict[int, str]:
 
     Looks for headers like `### 1. Title` or `### 2. Title`.
     Extracts the description text that appears AFTER the metadata line
-    (`**Validation:**...` or `**Importance:**...`) and BEFORE the `---` separator.
+    (`**Validation:**...` or `**Importance:**...`) and BEFORE the `---` separator,
+    less the validation reason the writer quotes between the two
+    (:func:`_drop_validation_reason`).
 
     Returns:
         Dict mapping issue index to description text (e.g., {1: "Description..."})
@@ -484,7 +483,7 @@ def parse_issue_descriptions(report_path: str) -> Dict[int, str]:
         block = _description_block(content, match)
         if block is None:
             continue
-        description = _description_text(block, escaped)
+        description = _drop_validation_reason(_description_text(block, escaped)).strip()
         if description:
             descriptions[int(match.group(1))] = description
 
@@ -542,6 +541,7 @@ def find_edited_descriptions(
 
     if not report_descriptions:
         return {}
+    escaped = escaped_report(report_path)
 
     # Ensure groups are stamped so suggestion_hash is available
     stamp_stable_ids(grouped)  # idempotent
@@ -576,13 +576,43 @@ def find_edited_descriptions(
                 key_used = sugg_hash if sugg_hash else positional_id
 
             if report_desc is not None and key_used:
-                # Compare normalized descriptions
-                if normalize_description(original_desc) != normalize_description(
-                    report_desc
-                ) and not _is_block_cut(original_desc, report_desc):
+                if description_edited(original_desc, report_desc, escaped=escaped):
                     edited[key_used] = (original_desc, report_desc)
 
     return edited
+
+
+def description_edited(
+    original_desc: str, report_desc: str, *, escaped: bool = False,
+) -> bool:
+    """Whether *report_desc*, a description read back from ``report.md``, is
+    the user's edit of *original_desc*, the review's own text.
+
+    The one rule every lane's edit reader applies (``find_edited_descriptions``
+    here, ``apply_code_fixes_orchestrator.find_edited_issue_descriptions``):
+    the two differ once normalised (:func:`normalize_description`). In a report
+    written with the escape (*escaped*, :func:`escaped_report`) a model's
+    ``---`` or ``###`` line is escaped, so the parser reads every description
+    whole and that is the whole rule: an edit anywhere in it, a cut included,
+    is the user's. In an older report such a line cut the block, so a report
+    description that is the original cut there (:func:`_is_block_cut`) is no
+    edit, and the apply prompt keeps the whole description.
+    """
+    if normalize_description(original_desc) == normalize_description(report_desc):
+        return False
+    return escaped or not _is_block_cut(original_desc, report_desc)
+
+
+def escaped_report(report_path: str) -> bool:
+    """Whether the report at *report_path* was written with the escape
+    (``report_markdown.has_escaped_text`` on its first line); ``False`` for
+    one that cannot be read."""
+    try:
+        with open(report_path, encoding='utf-8') as handle:
+            first = handle.readline()
+    except (OSError, UnicodeDecodeError):
+        return False
+    return rm.has_escaped_text(first)
 
 
 #: Where ``parse_suggestion_descriptions`` ends a block: a line that starts a
@@ -591,25 +621,19 @@ _BLOCK_END_RE = re.compile(r'\n---|\n###')
 
 
 def _is_block_cut(original_desc: str, report_desc: str) -> bool:
-    """True when *report_desc* is *original_desc* cut where the parser stops.
+    """True when *report_desc* is *original_desc* cut where the parser stops
+    in a report written before ``report_markdown.neutralize_model_text``.
 
-    A description holding its own ``---`` rule is rendered whole but read back
-    only up to that line, so an untouched report would otherwise read as an
-    edit that drops the rest of the description. A ``###`` line cuts it too in
-    a report written before ``report_markdown.neutralize_model_text``; a
-    current report escapes it and is read back un-escaped, so both renderings
-    are checked, each as the parser reads it.
+    There a description holding its own ``---`` rule or ``###`` line was
+    rendered whole but read back only up to that line, so an untouched report
+    would otherwise read as an edit that drops the rest of the description.
+    A current report escapes both lines and is never cut.
     """
     raw = (original_desc or '').replace('\r\n', '\n')
-    report = normalize_description(report_desc)
-    escaped = rm.neutralize_model_text(raw)
-    for text, read_back in ((raw, str), (escaped, rm.restore_model_text)):
-        match = _BLOCK_END_RE.search(text)
-        if match and normalize_description(
-            read_back(text[:match.start()])
-        ) == report:
-            return True
-    return False
+    match = _BLOCK_END_RE.search(raw)
+    return bool(match) and normalize_description(
+        raw[:match.start()]
+    ) == normalize_description(report_desc)
 
 
 def load_html_selections(

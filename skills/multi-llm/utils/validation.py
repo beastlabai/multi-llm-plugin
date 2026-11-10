@@ -2888,6 +2888,71 @@ def _verdict_or_failure(result: Dict[str, Any]) -> Dict[str, Any]:
     return failed
 
 
+def _batch_verdicts(
+    batch_data: Any,
+) -> Tuple[Optional[List[Dict[str, Any]]], Optional[str], int]:
+    """``(verdict records, the batch's model, entries dropped)`` of one parsed
+    batch file; records are ``None`` when the file is not a reply at all.
+
+    A reply is a list of verdict objects, bare or under ``groups`` in an object
+    whose ``metadata.model`` names the model that wrote it. The file is model
+    output a native host wrote unchecked, so neither shape is assumed: a
+    ``groups`` that is not a list, or a document that is neither, is no reply
+    (its groups stay ``validation_failed``, as a batch that does not parse
+    leaves them), and an entry that is not an object is dropped while the rest
+    of the batch merges (docs/development/review-results.md, "Snapshots and
+    empty review outcomes").
+    """
+    model: Optional[str] = None
+    if isinstance(batch_data, dict):
+        metadata = batch_data.get("metadata")
+        if isinstance(metadata, dict) and isinstance(metadata.get("model"), str):
+            model = metadata["model"] or None
+        entries = batch_data.get("groups", [])
+    else:
+        entries = batch_data
+    if not isinstance(entries, list):
+        return None, model, 0
+    records = [entry for entry in entries if isinstance(entry, dict)]
+    return records, model, len(entries) - len(records)
+
+
+def _echoed_hash(result: Dict[str, Any]) -> Optional[str]:
+    """The group hash a verdict echoed, ``None`` when it echoed none.
+
+    A value that is not text names no group of any batch, so it comes back as
+    its ``repr``: a foreign hash the join discards, never an unhashable key.
+    """
+    raw = result.get("group_hash") or result.get("group_id")
+    if not raw:
+        return None
+    return raw if isinstance(raw, str) else repr(raw)
+
+
+#: The reason every group's slot starts the merge with.
+_BATCH_NOT_FOUND = "Batch result not found"
+
+
+def _unusable_batch(
+    merged_results: List[Dict[str, Any]],
+    batch_info: Dict[str, Any],
+    reason: str,
+) -> None:
+    """Give every group of a batch whose file holds no usable reply *reason*.
+
+    The groups were already ``validation_failed`` ("Batch result not found");
+    this only says why, so the report and ``--revalidate`` name the file.
+    """
+    for index in batch_info.get("group_indices", []):
+        if (isinstance(index, int) and 0 <= index < len(merged_results)
+                and merged_results[index].get("reason") == _BATCH_NOT_FOUND):
+            merged_results[index] = {
+                **merged_results[index],
+                "reason": reason,
+                "error_type": ERROR_TYPE_PARSING,
+            }
+
+
 def merge_batched_validation_results(
     output_dir: str,
     batch_metadata: Dict[str, Any],
@@ -2940,7 +3005,7 @@ def merge_batched_validation_results(
         {
             "group_index": i,
             "status": "validation_failed",
-            "reason": "Batch result not found",
+            "reason": _BATCH_NOT_FOUND,
             "confidence": 0.0,
             "error_type": ERROR_TYPE_UNKNOWN,
             "recoverable": True,
@@ -2979,13 +3044,23 @@ def merge_batched_validation_results(
                 with open(batch_file, 'r', encoding='utf-8') as f:
                     batch_data = json.load(f)
 
-            # Handle both wrapped format and direct list
-            if isinstance(batch_data, dict):
-                batch_results = batch_data.get("groups", [])
-                batch_model = batch_data.get("metadata", {}).get("model")
-            else:
-                batch_results = batch_data
-                batch_model = None
+            # Both the wrapped format and a direct list; any other shape is no
+            # reply, read as a batch that does not parse is read.
+            batch_results, batch_model, dropped = _batch_verdicts(batch_data)
+            named = f"{batch_file} (model: {batch_model or 'not named'})"
+            if batch_results is None:
+                print(f"[merge] Error: {named} is not a list of verdicts "
+                      f"({type(batch_data).__name__}); its groups stay "
+                      f"validation_failed")
+                _unusable_batch(merged_results, batch_info, (
+                    f"{batch_file.name} holds no list of verdicts"
+                ))
+                batches_missing += 1
+                continue
+            if dropped:
+                print(f"[merge] Warning: {named}: dropped {dropped} entr"
+                      f"{'y' if dropped == 1 else 'ies'} that are not verdict "
+                      f"objects; the rest of the batch is merged")
 
             # Tag every result with the model its own batch file reported, so
             # `save_validation_results` can derive an overall model when its
@@ -3020,7 +3095,7 @@ def merge_batched_validation_results(
             if shared_ids:
                 kept = [
                     r for r in batch_results
-                    if (r.get("group_hash") or r.get("group_id")) not in shared_ids
+                    if _echoed_hash(r) not in shared_ids
                 ]
                 if len(kept) != len(batch_results):
                     print(f"[merge] Warning: Batch {batch_index}: discarding "
@@ -3044,7 +3119,7 @@ def merge_batched_validation_results(
             filled_indices: set = set()
             unhashed_results: List[Dict[str, Any]] = []
             for result in batch_results:
-                result_hash = result.get("group_hash") or result.get("group_id")
+                result_hash = _echoed_hash(result)
                 if not result_hash:
                     unhashed_results.append(result)
                     continue
@@ -3107,8 +3182,12 @@ def merge_batched_validation_results(
                     merged_results[original_index] = _verdict_or_failure(result)
                 continue
 
-            # Strategy 2: Positional match — correct count, wrong indices
-            if len(batch_results) == len(group_indices):
+            # Strategy 2: Positional match — correct count, wrong indices. Not
+            # once entries were dropped (`_batch_verdicts`): a dropped entry
+            # may have been any group's slot, so the order no longer says
+            # which group a verdict judged; index matches below still place
+            # theirs and the rest stay validation_failed.
+            if len(batch_results) == len(group_indices) and not dropped:
                 for i, result in enumerate(batch_results):
                     original_index = group_indices[i]
                     result["group_index"] = original_index
@@ -3144,6 +3223,9 @@ def merge_batched_validation_results(
 
         except (json.JSONDecodeError, IOError) as e:
             print(f"[merge] Error reading batch file {batch_file}: {e}")
+            _unusable_batch(merged_results, batch_info, (
+                f"{batch_file.name} could not be read as JSON"
+            ))
             batches_missing += 1
 
     print(f"[merge] Merged {batches_found} batches, {batches_missing} missing")

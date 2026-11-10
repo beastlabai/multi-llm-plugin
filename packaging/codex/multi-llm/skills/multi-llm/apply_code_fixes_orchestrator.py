@@ -47,8 +47,9 @@ from utils.code_fix_batcher import (
 from utils.git_utils import validate_git_ref, git_path
 from utils import importance as _importance
 from utils.report_parser import (
+    description_edited,
+    escaped_report,
     issue_numbering_digest,
-    normalize_description,
     parse_issue_descriptions,
     parse_issue_numbering_digest,
     parse_skipped_issues,
@@ -177,6 +178,7 @@ def find_edited_issue_descriptions(
 
     if not report_descriptions:
         return {}
+    escaped = escaped_report(report_path)
 
     edited = {}
 
@@ -194,7 +196,7 @@ def find_edited_issue_descriptions(
             else:
                 original_desc = group.get('desc', group.get('description', ''))
 
-            if normalize_description(original_desc) != normalize_description(report_desc):
+            if description_edited(original_desc, report_desc, escaped=escaped):
                 edited[issue_num] = (original_desc, report_desc)
     else:
         for issue_idx, issue in enumerate(issues, start=1):
@@ -206,7 +208,7 @@ def find_edited_issue_descriptions(
 
             if issue_idx in report_descriptions:
                 report_desc = report_descriptions[issue_idx]
-                if normalize_description(original_desc) != normalize_description(report_desc):
+                if description_edited(original_desc, report_desc, escaped=escaped):
                     edited[issue_idx] = (original_desc, report_desc)
 
     return edited
