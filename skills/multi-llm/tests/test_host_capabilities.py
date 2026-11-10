@@ -1135,7 +1135,7 @@ class TestVerbResolution:
         sentence = caps.verb_sentence("claude-code", "detach")
         for fragment in (
             "report a non-zero exit status with that path rather than retrying.",
-            "`status` still reading `running in foreground`",
+            "`status` reading `ended in foreground without a final state`",
             "offer the user each of these and run none yourself",
             "made again the same way with `--force` added, which resumes",
             "(`[SKIP]`)",
