@@ -35,13 +35,17 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 RIG=$(cd "$HERE/../../container" && pwd)
 OUT=${CAPTURE_OUT:-$HOME/.cache/multi-llm-capture/rows}
 ROWDIR=$OUT/rows/$CLI
-mkdir -p "$ROWDIR" "$OUT/scenarios"
+# The kit's shared files are staged once: by batch.sh before its parallel runs
+# (ROW_CAPTURE_STAGED=1), else here. A sibling run must never rewrite a file
+# another container is reading, nor walk a tree a sibling is deleting from.
+if [ -z "${ROW_CAPTURE_STAGED:-}" ]; then
+  "$HERE/stage.sh" "$OUT"
+fi
+mkdir -p "$ROWDIR"
+chmod a+rwX "$OUT/rows" "$ROWDIR"
 for suffix in stdout.txt stderr.txt meta.json server.jsonl server.log calls.jsonl; do
   rm -f "$ROWDIR/$ROW.$suffix"
 done
-cp "$HERE/incontainer.py" "$HERE/scriptserver.py" "$HERE/scripts.json" "$HERE/argv.json" "$HERE/prompt.txt" "$OUT/"
-cp -r "$HERE/scenarios/." "$OUT/scenarios/"
-chmod -R a+rwX "$OUT"
 status=0
 timeout --signal=KILL 900 docker run --rm --network none \
   --user 10001:10001 --cap-drop ALL --security-opt no-new-privileges --read-only \

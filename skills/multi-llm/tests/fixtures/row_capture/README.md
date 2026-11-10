@@ -18,6 +18,7 @@ in `timeout(1)`.
 | `argv.json`, `make_argv.py` | each CLI's argv: its adapter's `build_command` for `redirect.yaml`'s `model_arg` and a 230 s dispatch timeout (only qwen-code renders it, as `--max-wall-time 200`), rendered against the image's binaries rather than the host's PATH (kilocode's adapter would name `kilo` on a `kilo`-only host). `tests/test_row_capture_kit.py` holds the file to what the adapters render |
 | `scenarios/` | `stub_server.py` scenarios: `success` (the two-finding array every manifest here pins) and `empty-answer` (the empty string) |
 | `scriptserver.py`, `scripts.json` | the `multi-assistant` server: the tool turn is answered with a decoy text (`FIRST ANSWER (must NOT be selected)` and a `D999` array) **and** one call of the CLI's own read tool (`scripts.json`), the request carrying its result with the findings. The committed stub's `scripted_tool_call` answers that turn with a bare call and no text, which leaves one text message and says nothing about last-wins |
+| `stage.sh <out dir>` | copies the kit's shared files (driver, servers, argv, prompt, scenarios) into the dir mounted at `/work/out`; `batch.sh` runs it once before its parallel runs, `run_row.sh` runs it when called alone, so no run rewrites a file another container reads |
 | `batch.sh [<cli> ...]` | the whole session, the five CLIs of one row in parallel (~20 min); exits 1 and lists the runs when any `run_row.sh` failed |
 | `prompt.txt` | the 4,844-byte review prompt pi's set uses |
 

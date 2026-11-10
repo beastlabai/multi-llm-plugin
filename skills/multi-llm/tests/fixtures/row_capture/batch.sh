@@ -16,6 +16,9 @@ ROWS=(
 )
 LOGS=$(mktemp -d) || exit 1
 trap 'rm -rf "$LOGS"' EXIT
+# Stage the shared files once, before any run starts (run_row.sh then skips it).
+"$HERE/stage.sh" "${CAPTURE_OUT:-$HOME/.cache/multi-llm-capture/rows}" || exit 1
+export ROW_CAPTURE_STAGED=1
 failed=()
 for row in "${ROWS[@]}"; do
   read -r -a args <<< "$row"
