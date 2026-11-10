@@ -30,6 +30,30 @@ from . import scope_apply as _scope
 from .state_manager import StateManager
 from .text_clip import join_clauses
 from .unattended import AGENT_DECIDE_FLAG
+from . import detach as _detach
+from . import cli_common as _cli
+from . import run_record as _run_record
+from . import failure_capture
+from .git_utils import find_git_entry_root
+from .batch_ledger import touched_files
+from .write_safety import repo_root_for_report
+from .task_outcome import batch_report_path
+from .batch_reply import (
+    batch_check_could_not_run,
+    row_batch_check_findings,
+    row_declined,
+    DECLINED_SECTION_HEADING,
+    SKIPPED_SECTION_HEADING,
+)
+from .check_records import batch_check_summary, batch_check_section
+from .verification_lines import verification_line
+from .batch_prompt import CODE_WRITE_KINDS
+from .commit_spelling import commit_view
+from .commit_apply import guard_record
+from .html_report_generator import (
+    regenerate_report_with_human_decisions,
+    scope_regeneration_needed,
+)
 
 
 def applied_to_label(target: Optional[str], plan_path: str) -> Optional[str]:
@@ -37,7 +61,6 @@ def applied_to_label(target: Optional[str], plan_path: str) -> Optional[str]:
     root above *plan_path*, or ``None`` without one."""
     if not target:
         return None
-    from .git_utils import find_git_entry_root
     try:
         # The `.git` holder above the plan, walked (no git runs here).
         start = os.path.dirname(os.path.realpath(plan_path))
@@ -129,7 +152,6 @@ class ApplyPhaseReport:
         an earlier run of this phase changed (``batch_ledger.touched_files``,
         partial applications included).
         """
-        from .batch_ledger import touched_files
 
         return touched_files(self._phase_rows(), include_partial=True)
 
@@ -264,8 +286,6 @@ class ApplyPhaseReport:
         # other path when absent, so `--dry-run-subagents` names no report.
         paths["summary"] = os.path.join(phase_dir, "summary.md")
 
-        from .write_safety import repo_root_for_report
-
         repo_root = repo_root_for_report(self.plan_path)
         for index, touched_path in enumerate(self.touched_files(), start=1):
             resolved = (
@@ -280,8 +300,6 @@ class ApplyPhaseReport:
         # that only reads this run's `output_files`. Asked of the executor
         # rather than spelled out here (F6, 2026-09-17): it owns the naming
         # rule, and a hand-typed copy would drop this key on the day it moves.
-        from .task_outcome import batch_report_path
-
         judge_report = batch_report_path(phase_dir, "human_decision_judge")
         if os.path.exists(judge_report):
             paths["human_decision_judge_report"] = judge_report
@@ -292,7 +310,6 @@ class ApplyPhaseReport:
         if overlay_path:
             paths["decisions_overlay"] = overlay_path
 
-        from . import detach as _detach
         _detach.record_output_files(phase_dir, **paths)
         record_artifacts(
             path for path in paths.values() if path and os.path.exists(path)
@@ -375,7 +392,6 @@ class ApplyPhaseReport:
         invocation, so that step never runs — the per-item reasons, which are the
         good part, existed only inside ``orchestrator_output.json``.
         """
-        from .batch_reply import batch_check_could_not_run, row_batch_check_findings
 
         result = self.write_result
         rows = self._phase_rows()
@@ -425,8 +441,6 @@ class ApplyPhaseReport:
         }
         if failing:
             # Fix round 14: applied, but not a clean finish.
-            from .check_records import batch_check_summary
-
             print(f"Not a clean finish: {batch_check_summary(failing)}")
         if getattr(result, "unverified", None):
             print(result.unverified)
@@ -562,9 +576,7 @@ class ApplyPhaseReport:
         notes = self.run_notes()
         if not notes:
             return
-        from . import cli_common as _cli
 
-        from . import run_record as _run_record
         _run_record.report_progress(
             os.path.join(self.out_dir, self.phase_name), notes=notes,
         )
@@ -718,7 +730,6 @@ class ApplyPhaseReport:
         """``(declined, skipped)``: a row's items its batch declined and the
         items a ``--human-task <id>=skip`` answer recorded as skipped at the
         user's request, each ``{id: reason}`` (fix round 18). Never applied."""
-        from .batch_reply import row_declined
 
         return (
             row_declined(row),
@@ -768,16 +779,6 @@ class ApplyPhaseReport:
         Best-effort and never fatal — a report is not worth failing an applied
         run over. Returns the path written, or ``None``.
         """
-        from .check_records import batch_check_section
-        from .verification_lines import verification_line
-        from .batch_prompt import CODE_WRITE_KINDS
-        from .commit_spelling import commit_view
-        from .batch_reply import (
-            DECLINED_SECTION_HEADING,
-            SKIPPED_SECTION_HEADING,
-            batch_check_could_not_run,
-            row_batch_check_findings,
-        )
         phase_dir = os.path.join(self.out_dir, self.phase_name)
         result = self.write_result
         # #28: the phase's rows, not this run's outcomes — a `--resume` keeps
@@ -1040,9 +1041,8 @@ class ApplyPhaseReport:
         if not isinstance(report, dict) or report.get("summary_file") == summary_path:
             return
         report["summary_file"] = summary_path
-        from .failure_capture import _atomic_write_json
         try:
-            _atomic_write_json(report_path, report)
+            failure_capture._atomic_write_json(report_path, report)
         except OSError as exc:  # noqa: BLE001 - best-effort
             self.logger.warning("write_batch_report.json not patched: %s", exc)
 
@@ -1068,13 +1068,7 @@ class ApplyPhaseReport:
         # (plans/review-commits.md §2.10): read from the saved guard.
         guard = None
         if self.pinned is not None:
-            from .commit_apply import guard_record
-
             guard = guard_record(self.state.state)
-        from .html_report_generator import (
-            regenerate_report_with_human_decisions,
-            scope_regeneration_needed,
-        )
         # A recorded scope-policy change (an apply override, its deferrals)
         # refreshes the report's eligibility even with no decision to badge.
         if (not decisions and not (guard and guard.get("skipped"))

@@ -35,7 +35,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from utils.stream_bootstrap import bootstrap_streams
 from utils import cli_common
-from utils.cli_common import build_parent_parser, dispatcher_prefix
+from utils.cli_common import build_parent_parser, dispatcher_prefix, add_scope_policy_argument
 from utils.prompt_loader import load_prompt
 from utils import scope_round as _scope_round
 from utils.state_manager import load_groups_payload
@@ -62,6 +62,8 @@ from utils.review_orchestrator_base import (
     recorded_usage,
     derive_prefix,
 )
+from utils import status_file as _status_file
+from utils.output_handler import _compute_file_hash
 
 # Prompt template filename
 REVIEW_PROMPT_FILE = "plan_review.txt"
@@ -233,8 +235,6 @@ Examples:
     )
 
     # plans/scope-policy-and-report-tags.md §4: declared once, in cli_common.
-    from utils.cli_common import add_scope_policy_argument
-
     add_scope_policy_argument(parser, role="review")
 
     return parser.parse_args(argv)
@@ -417,7 +417,6 @@ def reaggregate_consolidation_mode(
         print(f"Warning: {partial_failures['count']} batch(es) had failures "
               f"(indices: {partial_failures['batches']})")
 
-    from utils.output_handler import _compute_file_hash
     plan_hash = _compute_file_hash(plan_path)
     grouped_hash = _compute_file_hash(grouped_path)
 
@@ -453,7 +452,6 @@ def reaggregate_consolidation_mode(
     # Live run 8 (Claude Code racing 01): the checkpoint kept the
     # recommendation this pass answers, so `status` and its result line went
     # on saying "run --consolidate" after it ran.
-    from utils import status_file as _status_file
     _status_file.remove_status_keys(phase_dir, ["consolidation_recommended"])
 
     if metadata.get("skipped_report"):

@@ -23,6 +23,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 from . import git_utils as _git_utils
 from .subagent_tasks import declared_file_set
 from .write_safety import file_sha256
+from .commit_range import pinned_record
+from .code_fix_batcher import fix_member_ids
 
 
 # ---------------------------------------------------------------------------
@@ -59,7 +61,6 @@ def commit_guard_of(state: Any, kind: Optional[str] = None) -> Optional[Dict[str
         "commit_range" in state or "head_ref" in state
     ):
         return None
-    from .commit_range import pinned_record
     record = pinned_record(state)
     guard = record.get("guard") if isinstance(record, Mapping) else None
     return guard if isinstance(guard, dict) and guard else None
@@ -105,7 +106,6 @@ def batch_fixes_for(
     from another run is never read as this one's)."""
     if not batches:
         return None
-    from .code_fix_batcher import fix_member_ids
     expected = [str(item) for item in task.get("expected_ids") or []]
     index = task.get("batch_index")
     ordered = list(batches)
@@ -147,7 +147,6 @@ def commit_group_files(
             declared.append(name)
     named: Dict[str, List[str]] = {}
     if fixes:
-        from .code_fix_batcher import fix_member_ids
         for member_id, fix in zip(fix_member_ids([dict(f) for f in fixes]), fixes):
             listed = fix.get("files")
             if not isinstance(listed, (list, tuple)):

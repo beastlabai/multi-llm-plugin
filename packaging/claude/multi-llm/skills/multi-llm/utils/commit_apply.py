@@ -106,6 +106,11 @@ from .clock import utc_iso_z as _now_utc
 from .state_file import update as update_state
 from .text_clip import clip, plain_line
 from .text_fmt import plural as _plural
+from . import write_safety
+from .human_decisions import group_id_of
+from .output_handler import workflow_file_entries
+from .write_safety import WritePolicy, glob_to_regex, restore_path
+from .provider_registry import ConfigError, get_commit_reviews_dir
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -235,8 +240,6 @@ def group_files(group: Mapping[str, Any], *, repo_root: Optional[str]) -> List[s
 
 
 def _group_id(group: Mapping[str, Any]) -> str:
-    from .human_decisions import group_id_of
-
     return group_id_of(dict(group))
 
 
@@ -371,7 +374,6 @@ def _workflow_filter(paths: Sequence[str], *, cwd: str, plan_path: Optional[str]
     folder of the commit-reviews folder: ``code_only_rule`` and the run's own
     writers govern those (§2.7, "The set").
     """
-    from .output_handler import workflow_file_entries
 
     workflow = workflow_file_entries(
         plan_path, root=cwd, output_dirs=[out_dir] if out_dir else [],
@@ -449,7 +451,6 @@ def _write_paths_denied(cwd: str, anchor: Optional[str]) -> Optional[Callable[[s
     on the path's own name (a symlink by its name, never its target); ``None``
     when the policy cannot be read. The merged policy both write legs enforce
     (``write_safety.WritePolicy.load``), anchored on *anchor*, else *cwd*."""
-    from .write_safety import WritePolicy, glob_to_regex
 
     try:
         patterns = [glob_to_regex(pattern) for pattern in
@@ -801,7 +802,6 @@ def restore_watched(guard: Mapping[str, Any], paths: Sequence[str], *, cwd: str,
 
     Every write revalidates the path no-follow (``write_safety.restore_path``).
     Paths not watched are left out of the answer."""
-    from .write_safety import restore_path
 
     watched = watched_ids(guard)
     copies = _copies_dir(guard, cwd)
@@ -1118,9 +1118,7 @@ def take_guard(state: Mapping[str, Any], groups: Sequence[Mapping[str, Any]], *,
     if endpoints is None or record is None:
         return None
     if file_sha256 is None:
-        from .write_safety import file_sha256 as _sha
-
-        file_sha256 = _sha
+        file_sha256 = write_safety.file_sha256
     head = endpoints.head
     context_plan: Optional[str] = None
     if endpoints.source == "commit_range" and isinstance(record.get("plan"), str) \
@@ -1567,7 +1565,6 @@ def select_review(*, cwd: str) -> Selection:
     the newest candidate and of at most three others for ``; also:``, or of
     the five listed rows on exit 3.
     """
-    from .provider_registry import ConfigError, get_commit_reviews_dir
 
     root = repo_root_of(cwd)
     head = _head_sha(str(root))

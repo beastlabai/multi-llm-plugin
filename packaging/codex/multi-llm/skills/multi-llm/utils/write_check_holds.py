@@ -44,6 +44,7 @@ from .runner_selection import profile_for_kind
 from .task_result import resolve_output_target
 from .subagent_tasks import declared_file_set
 from .task_ledger import ACCEPTED_WITH_FINDINGS_MARK
+from .check_tree import check_tree_exclusions
 
 
 class CheckHolds:
@@ -401,7 +402,6 @@ class CheckHolds:
 
     def tree_fingerprint(self) -> Optional[str]:
         """Fingerprint source files, including code beside workflow artifacts."""
-        from .check_tree import check_tree_exclusions
 
         excluded = check_tree_exclusions(
             Path(self._ctx.phase_dir), self._ctx.repo_root, output_dir=self._ctx.output_dir,

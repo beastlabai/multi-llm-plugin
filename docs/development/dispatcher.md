@@ -511,10 +511,20 @@ package, so `landlock_dispatch` loads it under either spelling
 **A function-level import needs a reason, stated beside it.** Import at module top unless the
 import closes a load-time cycle (an adapter importing `llm_client`, which loads the adapters), is
 an optional dependency (`tomllib` on 3.10, `_winapi`), points up a layer through an edge
-`tests/test_import_layers.py` lists in `KNOWN_UPWARD`, or keeps a light module light. When a test
+`tests/test_import_layers.py` lists in `KNOWN_UPWARD`, or keeps a light module light: the modules
+`tests/test_utils_imports.py` lists in `LIGHT_LEAVES` and `LIGHT_SCRIPTS` (the hook commands,
+`doctor`, the `status` and `next-command` paths, the light `util` commands and front doors) load
+neither the provider stack nor YAML. What a short-lived command loads when it *runs* counts too:
+a stopped composite's `status --view run` (which imports `improve_workflow` to spell the
+continuation) and each commit front door's `--help` load no project module beyond their set in
+`READER_PATHS`, so the review engine, the write path's reporting and the range and brief modules
+stay inside the functions that use them. A module every load imports at the top (not under a
+run-time `if`, a `try` that handles exceptions, or `if TYPE_CHECKING:`) is not imported again
+inside a function, anywhere in the skill (`test_no_skill_module_imports_a_module_twice`). When a test
 patches a name on its owner (`monkeypatch.setattr(subagent_tasks, "prompt_budget_utf16", ...)`), a
 module-top `from x import name` copy would not see the patch: import the module and read
-`x.name` at the call instead.
+`x.name` at the call instead. A name a module only forwards through its `__getattr__` (`git_utils`,
+`write_batch_scheduler`, `providers.base`) is imported from its owner.
 
 **Module-level caches live in one registry.** Because one interpreter runs several targets, a cache
 at module scope is shared by every phase of a run on purpose (the sandbox probe's once-per-process

@@ -10,6 +10,8 @@ Usage:
     uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-task-suggestions plans/my-plan.md [options]
 """
 
+import contextlib
+import io
 import os
 import re
 import shutil
@@ -64,9 +66,6 @@ class ApplyTaskSuggestionsOrchestrator(SuggestionApplyPhase):
         ``--mark-completed`` call runs before that hook, and without it
         ``write_phase_artifact`` would name the plan (fix round 26)."""
         if not self.tasks_file:
-            import contextlib
-            import io
-
             try:
                 with contextlib.redirect_stderr(io.StringIO()):
                     self.tasks_file = find_tasks_file(self.plan_path)

@@ -54,6 +54,7 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import sys
@@ -81,9 +82,10 @@ from utils.output_handler import (
     get_phase_dir,
     output_file_path,
     phase_dir_path,
+    output_dir_path,
 )
 from utils.tasks_file import TasksFileRefused, resolve_tasks_marker
-from utils.provider_registry import set_run_anchor
+from utils.provider_registry import set_run_anchor, SESSION_LAYER
 from utils.stream_bootstrap import bootstrap_streams
 from utils.subagent_prompts import build_task_generation_prompt
 from utils.subagent_tasks import (
@@ -97,6 +99,26 @@ from utils.subagent_tasks import (
 from utils.task_decomposer import TaskDecomposer
 from utils import scope_policy_runs
 from utils import unattended as unattended_mod
+from utils import validation
+import update_plan_tasks
+from utils import provider_registry
+from utils import runner_selection
+from utils import runner_preflight
+from utils import detach as _detach
+from utils import run_record as _run_record
+from utils import status_file
+from utils import review_orchestrator_base
+from utils.providers.types import PROFILE_AGENT_READONLY
+from utils.task_outcome import RunnerRejected, ExecutorError
+from utils.runner_selection import eligible_runners
+from utils.task_result import validate_result, normalize_result, supply_result_version
+from update_plan_tasks import replace_file
+from utils.held_folder import remove_in_plan_dir, write_in_plan_dir
+from utils.write_safety import remove_below_root, write_below_root, rename_below_root
+from utils.schema_validator import schema_version_supplied
+from utils.failure_capture import FAILED_CAPTURE_DIRNAME
+from utils.state_manager import StateManager
+from utils.review_orchestrator_base import update_status
 
 #: The ``state.json`` phase / phase-dir name.
 PHASE_NAME = "generate-tasks"
@@ -275,19 +297,16 @@ def materialize_task_file(
         executor_role="agent",
         extra={"phase": PHASE_NAME, "repo_root": root, "plan_file": str(plan_path)},
     )
-    from utils.validation import write_prompt_sidecars
 
     # All or none, as for validation: on a write failure the key is dropped
     # and the host runs `prompt` itself.
-    write_prompt_sidecars([task], phase_dir, stale_glob=PROMPT_FILE_NAME)
+    validation.write_prompt_sidecars([task], phase_dir, stale_glob=PROMPT_FILE_NAME)
     document = make_task_file(kind=TASK_KIND, tasks=[task], inputs=inputs)
     task_file = os.path.join(phase_dir, TASK_FILE_NAME)
     text = task_file_text(task_file, document)
     # Checked, then written through its folder held below the plan's
     # directory, so a link swapped in after the check is never followed
     # (docs/development/write-safety.md#plan-output-containment).
-    import update_plan_tasks
-
     try:
         target = update_plan_tasks.contain_plan_output(
             plan_path, Path(task_file), what="task file")
@@ -320,21 +339,13 @@ def preflight_workspace_runner(task: Dict[str, Any], *, anchor: Optional[str]) -
         RunnerRejected: exit 3, with the runner spec and the missing capability
             named.
     """
-    from utils.provider_registry import SESSION_LAYER, get_provider, parse_model_spec
-    from utils.providers.base import PROFILE_AGENT_READONLY
-    from utils.task_outcome import RunnerRejected
-    from utils.runner_selection import (
-        eligible_runners,
-        _resolve_task_source,
-    )
-    from utils.runner_preflight import preflight_runner
 
     # The key carries the ladder's layer word (`driver.subagent_runner
     # (session)`), so a refusal or a warning here names the rung that supplied
     # the spec, the way the executor's own preflight does.
-    spec, key, layer = _resolve_task_source(task, anchor=anchor)
-    provider_name, _model = parse_model_spec(spec, anchor=anchor)
-    provider = get_provider(provider_name)
+    spec, key, layer = runner_selection._resolve_task_source(task, anchor=anchor)
+    provider_name, _model = provider_registry.parse_model_spec(spec, anchor=anchor)
+    provider = provider_registry.get_provider(provider_name)
     if provider is not None and not provider.supports_workspace_reads:
         candidates = eligible_runners(PROFILE_AGENT_READONLY)
         raise RunnerRejected(
@@ -365,7 +376,7 @@ def preflight_workspace_runner(task: Dict[str, Any], *, anchor: Optional[str]) -
     # fallback from ever running. Explicit selections still fail immediately;
     # session selections receive the same full preflight inside run_tasks.
     if layer != SESSION_LAYER:
-        preflight_runner(
+        runner_preflight.preflight_runner(
             spec, profile=PROFILE_AGENT_READONLY, anchor=anchor, key=key, layer=layer
         )
 
@@ -384,7 +395,6 @@ def validate_document(data: Any) -> List[str]:
     kind (``task_result.validate_result``), so a document that fails either
     gets the executor lane's schema-repair re-ask and is never persisted.
     """
-    from utils.task_result import validate_result
 
     return list(validate_result(TASK_KIND, data))
 
@@ -396,9 +406,6 @@ def stale_result_problems(result_path: str) -> List[str]:
     *copy* (the omitted list keys it would supply), so asking changes nothing
     on disk.
     """
-    import copy
-
-    from utils.task_result import normalize_result, supply_result_version
 
     try:
         data = json.loads(Path(result_path).read_text(encoding="utf-8"))
@@ -435,8 +442,6 @@ class _Snapshot:
     """
 
     def __init__(self, plan_path: Path, state_file: Path, tasks_target: Path):
-        import update_plan_tasks
-
         self._plan, self._tasks = plan_path, tasks_target
         self._root = update_plan_tasks.plan_output_root(plan_path)
         self._before = {
@@ -448,10 +453,6 @@ class _Snapshot:
         return path.read_bytes() if path.exists() else None
 
     def _put_back(self, path: Path, before: Optional[bytes]) -> None:
-        from update_plan_tasks import replace_file
-        from utils.held_folder import remove_in_plan_dir, write_in_plan_dir
-        from utils.write_safety import remove_below_root, write_below_root
-
         if path == self._tasks:
             if before is None:
                 remove_below_root(self._root, path)
@@ -529,7 +530,6 @@ def verify_outcome(plan_path: Path, expected_count: int) -> List[str]:
 
 def consume_document(plan_path: Path, result_path: str) -> int:
     """Validate, run ``update_plan_tasks`` in-process, verify, or restore and fail."""
-    import update_plan_tasks
 
     # Both files this consumer writes beside the plan, checked before the
     # first byte and then written through their folder held below the plan's
@@ -558,9 +558,6 @@ def consume_document(plan_path: Path, result_path: str) -> int:
     # here, and the completed document goes back to disk before validation:
     # a later `task_is_complete` re-validates the file, so what was validated
     # and applied is what is on disk.
-    from utils.schema_validator import schema_version_supplied
-    from utils.task_result import normalize_result, supply_result_version
-
     notes = normalize_result(TASK_KIND, data)
     # Fix round 28 (live run 12, Claude Code racing 03): the host's copy of
     # the subagent's reply left out "schema_version", which has one value,
@@ -644,10 +641,6 @@ def consume_document(plan_path: Path, result_path: str) -> int:
     # last *failed* attempt left (`subagents_failed`), and `status` renders a
     # `done` run beside `phase state: subagents_failed` — measured 2026-09-14,
     # on the successful retry the opencode plugin then showed the session model.
-    from utils import detach as _detach
-    from utils import run_record as _run_record
-    from utils.status_file import update_status as _update_status
-
     phase_dir = str(get_phase_dir(plan_path, PHASE_NAME))
     # The host-visible half of the same two channels the apply/review bases
     # write: `status --view run` reads `output_files` off `.status.json` and
@@ -661,7 +654,7 @@ def consume_document(plan_path: Path, result_path: str) -> int:
     _detach.record_output_files(
         phase_dir, tasks=str(tasks_path), plan=str(plan_path)
     )
-    _update_status(phase_dir, {"state": "complete"})
+    status_file.update_status(phase_dir, {"state": "complete"})
     # The count is this phase's whole output, so report it: a step-only report
     # left `status` printing the one subagent that produced the list
     # (`task_generation 1/1 ok`) as the only number on screen. It is what this
@@ -687,7 +680,6 @@ def _state_file_for(plan_path: Path) -> Path:
     git or the clock, and from the plan resolved as ``StateManager`` resolves
     it: a plan linked in keeps its state beside the file the link leads to.
     """
-    from utils.output_handler import output_dir_path
 
     return output_dir_path(Path(plan_path).resolve()) / "state.json"
 
@@ -717,8 +709,6 @@ def _move_result_aside(
     if dry_run:
         print(kept)
         return None
-    import update_plan_tasks
-    from utils.write_safety import rename_below_root
 
     result = Path(result_path)
     try:
@@ -745,8 +735,6 @@ def _contain_phase_outputs(plan_path: Path) -> Optional[int]:
     nothing. Each writer checks its own file again and writes it through its
     folder held, so a link planted after this check is refused there.
     """
-    import update_plan_tasks
-    from utils.failure_capture import FAILED_CAPTURE_DIRNAME
 
     phase_dir = phase_dir_path(plan_path, PHASE_NAME)
     try:
@@ -786,7 +774,6 @@ def _resolve_scope_policy(
     prompt; a policy nobody typed is recorded as D6 row 16's resolution under
     ``--yes``.
     """
-    from utils.state_manager import StateManager
 
     state = StateManager(plan_path)
     # `--force` regenerates from scratch: a new run, which never inherits an
@@ -813,12 +800,6 @@ def run_generate_tasks(
     apply_runner: Optional[Callable[[str], int]] = None,
 ) -> int:
     """The whole sequence. ``full`` calls this directly to inject ``apply_runner``."""
-    from utils.review_orchestrator_base import (
-        dispatch_subagent_tasks,
-        exec_subagents_requested,
-        maybe_detach,
-        update_status,
-    )
 
     plan_path = Path(os.path.abspath(args.plan_file))
     if not plan_path.is_file():
@@ -851,7 +832,7 @@ def run_generate_tasks(
     # The detach boundary sits here: after every pre-flight (plan readable, gate
     # satisfied, phase dir created) and before any child runs, so a bad flag or an
     # unmet gate fails on the caller's terminal with no child and no log.
-    detached = maybe_detach(
+    detached = review_orchestrator_base.maybe_detach(
         args=args,
         mode=MODE_NAME,
         phase_dir=phase_dir,
@@ -954,18 +935,16 @@ def run_generate_tasks(
     task = tasks_of(document)[0]
     print(f"Materialized 1 {TASK_KIND} task: {task_file}")
 
-    if exec_subagents_requested(args) and not getattr(
+    if review_orchestrator_base.exec_subagents_requested(args) and not getattr(
         args, "dry_run_subagents", False
     ):
-        from utils.task_outcome import ExecutorError
-
         try:
             preflight_workspace_runner(task, anchor=str(plan_path))
         except ExecutorError as exc:
             return _fail(f"ERROR: {exc.message}")
 
     print(f"\n{PENDING_MARKER} {task_file}")
-    if dispatch_subagent_tasks(
+    if review_orchestrator_base.dispatch_subagent_tasks(
         args,
         task_file=task_file,
         phase_dir=phase_dir,

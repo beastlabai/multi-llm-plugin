@@ -28,6 +28,16 @@ from .provider_registry import get_verify_command
 from .batch_reply import batch_check_could_not_run
 from .write_phase_bridge import WRITE_TASK_FILENAME
 from .write_safety import resolve_repo_root
+from .state_manager import (
+    TASK_BATCH_CHECK_ACCEPTED_KEY,
+    TASK_BATCH_CHECK_KEY,
+    TASK_BATCH_CHECK_REPEATS_KEY,
+    TASK_CHECK_FINDINGS_KEY,
+    TASK_OWN_CHECK_RAN_KEY,
+)
+from .output_handler import output_dir_path
+from .task_decomposer import TaskDecomposer
+from .tasks_file import read_task_list
 
 
 #: npm's own placeholder ``scripts.test``: a test script that runs nothing.
@@ -178,13 +188,6 @@ def implement_checks_ran(
     ``repeated the findings of T002 in T001``."""
     if not hasattr(state, "get"):
         return None
-    from .state_manager import (
-        TASK_BATCH_CHECK_ACCEPTED_KEY,
-        TASK_BATCH_CHECK_KEY,
-        TASK_BATCH_CHECK_REPEATS_KEY,
-        TASK_CHECK_FINDINGS_KEY,
-        TASK_OWN_CHECK_RAN_KEY,
-    )
 
     def mapping(key: str) -> Dict[str, Any]:
         value = state.get(key)
@@ -289,7 +292,6 @@ def native_stop_unverified_line(plan_path: Union[str, Path]) -> Optional[str]:
     """
     try:
         plan = Path(plan_path).resolve()
-        from .output_handler import output_dir_path
         state = json.loads((output_dir_path(plan) / "state.json").read_text(encoding="utf-8"))
         if not isinstance(state, dict):
             return None
@@ -337,7 +339,6 @@ def native_apply_fixes_unverified_line(plan_path: Union[str, Path]) -> Optional[
     """
     try:
         plan = Path(plan_path).resolve()
-        from .output_handler import output_dir_path
         out = output_dir_path(plan)
         if get_verify_command(anchor=str(plan)):
             return None
@@ -372,8 +373,6 @@ def _check_task_ids_of_plan(plan: Path) -> set:
     (check tasks), parsed as implement parses it; empty when it cannot be read,
     which counts every completed task as code — the conservative reading."""
     try:
-        from .task_decomposer import TaskDecomposer
-        from .tasks_file import read_task_list
         tasks = TaskDecomposer().parse_plan(read_task_list(plan).text)
     except Exception:  # noqa: BLE001 - conservative: no check known
         return set()

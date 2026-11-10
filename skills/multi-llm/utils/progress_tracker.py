@@ -66,9 +66,9 @@ rather than a preference:
 
 Top-level imports stay light on purpose. ``utils.run_status`` reuses the
 formatters below to render ``status --view run``, and ``status`` must stay a
-sub-second command, so ``utils.run_record``, ``utils.status_file`` and
-``utils.provider_registry`` are imported lazily inside the functions that need
-them rather than dragged in by every importer of this module.
+sub-second command, so ``utils.run_record`` and ``utils.provider_registry`` are
+imported lazily inside the functions that need them rather than dragged in by
+every importer of this module.
 """
 
 from __future__ import annotations
@@ -76,12 +76,14 @@ from __future__ import annotations
 import asyncio
 import sys
 import time
+from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from .process_state import process_cache
 # A slot's end states live in status_file, where the result-file reader below
 # this module counts them too; read here and re-exported.
 from .status_file import STATE_DONE, STATE_FAILED, TERMINAL_STATES
+from . import status_file
 
 # ---------------------------------------------------------------------------
 # The lifecycle
@@ -212,7 +214,6 @@ def _now_iso() -> str:
     reader (``run_record._elapsed_since``) rather than with two that disagree about
     the timezone suffix.
     """
-    from . import status_file
 
     return status_file.now_iso()
 
@@ -232,7 +233,6 @@ def _stamp_after(delay_s: Any) -> Optional[str]:
     number = _seconds(delay_s)
     if number is None or number < 0:
         return None
-    from datetime import datetime, timedelta
 
     try:
         when = datetime.fromisoformat(_now_iso()) + timedelta(seconds=number)
@@ -502,7 +502,6 @@ def entry_stagger_remaining_s(
     """
     if not isinstance(entry, Mapping) or _entry_state(entry) != STATE_STAGGERING:
         return None
-    from datetime import datetime
 
     from . import run_record
 
@@ -1709,7 +1708,6 @@ class PhaseProgress:
 
     def render_line(self) -> str:
         """``[PROGRESS] step: validation | 2m30s | subagents 5/8 done (5 ok)``."""
-        from . import status_file
 
         progress = status_file.read_status(self.phase_dir).get("progress")
         if not isinstance(progress, Mapping):
@@ -1849,7 +1847,6 @@ def retire_live_entries(
     rewritten on the ordinary path, where the fan-out's own sweep has already
     retired everything and only the ``run`` record is left to write.
     """
-    from . import status_file
 
     directory = str(phase_dir)
     reference = _wall_time() if now is None else float(now)

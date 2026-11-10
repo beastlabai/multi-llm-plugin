@@ -41,10 +41,15 @@ exit code was ever observed" is a defined value and never a fabricated ``0``.
 
 from __future__ import annotations
 
+import asyncio
 import atexit
+import contextlib
+import functools
+import io
 import json
 import os
 import shutil
+import signal as _signal
 import sys
 import threading
 import time
@@ -84,6 +89,10 @@ from .cli_common import (
     record_progress_lines,
     replay_flags,
     skill_dir,
+    current_replay_flags,
+    retry_command,
+    flag_value,
+    invocation,
 )
 from .status_file import (
     RUN_STATE_ABORTED,
@@ -93,6 +102,7 @@ from .status_file import (
     RUN_STATE_STARTING,
     TERMINAL_RUN_STATES,
 )
+from .output_handler import consolidation_is_current
 
 # ---------------------------------------------------------------------------
 # Tunables
@@ -670,7 +680,6 @@ def _open_recommendation(phase_dir: str, recommendation: Any) -> Any:
     """
     if not recommendation:
         return recommendation
-    from .output_handler import consolidation_is_current
     try:
         if consolidation_is_current(phase_dir):
             return None
@@ -1569,7 +1578,6 @@ def resolved_reaggregate_command(status: Dict[str, Any]) -> Optional[str]:
     plan = status.get("plan_file")
     if not mode or not plan:
         return None
-    from .cli_common import current_replay_flags, retry_command
 
     # The document's third element is the fallback; a live invocation of the
     # same mode wins (`cli_common.current_replay_flags`). `status`'s own argv
@@ -2351,8 +2359,6 @@ async def run_phase_work(func: Any, /, *args: Any, **kwargs: Any) -> Any:
     each check and its change in one critical section. So either the thread
     finds the call given up and never runs it, or the awaiter finds it started
     and leaves it listed for the exit to wait on."""
-    import asyncio
-    import functools
 
     item = _PhaseWork()
     with _PHASE_WORK_LOCK:
@@ -2415,7 +2421,6 @@ def _is_interrupt(exc_type: Any) -> bool:
         return False
     if issubclass(exc_type, KeyboardInterrupt):
         return True
-    import asyncio
 
     return issubclass(exc_type, asyncio.CancelledError)
 
@@ -2491,8 +2496,6 @@ class PhaseRun:
     """
 
     def __init__(self) -> None:
-        import contextlib
-
         self._stack = contextlib.ExitStack()
         #: Every lock this run writes under: its own, or one it found held.
         self._locks: List[process_control.PhaseLock] = []
@@ -2595,7 +2598,6 @@ def _tool_route(host: Optional[str]) -> Optional[str]:
     environment, which the tool servers set and a launch's ``child_env``
     carries to the worker; its stderr note is the dispatcher's to print.
     Advisory: anything unreadable records nothing."""
-    import io
 
     try:
         from . import host_capabilities, routes
@@ -3121,8 +3123,6 @@ def _sweep_live_clis() -> None:
 
 
 def _signal_name(signum: int) -> str:
-    import signal as _signal
-
     try:
         return _signal.Signals(signum).name
     except (ValueError, AttributeError):  # pragma: no cover
@@ -3710,7 +3710,6 @@ def _invoker_plan_arg(argv: Sequence[str]) -> Optional[str]:
     path its hand-off printed ships the spelling the dispatcher recovered for it
     (the record's ``plan_arg``, ``cli_common.invocation_plan_arg``).
     """
-    from .cli_common import flag_value, invocation
 
     record = invocation()
     if record and record.get("plan_arg"):

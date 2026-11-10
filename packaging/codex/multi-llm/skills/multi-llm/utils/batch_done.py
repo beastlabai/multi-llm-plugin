@@ -188,6 +188,7 @@ from .write_prompt import (
     completion_stamp, discard_check_tree, load_write_task,
     record_completion_stamp,
 )
+from .write_verify import load_finalize_tracking
 
 
 __all__ = [
@@ -505,8 +506,6 @@ def _tracked_after_batch(
     phases edit are never tracked. Never fatal: the batch record is this
     command's job.
     """
-    from .write_verify import load_finalize_tracking
-    from .batch_prompt import CODE_WRITE_KINDS
     if kind not in CODE_WRITE_KINDS:
         return None
     finalize_tracking = load_finalize_tracking()

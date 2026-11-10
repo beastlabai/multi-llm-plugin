@@ -1062,6 +1062,7 @@ def is_refused_result_envelope(data: Any) -> bool:
     """
     if not isinstance(data, dict):
         return False
+    # ``result_envelope`` imports this module: a load-time cycle.
     from .providers.result_envelope import envelope_verdict
     return bool(envelope_verdict(data))
 

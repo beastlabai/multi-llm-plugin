@@ -35,6 +35,7 @@ See docs/development/runtime.md#atomic-file-writes. Stdlib only; layer L0
 
 from __future__ import annotations
 
+import io
 import os
 import secrets
 import stat
@@ -312,6 +313,5 @@ def read_back_text(data: bytes) -> str:
     read a file's bytes once, or holds the bytes it wrote, parses this, so it
     parses what a second, text-mode read would have returned without making
     one (docs/development/review-results.md, "Consuming checked bytes")."""
-    import io
 
     return io.TextIOWrapper(io.BytesIO(data), encoding="utf-8").read()

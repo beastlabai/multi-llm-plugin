@@ -23,6 +23,7 @@ reaches no code. Patch a moved name where it lives;
 """
 
 import os
+import re
 import shutil
 import sys
 from abc import ABC, abstractmethod
@@ -1356,7 +1357,6 @@ class LLMProvider(ABC):
         warning, never a block: a CLI that dropped ``--version`` still answers
         prompts fine).
         """
-        import re
 
         for text in (stdout or "", stderr or ""):
             match = re.search(r"\b(\d+\.\d+(?:\.\d+)*)\b", text)
@@ -1761,6 +1761,7 @@ class LLMProvider(ABC):
         top-level ``git_env`` → ``auto``. Read through the registry accessor
         rather than by indexing the config, exactly like the ``driver.*`` keys.
         """
+        # ``provider_registry`` imports this module: a load-time cycle.
         from ..provider_registry import get_git_credential_helper
         return get_git_credential_helper(self.name, anchor=anchor)
 

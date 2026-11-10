@@ -45,6 +45,7 @@ from .base import (
     split_reasoning_effort,
 )
 from .parse_kit import fail, ok
+from .codex_stream_audit import audit_codex_stream
 
 # Reasoning effort values this adapter EMITS as `model_reasoning_effort`
 # (verified live against codex-cli 0.144.0/0.146.0).
@@ -599,6 +600,8 @@ def jail_developer_instructions(context: JailContext) -> str:
 def repo_wide_developer_sentences(context: JailContext) -> str:
     """The ``repo-wide`` grant's sentences, naming the root the dir rule sits
     on and this run's output folder (root grant, 2026-10-05)."""
+    # ``landlock_dispatch`` imports the provider package, which loads this
+    # adapter: a load-time cycle.
     from ..landlock_dispatch import repo_wide_root
     output_dir = context.output_dir or "(none)"
     return JAIL_DEVELOPER_TARGET_REPO.format(
@@ -1798,7 +1801,6 @@ class CodexProvider(LLMProvider):
         never looks at ``command_execution``/``file_change`` items, so the
         audit parses them itself.
         """
-        from .codex_stream_audit import audit_codex_stream
 
         return audit_codex_stream(raw_stream)
 

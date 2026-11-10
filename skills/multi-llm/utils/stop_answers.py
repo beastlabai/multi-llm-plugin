@@ -25,6 +25,10 @@ from .task_ledger import ACCEPTED_AFTER_FAILING_LABEL, ACCEPTED_WITH_FINDINGS_LA
 from .text_clip import clip, without_closing_mark
 from .batch_reply import row_check_findings
 from .write_verdict import findings_clause
+from .cli_common import ERROR_MAX_CHARS, plain_line
+from .manual_tasks import MAX_RECORDED_WHY_CHARS
+from .subagent_tasks import implement_output_name
+from .state_manager import TASK_CHECK_TREES_KEY
 
 
 #: The stop record's key for its headline without the ways forward a resume
@@ -101,7 +105,6 @@ def fit_stop_headline(
     Under *last_resort* the head is cut, and when even the bare remedy, the
     answers and the tests line do not fit, everything before *tail* is.
     """
-    from .cli_common import ERROR_MAX_CHARS, plain_line
     limit = ERROR_MAX_CHARS if budget is None else int(budget)
     head = plain_line(head)
     quote = plain_line(reported) if reported else ""
@@ -280,7 +283,6 @@ def compose_resume_why(
     # reads back from the run's folder (`next_phase.recorded_why`), cut at a
     # word, so the tool routes and status carry the why the native block
     # prints instead of falling back on a large stop.
-    from .manual_tasks import MAX_RECORDED_WHY_CHARS
     return clip(f"runs the {unit} that can run; " + "; ".join(parts),
                 MAX_RECORDED_WHY_CHARS - len(tail)) + tail
 
@@ -396,7 +398,6 @@ def compose_stop_answers(
     # Each why within the length the tool routes read back
     # from the run's folder (`next_phase.stop_answers_on_record`), cut at a
     # word, so a large stop's answers are not dropped on the way.
-    from .manual_tasks import MAX_RECORDED_WHY_CHARS
     rest = "; the rest runs"
     answers: List[Dict[str, Any]] = []
     if len(clauses) > 1:
@@ -547,7 +548,6 @@ def executor_check_stamp(
     (``implement_orchestrator._executor_check_stamp``) and the native why
     (:func:`check_kept_on_resume`).
     """
-    from .subagent_tasks import implement_output_name
     if not isinstance(findings, list) or not findings:
         return None
     path = Path(phase_dir) / implement_output_name(check_id)
@@ -575,7 +575,6 @@ def check_kept_on_resume(
     stamp on record, else, with *phase_dir*, the executor's verdict stamp
     (:func:`executor_check_stamp`). With neither, the check runs again, and
     the resume's why says so."""
-    from .state_manager import TASK_CHECK_TREES_KEY
     try:
         stamps = state.get(TASK_CHECK_TREES_KEY)
         findings = (state.get("task_check_findings") or {})

@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import List, NamedTuple, Optional, Sequence, Union
 
 from .provider_registry import parse_model_spec, get_provider
+from .commit_range import pinned_head_read_rule
+from .git_utils import is_empty_tree_id
 
 
 # ---------------------------------------------------------------------------
@@ -310,16 +312,13 @@ def _pinned_opening(
 
 
 def _pinned_rule(base_ref: str, head: str, *, root: bool) -> str:
-    """``commit_range.pinned_head_read_rule`` for this pair (imported here, not
-    at module load: ``commit_range`` reaches ``cli_common``)."""
-    from .commit_range import pinned_head_read_rule
+    """``commit_range.pinned_head_read_rule`` for this pair."""
 
     return pinned_head_read_rule(None if root else base_ref, head)
 
 
 def _is_root_base(base_ref: str, cwd: Union[str, Path]) -> bool:
     """Whether *base_ref* is the repository's empty-tree id (a root range)."""
-    from .git_utils import is_empty_tree_id
 
     return bool(base_ref) and is_empty_tree_id(base_ref, str(cwd))
 

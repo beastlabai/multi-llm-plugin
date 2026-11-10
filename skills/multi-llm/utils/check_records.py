@@ -36,7 +36,12 @@ from .batch_reply import (
     row_check_findings,
     row_declined,
 )
-from .state_manager import IMPLEMENT_TASK_GRAPH_KEY
+from .state_manager import (
+    IMPLEMENT_TASK_GRAPH_KEY,
+    TASK_OWN_TEXT_KEY,
+    set_task_batch_check_in_state,
+    set_task_batch_check_repeats_in_state,
+)
 
 
 #: The id shape the task decomposer gives implement's own tasks — mirrors
@@ -995,10 +1000,6 @@ def move_check_repeats_in_state(
     own text both legs keep beside its failing own check
     (``task_own_text``); one with none on record (recorded before round 29)
     is left as it is, never judged from its title alone."""
-    from .state_manager import (
-        TASK_OWN_TEXT_KEY,
-        set_task_batch_check_in_state, set_task_batch_check_repeats_in_state,
-    )
     recorded = state.get("task_batch_check")
     if not isinstance(recorded, dict) or not recorded:
         return {}

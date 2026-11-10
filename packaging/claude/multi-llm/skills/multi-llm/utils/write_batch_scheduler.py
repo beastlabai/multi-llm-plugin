@@ -164,6 +164,7 @@ from .subagent_tasks import (
     SHARED_ARTIFACT_WRITE_KINDS,
     WRITE_KINDS,
     declared_file_set,
+    implement_output_name,
 )
 from .state_manager import (
     PROCESSED_LEG_EXECUTOR,
@@ -193,6 +194,8 @@ from .write_verdict import (
     jail_note,
     reason_for,
 )
+from . import provider_registry
+from .probe_state import jail_summary_count, jail_summary_lines
 
 
 __all__ = [
@@ -1537,10 +1540,6 @@ class WriteBatchScheduler:
 
     @staticmethod
     def _jail_line_count() -> int:
-        try:
-            from .probe_state import jail_summary_count
-        except Exception:  # noqa: BLE001 - an older executor has no summary
-            return 0
         return jail_summary_count()
 
     def _repeat_jail_lines(self, before: int) -> None:
@@ -1548,10 +1547,6 @@ class WriteBatchScheduler:
         at its close: write batches dispatch through ``dispatch_task`` directly,
         so ``run_tasks``' own closing summary never runs for them, and a change
         to ``$CODEX_HOME`` outlives the run."""
-        try:
-            from .probe_state import jail_summary_lines
-        except Exception:  # noqa: BLE001 - an older executor has no summary
-            return
         for line in jail_summary_lines(before):
             self.log(f"[write-subagents] closing summary: {line}")
 
@@ -2576,9 +2571,8 @@ class WriteBatchScheduler:
         get. It creates nothing (F1 "Task-specific paths stay out of shared
         state").
         """
-        from .provider_registry import get_provider
         provider_name, model = parse_model_spec(runner, anchor=self.anchor)
-        provider = get_provider(provider_name)
+        provider = provider_registry.get_provider(provider_name)
         if provider is None:
             return [runner]
         return _dispatch_spawn.audit_argv(
@@ -3161,7 +3155,6 @@ class WriteBatchScheduler:
         record ``write_record`` wrote) is moved on the code task's outcome,
         its earlier run's row in *result* and its verdict stamp too, with one
         log line. Caller holds the effects lock."""
-        from .subagent_tasks import implement_output_name
         seen = self._recorded_outcomes
         for task_id, (own, merged) in moved.items():
             path: Optional[str] = None

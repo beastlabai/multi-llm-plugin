@@ -18,7 +18,7 @@ import re
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .routes import ARGS_SLOT, RESUME_FLAG, quote_plan_arg
-from .text_clip import plain_line
+from .text_clip import plain_line, clip
 
 
 #: The longest why read back from a run's write mirror
@@ -163,7 +163,6 @@ def gate_resume_closes_the_manual_tasks(implement: Mapping[str, Any]) -> bool:
 def _manual_gate_names(implement: Mapping[str, Any], ids: Sequence[str]) -> str:
     """``T010 (Provision the checker fixture)``, the ids joined, at most
     :data:`GATE_IDS_SHOWN`, each with its recorded title cut."""
-    from .text_clip import clip
 
     titles = {
         str(entry.get("id")): entry.get("title")

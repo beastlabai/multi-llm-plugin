@@ -55,6 +55,9 @@ from .task_ledger import (
 )
 from .text_clip import clip
 from .write_phase_bridge import WRITE_TASK_FILENAME
+from . import status_file as _status_file
+from .manual_tasks import manual_close_note
+from .plan_updater import insert_implementation_summary_reference
 
 #: The scheduler's own report, beside the executor's per-dispatch one. A separate
 #: file because it records the *loop*: batch order, the stopping batch, the skip
@@ -125,7 +128,6 @@ class WriteReports:
         :meth:`mirror_status` call (or the next dispatch's own call here)
         corrects it.
         """
-        from . import status_file as _status_file
         try:
             existing = _status_file.read_status(self._ctx.phase_dir)
             mirror = dict(
@@ -144,7 +146,6 @@ class WriteReports:
 
     def mirror_snapshot(self) -> Dict[str, Any]:
         """The ``write_subagents`` mirror as last written, for a patch."""
-        from . import status_file as _status_file
         try:
             existing = _status_file.read_status(self._ctx.phase_dir)
         except Exception:  # noqa: BLE001 - a missing file is an empty mirror
@@ -210,7 +211,6 @@ class WriteReports:
                 })
         if not manual:
             return None
-        from .manual_tasks import manual_close_note
 
         return manual_close_note(template.replace(
             "{answers}", " ".join(f"--human-task {task_id}=done" for task_id in manual)),
@@ -565,7 +565,6 @@ class WriteReports:
         """``insert_implementation_summary_reference`` on the plan (D3n)."""
         if not (self._plan_file and summary_file):
             return
-        from .plan_updater import insert_implementation_summary_reference
         # `/`-spelled like `get_relative_output_path`'s: a link in the plan.
         relative = self._summary_file_relative or os.path.relpath(
             summary_file, str(Path(self._plan_file).parent)
@@ -627,7 +626,6 @@ class WriteReports:
         counted twice. (Named to leave ``in_flight`` — the JSON key below —
         for tasks that are the opposite: dispatched and NOT yet finished.)
         """
-        from . import status_file as _status_file
         try:
             outcomes = list(result.outcomes) + list(finished_in_batch)
             if result.finalized:
@@ -905,7 +903,6 @@ class WriteReports:
         other pre-dispatch refusal — both terminal to ``status``, which renders
         the repair off ``reason_code``. Best-effort, like every mirror write.
         """
-        from . import status_file as _status_file
         rejected = isinstance(exc, RunnerRejected)
         try:
             self._sweep.clear_in_flight()

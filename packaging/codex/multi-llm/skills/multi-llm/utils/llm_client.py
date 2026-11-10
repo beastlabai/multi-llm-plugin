@@ -78,6 +78,9 @@ from .provider_outcome import (  # noqa: F401 - re-exported, see above
     outcome_from_capture,
     rejected_answer_category,
 )
+from . import probe_state as _probe_state
+from . import json_extractor
+from .json_extractor import generate_output_path, parse_file_content
 
 
 def sandbox_record_word(value: Any) -> Optional[str]:
@@ -994,10 +997,6 @@ def _cached_cli_version(provider_name: str) -> str:
     process (its ladder declares a ``removed_at`` rung), so on the rung it is
     normally there.
     """
-    try:
-        from . import probe_state as _probe_state
-    except Exception:  # noqa: BLE001 - a diagnostic never ends a slot
-        return ""
     for name in ("_VERSION_CACHE", "_PROBE_VERSION_CACHE"):
         cache = getattr(_probe_state, name, None)
         if isinstance(cache, dict):
@@ -2172,7 +2171,6 @@ def _file_output_context(
     Returns ``(full_context, output_json_path)``. One owner, so the prompt
     :func:`argv_prompt_bytes` measures is the prompt that is dispatched.
     """
-    from .json_extractor import generate_output_path
 
     # Generate output file path
     prefix = prompt_context.get("prefix", "output")
@@ -2249,7 +2247,6 @@ def misnamed_result_baseline(
     attempt killed after writing it under the wrong name left it in the next
     attempt's baseline, and the slot was recorded failed beside its own answer.
     """
-    from .json_extractor import generate_output_path
 
     phase_dir = generate_output_path(Path(output_dir), "output", phase, model_spec).parent
     return _result_files.snapshot_candidates(phase_dir)
@@ -2318,7 +2315,6 @@ def requested_result_baseline(
     both read it back as this round's answer at exit 0 (Fable review
     2026-10-09).
     """
-    from .json_extractor import generate_output_path
 
     return _result_file_stamp(
         generate_output_path(Path(output_dir), "output", phase, model_spec)
@@ -2400,7 +2396,6 @@ def _adopt_misnamed_result(
     at the requested name must be that same regular file: a link swapped in
     after the directory scan, or before the rename, is never adopted.
     """
-    from .json_extractor import parse_file_content
 
     found = _result_files.find_misnamed_result(
         output_json_path.parent, before, model_spec, run_model_specs
@@ -2517,7 +2512,6 @@ def invoke_with_file_output(
           ``served_model_is_fallback``, so the JSON's origin travels with it
           whichever channel (file, extracted file, stdout) supplied it
     """
-    from .json_extractor import read_json_from_file
 
     full_context, output_json_path = _file_output_context(
         model_spec, prompt_context, output_dir, phase, timeout, anchor
@@ -2640,7 +2634,7 @@ def invoke_with_file_output(
             "data": None,
         }
     else:
-        file_result = read_json_from_file(output_json_path, prefer_arrays=prefer_arrays)
+        file_result = json_extractor.read_json_from_file(output_json_path, prefer_arrays=prefer_arrays)
 
     if file_result.get("success"):
         _finalize_file_output_log(

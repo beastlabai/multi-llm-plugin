@@ -41,6 +41,9 @@ from typing import (
 from . import html_report_generator as _hrg
 from . import scope_report as _scope_report
 from .metrics import describe_usage
+# The git readers are read through their owner at each call: tests patch
+# ``git_diff.capture_file_context``.
+from . import git_diff
 
 #: The views whose buckets list groups.
 VIEW_KEYS = _hrg._GROUP_VIEWS
@@ -449,9 +452,8 @@ def pinned_file_reader(head_ref: Optional[str],
              context_lines: int = 5) -> Optional[List[Dict[str, Any]]]:
         if head_ref is not None and (not snapshots or path not in snapshots):
             return None
-        from .git_utils import capture_file_context
-        return capture_file_context(path, line_range, context_lines=context_lines,
-                                    file_snapshots=snapshots)
+        return git_diff.capture_file_context(path, line_range, context_lines=context_lines,
+                                             file_snapshots=snapshots)
     return read
 
 
@@ -466,20 +468,19 @@ def _code_sources(inputs: ReportInputs, files: List[str]):
     diff = inputs.diff_data
     if diff is None and base_ref is not None and files:
         try:
-            from .git_utils import capture_diff_hunks
             if inputs.head_ref is None:
-                diff = capture_diff_hunks(base_ref, files)
+                diff = git_diff.capture_diff_hunks(base_ref, files)
             else:
-                diff = capture_diff_hunks(base_ref, files, head_ref=inputs.head_ref,
-                                          cwd=inputs.repo_root)
+                diff = git_diff.capture_diff_hunks(base_ref, files, head_ref=inputs.head_ref,
+                                                   cwd=inputs.repo_root)
         except Exception as exc:  # noqa: BLE001 - the report renders without hunks
             warnings.warn(f"Failed to capture diff hunks: {exc}")
             diff = None
     snapshots = inputs.file_snapshots
     if inputs.head_ref is not None and snapshots is None and files:
         try:
-            from .git_utils import capture_file_snapshots_at
-            snapshots = capture_file_snapshots_at(inputs.head_ref, files, cwd=inputs.repo_root)
+            snapshots = git_diff.capture_file_snapshots_at(inputs.head_ref, files,
+                                                           cwd=inputs.repo_root)
         except Exception as exc:  # noqa: BLE001 - no snapshot means no file context
             warnings.warn(f"Failed to read files at {inputs.head_ref[:12]}: {exc}")
             snapshots = {}

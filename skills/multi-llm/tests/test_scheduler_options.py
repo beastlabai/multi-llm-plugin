@@ -78,10 +78,17 @@ class TestBuildingTheScheduler:
             WriteBatchScheduler(SchedulerOptions(**_fields(tmp_path, kind="review")))
 
 
+def _called_name(func):
+    """``WriteBatchScheduler`` for ``WriteBatchScheduler(...)`` and for
+    ``write_batch_scheduler.WriteBatchScheduler(...)``, the spelling that reads
+    the class through its module at the call, where a test patches it."""
+    return func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+
+
 @pytest.mark.parametrize("path", ["implement_orchestrator.py", "utils/apply_orchestrator_base.py"])
 def test_each_orchestrator_passes_one_options_record(path):
     calls = [node for node in ast.walk(ast.parse((SKILL_DIR / path).read_text()))
-             if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "WriteBatchScheduler"]
+             if isinstance(node, ast.Call) and _called_name(node.func) == "WriteBatchScheduler"]
     assert len(calls) == 1
     (call,) = calls
     assert not call.keywords and len(call.args) == 1

@@ -71,6 +71,7 @@ imported them from there has to change.
 from __future__ import annotations
 
 import random
+import time
 from dataclasses import dataclass
 from typing import Callable, Optional, Protocol
 
@@ -308,7 +309,6 @@ class RetryLadder:
         resends: int = 0,
     ) -> None:
         if now is None:  # pragma: no cover - the default is the real clock
-            import time
 
             now = time.monotonic
         self._now = now

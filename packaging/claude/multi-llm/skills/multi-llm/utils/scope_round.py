@@ -32,6 +32,9 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence
 
 from . import scope_policy as sp
+from . import status_file
+from .state_manager import stamped_group_id, group_join_ids, records_by_unique_id
+from .status_file import remove_status_keys
 
 #: The task-file key holding one validation round's scope block.
 TASK_SCOPE_KEY = "scope"
@@ -497,7 +500,6 @@ def groups_by_hash(groups: Optional[Sequence[Any]]) -> Dict[str, Dict[str, Any]]
     """``{stamped group id: host group}`` for a list of groups."""
     if not groups:
         return {}
-    from .state_manager import stamped_group_id
     table: Dict[str, Dict[str, Any]] = {}
     for group in groups:
         data = group_dict(group)
@@ -564,10 +566,9 @@ def record_decisions(phase_dir: Optional[str], counts: Optional[Mapping[str, int
         print(line)
     if not phase_dir:
         return
-    from .status_file import remove_status_keys, update_status
     try:
         if counts:
-            update_status(str(phase_dir), {DECISIONS_METADATA_KEY: dict(counts)})
+            status_file.update_status(str(phase_dir), {DECISIONS_METADATA_KEY: dict(counts)})
         elif os.path.exists(os.path.join(str(phase_dir), ".status.json")):
             remove_status_keys(str(phase_dir), [DECISIONS_METADATA_KEY])
     except Exception:  # noqa: BLE001 - a status note never fails the phase
@@ -584,7 +585,6 @@ def attach_verdicts(groups: Optional[List[Dict[str, Any]]],
     """
     if not groups:
         return
-    from .state_manager import group_join_ids, records_by_unique_id
     by_hash = records_by_unique_id(records or [], "group_id", "group_hash")
     dict_groups = [group for group in groups if isinstance(group, dict)]
     for group, ids in zip(dict_groups, group_join_ids(dict_groups)):

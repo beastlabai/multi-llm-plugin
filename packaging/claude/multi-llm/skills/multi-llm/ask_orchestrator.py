@@ -53,6 +53,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re as _re
 import shlex
 import sys
 import threading
@@ -1347,7 +1348,6 @@ def demote_headings(text: str) -> str:
     ends and the next begins. Headings inside fenced code blocks (e.g. shell
     comments) are left untouched.
     """
-    import re as _re
 
     out: List[str] = []
     in_fence = False

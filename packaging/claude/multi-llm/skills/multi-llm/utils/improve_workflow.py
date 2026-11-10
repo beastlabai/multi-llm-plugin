@@ -66,6 +66,7 @@ from .cli_common import (
     add_scope_policy_argument,
     build_parent_parser,
     dispatcher_prefix,
+    dispatcher_command,
 )
 from .output_handler import (
     PHASE_DIRECTORIES,
@@ -76,6 +77,16 @@ from .output_handler import (
 from .state_manager import (
     StateManager, _parse_completion_time, predates_review,
 )
+from . import commit_spelling
+from .commit_spelling import step_word
+from .subagent_tasks import WRITE_KIND_BY_PHASE
+from .git_utils import get_project_root
+from .review_diff import REVIEW_SCOPE_FILENAME, read_review_scope
+
+# ``review_orchestrator_base``, ``write_resume`` and ``batch_ledger`` load in
+# the functions that use them: ``status`` and ``util next-command`` import
+# this module to spell a stopped run's continuation and read none of them
+# (tests/test_utils_imports.py ``test_a_reader_path_loads_no_module_its_base_did_not``).
 
 #: The step word of review-plan's advisory consolidation pass. Not a mode and
 #: not in any ``sequence``: it is ``review-plan --consolidate``, run between the
@@ -195,7 +206,6 @@ def _step_word(mode: str, word: str) -> str:
     composite whose range a front door pins (``review-code`` →
     ``review-commits``), else the word itself (``commit_spelling.step_word``,
     the row-keyed mapping)."""
-    from .commit_spelling import step_word
 
     return step_word(_row(mode).name, word)
 
@@ -225,8 +235,7 @@ def review_phase_for(apply_step: str) -> str:
     ``code-review``); this one lookup is how neither mistake is made. Kept here
     rather than in ``state_manager``, which ``write_batch_scheduler`` imports.
     """
-    from .subagent_tasks import WRITE_KIND_BY_PHASE
-    from .write_batch_scheduler import REVIEW_PHASE_BY_WRITE_KIND
+    from .write_resume import REVIEW_PHASE_BY_WRITE_KIND
 
     phase = mode_table.phase_for(apply_step)
     return REVIEW_PHASE_BY_WRITE_KIND[WRITE_KIND_BY_PHASE[phase]]
@@ -479,9 +488,9 @@ def _requested_scope(
     files_from = getattr(args, "files_from", None)
     if not files and files_from is None:
         return None
+    # review-code's orchestrator imports this module (through the commit front
+    # door): a load-time cycle.
     import code_review_orchestrator as review_code
-
-    from .git_utils import get_project_root
 
     root = review_code.review_git_root(get_project_root(str(plan))) or os.getcwd()
     if files_from == "-":
@@ -497,7 +506,6 @@ def _recorded_base_ref(mode: str, plan: Path) -> Optional[str]:
     """The ref the code review on record diffed against, from its manifest."""
     if not _reviews_code(mode):
         return None
-    from .git_utils import REVIEW_SCOPE_FILENAME, read_review_scope
 
     review_dir = phase_dir_path(plan, _row(mode).sequence_phases[0])
     header = read_review_scope(review_dir / REVIEW_SCOPE_FILENAME)
@@ -516,6 +524,7 @@ def _leftover_results(mode: str, review_dir: Path) -> bool:
     """
     if not _reviews_code(mode) or (review_dir / "grouped.json").exists():
         return False
+    # Review-code's orchestrator: a load-time cycle, as in :func:`_requested_scope`.
     import code_review_orchestrator as review_code
 
     return bool(review_code.leftover_model_results(review_dir))
@@ -561,6 +570,7 @@ def read_records(
     apply_word, apply_word_at = _newer_apply_record(completed, skipped, apply_phase)
     recorded_scope = None
     if _reviews_code(row.name):
+        # Review-code's orchestrator: a load-time cycle, as in :func:`_requested_scope`.
         from code_review_orchestrator import REVIEW_SCOPE_FILES_KEY
 
         recorded = state.get(REVIEW_SCOPE_FILES_KEY)
@@ -924,7 +934,6 @@ def continuation_args(
     range, which the front door also takes. Every other composite comes back
     as ``(mode, [plan_arg, *flags])``, unchanged.
     """
-    from . import commit_spelling
 
     flags = continuation_flags(mode, args)
     shown = plan if plan_arg is None else plan_arg
@@ -943,7 +952,6 @@ def continuation_command(
     base: Optional[Path] = None,
 ) -> str:
     """:func:`continuation_args` as the dispatcher command a stop names."""
-    from .cli_common import dispatcher_command
 
     word, rest = continuation_args(mode, plan, args)
     return dispatcher_command(word, *rest, base=base)
@@ -1188,6 +1196,7 @@ def scope_changed_line(mode: str, records: Records) -> str:
     """``[IMPROVE_SCOPE_CHANGED]``: the scope on record, and the one typed."""
     recorded = records.recorded_scope
     if recorded:
+        # Review-code's orchestrator: a load-time cycle, as in :func:`_requested_scope`.
         from code_review_orchestrator import REVIEW_SCOPE_FILES_KEY
 
         then = (
@@ -1231,6 +1240,7 @@ def scope_notices(mode: str, args: argparse.Namespace, records: Records) -> List
 
 def files_from_stdin_refusal() -> str:
     """The ``ERROR:`` line review-code prints for ``-`` under ``--detach``."""
+    # Review-code's orchestrator: a load-time cycle, as in :func:`_requested_scope`.
     from code_review_orchestrator import FILES_FROM_STDIN_DETACHED
 
     return f"ERROR: {FILES_FROM_STDIN_DETACHED}"
@@ -1240,6 +1250,7 @@ def is_scope_files_error(exc: BaseException) -> bool:
     """Whether *exc* is review-code's ``ScopeFilesError`` (imported only to ask)."""
     if not isinstance(exc, ValueError):
         return False
+    # Review-code's orchestrator: a load-time cycle, as in :func:`_requested_scope`.
     from code_review_orchestrator import ScopeFilesError
 
     return isinstance(exc, ScopeFilesError)
@@ -2010,7 +2021,6 @@ class ImproveWorkflow(fwo.FullWorkflow):
         writes nothing.
         """
         from .batch_ledger import BatchLedger, touched_files
-        from .git_utils import get_project_root
 
         ledger = BatchLedger(apply_dir)
         rows = ledger.rows()

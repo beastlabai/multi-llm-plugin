@@ -13,15 +13,18 @@ Usage:
 
 import argparse
 import hashlib
+import io
 import json
 import logging
 import os
 import re
+import stat as _stat
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
+from types import SimpleNamespace
 from typing import (
     Any, Callable, Collection, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple,
 )
@@ -54,7 +57,14 @@ from utils.tasks_file import (
     TasksFileRefused,
     read_task_list,
 )
-from utils.state_manager import mark_tasks_reset_in_state
+from utils.state_manager import (
+    mark_tasks_reset_in_state,
+    clear_task_verdict,
+    TASK_BATCH_CHECK_KEY,
+    TASK_CHECK_FINDINGS_KEY,
+    TASK_CHECK_TREES_KEY,
+    set_task_check_tree_in_state,
+)
 from utils.git_utils import get_project_root
 from utils.provider_registry import set_run_anchor
 from utils import scope_policy_runs
@@ -75,22 +85,59 @@ from check_workflow_prerequisites import (
     record_prerequisite_skip,
     upstream_skip_notices,
 )
+from utils import review_orchestrator_base
+from utils import prior_changes as _prior_changes
+from utils import prompt_files
+from utils import host_capabilities as _hosts
+from utils import manual_tasks as _manual
+from utils import routes as _routes
+from utils import detach as _detach
+from utils import next_phase_words as _words
+from utils import write_safety as _write_safety
+from utils import write_batch_scheduler
+from utils import write_phase_bridge
+from utils.check_records import (
+    rerunnable_checks,
+    unlanded_on_record,
+    decomposition_graph,
+    write_result_notice,
+    blocked_by_check_reason,
+    transitive_dependents,
+)
+from utils.subagent_tasks import implement_output_name
+from utils.write_safety import (
+    TaskSnapshot,
+    WriteSafetyError,
+    policy_allow_clause,
+    policy_skip_clause,
+)
+from utils.batch_prompt import DISPATCHED_PROMPTS_SUBDIR, is_check_task, dispatch_line
+from utils.human_task_plan import (
+    plan_manual_gates,
+    manual_gate_head,
+    manual_gate_way_on,
+    mark_no_longer_skipped,
+    resolve_human_task_plan,
+    answered_done_label,
+    answered_done_on_record,
+    set_aside_by_plan,
+    persist_human_task_plan,
+)
+from utils.batch_ledger import touched_files
+from utils.write_batch_scheduler import SchedulerOptions
+from utils.write_prompt import check_tree_fingerprint, policy_violation_for
+from utils.stop_answers import executor_check_stamp, NATIVE_REFUSED_PREFIX
+from utils.task_ledger import KEPT_WITH_FINDINGS_LABEL, kept_named
+from utils.batch_done import resume_refusal_lines, unrecorded_logged_batches
+from utils.host_capabilities import resolve_host_id
+from utils.manual_tasks import after_code_note
 
 logger = logging.getLogger(__name__)
-
-
-def rerunnable_checks(state: Any) -> List[str]:
-    """``check_records.rerunnable_checks``, imported when first used
-    (it stays off this module's import path)."""
-    from utils.check_records import rerunnable_checks as _rerunnable
-
-    return _rerunnable(state)
 
 
 def _unlanded_on_record(plan_path: Path, state: Any) -> List[str]:
     """``check_records.unlanded_on_record`` for this plan, each id
     named on stdout with why it runs again."""
-    from utils.check_records import unlanded_on_record
 
     phase_dir = get_phase_dir(plan_path, "implement")
     unlanded = unlanded_on_record(str(phase_dir), state.state)
@@ -854,11 +901,9 @@ def maybe_detach_implement_phase(
             or getattr(args, "internal_worker", False)):
         return None
 
-    from utils.review_orchestrator_base import maybe_detach
-
     phase_dir = str(get_phase_dir(plan_path, "implement"))
     Path(phase_dir).mkdir(parents=True, exist_ok=True)
-    return maybe_detach(
+    return review_orchestrator_base.maybe_detach(
         args=args, mode="implement", phase_dir=phase_dir,
         plan_file=str(plan_path.absolute()), phase="implement",
     )
@@ -950,14 +995,11 @@ def _prepare_selected_task(
     if dry_run:
         return
     if state.get_task_status(task.id) == TaskStatus.COMPLETED.value:
-        from utils.subagent_tasks import implement_output_name
-        from utils.write_safety import TaskSnapshot, resolve_repo_root
-
         phase_dir = get_phase_dir(plan_path, "implement")
         stamp = datetime.now().strftime("%Y%m%dT%H%M%S%f")
         snapshot = TaskSnapshot.load(
             str(phase_dir), task.id,
-            expected_root=resolve_repo_root(str(plan_path)),
+            expected_root=_write_safety.resolve_repo_root(str(plan_path)),
         )
         if snapshot is not None:
             directory = Path(snapshot.directory)
@@ -968,8 +1010,6 @@ def _prepare_selected_task(
     state.update_task_status(task.id, TaskStatus.PENDING.value)
     # A fresh result replaces these; until then the old verdict is not the
     # selected attempt's verdict, including after a host dies mid-handoff.
-    from utils.state_manager import clear_task_verdict
-
     clear_task_verdict(state.state, task.id)
     # The log line its earlier run wrote is not this rerun's
     # (`batch_done.unrecorded_logged_batches`): a host gone before its
@@ -1017,9 +1057,6 @@ def _start_over(
     See
     :func:`_has_earlier_implement_records`.
     """
-    from utils.state_manager import clear_task_verdict
-    from utils.subagent_tasks import implement_output_name
-    from utils.write_safety import TaskSnapshot, WriteSafetyError, resolve_repo_root
 
     phase_dir = get_phase_dir(plan_path, "implement")
     stamp = datetime.now().strftime("%Y%m%dT%H%M%S%f")
@@ -1028,7 +1065,7 @@ def _start_over(
         if getattr(task, "executor_role", "") != "human"
     ]
     try:
-        repo_root: Optional[str] = resolve_repo_root(str(plan_path))
+        repo_root: Optional[str] = _write_safety.resolve_repo_root(str(plan_path))
     except WriteSafetyError as exc:
         repo_root = None
         print(
@@ -1103,13 +1140,6 @@ def _has_earlier_implement_records(
     snapshot that cannot be read counts as a record, so the start-over that
     would warn about it still runs.
     """
-    from utils import prior_changes as _prior_changes
-    from utils.state_manager import (
-        TASK_BATCH_CHECK_KEY, TASK_CHECK_FINDINGS_KEY, TASK_CHECK_TREES_KEY,
-    )
-    from utils.subagent_tasks import implement_output_name
-    from utils.batch_prompt import DISPATCHED_PROMPTS_SUBDIR
-    from utils.write_safety import TaskSnapshot, WriteSafetyError
 
     ids = set(code_ids)
     for task_id in code_ids:
@@ -1173,9 +1203,6 @@ def _remove_kept_prompts(phase_dir: Path) -> int:
     (:func:`_remove_kept_prompts_windows`); it used to remove nothing, so a
     start-over there kept every earlier prompt (Windows port, round seven).
     """
-    import stat as _stat
-
-    from utils.batch_prompt import DISPATCHED_PROMPTS_SUBDIR
 
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     directory = getattr(os, "O_DIRECTORY", 0)
@@ -1223,7 +1250,6 @@ def _remove_kept_prompts_windows(phase_dir: Path) -> int:
     link (round-8 review). The path walk is what is left where that walk
     cannot be made at all (the calls cannot be loaded, a folder cannot be
     opened, a volume without a drive letter)."""
-    from utils import prompt_files
 
     removed = prompt_files.remove_held(
         str(phase_dir), lambda name: name.endswith(".prompt.txt"),
@@ -1238,9 +1264,6 @@ def _remove_kept_prompts_by_path(phase_dir: Path) -> int:
     nothing, each name is ``lstat``-checked and removed only when it is a
     regular file. Nothing is held between a check and its removal. Best-effort,
     like the descriptor walk."""
-    import stat as _stat
-
-    from utils.batch_prompt import DISPATCHED_PROMPTS_SUBDIR
 
     reparse = getattr(_stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
     folder = os.path.join(str(phase_dir), DISPATCHED_PROMPTS_SUBDIR)
@@ -1278,13 +1301,8 @@ def _manual_close_note(
     command spelling (the template the result line's ``user_next_step``
     uses); ``None`` when nothing can be spelled. *waiting*: how many code
     tasks wait on them."""
-    import io
 
     try:
-        from utils import host_capabilities as _hosts
-        from utils import manual_tasks as _manual
-        from utils import routes as _routes
-
         host_id = _hosts.resolve_host_id(explicit=getattr(args, "host", None))
         template = _hosts.next_command_template(
             host_id, _routes.resolve_route(host_id, stderr=io.StringIO()))
@@ -1311,9 +1329,6 @@ def _native_manual_gates(
     after, and the report's lookup, made once the batches are recorded,
     gives its command."""
     try:
-        from utils.check_records import decomposition_graph
-        from utils.human_task_plan import plan_manual_gates
-
         entries = [
             task for batch in output_data.get("batches") or []
             for task in batch.get("tasks") or []
@@ -1344,7 +1359,6 @@ def _native_manual_gate_stop(
     gates = _native_manual_gates(plan, output_data, state)
     if not gates or not gates.get("gated") or not gates.get("waiting"):
         return None
-    from utils.human_task_plan import manual_gate_head, manual_gate_way_on
 
     titles = dict(state.get("task_titles") or {})
     waiting = {k: list(v) for k, v in sorted(gates["waiting"].items()) if v}
@@ -1404,11 +1418,6 @@ def _stop_user_commands(args: argparse.Namespace) -> Dict[str, str]:
     for this host and route): the stop message then names the flags.
     """
     try:
-        from utils import detach as _detach
-        from utils import host_capabilities as _hosts
-        from utils import next_phase_words as _words
-        from utils import routes as _routes
-
         host_id = _hosts.resolve_host_id(explicit=getattr(args, "host", None))
         route = _routes.resolve_route(host_id)
         handle = _detach.active_run()
@@ -1504,11 +1513,7 @@ def _record_implement_write_artifacts(
     summary_file = getattr(result, "summary_file", None)
     paths["summary"] = summary_file or os.path.join(phase_dir, "summary.md")
 
-    from utils import write_safety as _write_safety
-
     repo_root = _write_safety.repo_root_for_report(plan_file)
-
-    from utils.batch_ledger import touched_files
 
     touched = touched_files(getattr(result, "outcomes", None) or [], include_partial=False)
     for index, touched_path in enumerate(touched, start=1):
@@ -1519,8 +1524,6 @@ def _record_implement_write_artifacts(
             else os.path.join(repo_root, os.path.normpath(touched_path))
         )
         paths[f"touched_file_{index}"] = resolved
-
-    from utils import detach as _detach
 
     _detach.record_output_files(phase_dir, **paths)
     record_artifacts(path for path in paths.values() if path and os.path.exists(path))
@@ -1583,29 +1586,20 @@ def run_implement_write_phase(
             or getattr(args, "dry_run_subagents", False)):
         return None
 
-    from utils.write_batch_scheduler import SchedulerOptions, WriteBatchScheduler
-    from utils.check_records import write_result_notice
-    from utils.write_phase_bridge import (
-        materialize_write_tasks,
-        write_task_file_for_phase,
-    )
-
     phase_dir = str(get_phase_dir(plan_path, "implement"))
     Path(phase_dir).mkdir(parents=True, exist_ok=True)
     plan_file = str(plan_path.absolute())
     output_dir = str(get_output_dir(plan_path))
     tasks_file_str = str(tasks_file) if tasks_file else None
 
-    from utils import write_safety as _write_safety
-
-    tasks = materialize_write_tasks(
+    tasks = write_phase_bridge.materialize_write_tasks(
         kind="implement",
         batches=output_data.get("batches") or [],
         phase_dir=phase_dir,
         plan_file=plan_file,
         tasks_file=tasks_file_str,
     )
-    task_file = write_task_file_for_phase(
+    task_file = write_phase_bridge.write_task_file_for_phase(
         kind="implement", tasks=tasks, phase_dir=phase_dir, plan_file=plan_file,
         tasks_file=tasks_file_str,
     )
@@ -1616,7 +1610,7 @@ def run_implement_write_phase(
     _seed_pending_task_statuses(state, tasks)
 
     try:
-        scheduler = WriteBatchScheduler(SchedulerOptions(
+        scheduler = write_batch_scheduler.WriteBatchScheduler(SchedulerOptions(
             tasks=tasks,
             phase_dir=phase_dir,
             kind="implement",
@@ -1682,22 +1676,18 @@ def _materialize_native_write_tasks(
     with *host*, so ``status`` shows this run rather than an
     earlier executor run's ``.status.json``.
     """
-    from utils.write_phase_bridge import (
-        materialize_write_tasks,
-        write_task_file_for_phase,
-    )
 
     phase_dir = str(get_phase_dir(plan_path, "implement"))
     plan_file = str(plan_path.absolute())
     tasks_file_str = str(tasks_file) if tasks_file else None
-    tasks = materialize_write_tasks(
+    tasks = write_phase_bridge.materialize_write_tasks(
         kind="implement",
         batches=output_data.get("batches") or [],
         phase_dir=phase_dir,
         plan_file=plan_file,
         tasks_file=tasks_file_str,
     )
-    path = write_task_file_for_phase(
+    path = write_phase_bridge.write_task_file_for_phase(
         kind="implement", tasks=tasks, phase_dir=phase_dir, plan_file=plan_file,
         tasks_file=tasks_file_str, native_host=host or "claude-code",
     )
@@ -1746,11 +1736,6 @@ def _native_human_task_plan(
     ``pending`` and recorded so (``human_task_plan.mark_no_longer_skipped``),
     never left ``skipped`` for the host to pass over.
     """
-    from utils.check_records import decomposition_graph
-    from utils.human_task_plan import (
-        mark_no_longer_skipped,
-        resolve_human_task_plan,
-    )
 
     batches = output_data.get("batches") or []
     check_findings_ids = list(check_findings_ids or ())
@@ -1854,11 +1839,6 @@ def _native_check_reruns(
     again on unchanged files). A check kept on that stamp adopts it, so the
     native run's closing ``util finalize-tracking`` re-stamps it like its own.
     """
-    from utils.state_manager import (
-        TASK_CHECK_TREES_KEY,
-        set_task_check_tree_in_state,
-    )
-    from utils.write_prompt import check_tree_fingerprint
 
     stamps = state.get(TASK_CHECK_TREES_KEY) or {}
     if not isinstance(stamps, dict):
@@ -1910,8 +1890,6 @@ def _executor_check_stamp(
     the one on record. ``None`` otherwise.
     """
     # One reader for both the resume and its why (`stop_answers.check_kept_on_resume`).
-    from utils.stop_answers import executor_check_stamp
-
     return executor_check_stamp(
         get_phase_dir(plan_path, "implement"), check_id, findings)
 
@@ -1949,12 +1927,6 @@ def _native_withheld(
 
     ``pending_tasks`` is recounted from what is left.
     """
-    from utils.check_records import (
-        blocked_by_check_reason,
-        decomposition_graph,
-        transitive_dependents,
-    )
-    from utils.stop_answers import NATIVE_REFUSED_PREFIX
 
     batches = output_data.get("batches") or []
     entries = [task for batch in batches for task in batch.get("tasks") or []]
@@ -2001,12 +1973,8 @@ def _native_withheld(
     ]
     if candidates:
         try:
-            from utils.write_phase_bridge import materialize_write_tasks
-            from utils.write_prompt import policy_violation_for
-            from utils.write_safety import policy_allow_clause, policy_skip_clause
-
             phase_dir = get_phase_dir(plan_path, "implement")
-            write_tasks = materialize_write_tasks(
+            write_tasks = write_phase_bridge.materialize_write_tasks(
                 kind="implement",
                 batches=[{"batch_index": 0, "can_parallelize": False, "tasks": candidates}],
                 phase_dir=str(phase_dir),
@@ -2127,14 +2095,6 @@ def _kept_labels(state: StateManager, plan: Any = None) -> Dict[str, str]:
     summary.md use (``human_task_plan.answered_done_label``); and a
     check whose findings stand, not accepted, as
     ``task_ledger.KEPT_WITH_FINDINGS_LABEL``."""
-    from types import SimpleNamespace
-
-    from utils.task_ledger import KEPT_WITH_FINDINGS_LABEL
-    from utils.check_records import rerunnable_checks
-    from utils.human_task_plan import (
-        answered_done_label,
-        answered_done_on_record,
-    )
 
     accepted, completed = answered_done_on_record(state)
     accepted = dict(accepted)
@@ -2162,7 +2122,6 @@ def _kept_named(kept: Sequence[str], labels: Dict[str, str]) -> str:
     most eight), then each labelled one with what it is
     (``task_ledger.kept_named``, the executor's and the progress
     line's words too)."""
-    from utils.task_ledger import kept_named
 
     return kept_named(kept, labels)
 
@@ -2227,8 +2186,6 @@ def _waiting_on_checks(
     and ``util write-prompt`` (``[WRITE_PROMPT_BLOCKED]``); this only names it
     in advance. A manual task waits on nothing (no subagent runs it).
     """
-    from utils.check_records import transitive_dependents
-    from utils.batch_prompt import is_check_task
 
     entries = [task for batch in batches for task in batch.get("tasks") or []]
 
@@ -2270,7 +2227,6 @@ def _dispatch_line(output_data: Dict[str, Any]) -> str:
     counted from the batches as handed out (the native emit and ``--dry-run``;
     the executor's run prints its own, ``WriteBatchScheduler._dispatch_preview``,
     in the same words)."""
-    from utils.batch_prompt import dispatch_line
 
     counts = _handoff_counts(output_data)
     return dispatch_line(
@@ -2291,7 +2247,6 @@ def _refuse_unrecorded_native_resume(
     """
     if not resume or not tasks:
         return False
-    from utils.batch_done import resume_refusal_lines, unrecorded_logged_batches
 
     output_dir = str(get_output_dir(plan_path))
     unrecorded = unrecorded_logged_batches(
@@ -3271,8 +3226,6 @@ def prepare_native_emit(run: ImplementRun) -> Optional[int]:
     )
     # The tasks the plan set aside, which the host's N/N `[ETA]` line names,
     # as the executor's does. Replaced by every native emit.
-    from utils.human_task_plan import set_aside_by_plan
-
     state.set_metrics_set_aside(
         "implement", set_aside_by_plan(run.native_human_plan, run.human_task_ids),
     )
@@ -3306,7 +3259,6 @@ def _plan_native_human_tasks(run: ImplementRun) -> None:
     ``done``/``skip`` must change what this leg hands out.
     """
     args, state, output_data = run.args, run.state, run.output_data
-    from utils.human_task_plan import answered_done_on_record
 
     answered_on_record = answered_done_on_record(
         state,
@@ -3413,8 +3365,6 @@ def emit_native(run: ImplementRun) -> Optional[int]:
     # the same seam instead of the host fishing the prompt out of the handoff
     # JSON and substituting the token by hand.
     try:
-        from utils.host_capabilities import resolve_host_id
-
         write_task_file, native_tasks = _materialize_native_write_tasks(
             plan_path, run.output_data, tasks_file=run.tasks_file,
             host=resolve_host_id(explicit=getattr(args, "host", None)),
@@ -3480,7 +3430,6 @@ def _stop_on_native_gate(run: ImplementRun) -> int:
         print(line)
     state.set_metrics_left_out("implement", {})
     state.set_metrics_set_aside("implement", {})
-    from utils.human_task_plan import persist_human_task_plan
 
     persist_human_task_plan(state, run.native_human_plan)
     state.mark_phase_started("implement")
@@ -3557,7 +3506,6 @@ def _human_plan_lines(run: ImplementRun, named: Callable[[str], str]) -> List[st
                "too" if note else "")
             + "):"
         )
-        from utils.manual_tasks import after_code_note
 
         for task_id, reason in sorted(deferred.items()):
             # A manual task after code this emit hands out says so; the
@@ -3583,8 +3531,6 @@ def _human_plan_lines(run: ImplementRun, named: Callable[[str], str]) -> List[st
         # A check whose findings the user accepted never failed, so the words
         # are the executor's (`answered_done_label`), never "accepted after
         # failing" for every one.
-        from utils.human_task_plan import answered_done_label
-
         labels = {
             task_id: answered_done_label(plan, task_id)
             for task_id in plan.accepted
@@ -3700,8 +3646,6 @@ def record_emit(run: ImplementRun) -> Optional[int]:
     """
     state = run.state
     if run.native_human_plan is not None:
-        from utils.human_task_plan import persist_human_task_plan
-
         persist_human_task_plan(state, run.native_human_plan)
     if not run.closes:
         state.mark_phase_started("implement")

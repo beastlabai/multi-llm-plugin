@@ -11,6 +11,7 @@ mirrors (:func:`_mirror_text`) and the notices a terminal poll records. Reads
 
 from __future__ import annotations
 
+import io
 import math
 import os
 from pathlib import Path
@@ -23,6 +24,10 @@ from .task_ledger import (
     MIRROR_SKIP_LABELS as _MIRROR_SKIP_LABELS,
     bucket_clauses as _bucket_clauses,
     mirror_ids as _mirror_ids,
+    ACCEPTED_AFTER_FAILING_LABEL,
+    ACCEPTED_WITH_FINDINGS_LABEL,
+    COMPLETED_BY_HAND_LABEL,
+    KEPT_WITH_FINDINGS_LABEL,
 )
 from .cli_common import dispatcher_command
 from .progress_tracker import (
@@ -101,7 +106,6 @@ def manual_close_note(
     *recorded_route* is the route the plan's run was started on
     (:func:`_recorded_route`), for a reader that names none.
     """
-    import io
 
     from . import next_phase
 
@@ -1571,12 +1575,6 @@ def _kept_labels(mirror: Mapping[str, Any], kept: Sequence[str]) -> Dict[str, st
     failed task) and a manual task completed by hand
     (``completed_by_hand_task_ids``). Plain kept tasks carry
     no label."""
-    from .task_ledger import (
-        ACCEPTED_AFTER_FAILING_LABEL,
-        ACCEPTED_WITH_FINDINGS_LABEL,
-        COMPLETED_BY_HAND_LABEL,
-        KEPT_WITH_FINDINGS_LABEL,
-    )
 
     kept_ids = {str(t) for t in kept}
     labels = {

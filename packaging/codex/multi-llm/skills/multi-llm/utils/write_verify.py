@@ -42,6 +42,7 @@ from .batch_reply import WRITE_APPLIED, WRITE_PARTIAL
 from .dispatch_spawn import _host_env_guards
 from .subagent_tasks import PHASE_BY_WRITE_KIND
 from .redact import redact_text
+from .providers.child_env import build_child_env
 
 #: How much of the verification command's output travels in the result payload,
 #: the summary and `.status.json`. A tail rather than the whole capture: a failing
@@ -679,7 +680,6 @@ class VerifyCommand:
         allowed to edit, so this command is inside the phase's own blast radius.
         `docs/configuration.md`'s safety section says so too.
         """
-        from .providers.base import build_child_env
         try:
             guards, passthrough = _host_env_guards()
             return build_child_env(

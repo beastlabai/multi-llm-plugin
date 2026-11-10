@@ -61,6 +61,7 @@ from .subagent_tasks import declared_file_set, write_output_name
 from .task_ledger import KEPT_WITH_FINDINGS_LABEL
 from .text_clip import with_closing_mark
 from .write_safety import TaskSnapshot, file_sha256
+from .code_fix_batcher import without_protected_clause
 
 
 #: The D2g inputs binding for the results already on disk, kept beside them.
@@ -493,7 +494,6 @@ class ResumeEvidence:
         """
         prompt = str(task.get("prompt") or "")
         if self._commit_guard() is not None:
-            from .code_fix_batcher import without_protected_clause
             prompt = without_protected_clause(prompt)
         payload = json.dumps(
             {

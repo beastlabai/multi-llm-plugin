@@ -99,6 +99,7 @@ from .cli_common import (
     record_state,
     record_validation_context,
     record_validation_counts,
+    _modes,
 )
 from .output_handler import PHASE_DIR_NAMES, output_dir_path
 from .stream_bootstrap import bootstrap_streams
@@ -508,7 +509,6 @@ def _resolve_phase(word: Optional[str]) -> Optional[str]:
     """
     if not word:
         return None
-    from .cli_common import _modes
 
     modes = _modes()
     resolved = modes.phase_from_selector(word)
@@ -1264,7 +1264,6 @@ def _is_workflow_step_run(view: Dict[str, Any]) -> bool:
     workflow's next phase (docs/development/status.md, "Only a workflow
     step's run carries them").
     A commit front door's run is recorded under the phase it fronts."""
-    from .cli_common import _modes
 
     run = view.get("run") or {}
     finished_mode = str(run.get("mode") or view.get("phase") or "") or None
@@ -1331,10 +1330,8 @@ def _read_by_a_tool_route(args: argparse.Namespace) -> bool:
     this process spells commands for (``next_phase.resolve_route``, its one
     reader, from the environment the servers set; never a run's recorded
     route, which a shell reads too) is a tool route (fix round 26)."""
-    import io
 
     from . import next_phase
-    from .cli_common import _modes
 
     try:
         route = next_phase.resolve_route(_reader_host(args), stderr=io.StringIO())
@@ -1362,12 +1359,10 @@ def _wait_clamp_ceiling(host_id: Optional[str]) -> Optional[Tuple[str, int]]:
     clamp exists for.
     """
     try:
-        from . import host_capabilities as caps
-
         if host_id:
-            ceiling = caps.timeout_ceiling_s(host_id)
+            ceiling = host_capabilities.timeout_ceiling_s(host_id)
             return (host_id, ceiling) if ceiling else None
-        return caps.tightest_timeout_ceiling()
+        return host_capabilities.tightest_timeout_ceiling()
     except Exception as exc:
         note_swallowed("status: wait clamp ceiling", exc)
         return None
@@ -1390,12 +1385,11 @@ def _declared_host_id(args: argparse.Namespace) -> Optional[str]:
     the stderr note explaining the clamp told the caller no ``--host`` had been
     given when a host had in fact been declared.
     """
-    from . import host_capabilities as caps
 
     explicit = getattr(args, "host", None)
-    if not explicit and not os.environ.get(caps.HOST_ENV):
+    if not explicit and not os.environ.get(host_capabilities.HOST_ENV):
         return None
-    return caps.resolve_host_id(explicit=explicit)
+    return host_capabilities.resolve_host_id(explicit=explicit)
 
 
 def _resolve_wait_timeout(args: argparse.Namespace, plan_path: Path) -> float:

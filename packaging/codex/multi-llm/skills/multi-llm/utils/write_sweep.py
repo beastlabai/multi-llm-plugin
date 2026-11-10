@@ -42,7 +42,11 @@ from .write_safety import (
     file_sha256,
     read_capped,
     write_copy,
+    remove_tree,
+    restore_leftovers,
 )
+from . import detach
+from . import status_file
 
 #: Directory *names* the post-run containment sweep never descends into. A VCS
 #: metadata dir churns on anything the runner happens to run — ``git status``
@@ -303,7 +307,6 @@ class ContainmentSweep:
         is left is named in a warning, never left silently
         (docs/development/write-safety.md, the store's discard).
         """
-        from .write_safety import remove_tree
 
         store = os.path.join(self._ctx.safety_dir, ROLLBACK_STORE_DIRNAME)
         left = remove_tree(store)
@@ -408,8 +411,6 @@ class ContainmentSweep:
         # Its heartbeat and redirected stdout continue while this write batch
         # runs, including during report-only re-asks. Exempt just those runtime
         # files, not the composite's whole tree or unrelated phase artifacts.
-        from . import detach, status_file
-
         active = detach.active_run()
         if active is not None:
             excluded.extend(os.path.abspath(path) for path in (
@@ -442,7 +443,6 @@ class ContainmentSweep:
         path goes into ``kept`` when given, for :meth:`_swept_moves` to leave
         out of both sides of the difference.
         """
-        from .write_safety import restore_leftovers
 
         leftovers = restore_leftovers(self._ctx.repo_root)
         excluded = self.exclusions()

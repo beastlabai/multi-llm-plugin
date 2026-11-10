@@ -44,10 +44,12 @@ Usage::
 from __future__ import annotations
 
 import argparse
+import asyncio
 import importlib
 import inspect
 import json
 import os
+import shlex
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -77,13 +79,14 @@ from utils.cli_common import (
     record_error,
     record_next,
 )
-from utils.output_handler import get_output_dir, get_phase_dir
+from utils.output_handler import get_output_dir, get_phase_dir, consolidation_is_current
 from utils.state_manager import StateManager
 from utils.stream_bootstrap import bootstrap_streams
 from utils.text_clip import clip, drop_said_clauses, join_clauses
 from utils import scope_policy_runs
 from utils import unattended as unattended_mod
 from utils.unattended import NeedsHuman
+from utils import process_control
 
 #: Step outcomes the driver branches on.
 DONE = "done"
@@ -323,10 +326,6 @@ class FullWorkflow:
         self._clear_next()
         try:
             if inspect.iscoroutinefunction(target):
-                import asyncio
-
-                from utils import process_control
-
                 # As the dispatcher's `_call_target` does: a Ctrl-C stops the
                 # phase's CLIs inside the cancellation, before `asyncio.run`
                 # joins the worker threads that are waiting on them.
@@ -983,7 +982,6 @@ class FullWorkflow:
         it and records it as ``next``); anything else comes back unchanged."""
         if not command:
             return command
-        import shlex
 
         try:
             tokens = shlex.split(command)
@@ -1176,7 +1174,6 @@ def consolidation_skip_reason(plan_dir: Union[str, Path]) -> Optional[str]:
     not skippable, so a resumed run re-enters it; without the first check it
     ran the pass again on groups it had already consolidated.
     """
-    from utils.output_handler import consolidation_is_current
 
     if consolidation_is_current(str(Path(plan_dir) / "review-plan")):
         return "already ran on these review groups"

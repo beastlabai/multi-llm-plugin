@@ -31,6 +31,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -1161,8 +1162,6 @@ def prompt_budget_utf16(
     cap = CMDLINE_CAP_UTF16_BATCH if is_batch_shim else CMDLINE_CAP_UTF16_NATIVE
     budget = cap - CMDLINE_UTF16_HEADROOM
     if non_prompt_argv:
-        import subprocess  # local: keeps module import cheap and side-effect free
-
         budget -= _utf16_code_units(subprocess.list2cmdline(list(non_prompt_argv)))
     return max(budget, 0)
 

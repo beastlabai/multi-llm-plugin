@@ -30,7 +30,9 @@ Nothing here dispatches: ``utils/write_batch_scheduler`` is the consumer.
 
 from __future__ import annotations
 
+import json
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
@@ -300,7 +302,6 @@ def native_run_record(
     record existed) records ``started_at: None``, so every record of the
     review counts, as it did before. Any other emit — a first run, a bare
     re-run, ``--fresh`` — starts a run: ``started_at`` is *now*."""
-    from datetime import datetime
 
     now = now or datetime.now().isoformat()
     items: List[str] = []
@@ -312,8 +313,6 @@ def native_run_record(
         return {"started_at": now, "items": items, "emitted_at": now}
     previous: Any = None
     try:
-        import json
-
         with open(os.path.join(phase_dir, WRITE_TASK_FILENAME), encoding="utf-8") as handle:
             previous = json.load(handle)
     except (OSError, ValueError):

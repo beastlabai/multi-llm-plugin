@@ -64,6 +64,18 @@ from .commit_paths import BRIEF_END_MARKER, BRIEF_MARKER
 from .git_utils import GitError, attribute_source_args, git_path, run_git
 from .text_clip import clip, plain_line
 from .text_fmt import plural as _plural
+from .apply_orchestrator_base import VALID_OVERRIDE_VALUES
+from .judge_vocab import canonical_value
+from .state_manager import load_groups_payload, stamp_stable_ids
+from .report_parser import (
+    load_consolidated_html_selections,
+    load_html_selections,
+    merge_consolidated_selections,
+    parse_consolidated_skipped_groups,
+    parse_consolidated_validation_overrides,
+    parse_skipped_issues,
+    parse_validation_overrides_issues,
+)
 
 PathLike = Union[str, os.PathLike]
 
@@ -639,8 +651,6 @@ def _keys(value: object) -> int:
 def _honoured(overrides: object) -> int:
     """How many override values apply would honour (``VALID_OVERRIDE_VALUES``
     after the legacy judge spelling is upgraded)."""
-    from .apply_orchestrator_base import VALID_OVERRIDE_VALUES
-    from .judge_vocab import canonical_value
 
     if not isinstance(overrides, dict):
         return 0
@@ -652,14 +662,13 @@ def _report_edits(phase: Path, report: Path) -> int:
     them: each ``### N.`` description against the grouped finding it names
     (``find_edited_issue_descriptions`` with ``build_issue_to_group_map``).
     0 without a readable ``grouped.json`` to compare with."""
-    from .state_manager import load_groups_payload, stamp_stable_ids
 
     try:
         groups = load_groups_payload(json.loads((phase / "grouped.json").read_text(encoding="utf-8")))
     except (OSError, ValueError):
         return 0
-    # The readers live with apply-code-fixes' orchestrator (a top-level
-    # module, imported lazily as utils/improve_workflow.py imports its phases).
+    # The readers live with apply-code-fixes' orchestrator, which imports this
+    # module through the commit front door: a load-time cycle.
     import apply_code_fixes_orchestrator as acf
 
     stamp_stable_ids(groups)
@@ -685,15 +694,6 @@ def count_decisions(phase_dir: PathLike) -> DecisionCounts:
     groups, because the restart carries none of them over either way.
     Read-only.
     """
-    from .report_parser import (
-        load_consolidated_html_selections,
-        load_html_selections,
-        merge_consolidated_selections,
-        parse_consolidated_skipped_groups,
-        parse_consolidated_validation_overrides,
-        parse_skipped_issues,
-        parse_validation_overrides_issues,
-    )
 
     phase = Path(phase_dir)
     counts = DecisionCounts()

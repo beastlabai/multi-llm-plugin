@@ -1545,6 +1545,7 @@ def file_route_composed_flags(
     flag that replaces their baked ``--yes``. A test holds this to each
     host's template.
     """
+    # ``host_capabilities`` imports this module: a load-time cycle.
     from . import host_capabilities
 
     entry = host_capabilities.entry(host_id)

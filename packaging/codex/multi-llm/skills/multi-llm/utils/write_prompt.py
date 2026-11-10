@@ -139,6 +139,8 @@ from .write_safety import (
     PolicyViolation, WritePolicy, policy_allow_clause, policy_outside_note,
     relative_to_root,
 )
+from . import scope_apply as _scope
+from .check_tree import check_tree_exclusions
 
 
 __all__ = [
@@ -317,7 +319,6 @@ def render_write_prompt(
 
 def _scope_refusal(task: Dict[str, Any], output_dir: str, phase: Optional[str]) -> Optional[str]:
     """``scope_apply.stale_task_refusal`` against the plan dir's ``state.json``."""
-    from . import scope_apply as _scope
     state = _known_checks.read_state(output_dir)
     policy, baseline = _scope.effective_from_state(
         state if isinstance(state, dict) else {}, str(phase or ""))
@@ -800,7 +801,6 @@ def check_tree_path(phase_dir: Path, task_id: str) -> Path:
 
 def _tree_exclusions(phase_dir: Path, repo_root: str) -> List[str]:
     """The precise workflow-artifact exclusions shared with the executor."""
-    from .check_tree import check_tree_exclusions
 
     return check_tree_exclusions(phase_dir, repo_root)
 

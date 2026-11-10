@@ -32,6 +32,8 @@ from utils.output_handler import output_file_path
 from utils.plan_updater import insert_tasks_file_reference
 from utils.state_manager import get_or_create_state
 from utils.subagent_tasks import derive_executor_role
+from utils.write_safety import PathEscape, contain_local_path, write_below_root
+from utils.task_result import normalize_result, supply_result_version, validate_result
 
 
 COMPLEXITY_COLORS = {
@@ -321,7 +323,6 @@ def contain_plan_output(
     removal), made through the resolved folder held, so a link swapped in
     after this check is never followed.
     """
-    from utils.write_safety import PathEscape, contain_local_path
 
     path = Path(path)
     plan_dir = plan_output_root(plan_path)
@@ -346,7 +347,6 @@ def write_plan_output(plan_path: Path, target: Path, data: Union[str, bytes]) ->
     :func:`replace_file` writes it (the platform's newlines); an existing
     file's mode carries over. ``OSError`` when it is not written: a link or
     a moved folder met on the way is refused, never followed."""
-    from utils.write_safety import write_below_root
 
     if isinstance(data, str):
         data = data.replace("\n", os.linesep).encode("utf-8")
@@ -390,12 +390,6 @@ def apply_tasks_document(
     plan_path = Path(plan_path)
     if not plan_path.exists():
         raise TasksDocumentError(f"Plan file not found: {plan_path}")
-
-    from utils.task_result import (
-        normalize_result,
-        supply_result_version,
-        validate_result,
-    )
 
     normalize_result("task_generation", data)
     supply_result_version("task_generation", data)

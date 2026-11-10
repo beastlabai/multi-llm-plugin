@@ -34,16 +34,17 @@ The contract, briefly:
 
 from __future__ import annotations
 
+import json as _json
 import os
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as _replace
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from . import phase_walk
 from .advisory import note_swallowed
-from .text_clip import plain_line
+from .text_clip import plain_line, with_closing_mark
 
 # The route, the plan's spelling, the manual-task words and the phase command
 # live below the CLI, where the write phases and the dispatcher plumbing read
@@ -445,7 +446,6 @@ def _with_manual_tasks(
     manual, note, command = _manual_tasks(phases, template=template, plan_arg=plan_arg)
     if not manual:
         return answer
-    from dataclasses import replace as _replace
 
     return _replace(answer, manual_tasks=manual, manual_tasks_note=note,
                     manual_tasks_command=command)
@@ -704,8 +704,6 @@ def next_phase_commands(
         # place a command answer gets them (`emit_answer` had a
         # second writer for `--after implement`, and the two packages that
         # wrote them disagreed on what the answer carries).
-        from dataclasses import replace as _replace
-
         if (answer.phase == "implement" and gate_flags and not answer.why
                 and status_of("implement") == "in_progress"):
             answer = _replace(answer, why=manual_gate_why(implement_entry))
@@ -1221,7 +1219,6 @@ def implement_answers(
     each with its why, in the tool routes' words, every command in this
     host's spelling (:func:`phase_command`). ``()`` when no task waits.
     """
-    import json as _json
 
     source = plan_arg if plan_path is None else plan_path
     state_file = _state_file(os.path.abspath(str(source)))
@@ -1280,7 +1277,6 @@ def implement_resume_why(
     unchanged tree (``stop_answers.native_resume_why`` over
     ``state.json`` as recorded, and the implement folder for the executor's
     check stamps), or ``None``."""
-    import json as _json
 
     from .output_handler import phase_dir_path
 
@@ -1397,8 +1393,6 @@ def emit_answer(
         ):
             # `util next-command` only (with_answers): a stopped implement's
             # answers, beside its resume.
-            from dataclasses import replace as _replace
-
             if plain_resume:
                 answers = implement_answers(
                     plan_arg, host_id, route, plan_path=plan_path,
@@ -1906,7 +1900,6 @@ def render_resume_answers(answers: Sequence[Mapping[str, Any]]) -> str:
     its command and ends its sentence once (``text_clip.with_closing_mark``),
     and the clause adds no mark of its own after the text.
     """
-    from .text_clip import with_closing_mark
 
     return " ".join(
         f"`{entry['command']}` — {with_closing_mark(entry['why'])}"

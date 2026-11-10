@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+import sys
 
 from . import scope_policy as sp
 from .state_file import STATE_FILENAME, read_document
@@ -437,8 +438,6 @@ def strip_selection_scope_fields(data: Any, source: str = "selections") -> Any:
     dropped = [k for k in list(data)
                if str(k).replace("-", "_").lower().startswith(SELECTION_DENY_PREFIXES)]
     if dropped:
-        import sys
-
         for key in dropped:
             data.pop(key, None)
         print(f"WARNING: {source} carries {', '.join(sorted(map(str, dropped)))}; "

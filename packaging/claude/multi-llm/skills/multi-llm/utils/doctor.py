@@ -71,6 +71,7 @@ and ``--json`` is the same complete object either way.
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import os
 import re
@@ -79,6 +80,7 @@ import subprocess
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from . import cli_version_cache
@@ -500,7 +502,6 @@ DOCTOR_PROBE_KIND = "doctor"
 
 def _accepts_kwarg(fn: Any, name: str) -> bool:
     """Whether ``fn`` takes a keyword ``name`` (or ``**kwargs``)."""
-    import inspect
 
     try:
         params = inspect.signature(fn).parameters
@@ -589,7 +590,6 @@ def _base_allow_list(cwd: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
     rendered entry names it by its per-attempt pattern, since that exact
     directory is gone once the row is printed.
     """
-    from dataclasses import replace
 
     from . import landlock_dispatch as jail
 

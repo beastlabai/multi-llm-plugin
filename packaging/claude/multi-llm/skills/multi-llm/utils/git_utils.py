@@ -33,7 +33,7 @@ import sys
 import tempfile
 import time
 from contextlib import contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import (
     Any,
     Callable,
@@ -800,7 +800,6 @@ def git_path(
     made posix, so the caller's own lookup fails on them rather than this
     helper guessing.
     """
-    from pathlib import PurePosixPath, PureWindowsPath
 
     text = str(path)
     pure = PureWindowsPath(text) if os.name == "nt" else PurePosixPath(text)
@@ -1235,8 +1234,6 @@ def _private_index_copy(cwd: Optional[str]) -> str:
         if os.path.exists(source):
             _copy_index_keeping_its_time(source, target)
     except OSError:
-        import tempfile
-
         descriptor, target = tempfile.mkstemp(prefix="multi-llm-index.")
         os.close(descriptor)
         if os.path.exists(source):

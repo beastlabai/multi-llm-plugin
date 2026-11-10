@@ -32,6 +32,9 @@ from pathlib import Path
 from typing import Any, List, Mapping, Optional, Sequence, Tuple, Union
 
 from .state_file import STATE_FILENAME, read_document
+import modes as mode_table
+from .output_handler import output_dir_path
+from .cli_common import dispatcher_command, retry_command
 
 #: Flags a front door synthesises or consumes; a printed commit command never
 #: carries one (the front doors refuse the first three, and the rest are
@@ -60,8 +63,6 @@ class CommitView:
 
 
 def _state_path_for(plan: Union[str, Path]) -> Path:
-    from .output_handler import output_dir_path
-
     return output_dir_path(Path(plan)) / STATE_FILENAME
 
 
@@ -106,7 +107,6 @@ def spell_mode(mode: str, view: Optional[CommitView]) -> str:
     ``apply-commit-fixes`` for a commit review; every other word unchanged."""
     if view is None:
         return mode
-    import modes as mode_table
 
     for row in mode_table.MODES:
         if row.commit_view_of == mode:
@@ -155,7 +155,6 @@ def spell_command(
     base: Optional[Path] = None,
 ) -> str:
     """``dispatcher_command`` in the commit spelling (unchanged without a view)."""
-    from .cli_common import dispatcher_command
 
     word, rest = spell_args(mode, plan, args, view)
     return dispatcher_command(word, *rest, base=base)
@@ -168,7 +167,6 @@ def step_word(row_name: str, word: str) -> str:
     sequence word is spelled through the front-door row whose
     ``commit_view_of`` names it. improve-plan and improve-code keep their words.
     """
-    import modes as mode_table
 
     row = mode_table.resolve(row_name)
     if row is None or not row.is_composite:
@@ -202,7 +200,6 @@ def spell_retry_command(
     for byte (review D, finding 3; plans/review-commits.md §5 "Follow-up
     commands").
     """
-    from .cli_common import retry_command
 
     view = commit_view(plan_path)
     word = spell_mode(mode, view)

@@ -37,6 +37,7 @@ from .state_manager import (
     update_task_status_in_state,
 )
 from .subagent_tasks import APPLY_WRITE_KINDS
+from .check_records import move_check_repeats_in_state, task_own_text
 
 __all__ = ["BatchFacts", "BatchRecord", "KEEP_CHECK_TREE", "record_batch_facts"]
 
@@ -151,7 +152,6 @@ def record_batch_facts(
     if facts.resumed:
         pass
     elif facts.kind == "implement":
-        from .check_records import move_check_repeats_in_state, task_own_text
         set_task_check_findings_in_state(state, task_id, kept(facts.check_findings))
         if facts.check_tree is not KEEP_CHECK_TREE:
             set_task_check_tree_in_state(state, task_id, kept(facts.check_tree))

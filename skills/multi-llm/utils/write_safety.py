@@ -72,7 +72,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set,
 
 from .atomic_io import atomic_write_bytes, atomic_write_text, temp_path_for
 from .clock import local_iso_seconds
-from .git_utils import pin_repo_root
+from .git_utils import pin_repo_root, find_git_entry_root
 # The walk and the hold (a folder reached from a root without following a link,
 # held by its descriptor) live below this module, so the L1 writers beside a
 # plan (state_file, status_file) hold their folder the same way.
@@ -463,7 +463,6 @@ def repo_root_for_report(anchor: Optional[str]) -> str:
         print(f"WARNING: {exc.message}", file=sys.stderr)
     start = Path(anchor).resolve() if anchor else Path.cwd().resolve()
     probe_dir = str(start if start.is_dir() else start.parent)
-    from .git_utils import find_git_entry_root
     return find_git_entry_root(probe_dir) or str(Path(probe_dir).resolve())
 
 

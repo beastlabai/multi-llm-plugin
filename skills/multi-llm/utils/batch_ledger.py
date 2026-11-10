@@ -35,6 +35,7 @@ from .state_manager import (
     TASK_BATCH_CHECK_KEY,
     TASK_BATCH_CHECK_REPEATS_KEY,
     TASK_CHECK_FINDINGS_KEY,
+    stamp_or_mtime,
 )
 from .retry_ladder import STATUS_OK
 from .batch_reply import (
@@ -56,6 +57,8 @@ from .task_outcome import (
 )
 from .subagent_tasks import APPLY_WRITE_KINDS
 from .task_ledger import MIRROR_ROW_LISTS, mirror_ids
+from .status_file import read_status
+from .write_safety import AuditLog
 
 __all__ = [
     "VERDICT_FIELDS",
@@ -373,7 +376,6 @@ class BatchLedger:
     def written_at(self) -> Any:
         """When the report was written: its ``written_at``, else the file's
         mtime (``state_manager.stamp_or_mtime``)."""
-        from .state_manager import stamp_or_mtime
 
         report = self.report() or {}
         return stamp_or_mtime(report.get("written_at"), self.report_path)
@@ -424,8 +426,6 @@ class BatchLedger:
         lists moved to its rows records none of them. A record missing whole
         is one line, not one per row.
         """
-        from .status_file import read_status
-        from .write_safety import AuditLog
 
         report = self.report()
         rows = self.rows()

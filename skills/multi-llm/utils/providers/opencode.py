@@ -3,6 +3,7 @@ import atexit
 import contextlib
 import contextvars
 import difflib
+import hashlib
 import json
 import os
 import re
@@ -49,7 +50,7 @@ from .base import (
     split_reasoning_effort,
     version_tuple,
 )
-from .child_env import _provider_block
+from .child_env import _provider_block, build_child_env
 from .parse_kit import direct_json, fail
 from .version_gate import reset_flag_gate_cache
 
@@ -1248,7 +1249,6 @@ def _user_config_memo_key(cwd: Optional[str]) -> str:
     is, plus ``cwd`` (the project layer). Hashed, because an inherited
     ``OPENCODE_CONFIG_CONTENT`` may hold a key. Literal reads, one per name, so
     the packaging's environment-read walk can resolve each."""
-    import hashlib
 
     try:
         where = os.path.abspath(cwd or os.getcwd())
@@ -2078,7 +2078,6 @@ class OpenCodeProvider(LLMProvider):
         The fallback for :meth:`config_credential_source` when no executor
         builder is handed in. ``None`` means "inherit this process's env".
         """
-        from .base import build_child_env
 
         delta = {
             key: (os.path.expanduser(value) if isinstance(value, str) else value)

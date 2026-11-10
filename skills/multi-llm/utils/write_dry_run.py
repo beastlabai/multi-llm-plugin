@@ -32,7 +32,13 @@ from .task_outcome import (
 )
 from .failure_capture import _atomic_write_json
 from .runner_selection import profile_for_kind
-from .subagent_tasks import SHARED_ARTIFACT_WRITE_KINDS, declared_file_set, snapshot_file_set
+from .subagent_tasks import (
+    SHARED_ARTIFACT_WRITE_KINDS,
+    declared_file_set,
+    snapshot_file_set,
+    preferred_prompt_transport,
+    utf16_units,
+)
 from .write_safety import (
     DRY_RUN_FILENAME,
     PolicyViolation,
@@ -83,7 +89,6 @@ class DryRunReport:
         "would this batch have been refused?" answerable *before* a model is handed
         edit access.
         """
-        from .subagent_tasks import preferred_prompt_transport, utf16_units
 
         entries: List[Dict[str, Any]] = []
         for batch_index, batch_tasks in ordered:

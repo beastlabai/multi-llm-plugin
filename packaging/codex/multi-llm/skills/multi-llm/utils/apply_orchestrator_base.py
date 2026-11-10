@@ -43,7 +43,15 @@ from .apply_output_helpers import (
     write_and_emit_output,
 )
 from .apply_path_helpers import load_json_file
-from .cli_common import add_retired_flag, build_parent_parser
+from .cli_common import (
+    add_retired_flag,
+    build_parent_parser,
+    add_scope_policy_argument,
+    record_error,
+    record_commit_fixes_result,
+    add_notice,
+    record_notice,
+)
 from .apply_selection_helpers import (
     merge_validation_with_groups,
     resolve_priority_args,
@@ -64,7 +72,7 @@ from .judge_vocab import (
     JUDGE_DECIDE_ITEM_IDS,
     canonical_value,
 )
-from .output_handler import derive_prefix, find_output_dir, get_phase_dir
+from .output_handler import derive_prefix, find_output_dir, get_phase_dir, output_dir_path
 from .provider_registry import set_run_anchor
 from .report_parser import load_html_selections, merge_selections
 from .state_manager import (
@@ -86,6 +94,9 @@ from .validation import (
     host_views_lock,
     prepare_batched_revalidation_tasks,
     save_validation_results,
+    merge_batched_revalidation_results,
+    REVALIDATION_SNAPSHOT_NAME,
+    bind_document_file,
 )
 from .human_decisions import (
     apply_verdicts_to_work_set,
@@ -105,6 +116,41 @@ from . import scope_apply as _scope
 from . import scope_policy as _sp
 from . import unattended as _unattended
 from .unattended import AGENT_DECIDE_FLAG, LEGACY_AGENT_DECIDE_FLAGS
+from . import detach as _detach
+from . import host_capabilities as _hosts
+from . import next_phase_words as _words
+from . import routes as _routes
+from . import metrics
+from . import scope_policy_runs as _scope_policy_runs
+from . import review_orchestrator_base
+from . import write_safety
+from . import write_batch_scheduler
+from . import write_phase_bridge
+from .commit_paths import document_label, read_commit_range, is_commit_brief
+from .known_checks import APPLY_FIX_BATCH_CHECKS_KEY
+from .subagent_tasks import file_content_hash
+from .commit_range import (
+    SLUG_PATTERN,
+    pinned_endpoints,
+    pinned_spelling,
+    RangeError,
+    pinned_record,
+    resolve_recorded,
+    DATA_UNDER_REVIEW,
+)
+from .git_utils import get_project_root_from_dir, git_path, get_modified_files, get_staged_files
+from .commit_apply import GUARD_SKIP_STATUS, skip_reason, take_guard
+from .write_batch_scheduler import SchedulerOptions
+from .write_reports import WRITE_BATCH_REPORT_FILENAME
+from .write_resume import review_completed_at
+from .write_safety import AuditLog, relative_to_root, WriteSafetyError
+from .task_result import OUTPUT_NAME_PATTERN_BY_KIND
+from .task_outcome import ExecutorError
+from .check_records import write_result_notice
+from .write_phase_bridge import native_run_record
+from .host_capabilities import resolve_host_id
+from .batch_done import resume_refusal_lines, unrecorded_logged_batches
+from .verification_lines import native_apply_fixes_unverified_line
 
 
 # ---------------------------------------------------------------------------
@@ -446,8 +492,6 @@ def build_common_arg_parser(
     )
 
     # Declared once, in cli_common.
-    from .cli_common import add_scope_policy_argument
-
     add_scope_policy_argument(parser, role="apply")
 
     # =================================================================
@@ -1057,8 +1101,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             # The refusal is the result
             # line's `error`, which the tool routes relay; it used to be on
             # stderr alone, and the line said it named no error.
-            from .cli_common import record_error
-
             record_error(
                 f"{word} cannot take this --human-task answer: "
                 f"{'; '.join(problems)}. Nothing was changed; the {word} stop "
@@ -1076,8 +1118,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         own lines never call a commit brief a plan, through the one owner of the word,
         ``commit_paths.document_label``. Read-only; no state is a plan."""
         try:
-            from .commit_paths import document_label, read_commit_range
-
             word = document_label({"commit_range": read_commit_range(
                 os.path.abspath(str(self.args.plan_file)))})
         except Exception:  # noqa: BLE001 - advisory: the plan's word stands
@@ -1089,11 +1129,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         ``skip``, the resume carrying ``--human-task {task_id}=skip``. Empty
         when nothing can be spelled; the stop then names the flags."""
         try:
-            from . import detach as _detach
-            from . import host_capabilities as _hosts
-            from . import next_phase_words as _words
-            from . import routes as _routes
-
             host_id = _hosts.resolve_host_id(explicit=getattr(self.args, "host", None))
             route = _routes.resolve_route(host_id)
             handle = _detach.active_run()
@@ -1353,7 +1388,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             if self.write_kind == "apply_code_fixes":
                 # What the void run's batches reported about
                 # their own checks is no earlier batch of this run.
-                from .known_checks import APPLY_FIX_BATCH_CHECKS_KEY
                 self.state.clear_key(APPLY_FIX_BATCH_CHECKS_KEY)
             self.state.save()
             # Clear prior changes history for a fresh start
@@ -1696,7 +1730,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 getattr(self.args, "exec_subagents", False)
                 or getattr(self.args, "dry_run_subagents", False)
             )
-            from .subagent_tasks import file_content_hash
 
             review_stamp = file_content_hash(
                 os.path.join(self.out_dir, self.review_subdir, "grouped.json"))
@@ -2031,9 +2064,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         """
         if not self.guards_commit_fixes:
             return
-        from .commit_range import SLUG_PATTERN, pinned_endpoints, pinned_spelling
-        from .commit_paths import is_commit_brief
-        from .output_handler import output_dir_path
 
         plan = Path(self.plan_path)
         state_file = output_dir_path(plan) / "state.json"
@@ -2085,7 +2115,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 f"over, then re-run."
             )
         print(message, file=sys.stderr)
-        from .cli_common import record_error
 
         record_error(message)
         raise OrchestratorError(
@@ -2105,8 +2134,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         """
         if not self.guards_commit_fixes or self.state is None:
             return
-        from .commit_range import RangeError, pinned_endpoints, pinned_record, resolve_recorded
-        from .git_utils import get_project_root_from_dir, git_path
 
         endpoints = pinned_endpoints(self.state.state)
         if endpoints is None:
@@ -2131,7 +2158,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             )
         except RangeError as exc:
             print(exc.message)
-            from .cli_common import record_error
 
             record_error(" ".join(exc.message.split("\n")))
             raise OrchestratorError(
@@ -2167,10 +2193,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         """
         if self._pinned is None or self.state is None or self._is_detach_invoker():
             return
-        from .cli_common import record_commit_fixes_result
-        from .commit_apply import GUARD_SKIP_STATUS, skip_reason, take_guard
-        from .commit_range import pinned_record
-        from .human_decisions import group_id_of
 
         dry = bool(getattr(self.args, "dry_run", False)
                    or getattr(self.args, "dry_run_subagents", False))
@@ -2193,9 +2215,8 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             record = pinned_record(self.state.state)
             if record is not None:
                 record["guard"] = outcome.guard
-                from .metrics import state_file_lock
 
-                with state_file_lock(self.state.state_file):
+                with metrics.state_file_lock(self.state.state_file):
                     self.state.save()
 
         head = str(outcome.guard.get("head") or "")
@@ -2241,7 +2262,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         """
         if self.state is None:
             return set()
-        from .subagent_tasks import file_content_hash
 
         review_stamp = file_content_hash(
             os.path.join(self.out_dir, self.review_subdir, "grouped.json"))
@@ -2289,8 +2309,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         explicit = getattr(self.args, _sp.DEST, None)
         problem = _scope.invalid_policy_message(explicit)
         if problem:
-            from .cli_common import record_error
-
             print(f"ERROR: {problem}", file=sys.stderr)
             record_error(problem)
             raise OrchestratorError(f"Phase _setup, step 10b: {problem}", exit_code=3)
@@ -2300,8 +2318,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         if scope.source != _sp.SOURCE_EXPLICIT:
             # D6 row 16: a policy nobody typed is recorded under `--yes` only
             # (`_record_resolution` returns early otherwise).
-            from . import scope_policy_runs as _scope_policy_runs
-
             self._record_resolution(
                 _scope_policy_runs.SITE_ID,
                 _scope_policy_runs.resolution_text(scope.policy, scope.source),
@@ -2344,7 +2360,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         gate.change = None
         if gate.policy is None or not self.write_kind or self.state is None:
             return
-        from .subagent_tasks import file_content_hash
 
         phase_dir = os.path.join(self.out_dir, self.phase_name)
         change = _scope.detect_policy_change(
@@ -2356,8 +2371,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         if change is None:
             return
         if change.unsettled:
-            from .cli_common import record_error
-
             lines = _scope.unsettled_refusal(change, mode_word=self._scope_phase_word())
             for line in lines:
                 print(line, file=sys.stderr)
@@ -2403,7 +2416,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         """
         if state is None or not self._scope_effective(state).preserve:
             return []
-        from .subagent_tasks import file_content_hash
 
         out_dir = self.out_dir or find_output_dir(
             self.plan_path, guard_double_nesting=self.guard_double_nesting)
@@ -2442,8 +2454,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         return blockers
 
     def _scope_report_blockers(self, blockers: Sequence[Dict[str, Any]]) -> None:
-        from .cli_common import record_error
-
         word = self._scope_phase_word()
         for line in _scope.blocker_lines(blockers, mode_word=word):
             print(line, file=sys.stderr)
@@ -2461,8 +2471,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
     def _publish_scope_notice(self) -> None:
         note = self.scope_gate.notice(self.item_noun_plural)
         if note:
-            from .cli_common import add_notice
-
             add_notice(note)
 
     def _scope_all_deferred_exit(self) -> None:
@@ -2612,8 +2620,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # its prompt byte for byte.
         trust_note: Optional[str] = None
         if self._pinned is not None:
-            from .commit_range import DATA_UNDER_REVIEW
-
             trust_note = DATA_UNDER_REVIEW
         try:
             document = build_judge_tasks(
@@ -2635,9 +2641,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # FILES are ingested in the same invocation, so the decisions reach
         # ``record_human_decision`` and the apply batch without a verdict ever
         # travelling through chat context.
-        from .review_orchestrator_base import dispatch_subagent_tasks
-
-        if not dispatch_subagent_tasks(
+        if not review_orchestrator_base.dispatch_subagent_tasks(
             self.args,
             task_file=tasks_path,
             phase_dir=phase_dir,
@@ -3102,12 +3106,11 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         if not (self._is_detach_invoker()
                 or getattr(self.args, "internal_worker", False)):
             return None
-        from .review_orchestrator_base import maybe_detach
 
         phase_dir = os.path.join(self.out_dir, self.phase_name)
         os.makedirs(phase_dir, exist_ok=True)
         mode = self.confirmation_phase_name or self.phase_name
-        return maybe_detach(
+        return review_orchestrator_base.maybe_detach(
             args=self.args,
             mode=mode,
             phase_dir=phase_dir,
@@ -3148,7 +3151,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         review has no parseable completion — and every caller then keeps
         what it was dating (absence of a date is not staleness).
         """
-        from .write_batch_scheduler import review_completed_at
         return review_completed_at(
             getattr(getattr(self, "state", None), "state", None),
             getattr(self, "write_kind", ""),
@@ -3175,17 +3177,14 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         if not target or not os.path.isfile(target):
             return None
         phase_dir = os.path.join(self.out_dir, self.phase_name)
-        from .write_safety import (
-            AuditLog, file_sha256, relative_to_root, resolve_repo_root,
-        )
         records = AuditLog(phase_dir).records()
         if not records:
             return None
-        current = file_sha256(target)
+        current = write_safety.file_sha256(target)
         if not current:
             return None
         try:
-            root = resolve_repo_root(self.plan_path)
+            root = write_safety.resolve_repo_root(self.plan_path)
             target_key = relative_to_root(target, root)
         except Exception:  # noqa: BLE001 - fall back to matching by hash alone
             target_key = None
@@ -3242,9 +3241,8 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         """
         if not os.path.isfile(backup_path) or not os.path.isfile(target):
             return None
-        from .write_safety import file_sha256
-        kept_sha = file_sha256(backup_path)
-        if not kept_sha or kept_sha == file_sha256(target):
+        kept_sha = write_safety.file_sha256(backup_path)
+        if not kept_sha or kept_sha == write_safety.file_sha256(target):
             return None
         stem, ext = os.path.splitext(backup_path)
         kept = f"{stem}.{kept_sha[:8]}{ext}"
@@ -3359,8 +3357,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         """
         if getattr(self.args, "resume", False):
             return True
-        from .task_result import OUTPUT_NAME_PATTERN_BY_KIND
-        from .write_batch_scheduler import WRITE_BATCH_REPORT_FILENAME
 
         reviewed_at = self._review_completed_at()
 
@@ -3475,20 +3471,12 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         if not self.batches:
             return None
 
-        from .task_outcome import ExecutorError
-        from .write_safety import WriteSafetyError
-        from .write_batch_scheduler import SchedulerOptions, WriteBatchScheduler
-        from .write_phase_bridge import (
-            materialize_write_tasks,
-            write_task_file_for_phase,
-        )
-
         phase_dir = os.path.join(self.out_dir, self.phase_name)
         os.makedirs(phase_dir, exist_ok=True)
         grouped_file = os.path.join(self.out_dir, self.review_subdir, "grouped.json")
         artifact = self.write_phase_artifact()
         tasks_file = artifact if artifact != self.plan_path else None
-        tasks = materialize_write_tasks(
+        tasks = write_phase_bridge.materialize_write_tasks(
             kind=self.write_kind,
             batches=[
                 batch if isinstance(batch, dict) else batch.to_dict()
@@ -3500,7 +3488,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             grouped_file=grouped_file if os.path.exists(grouped_file) else None,
             **self.scope_gate.materialize_kwargs(),
         )
-        task_file = write_task_file_for_phase(
+        task_file = write_phase_bridge.write_task_file_for_phase(
             kind=self.write_kind, tasks=tasks, phase_dir=phase_dir,
             plan_file=self.plan_path,
             tasks_file=tasks_file,
@@ -3536,7 +3524,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             self.args, "resume", False
         )
         try:
-            scheduler = WriteBatchScheduler(SchedulerOptions(
+            scheduler = write_batch_scheduler.WriteBatchScheduler(SchedulerOptions(
                 tasks=tasks,
                 phase_dir=phase_dir,
                 kind=self.write_kind,
@@ -3570,9 +3558,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             print(f"[write-subagents] report: {result.report_path}")
         # A batch whose own check failed after its edits, and
         # a code phase nothing verified, are on the result line a host relays.
-        from .cli_common import record_error, record_notice
-        from .check_records import write_result_notice
-
         stop = getattr(result, "stop", None) or {}
         if stop.get("headline"):
             # An apply phase's
@@ -3609,11 +3594,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         """
         if not self.write_kind or not self.batches:
             return None
-        from .write_phase_bridge import (
-            materialize_write_tasks,
-            native_run_record,
-            write_task_file_for_phase,
-        )
 
         phase_dir = os.path.join(self.out_dir, self.phase_name)
         os.makedirs(phase_dir, exist_ok=True)
@@ -3621,7 +3601,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         grouped = grouped_file if os.path.exists(grouped_file) else None
         artifact = self.write_phase_artifact()
         tasks_file = artifact if artifact != self.plan_path else None
-        tasks = materialize_write_tasks(
+        tasks = write_phase_bridge.materialize_write_tasks(
             kind=self.write_kind,
             batches=[
                 batch if isinstance(batch, dict) else batch.to_dict()
@@ -3636,14 +3616,12 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         self._native_write_tasks = list(tasks)
         # Stamped native, so `status` shows this run rather
         # than an earlier executor run's `.status.json`.
-        from .host_capabilities import resolve_host_id
-
         # The run its batches belong to is read before
         # this rewrite, so `status` counts what the whole run handed out
         # across a `--resume` and none of an earlier run's records.
         run = native_run_record(
             phase_dir, tasks, resume=bool(getattr(self.args, "resume", False)))
-        return write_task_file_for_phase(
+        return write_phase_bridge.write_task_file_for_phase(
             kind=self.write_kind, tasks=tasks, phase_dir=phase_dir,
             plan_file=self.plan_path, tasks_file=tasks_file, grouped_file=grouped,
             native_host=resolve_host_id(explicit=self._host_id()),
@@ -3663,7 +3641,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         tasks = getattr(self, "_native_write_tasks", None) or []
         if not tasks:
             return
-        from .batch_done import resume_refusal_lines, unrecorded_logged_batches
 
         word = self.confirmation_phase_name or self.phase_name
         unrecorded = unrecorded_logged_batches(
@@ -3694,7 +3671,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         """
         if self.state is None:
             return
-        from .git_utils import get_modified_files, get_staged_files
         if self.state.get("pre_existing_changes") is not None:
             existing = self.state.get("pre_existing_changes") or []
             # "path(s)", not "file(s)": `git status --porcelain` collapses an
@@ -4343,9 +4319,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # D3b: with --exec-subagents this process dispatches the revalidation
         # batch and merges it in place, so the phase continues with the updated
         # validation instead of exiting for a host to drive a second turn.
-        from .review_orchestrator_base import dispatch_subagent_tasks
-
-        if dispatch_subagent_tasks(
+        if review_orchestrator_base.dispatch_subagent_tasks(
             self.args,
             task_file=revalidation_task_path,
             phase_dir=review_dir,
@@ -4354,8 +4328,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             plan_path=str(self.plan_path),
             label="revalidation",
         ):
-            from .validation import merge_batched_revalidation_results
-
             self.validation = merge_batched_revalidation_results(
                 output_dir=review_dir,
                 revalidation_metadata=revalidation_tasks,
@@ -4399,7 +4371,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         binds). ``None`` when it cannot be read or decoded, which falls back to
         :meth:`get_revalidation_context`'s text with no path.
         """
-        from .validation import REVALIDATION_SNAPSHOT_NAME, bind_document_file
 
         try:
             return bind_document_file(
@@ -4450,7 +4421,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         """
         if self.write_kind != "apply_code_fixes":
             return
-        from .verification_lines import native_apply_fixes_unverified_line
 
         tests = native_apply_fixes_unverified_line(self.plan_path)
         if tests:

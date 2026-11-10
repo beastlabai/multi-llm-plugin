@@ -55,6 +55,8 @@ from .commit_range import (
 from .commit_paths import document_label
 from .text_clip import clip, plain_line
 from .text_fmt import plural as _plural
+from .output_handler import output_dir_path
+from .prompt_channels import INLINE_CONTEXT_PLAN_LABEL
 
 #: The two review templates (``prompts/``).
 CODE_REVIEW_PROMPT = "code_review.txt"
@@ -90,7 +92,6 @@ def run_commit_range(plan_path: Any) -> Optional[Dict[str, Any]]:
     """The ``commit_range`` the run anchored on *plan_path* records, read
     without touching ``state.json`` (a review slot only reads it); None when
     there is no state file, it is unreadable, or it records none."""
-    from .output_handler import output_dir_path
 
     try:
         state_file = Path(output_dir_path(Path(plan_path).resolve())) / "state.json"
@@ -198,7 +199,6 @@ def plan_block(record: Mapping[str, Any], *, repo_root: Optional[str] = None,
     path = context_plan_path(record, repo_root=repo_root)
     if path is None:
         return ""
-    from .prompt_channels import INLINE_CONTEXT_PLAN_LABEL
 
     digest = record.get("plan_sha256") or "unknown"
     where = (

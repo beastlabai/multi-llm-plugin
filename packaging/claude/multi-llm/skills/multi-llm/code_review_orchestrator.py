@@ -25,12 +25,14 @@ import argparse
 import asyncio
 import contextlib
 import dataclasses
+import glob as glob_module
 import hashlib
 import json
 import os
 import posixpath
 import re
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, NamedTuple, Optional, Sequence, Set, Tuple
@@ -58,6 +60,7 @@ from utils.cli_common import (
     dispatcher_prefix,
     reaggregate_command,
     record_next,
+    add_scope_policy_argument,
 )
 from utils.report_parser import issue_numbering_footer
 from utils import report_markdown
@@ -238,7 +241,12 @@ from utils.git_utils import (
 )
 from utils.html_report_generator import generate_html_report, write_html_report, model_label, served_model_label, VALIDATION_ORDER, UNKNOWN_STATUS_RANK
 from utils.html_report_generator import failed_models_line, sidecar_json
-from utils.commit_paths import commit_review_artifact, commit_reviews_folder_rel
+from utils.commit_paths import (
+    commit_review_artifact,
+    commit_reviews_folder_rel,
+    document_label,
+    read_commit_range,
+)
 from utils.commit_range import (
     RangeError,
     display_range,
@@ -250,6 +258,11 @@ from utils.commit_range import (
     resolve_commit_strict,
     resolve_recorded,
 )
+from utils import scope_report as _scope_report
+from utils import status_file
+from utils.tasks_file import find_tasks_file
+from utils.commit_front_door import hand_worker_the_stage_applier
+from utils.commit_spelling import commit_view, spell_mode
 
 
 def derive_prefix(plan_path: Path) -> str:
@@ -708,8 +721,6 @@ Examples:
     )
 
     # Declared once, in cli_common.
-    from utils.cli_common import add_scope_policy_argument
-
     add_scope_policy_argument(parser, role="review")
 
     return parser.parse_args(argv)
@@ -3335,8 +3346,6 @@ def code_review_scope_baseline(
     commit_review = isinstance(record.get("commit_range"), dict)
     tasks_path: Optional[str] = None
     if not commit_review:
-        from utils.tasks_file import find_tasks_file
-
         try:
             tasks_path = find_tasks_file(str(plan_path))
         except (FileNotFoundError, ValueError, OSError):
@@ -3447,7 +3456,6 @@ async def run_single_review(
     Returns:
         Tuple of (success, issues_list, error)
     """
-    import time
     start_time = time.time()
     slot = CodeSlot(
         model_spec, plan_path, out_dir, timeout=timeout,
@@ -4440,8 +4448,6 @@ def generate_review_report(
     # Scope tags: the round's
     # effective policy and the tag counts over distinct groups, never over the
     # issue rows below (a consensus finding is one row per model).
-    from utils import scope_report as _scope_report
-
     if scope_state is None:
         scope_state = _scope_report.read_state(phase_dir)
     scope_round = _scope_report.round_info(scope_state, "code-review", validated_groups or [])
@@ -4837,8 +4843,6 @@ def _format_issue(
 
     if introduced_by:
         lines.append(introduced_by)
-
-    from utils import scope_report as _scope_report
 
     lines.append(_scope_report.md_member_line(issue))
     if group_scope is not None:
@@ -5463,7 +5467,6 @@ def _plan_file_label(plan_path: Path, args: Any = None) -> str:
     (:func:`landed_stage`) is a commit brief too: a detached launch of a new
     brief has its ``commit_range`` only in that stage until the worker's
     boundary, after this label prints. Read-only; no state is a plan."""
-    from utils.commit_paths import document_label, read_commit_range
 
     record = read_commit_range(plan_path)
     if record is None and landed_stage(args):
@@ -5477,7 +5480,6 @@ async def main(argv: Optional[List[str]] = None) -> int:
     phase dir, taken at its entry and released when it returns or exits
     (``detach.PhaseRun``; docs/development/runtime.md, "One writer per phase
     dir")."""
-    from utils.commit_front_door import hand_worker_the_stage_applier
 
     # A worker started here directly (review-commits --detach) applies its
     # stage as the dispatcher's does.
@@ -5922,9 +5924,6 @@ def _guard_phase_state(args: argparse.Namespace, plan_path: Path) -> Optional[Pi
         # Said as done, never as an error. A
         # commit review says it as the mode the user typed, of its commit
         # brief.
-        from utils.commit_paths import document_label
-        from utils.commit_spelling import commit_view, spell_mode
-
         sys.exit(report_already_completed(
             spell_mode("review-code", commit_view(state_guard.state)),
             get_phase_dir(plan_path, 'code-review'),
@@ -5946,7 +5945,6 @@ def _guard_phase_state(args: argparse.Namespace, plan_path: Path) -> Optional[Pi
 def _checkpoint_unreadable(phase_dir: Path) -> bool:
     """Whether *phase_dir*'s checkpoint is damaged or cannot be read
     (``status_file.checkpoint_damage``)."""
-    from utils import status_file
 
     try:
         return status_file.checkpoint_damage(str(phase_dir)) is not None
@@ -6954,7 +6952,6 @@ def _announce_pending_salvage(
     follows them (``[REAGGREGATE_AFTER_SALVAGE]``, also the result line's
     ``next``)."""
     # Check for salvage requests and print reaggregate command
-    import glob as glob_module
     salvage_pattern = str(phase_dir / "salvage_*.json")
     # emit_salvage_task writes salvage_task_<model>.json beside each
     # salvage_<model>.json and the glob matches both, so one failed model would

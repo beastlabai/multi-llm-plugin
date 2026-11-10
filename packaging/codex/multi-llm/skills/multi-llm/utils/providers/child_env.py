@@ -242,6 +242,8 @@ def _merged_config(anchor: Optional[str] = None) -> Dict[str, Any]:
     path, so every failure resolves to "no configuration", i.e. the documented
     defaults. ``claude_code``'s fallback-list read raises instead, on purpose.
     """
+    # ``provider_registry`` imports the provider base, which imports this
+    # module: a load-time cycle.
     from ..provider_registry import load_config
     try:
         config = load_config(anchor=anchor)
@@ -568,6 +570,7 @@ def env_allowlist_matrix(
     ``len(registry) × len(platforms) × len(capabilities)``, computed, not typed.
     """
     if provider_names is None:
+        # A load-time cycle, as in :func:`_merged_config`.
         from ..provider_registry import _PROVIDERS
         provider_names = sorted(_PROVIDERS)
     return {

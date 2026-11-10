@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import unicodedata
+import warnings
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -16,6 +17,7 @@ from .judge_vocab import upgrade_legacy
 from .schema_validator import validate_state_file
 from . import state_file as _state_file
 from . import task_ledger as _task_ledger
+from .output_handler import get_output_dir
 
 logger = logging.getLogger(__name__)
 
@@ -1677,7 +1679,6 @@ class StateManager:
         self.read_only = read_only
 
         # State file lives in the plan's output directory
-        from .output_handler import get_output_dir
         self.plan_dir = get_output_dir(self.plan_path)
         self.state_file = self.plan_dir / "state.json"
 
@@ -1990,7 +1991,6 @@ class StateManager:
         is_valid, errors = self._validate_state(self.state)
         if not is_valid:
             # Log validation errors; the save has gone ahead
-            import warnings
             warnings.warn(f"State validation warnings: {errors}")
 
     def _read_current_text(self) -> Optional[str]:

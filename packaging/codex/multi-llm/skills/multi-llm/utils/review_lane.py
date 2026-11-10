@@ -43,6 +43,7 @@ import asyncio
 import json
 import os
 import sys
+import time
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -83,6 +84,8 @@ from .validation import (
     resolved_reaggregate_command,
     validation_source_decision,
 )
+from . import scope_policy_runs as _scope_policy_runs
+from . import failure_capture
 
 
 # ---------------------------------------------------------------------------
@@ -623,8 +626,6 @@ def open_round(
             "defaults.models: " + ", ".join(model_specs),
         )
     if unattended:
-        from . import scope_policy_runs as _scope_policy_runs
-
         _scope_policy_runs.announce(
             phase_dir, scope_round_policy.policy, scope_round_policy.source,
             unattended=True,
@@ -914,7 +915,6 @@ async def run_slot(slot: ReviewSlot, *, start_time: float) -> SlotResult:
     answer. An answer on stdout, or in a misnamed file adopted by name, is
     this slot's whatever the old file does.
     """
-    import time
 
     steps = slot.slot_steps()
     guard = steps.slot_guard(
@@ -2239,11 +2239,9 @@ async def _resume_round(
     # out: native hosts reread the JSON, not this in-memory document.
     with host_views_lock(phase_dir):
         if ensure_prompt_sidecars(batch_metadata, phase_dir):
-            from .failure_capture import _atomic_write_json
-
             try:
                 with claim.held("rewrite validation_tasks.json"):
-                    _atomic_write_json(validation_tasks_path, batch_metadata)
+                    failure_capture._atomic_write_json(validation_tasks_path, batch_metadata)
             except OSError as exc:
                 print(
                     f"ERROR: Could not persist repaired prompt metadata to "

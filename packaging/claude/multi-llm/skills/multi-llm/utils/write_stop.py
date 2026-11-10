@@ -53,6 +53,8 @@ from .subagent_tasks import APPLY_WRITE_KINDS, declared_file_set
 from .task_ledger import ACCEPTED_WITH_FINDINGS_MARK, is_declined_reason
 from .text_clip import clip
 from .write_safety import policy_allow_clause, policy_outside_note, policy_skip_clause
+from . import status_file as _status_file
+from .manual_tasks import manual_gate_why, manual_gate_decline_answers
 
 
 class StopAccount:
@@ -1064,7 +1066,6 @@ class StopAccount:
     ) -> Optional[str]:
         """What the gate's resume does, in ``manual_tasks.manual_gate_why``'s
         words, over this run's titles."""
-        from .manual_tasks import manual_gate_why
 
         try:
             return manual_gate_why(self.manual_gate_entry(gating, waiting))
@@ -1077,7 +1078,6 @@ class StopAccount:
         """The gate's other ways on, ``manual_tasks.manual_gate_decline_answers``
         The user's ``--human-task <id>=skip`` for each
         gating manual task, recorded on the stop as its ``answers``."""
-        from .manual_tasks import manual_gate_decline_answers
 
         try:
             return manual_gate_decline_answers(self.manual_gate_entry(gating, waiting))
@@ -1569,7 +1569,6 @@ class StopAccount:
             # No earlier run left a mirror to patch: this run's own.
             self._mirror_status(result)
             return
-        from . import status_file as _status_file
         try:
             # The phase-level `state` stays the earlier run's: this run
             # changed nothing a status reader would count.

@@ -26,7 +26,7 @@ import os
 import threading
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from .cli_common import skill_dir
+from .cli_common import skill_dir, flag_value
 from .process_state import process_cache
 from .unattended import NeedsHuman
 
@@ -301,7 +301,6 @@ def resolve_host_id(
     if explicit:
         return explicit
     if argv:
-        from .cli_common import flag_value
         found = flag_value(argv, "--host")
         if found:
             return found

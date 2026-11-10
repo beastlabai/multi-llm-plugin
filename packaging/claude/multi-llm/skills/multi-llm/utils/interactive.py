@@ -37,9 +37,7 @@ def _availability_reason(provider_name: str) -> str:
     diagnostic may not become the reason a model list cannot be filtered.
     """
     try:
-        from .provider_registry import get_provider
-
-        provider = get_provider(provider_name)
+        provider = _provider_registry.get_provider(provider_name)
         if provider is None:
             return ""
         return provider.describe_availability().detail
@@ -289,7 +287,6 @@ def select_models_two_step(anchor: Optional[str] = None) -> List[str]:
     Returns:
         List of model specs in provider:model format (e.g., ["gemini:gemini-2.5-flash"])
     """
-    from .provider_registry import get_provider
 
     config = load_config(anchor=anchor)
     providers = config.get("providers", {})
@@ -306,7 +303,7 @@ def select_models_two_step(anchor: Optional[str] = None) -> List[str]:
         # picker list, and the typed report has nothing to add to a row that is
         # either shown or not. The warnings further down are where the state
         # earns its keep.
-        provider = get_provider(name)
+        provider = _provider_registry.get_provider(name)
         if provider is None or not provider.is_available():
             continue
 

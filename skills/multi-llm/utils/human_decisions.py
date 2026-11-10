@@ -47,7 +47,11 @@ from .judge_vocab import (
     canonical_value,
 )
 from . import importance as _importance
-from .schema_validator import schema_version_supplied, validate_human_decision_verdicts
+from .schema_validator import (
+    schema_version_supplied,
+    validate_human_decision_verdicts,
+    supply_schema_version,
+)
 from .subagent_prompts import build_human_decision_judge_prompt
 from .subagent_tasks import (
     PromptBudget,
@@ -59,6 +63,8 @@ from .subagent_tasks import (
     safe_output_token,
     write_task_file,
 )
+from .state_manager import generate_group_id
+from .task_outcome import batch_report_path
 
 
 __all__ = [
@@ -169,7 +175,6 @@ def group_id_of(group: Dict[str, Any]) -> str:
     existing = group.get("group_hash") or group.get("group_id")
     if existing:
         return str(existing)
-    from .state_manager import generate_group_id
     return generate_group_id(group)
 
 
@@ -361,7 +366,6 @@ class VerdictIngest:
 
 
 def _supply_verdict_version(document: Any) -> Optional[str]:
-    from .schema_validator import supply_schema_version
     return supply_schema_version(document, "human_decision_verdicts.schema.json")
 
 
@@ -497,7 +501,6 @@ def judge_labels(
     replaced after ingestion never takes another file's credit. Without it
     (offline callers) the files are read now.
     """
-    from .task_outcome import batch_report_path
     # With *ingest* the key is the source path as ingested; without it (offline
     # callers) the file's realpath now, as before.
     runner_by_path: Dict[str, str] = {}

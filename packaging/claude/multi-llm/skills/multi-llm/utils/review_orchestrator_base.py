@@ -18,6 +18,7 @@ Functions cover:
 import argparse
 import asyncio
 import contextvars
+import glob as glob_module
 import hashlib
 import json
 import os
@@ -27,6 +28,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -55,7 +57,13 @@ from .cli_common import (
     record_artifacts,
     record_next,
 )
-from .output_handler import sanitize_prefix, get_phase_dir
+from .output_handler import (
+    sanitize_prefix,
+    get_phase_dir,
+    consolidation_is_current,
+    output_dir_path,
+    PHASE_DIRECTORIES,
+)
 from .prompt_loader import load_prompt
 from . import unattended as _unattended
 from .provider_registry import (
@@ -160,7 +168,9 @@ from .state_manager import (
     get_or_create_state,
     stamp_stable_ids,
     load_groups_payload,
-    save_groups_payload,  # noqa: F401 - the module's name for grouped.json's writer
+    save_groups_payload,  # noqa: F401 - the module's name for grouped.json's writer,
+    stamped_group_id,
+    generate_suggestion_id,
 )
 from .validation import (
     PLAN_SNAPSHOT_NAME,
@@ -187,9 +197,40 @@ from .validation import (
 from .subagent_tasks import (
     build_inputs,
     write_salvage_task_file,
+    batch_manifest,
 )
 from .suggestion_processor import group_similar_suggestions
-from .validation import apply_validation_to_groups, save_validation_results
+from .validation import apply_validation_to_groups, save_validation_results, join_model_names
+from . import subagent_tasks
+from . import metrics
+from . import runner_selection
+from . import provider_registry
+from . import failure_capture
+from . import task_file_runner
+from . import probe_state as _probe_state
+from . import sandbox_walk
+from . import report_markdown as _rm
+from . import scope_report as _scope_report
+from .task_batch import _recorded_provenance, _recorded_runners
+from .runner_selection import _REASON_EXPLANATION
+from .task_outcome import RunnerRejected, BatchFailed, ExecutorError
+from .task_file_runner import dry_run_report
+from .landlock_dispatch import (
+    render_home,
+    describe_changed,
+    TrustEntriesNote,
+    render_summary_entries,
+    as_jail_denials,
+    jail_denials_text,
+)
+from .probe_state import SandboxProbeResult
+from .sandbox_walk import (
+    cached_sandbox_verdict,
+    sandbox_bypass_line,
+    sandbox_fallback_rung,
+    sandbox_walk_note,
+)
+from .write_safety import restore_leftovers
 
 # Required fields for each suggestion (shared across review phases)
 REQUIRED_FIELDS = ["title", "desc", "importance", "reference", "type"]
@@ -255,8 +296,8 @@ def recompute_consolidation_recommendation(
     """
     if not supports_consolidation:
         return None
+    # ``consolidation`` imports this module: a load-time cycle.
     from .consolidation import CONSOLIDATION_RECOMMENDED_THRESHOLD
-    from .output_handler import consolidation_is_current
     # Live run 8: a consolidation that already ran on these groups is not
     # recommended again (a `--reaggregate` after `--consolidate` re-enters
     # here); groups that changed since make it stale, and it is again.
@@ -488,8 +529,6 @@ def _authoritative_validator_runner(
     Returns:
         ``{batch_index: runner_or_None}`` for every batch in ``batch_metadata``.
     """
-    from .task_batch import _recorded_provenance, _recorded_runners
-    from .subagent_tasks import batch_manifest, file_bytes_sha256
     kind = batch_metadata.get("kind") or "validation"
     batches = batch_metadata.get("batches", [])
     result: Dict[int, Optional[str]] = {}
@@ -517,7 +556,7 @@ def _authoritative_validator_runner(
         runner: Optional[str] = None
         current = (
             batch_hashes.get(str(index), "") if batch_hashes is not None
-            else file_bytes_sha256(
+            else subagent_tasks.file_bytes_sha256(
                 os.path.join(phase_dir, f"validation_batch_{index}.json")
             )
         )
@@ -582,8 +621,6 @@ def merge_validation_batches(
     wrote itself are merged; a batch without them is missing, never read from
     disk.
     """
-    from .subagent_tasks import batch_manifest
-    from .validation import join_model_names
     held: Dict[Any, Any] = {}
     batch_hashes: Dict[str, str] = {}
     held_indexes: set = set()
@@ -678,11 +715,9 @@ def reopen_phase_for_validation(
     snapshot. The file goes back as read, less this phase's entry and plus
     what every ``StateManager`` load and save stamps.
     """
-    from .metrics import state_file_lock
-    from .output_handler import output_dir_path
 
     plan = Path(plan_path)
-    with state_file_lock(output_dir_path(plan.resolve()) / "state.json"):
+    with metrics.state_file_lock(output_dir_path(plan.resolve()) / "state.json"):
         reopened = get_or_create_state(plan)
         phases = reopened.state.get("phases_completed")
         if isinstance(phases, dict) and phases.pop(phase_name, None):
@@ -841,7 +876,6 @@ def scope_decisions_for(
     determines it — a read-only review included. ``None`` (and
     nothing stored) under ``expand``.
     """
-    from .state_manager import stamped_group_id
 
     counts = _scope_round.annotate_decisions(
         validated, scope_meta.get("policy"),
@@ -1080,8 +1114,6 @@ def _print_executor_refusal(
     ``{"state": "runner_rejected", "reason_code": …}`` so ``status`` and a
     detached poll describe this run rather than the one before it.
     """
-    from .runner_selection import _REASON_EXPLANATION
-    from .task_outcome import RunnerRejected
 
     print(f"ERROR: {failure.message}", file=sys.stderr)
     rejected = isinstance(failure, RunnerRejected)
@@ -1351,10 +1383,7 @@ def materialization_read_refusal(args: Any, plan_path: str) -> Optional[Any]:
     if not exec_subagents_requested(args):
         return _NativeReadAdvisory(plan_path)
     try:
-        from .runner_selection import resolve_task_runner
-        from .provider_registry import get_provider, parse_model_spec
-
-        spec = resolve_task_runner(
+        spec = runner_selection.resolve_task_runner(
             {
                 "task_id": "validation-batch-0",
                 "kind": "validation",
@@ -1363,8 +1392,8 @@ def materialization_read_refusal(args: Any, plan_path: str) -> Optional[Any]:
             },
             anchor=plan_path,
         )
-        provider_name, _model = parse_model_spec(spec, anchor=plan_path)
-        provider = get_provider(provider_name)
+        provider_name, _model = provider_registry.parse_model_spec(spec, anchor=plan_path)
+        provider = provider_registry.get_provider(provider_name)
     except Exception:  # noqa: BLE001 - dispatch-time refusal is the backstop
         return None
     if provider is None:
@@ -1436,11 +1465,9 @@ def verify_round_context(
         with host_views_lock(phase_dir):
             ensure_prompt_sidecars(document, phase_dir)
             if task_file:
-                from .failure_capture import _atomic_write_json
-
                 invalidate_host_index(task_file)
                 try:
-                    _atomic_write_json(task_file, document)
+                    failure_capture._atomic_write_json(task_file, document)
                 except OSError as exc:
                     print(
                         f"ERROR: Could not persist the rebound prompts to "
@@ -1498,14 +1525,6 @@ def dispatch_subagent_tasks(
     dry_run = bool(getattr(args, "dry_run_subagents", False))
     if not exec_subagents_requested(args) and not dry_run:
         return False
-    from .task_outcome import (
-        BatchFailed,
-        ExecutorError,
-    )
-    from .task_file_runner import (
-        continue_past_marker,
-        dry_run_report,
-    )
 
     project_root = get_project_root(plan_path) if plan_path else None
     try:
@@ -1542,7 +1561,7 @@ def dispatch_subagent_tasks(
         # "Consuming checked bytes").
         fresh = (label in ("validation", "revalidation")
                  and _result_files.phase_recovered(phase_dir))
-        return continue_past_marker(
+        return task_file_runner.continue_past_marker(
             args,
             task_file=task_file,
             phase_dir=phase_dir,
@@ -2033,9 +2052,6 @@ def grouped_coverage_gap(
         One line per model that differs, naming what is on disk and not in
         the file and the reverse; empty when the two agree.
     """
-    from collections import Counter
-
-    from .state_manager import generate_suggestion_id
 
     in_file: Dict[str, Counter] = {}
     spec_by_stem: Dict[str, str] = {}
@@ -2336,10 +2352,6 @@ def dispatch_salvage_tasks(
             "under this flag, so no model result is repaired."
         )
         return []
-    import glob as glob_module
-
-    from .task_outcome import ExecutorError
-    from .task_file_runner import run_task_file
 
     repaired: List[str] = []
     project_root = get_project_root(plan_path) if plan_path else None
@@ -2360,7 +2372,7 @@ def dispatch_salvage_tasks(
             continue
         print(f"\n[exec-subagents] dispatching salvage task from {task_file}")
         try:
-            report = run_task_file(
+            report = task_file_runner.run_task_file(
                 task_file,
                 phase_dir=phase_dir,
                 phase=phase,
@@ -2863,7 +2875,6 @@ def jail_record_fields(details: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 
 def _render_home(path: Optional[str]) -> str:
     """``path`` with ``$HOME`` shown as ``~`` (``landlock_dispatch``'s rule)."""
-    from .landlock_dispatch import render_home
 
     return render_home(path)
 
@@ -3072,11 +3083,6 @@ def announce_retired_rungs(
 
     Nothing else about the run changes.
     """
-    try:
-        from .sandbox_walk import recorded_rung_retirements
-    except Exception:  # noqa: BLE001 - a notice may never end a fan-out
-        recorded_rung_retirements = None  # type: ignore[assignment]
-
     # (provider, rung id) -> {"specs": [...], "measured": bool, "version": str}
     groups: Dict[Tuple[str, str], Dict[str, Any]] = {}
     # (provider, incidental rung id) -> [specs]: the plugin's own jail last run,
@@ -3103,9 +3109,8 @@ def announce_retired_rungs(
             continue
         if provider_name not in retirements:
             try:
-                retirements[provider_name] = (
-                    list(recorded_rung_retirements(provider_name))
-                    if recorded_rung_retirements else []
+                retirements[provider_name] = list(
+                    sandbox_walk.recorded_rung_retirements(provider_name)
                 )
             except Exception:  # noqa: BLE001
                 retirements[provider_name] = []
@@ -3167,10 +3172,6 @@ def _recorded_rung_outcome(
 ) -> Optional[Tuple[str, str, str]]:
     """``(outcome, probe tail, version)`` this process's probe cache recorded
     for ``rung_id`` of ``provider_name`` this run, or ``None``."""
-    try:
-        from . import probe_state as _probe_state
-    except Exception:  # noqa: BLE001 - a notice may never end a fan-out
-        return None
     cache = getattr(_probe_state, "_SANDBOX_PROBE_CACHE", None)
     lock = getattr(_probe_state, "_SANDBOX_PROBE_LOCK", None)
     if not isinstance(cache, dict):
@@ -3452,7 +3453,6 @@ def salvage_requested_this_attempt(phase_dir: str, model_spec: str) -> bool:
     that follows the salvage in the same phase dir writes the same bare name,
     so the salvage verdict is usually gone by report time.
     """
-    import glob as glob_module
 
     phase_dir = str(phase_dir)
     stem = sanitize_model_name(str(model_spec))
@@ -3639,8 +3639,6 @@ def _fanout_sandbox_verdict(provider_name: str, cwd: Optional[str]) -> Any:
     anything, so this costs nothing for every adapter that declares no OS
     sandbox — which is all of them but codex.
     """
-    from .probe_state import SandboxProbeResult
-    from .sandbox_walk import cached_sandbox_verdict
 
     try:
         provider = get_provider(provider_name)
@@ -3735,7 +3733,6 @@ def sandbox_bypassed_notice(provider_name: str, probe: Any = None) -> str:
     """
     if probe is None:
         return sandbox_bypassed_notice_text(provider_name)
-    from .sandbox_walk import sandbox_bypass_line
 
     rungs: Tuple[Any, ...] = ()
     try:
@@ -3847,7 +3844,6 @@ def sandbox_refusal(provider_name: str, cwd: Optional[str]) -> SandboxVerdict:
     rung probe that gave no answer (fail-closed: nothing learned never licenses
     a widening), and for every adapter that declares no fallback.
     """
-    from .sandbox_walk import _fallback_rungs, sandbox_fallback_rung, sandbox_walk_note
 
     probe = _fanout_sandbox_verdict(provider_name, cwd)
     if probe.state != "unavailable":
@@ -3877,7 +3873,7 @@ def sandbox_refusal(provider_name: str, cwd: Optional[str]) -> SandboxVerdict:
         )
     reason = sandbox_unavailable_reason(provider_name, probe.tail)
     try:
-        declared = _fallback_rungs(get_provider(provider_name), PROFILE_GENERATE)
+        declared = sandbox_walk._fallback_rungs(get_provider(provider_name), PROFILE_GENERATE)
     except Exception:  # noqa: BLE001 - a diagnostic may never end a fan-out
         declared = ()
     note = sandbox_walk_note(probe, policy, provider_name=provider_name, rungs=declared)
@@ -4096,8 +4092,6 @@ def porcelain_snapshot(
     # A staged file a rollback restore kept for the user is no slot's write
     # (docs/development/write-safety.md, restore): exactly that file, as the
     # write executor's sweep leaves it out.
-    from .write_safety import restore_leftovers
-
     leftovers = restore_leftovers(root)
     if leftovers:
         real_root = os.path.realpath(root)
@@ -4742,7 +4736,6 @@ def merge_home_checks(records: Sequence[Any]) -> Optional[Dict[str, Any]]:
 def _describe_home_change(record: Dict[str, Any]) -> str:
     """``landlock_dispatch.describe_changed`` over a slot's merged record, so
     both lanes name and summarize a change the same way."""
-    from .landlock_dispatch import describe_changed
 
     return describe_changed(
         [str(name) for name in record.get("changed") or ()],
@@ -4795,7 +4788,6 @@ def foreign_trust_line(provider_name: str, record: Dict[str, Any]) -> Any:
     ``landlock_dispatch.TrustEntriesNote``, rendered by
     :func:`print_closing_summary` with the executor lane's wording and naming
     only the tables still there then."""
-    from .landlock_dispatch import TrustEntriesNote
 
     home = record.get("home") or None
     return TrustEntriesNote(
@@ -4820,7 +4812,6 @@ def _closing_key(key: Any) -> str:
 def phase_summary_key(plan_path: Union[str, Path], phase_name: str) -> str:
     """The closing-summary key of a plan's phase: its phase directory,
     computed and never created (``output_dir_path``, not ``get_phase_dir``)."""
-    from .output_handler import PHASE_DIRECTORIES, output_dir_path
     return str(
         output_dir_path(Path(plan_path)) / PHASE_DIRECTORIES.get(phase_name, phase_name)
     )
@@ -4839,7 +4830,6 @@ def note_for_closing_summary(key: Any, line: Any) -> None:
 def print_closing_summary(key: Any) -> List[str]:
     """Print, once, the lines :func:`note_for_closing_summary` kept for this
     run, under one heading; returns them (``[]`` prints nothing)."""
-    from .landlock_dispatch import render_summary_entries
 
     with _CLOSING_LOCK:
         entries = _CLOSING_LINES.pop(_closing_key(key), [])
@@ -4859,7 +4849,6 @@ def report_jail_outcome(display_name: str, details: Optional[Dict[str, Any]], su
     and it lets a review that calls a tool broken be traced to the jail.
     The count is read back as a ``JailDenials`` and worded by
     ``landlock_dispatch.jail_denials_text``, the executor's renderer too."""
-    from .landlock_dispatch import as_jail_denials, jail_denials_text
 
     details = details or {}
     failure = details.get("jail_failure")
@@ -4982,7 +4971,6 @@ def bypass_ignore_prefixes(
         return prefixes
     # `output_dir_path`, not `get_output_dir`: the latter `mkdir`s, and a
     # detective check must not create the directory it is about to exclude.
-    from .output_handler import output_dir_path
     try:
         out_dir = os.path.realpath(str(output_dir_path(Path(plan_path))))
         relative = os.path.relpath(out_dir, os.path.realpath(project_root))
@@ -6958,8 +6946,6 @@ def aggregate_results(
     }
     phase_label = phase_labels.get(phase_name, "Plan Review")
 
-    from . import report_markdown as _rm
-
     report_lines = [
         # Model text below is escaped; the parser un-escapes descriptions
         # only under this first line (`report_markdown.has_escaped_text`).
@@ -7020,8 +7006,6 @@ def aggregate_results(
     # Scope tags: the round's
     # effective policy and the distinct-group tag counts, from `state.json`'s
     # record of this review round (a legacy round reads `expand`).
-    from . import scope_report as _scope_report
-
     if scope_state is None:
         scope_state = _scope_report.read_state(phase_dir)
     scope_round = _scope_report.round_info(scope_state, phase_name, groups_to_display or [])
@@ -7142,8 +7126,6 @@ def format_group(
             its policy outcome sit between the checkboxes and the
             ``**Validation:**`` line.
     """
-    from . import report_markdown as _rm
-    from . import scope_report as _scope_report
     theme = group.get("theme", "Untitled Group")
     category = group.get("category", "unknown")
     validation_status = group.get("validation_status")
@@ -7245,7 +7227,6 @@ def format_suggestion_in_group(
 
     display_label = suggestion.get("display_label", suggestion_id)
     display_hash = suggestion.get("display_hash", "")
-    from . import report_markdown as _rm
 
     # The title on the header line and the box right under it: the parser
     # reads the Skip tick off that line. Title, metadata fields and the
@@ -7265,8 +7246,6 @@ def format_suggestion_in_group(
     # line: `report_parser.parse_suggestion_descriptions` reads everything
     # after that line as the editable description, so an unchanged report
     # shows no edit.
-    from . import scope_report as _scope_report
-
     lines.append(_scope_report.md_member_line(suggestion))
     lines.extend([
         f"**Importance:** {_rm.inline_text(importance)} | "

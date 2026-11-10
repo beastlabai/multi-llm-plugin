@@ -26,6 +26,7 @@ from . import prior_changes as _prior_changes
 from .retry_ladder import STATUS_REJECTED
 from .task_outcome import ResultRejected
 from .subagent_tasks import PRIOR_CHANGES_TOKEN, APPLY_WRITE_KINDS, snapshot_file_set
+from . import scope_apply
 
 
 #: Write kinds whose deliverable is **source code**, so the repository's own
@@ -230,8 +231,7 @@ def dispatched_prompt_path(
 
 
 def _scope_apply():
-    """:mod:`utils.scope_apply`, imported on first use (a light module)."""
-    from . import scope_apply
+    """:mod:`utils.scope_apply`."""
     return scope_apply
 
 

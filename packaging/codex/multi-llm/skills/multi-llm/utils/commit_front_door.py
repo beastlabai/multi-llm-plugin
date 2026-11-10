@@ -44,6 +44,8 @@ import os
 import re
 import shlex
 import sys
+import textwrap
+import time
 import uuid
 from dataclasses import dataclass, field, replace
 from datetime import datetime
@@ -52,9 +54,17 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .cli_common import EXIT_ERROR as _EXIT_ERROR
 from .cli_common import EXIT_NEEDS_HUMAN as _EXIT_NEEDS_HUMAN
-from .cli_common import EXIT_OK as _EXIT_OK
+from .cli_common import (
+    EXIT_OK as _EXIT_OK,
+    record_error,
+    dispatcher_prefix,
+    INTERNAL_FLAG_PREFIX,
+    record_commit_range_result,
+    flag_present,
+    record_invocation,
+)
 from .clock import utc_iso_z
-from .git_utils import git_path
+from .git_utils import git_path, run_git, attribute_source_args, run_git_for_paths, GitError
 from .provider_registry import ConfigError, get_commit_reviews_dir
 
 # The path layer. Every name is re-exported: ``utils.commit_review``, the old
@@ -91,6 +101,17 @@ from .commit_paths import (  # noqa: F401
     _STAGE_VERSION,
     _start_dir,
 )
+from . import git_utils
+from . import process_control
+import modes as mode_table
+from .unattended import mark_needs_human
+from .text_clip import clip, plain_line
+
+# ``commit_range``, ``commit_brief``, ``commit_apply``, ``state_manager``,
+# ``detach``, ``positionals`` and ``improve_workflow`` load in the functions
+# that use them: a front door's ``--help`` and the dispatcher's
+# ``is_commit_brief`` read none of them (tests/test_utils_imports.py
+# ``test_a_reader_path_loads_no_module_its_base_did_not``).
 
 
 # ===========================================================================
@@ -217,8 +238,6 @@ def _door_word(mode: str, util: bool) -> str:
 def _stop(message: str, exit_code: int) -> FrontDoorExit:
     """Print *message* (a marker line to stdout, an ``ERROR:`` to stderr),
     record its first line as the run's error, and return the exit to raise."""
-    from .cli_common import record_error
-    from .unattended import mark_needs_human
 
     text = message.rstrip("\n")
     lines = text.splitlines()
@@ -309,7 +328,6 @@ _RANGE_HELP = (
 
 def _help_parser(mode: str, *, util: bool = False) -> argparse.ArgumentParser:
     """The ``--help`` surface of a front door (or of ``util commit-brief``)."""
-    from .cli_common import dispatcher_prefix
 
     run = dispatcher_prefix()
     fronted = FRONTED[mode] if mode != "improve-commits" else "improve-code"
@@ -358,7 +376,6 @@ def _help_parser(mode: str, *, util: bool = False) -> argparse.ArgumentParser:
         "Examples:",
         *examples,
     ]
-    import textwrap
 
     parser = argparse.ArgumentParser(
         prog=prog,
@@ -426,6 +443,7 @@ def _fronted_parser(mode: str) -> argparse.ArgumentParser:
 
         return improve_workflow.build_parser(mode)
     if mode == "review-commits":
+        # The fronted orchestrators import this module: a load-time cycle.
         import code_review_orchestrator as target
 
         return _capture_parser(target.parse_args)
@@ -702,7 +720,6 @@ def _from_text(text: str, mode: str, root: Path, cwd: str) -> _Resolution:
 def _refuse_unborn(root: Path) -> None:
     """The unborn ``HEAD`` (exit 2), before a no-argument apply's lookup."""
     from .commit_range import NOTHING_TO_REVIEW, RangeError
-    from .git_utils import run_git
 
     _out, _err, code = run_git("rev-parse", "--verify", "--quiet", "HEAD^{commit}",
                                 check=False, cwd=str(root))
@@ -730,9 +747,9 @@ def _resolve(mode: str, typed: _Typed, root: Path, cwd: str) -> _Resolution:
         return _from_text(text, mode, root, cwd)
     if mode == "apply-commit-fixes":
         _refuse_unborn(root)
-        from .commit_apply import select_review
+        from . import commit_apply
 
-        selection = select_review(cwd=str(root))
+        selection = commit_apply.select_review(cwd=str(root))
         brief = Path(os.fspath(selection.brief))
         result = _from_brief(brief, _shown_path(brief), root)
         result.selected_line = getattr(selection, "line", None)
@@ -785,6 +802,7 @@ def _typed_scope(typed: _Typed, root: Path) -> Optional[List[str]]:
         files_from = None
         if not files:
             return None
+    # ``code_review_orchestrator`` imports this module: a load-time cycle.
     import code_review_orchestrator as review_code
 
     try:
@@ -799,7 +817,6 @@ def _review_scope(cr: Any, typed: _Typed, root: Path) -> List[str]:
     """``git diff --name-only <diff_base> <head>`` minus every commit review's
     own files, narrowed by the typed scope."""
     from .commit_range import diff_base
-    from .git_utils import attribute_source_args, run_git_for_paths
 
     out, err, code = run_git_for_paths(
         *attribute_source_args(cr.head), "diff", "--name-only", "-z",
@@ -824,7 +841,6 @@ def _drift(cr: Any, typed: _Typed, root: Path) -> Tuple[List[str], int]:
     scope = _review_scope(cr, typed, root)
     if not scope:
         return [], 0
-    from . import git_utils
 
     changed = set(git_utils.paths_changed_since(cr.head, scope, cwd=str(root)))
     return [path for path in scope if path in changed], len(scope)
@@ -858,8 +874,6 @@ class _Identity:
 
 
 def _quoted(text: Optional[str]) -> str:
-    from .text_clip import clip, plain_line
-
     return '"' + clip(plain_line(text or ""), 80) + '"'
 
 
@@ -1050,9 +1064,7 @@ def _take_lock(mode: str, door: str, brief: Path) -> Any:
     """The door's lock, taken non-blocking with the composite step lock's
     retry (a ``status`` poll probes every lock by taking it); a refusal is
     the live-run exit 3."""
-    import time
-
-    from . import detach, improve_workflow, process_control
+    from . import detach, improve_workflow
 
     phase, directory = _lock_dir(mode, brief)
     directory.mkdir(parents=True, exist_ok=True)
@@ -1373,7 +1385,6 @@ def hand_worker_the_stage_applier(argv: Optional[Sequence[str]] = None) -> None:
     ``apply_code_fixes_orchestrator``, ``improve_commits_orchestrator``). Any
     other process is handed nothing.
     """
-    from .cli_common import INTERNAL_FLAG_PREFIX
     from .detach import register_commit_stage_applier
 
     tokens = sys.argv[1:] if argv is None else argv
@@ -1424,6 +1435,7 @@ def _refuse_before_step1(mode: str, typed: _Typed, detaching: bool) -> None:
     """The composite's refusals that must come before any write."""
     if mode != "improve-commits":
         if mode == "review-commits" and detaching and typed.flag("files_from") == "-":
+            # ``code_review_orchestrator`` imports this module: a load-time cycle.
             import code_review_orchestrator as review_code
 
             raise _stop(f"ERROR: {review_code.FILES_FROM_STDIN_DETACHED}", _EXIT_ERROR)
@@ -1459,10 +1471,8 @@ def prepare(mode: str, argv: Sequence[str], *, util: bool = False) -> Prepared:
 
 
 def _prepare(mode: str, argv: List[str], *, util: bool, door: str) -> Prepared:
-    from .cli_common import record_commit_range_result
     from .commit_range import diff_base, measure_range, render_commit_block, render_drift_line
     from .commit_range import result_payload
-    from .git_utils import GitError
 
     cwd = os.getcwd()
     typed = _parse_door(mode, argv, door=door)
@@ -1514,9 +1524,9 @@ def _prepare(mode: str, argv: List[str], *, util: bool, door: str) -> Prepared:
     record_commit_range_result(payload)
 
     if mode == "apply-commit-fixes" and resolution.selected is None and brief is not None:
-        from .commit_apply import require_completed_review
+        from . import commit_apply
 
-        require_completed_review(brief, pinned=cr.pinned or _shown_path(brief), cwd=str(root))
+        commit_apply.require_completed_review(brief, pinned=cr.pinned or _shown_path(brief), cwd=str(root))
 
     # -- step 3: the folder and the identity (reads only) --------------------
     if brief_error is not None:
@@ -1657,7 +1667,6 @@ def _prepare(mode: str, argv: List[str], *, util: bool, door: str) -> Prepared:
 
 def _fronted_argv(prep: Prepared) -> Tuple[str, List[str], List[str]]:
     """``(record mode, recorded argv, argv the fronted main is called with)``."""
-    from .cli_common import flag_present
 
     forwarded = list(prep.remaining)
     shown = _shown_path(prep.brief)
@@ -1687,8 +1696,6 @@ def _call_main(target: Callable[..., Any], argv: Sequence[str]) -> int:
     """Call a phase's ``main(argv)`` in-process, awaiting it when it is async
     (as the dispatcher's ``_call_target`` does)."""
     if inspect.iscoroutinefunction(target):
-        from . import process_control
-
         result = asyncio.run(
             process_control.sweeping_live_clis_on_interrupt(target(list(argv)))
         )
@@ -1700,6 +1707,7 @@ def _call_main(target: Callable[..., Any], argv: Sequence[str]) -> int:
 def _call_fronted(mode: str, argv: Sequence[str]) -> int:
     """The fronted ``main``, looked up at call time."""
     if mode == "review-commits":
+        # The fronted orchestrators import this module: a load-time cycle.
         import code_review_orchestrator as target
 
         return _call_main(target.main, argv)
@@ -1795,7 +1803,6 @@ def front_door(mode: str, argv: Sequence[str]) -> int:
     no other invocation can rewrite or archive the round while the apply step
     reads it. A stage the launch did not consume is deleted.
     """
-    from .cli_common import flag_present, record_invocation
 
     if mode not in COMMIT_MODES:
         raise ValueError(f"not a commit mode: {mode!r}")
@@ -1840,14 +1847,11 @@ def commit_brief_main(argv: Optional[Sequence[str]] = None) -> int:
     ``[COMMIT_REMAINING_FLAGS]``, and releases ownership on exit. Re-records
     no invocation.
     """
-    from .cli_common import flag_present
 
     tokens = list(sys.argv[1:] if argv is None else argv)
     if flag_present(tokens, "--help", "-h"):
         parse_args("commit-brief", ["--help"])
         return _EXIT_OK
-    import modes as mode_table
-
     from .positionals import revs_flags, split_positionals
 
     words, flags = split_positionals(tokens, mode_table.resolve(_UTIL_MODE))

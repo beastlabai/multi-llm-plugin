@@ -54,10 +54,17 @@ Grammar (one line, no shell preprocessing)::
 
 from __future__ import annotations
 
+import hashlib
+import importlib
+import inspect
 import os
 import re
+import shlex
+import stat
 import sys
 import tempfile
+import textwrap
+import time
 import traceback
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
@@ -86,6 +93,7 @@ from utils.cli_common import (
     record_invocation,
     render_instruction_text,
     skill_dir,
+    record_ran_from_root,
 )
 from utils.stream_bootstrap import bootstrap_streams
 from utils.unattended import (
@@ -234,8 +242,6 @@ def render_help() -> str:
         lines.append(f"  {alias} -> {mode_table.alias_expansion(alias)}")
     revs_modes = [m.name for m in mode_table.MODES if _positionals.takes_revs(m)]
     if revs_modes:
-        import textwrap
-
         lines.append("")
         lines += textwrap.wrap(
             f"The commit modes ({', '.join(revs_modes)}) take an optional "
@@ -589,7 +595,6 @@ def _load_target(module_path: str, attr: str) -> Callable[[Sequence[str]], int]:
     inside ``main(argv)`` so two targets can safely run inside one interpreter
     (see tests/test_instruction_portability.py).
     """
-    import importlib
 
     module = importlib.import_module(module_path)
     target = getattr(module, attr, None)
@@ -609,7 +614,6 @@ def _call_target(target: Callable[[Sequence[str]], int], argv: Sequence[str]) ->
     joins the worker threads waiting on them (decision 11.9).
     """
     import asyncio
-    import inspect
 
     if inspect.iscoroutinefunction(target):
         from utils import process_control
@@ -919,8 +923,6 @@ def _run_from_repository_root(
     _CWD_BEFORE_ROOT.append(cwd)
     # On the result line too, so a tool server names the plan
     # the way this command reads it, never by a `.git` walk of its own.
-    from utils.cli_common import record_ran_from_root
-
     record_ran_from_root(root)
     print(
         f"multi-llm: running from the repository root {root}, where "
@@ -1130,7 +1132,6 @@ def _write_core_file(mode_name: str, text: str) -> str:
     name or in the folder chain (``utils/prompt_files``), so a reader sees the
     previous complete file or the new one. Raises ``OSError``.
     """
-    import hashlib
 
     from utils import prompt_files
 
@@ -1164,8 +1165,6 @@ def _sweep_core_files(folder, names: Sequence[str], *, keep: str) -> None:
     kind of entry stays, and so does every other name. Best effort: a file
     left behind costs nothing.
     """
-    import stat
-    import time
 
     cutoff = time.time() - CORE_FILE_MAX_AGE_S
     for old in names:
@@ -1333,7 +1332,6 @@ def _core_sha(text: str) -> str:
     The same digest ``--to-file`` names its file by, so a paged read and the
     file form of one render agree on it.
     """
-    import hashlib
 
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:CORE_PAGE_SHA_CHARS]
 
@@ -1380,7 +1378,6 @@ def _paged_notice(mode_name: str, text: str, count: int, sha: str, size: int) ->
     banner's closing line, so a reader that drops the printed banner drops this
     one the same way. It sits at the head, which a middle cut keeps.
     """
-    import textwrap
 
     smaller = max(CORE_PAGE_SIZE_MIN, size // 2)
     total = len(text.encode("utf-8"))
@@ -1956,7 +1953,6 @@ def _continuation_target(command: str) -> Optional[Tuple["mode_table.Mode", str]
     a root range) names the phase its front door fronts
     (``Mode.commit_view_of``) and the brief its range names.
     """
-    import shlex
 
     try:
         tokens = shlex.split(command)

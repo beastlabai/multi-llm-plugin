@@ -65,6 +65,7 @@ import os
 import select
 import signal
 import stat
+import struct
 import subprocess
 import sys
 import threading
@@ -1883,7 +1884,6 @@ def _program_interpreter(path: str = "/proc/self/exe") -> Optional[str]:
     this process's own executable, the loader the kernel started it with.
     ``None`` for a static executable, a file that is not ELF, or one that
     cannot be read."""
-    import struct
 
     try:
         with open(path, "rb") as exe:

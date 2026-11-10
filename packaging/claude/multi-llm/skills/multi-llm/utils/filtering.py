@@ -1,6 +1,7 @@
 """Shared filtering logic for suggestions and code fixes."""
 
 import copy
+import re
 import sys
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -361,7 +362,6 @@ def filter_user_skipped_groups(
     Returns:
         Tuple of (filtered_groups, user_skipped_count)
     """
-    import re
 
     # --- Sanitize skipped_group_hashes: filter out non-str elements ---
     sanitized_group_hashes: Set[str] = set()

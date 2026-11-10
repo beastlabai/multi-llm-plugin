@@ -20,12 +20,15 @@ if __name__ == "__main__" and not __package__:
 
     sys.exit(main(sys.argv[1:]))
 
+import argparse
 import base64
 import hashlib
 import json
 import logging
+import os
 import re
 import sys
+import warnings
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
@@ -52,7 +55,6 @@ def _write_atomic(path: Path, text: str) -> None:
     """Write *text* by ``atomic_io``'s atomic write, so a reader (the apply
     step, a decision overlay, a browser) sees the old file or the new one,
     never part of one. UTF-8, the platform's newlines, as ``write_text``."""
-    import os
 
     atomic_write_text(path, text, newline=os.linesep)
 
@@ -1781,6 +1783,7 @@ def generate_html_report(
             or when ``data_source="consolidated"`` and the file is malformed,
             or when the template has no data placeholder.
     """
+    # ``report_view`` imports this module: a load-time cycle.
     from .report_view import ReportInputs, build_report_view, compact_views
 
     view = build_report_view(ReportInputs(
@@ -2497,7 +2500,6 @@ def load_report_template(style: str) -> str:
     flat one for any other style. A missing PR template falls back to the
     flat one with a warning. Raises ``FileNotFoundError`` (``filename`` set
     to the path looked for) when the file is missing."""
-    import warnings
 
     templates_dir = Path(__file__).parent.parent / "templates"
     path = templates_dir / REPORT_TEMPLATES.get(style, REPORT_TEMPLATES["flat"])
@@ -2787,7 +2789,6 @@ def _report_consolidated_regeneration(phase_dir: Path, decisions: Mapping[str, A
 def main(argv: Optional[List[str]] = None) -> int:
     """CLI: overlay recorded human decisions onto an existing review report."""
     bootstrap_streams()
-    import argparse
 
     parser = argparse.ArgumentParser(
         description=(

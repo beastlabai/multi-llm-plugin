@@ -45,7 +45,17 @@ from .git_utils import get_modified_files as utils_get_modified_files
 from .metrics import StateLockTimeout, state_file_lock
 from .output_handler import workflow_file_entries
 from .state_file import write_document
-from .state_manager import compute_plan_hash, mark_phase_completed_in_state
+from .state_manager import (
+    compute_plan_hash,
+    mark_phase_completed_in_state,
+    TASK_CHECK_TREES_KEY,
+    set_task_check_tree_in_state,
+    _parse_completion_time,
+)
+from .check_records import rerunnable_checks, BLOCKED_BY_CHECK_PREFIX, held_back_by_checks
+from .write_prompt import check_tree_fingerprint
+from .write_phase_bridge import WRITE_TASK_FILENAME
+from .plan_updater import insert_implementation_summary_reference
 
 # A tracked-file dump is a reference list, not a reading; state.json holds all
 # of it. Measured 2026-09-16: a run that tracked 1 511 files spent 1 512 of its
@@ -335,12 +345,6 @@ def _restamp_check_trees(state_path: Path) -> None:
     handed out again and nobody re-ran has none, and runs on the next resume.
     Best-effort and silent: a check with no stamp is run again.
     """
-    from .state_manager import (
-        TASK_CHECK_TREES_KEY,
-        set_task_check_tree_in_state,
-    )
-    from .check_records import rerunnable_checks
-    from .write_prompt import check_tree_fingerprint
     try:
         with state_file_lock(state_path):
             state = json.loads(state_path.read_text(encoding="utf-8"))
@@ -466,7 +470,6 @@ def _completion_stands(state: dict) -> bool:
     implement, and review-code and apply-code-fixes read stale for no code
     change). The ``StateManager.is_phase_started`` rule, on the raw dict.
     """
-    from .state_manager import _parse_completion_time
 
     completed = _parse_completion_time(
         (state.get("phases_completed") or {}).get("implement")
@@ -498,11 +501,6 @@ def _held_by_a_check(
     problems`` reason is held too (a state with no graph on record), scoped
     to the decomposition implement ran last when it is on record.
     """
-    from .check_records import (
-        BLOCKED_BY_CHECK_PREFIX,
-        held_back_by_checks,
-    )
-    from .write_phase_bridge import WRITE_TASK_FILENAME
     tasks: list = []
     if state_path is not None:
         try:
@@ -873,7 +871,6 @@ def _census_paths(
 
 def _insert_summary_reference(plan_file: str, summary_relative: str) -> int:
     """Idempotently add the implementation-summary link to the plan."""
-    from .plan_updater import insert_implementation_summary_reference
 
     plan_path = Path(plan_file)
     if not plan_path.exists():

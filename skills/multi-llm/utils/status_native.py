@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -329,7 +330,6 @@ def _state_changed_at(state_file: Path) -> Optional[str]:
         stamp = os.stat(state_file).st_mtime
     except OSError:
         return None
-    from datetime import datetime
 
     return datetime.fromtimestamp(stamp).isoformat(timespec="seconds")
 

@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Set
 from pathlib import Path
 
 from .subagent_tasks import derive_executor_role, subagent_type_for_role
+from .tasks_file import read_task_list
 
 
 class TaskStatus(Enum):
@@ -958,7 +959,6 @@ def decompose_plan_file(plan_path: Path) -> TaskDecomposer:
     Returns:
         TaskDecomposer instance with parsed tasks
     """
-    from .tasks_file import read_task_list
     decomposer = TaskDecomposer()
     decomposer.parse_plan(read_task_list(plan_path).text)
     return decomposer

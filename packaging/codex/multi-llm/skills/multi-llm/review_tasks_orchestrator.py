@@ -36,7 +36,12 @@ from typing import Dict, List, Optional
 sys.path.insert(0, str(Path(__file__).parent))
 
 from utils.stream_bootstrap import bootstrap_streams
-from utils.cli_common import add_retired_flag, build_parent_parser, dispatcher_prefix
+from utils.cli_common import (
+    add_retired_flag,
+    build_parent_parser,
+    dispatcher_prefix,
+    add_scope_policy_argument,
+)
 from utils.output_handler import output_dir_path
 from utils.prompt_loader import load_prompt
 from utils.provider_registry import get_all_model_specs
@@ -184,8 +189,6 @@ Examples:
     )
 
     # plans/scope-policy-and-report-tags.md §4: declared once, in cli_common.
-    from utils.cli_common import add_scope_policy_argument
-
     add_scope_policy_argument(parser, role="review")
 
     return parser.parse_args(argv)

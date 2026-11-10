@@ -8,6 +8,8 @@ the ``resume with:`` block a stopped run gets (:func:`_resume_lines`), and the
 
 from __future__ import annotations
 
+import functools
+import io
 import os
 import sys
 from pathlib import Path
@@ -131,7 +133,6 @@ def user_speller(
     with the pinned range, and leaves out every flag a front door synthesises
     or consumes (``next_phase.commit_view_for``).
     """
-    import io
 
     from . import next_phase
 
@@ -243,7 +244,6 @@ def _view_speller(spell: Optional[Speller], view: Mapping[str, Any]) -> Optional
     route = _run_route(view, getattr(spell, "host", None)) if spell else None
     if route is None:
         return spell
-    import functools
 
     return functools.partial(spell, route=route)
 
@@ -777,10 +777,9 @@ def render_runner_text(
     prevent.
     """
     try:
-        from . import host_capabilities as caps
         from .provider_registry import resolve_subagent_runner
 
-        invoking_host = caps.resolve_host_id(sys.argv[1:], explicit=host_id)
+        invoking_host = host_capabilities.resolve_host_id(sys.argv[1:], explicit=host_id)
         run_host, recorded, recorded_by = _run_runner_facts(views)
         resolved_host = run_host or invoking_host
         if recorded:
@@ -795,7 +794,7 @@ def render_runner_text(
                 skip_session=resolved_host != invoking_host,
             )
             source = f"supplied by {layer}"
-        native = str(caps.entry(resolved_host).get("subagents")) == "native"
+        native = str(host_capabilities.entry(resolved_host).get("subagents")) == "native"
     except host_capabilities.UnknownHost:  # an unknown host prints nothing (above)
         return []
     except Exception as exc:  # noqa: BLE001 - reported, never resolved (above)

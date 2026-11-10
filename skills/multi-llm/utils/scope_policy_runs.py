@@ -58,6 +58,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import scope_policy as sp
 from .clock import local_iso, parse_local
+import modes as mode_table
+from . import unattended as unattended_mod
 
 #: The ``state.json`` top-level key holding the run records.
 RUNS_KEY = "scope_policy_runs"
@@ -92,7 +94,6 @@ def ending_phases(mode: str) -> Tuple[str, ...]:
     apply-suggestions), a leaf mode's own phase (``implement``). Read off the
     mode table, so a new composite needs no edit here.
     """
-    import modes as mode_table  # type: ignore
     row = mode_table.resolve(mode)
     if row is None:
         return ()
@@ -288,7 +289,6 @@ def announce(
     """
     if not unattended or source == sp.SOURCE_EXPLICIT:
         return None
-    from . import unattended as unattended_mod
     decision = resolution_text(policy, source, mode=mode)
     unattended_mod.record_resolution(phase_dir, SITE_ID, decision, quiet=quiet)
     return decision

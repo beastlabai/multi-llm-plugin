@@ -33,11 +33,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .clock import local_iso_seconds
+from .text_clip import clip, plain_line
 
 # ---------------------------------------------------------------------------
 # Vocabulary
@@ -189,7 +191,6 @@ def flatten_text(value: Any, limit: int = REASON_LIMIT) -> str:
         return ""
     if not isinstance(value, str):
         value = str(value)
-    from .text_clip import clip, plain_line
     text = plain_line(value)
     previous = None
     while previous != text:
@@ -276,7 +277,6 @@ def baseline_source(
 def baseline_source_from_document(document: Any, role: Optional[str] = None,
                                   snapshot: Optional[str] = None) -> Dict[str, Any]:
     """:func:`baseline_source` for a ``validation.BoundDocument`` (duck-typed)."""
-    import os
 
     path = getattr(document, "path", None)
     snap = snapshot

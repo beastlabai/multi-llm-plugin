@@ -7,12 +7,14 @@ clusters related suggestion groups by plan section and generates
 consolidated suggestions preserving nuance from all underlying suggestions.
 """
 
+import copy
 import hashlib
 import json
 import logging
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
@@ -47,6 +49,21 @@ from . import scope_report as _scope_report
 # output_handler, where the run record reads them; re-exported for reading.
 from .output_handler import _compute_file_hash, consolidation_is_current  # noqa: F401
 from . import importance as _importance
+from . import validation
+from .validation import host_views_lock, invalidate_host_index, refresh_host_index
+from .html_report_generator import (
+    derive_aggregate_validation_status,
+    build_report_notices,
+    CONSOLIDATED_REPORT_DATA,
+    build_sort_config,
+    embed_report_data,
+    load_report_template,
+    sidecar_json,
+    sum_usage,
+)
+from .review_orchestrator_base import remaining_failed_models, salvage_requested_models
+from .metrics import describe_usage
+from .report_view import build_model_metadata, plan_title, read_plan
 
 
 # ---------------------------------------------------------------------------
@@ -418,7 +435,6 @@ def _truncate_group_content(group: Dict[str, Any], budget: int) -> Dict[str, Any
     Returns:
         A new group dict with truncated suggestion descriptions.
     """
-    import copy
 
     truncated = copy.deepcopy(group)
     # Truncate each suggestion text proportionally, under the key it came from
@@ -620,7 +636,6 @@ def prepare_consolidation_tasks(
     writing invocation's own selection flags (D2), so the merge is retried
     under the panel the caller asked for.
     """
-    from .validation import host_views_lock
 
     # One views transaction: the old index goes, the sidecars and the task file
     # are written, and the index is rebuilt from that file
@@ -641,11 +656,6 @@ def _prepare_consolidation_tasks(
     prompt_budget: Optional[PromptBudget],
 ) -> Dict[str, Any]:
     """:func:`prepare_consolidation_tasks`, inside the phase's views lock."""
-    from .validation import (
-        invalidate_host_index,
-        refresh_host_index,
-        write_prompt_sidecars,
-    )
 
     phase_path = Path(phase_dir)
     tasks_path = phase_path / "consolidation_tasks.json"
@@ -741,7 +751,7 @@ def _prepare_consolidation_tasks(
 
     # The prompt files a native host hands its subagents, written beside the
     # batches (validation's sidecar rule: all or none, `prompt` stays the source).
-    write_prompt_sidecars(
+    validation.write_prompt_sidecars(
         batches, str(phase_path),
         stale_glob=CONSOLIDATION_PROMPT_TEMPLATE.format(index="*"),
     )
@@ -1528,7 +1538,6 @@ def generate_consolidated_report(
     Returns:
         The path (as a string) of the written ``consolidated-report.md``.
     """
-    from datetime import datetime
 
     phase_path = Path(phase_dir)
 
@@ -1597,8 +1606,6 @@ def generate_consolidated_report(
     # --- Build validation lookups for per-group aggregate status ---
     # Mirrors the HTML consolidated path so the "Let the agent decide" checkbox can
     # be gated on a needs-human-decision aggregate status.
-    from .html_report_generator import derive_aggregate_validation_status
-
     validation_by_hash: Dict[str, str] = {}
     validation_by_index: Dict[int, str] = {}
     if validation:
@@ -1734,16 +1741,7 @@ def _failure_report_fields(phase_dir: str,
     ``Object.keys``); ``requestedModels`` is left out when the checkpoint
     records no requested set. *served_models* gives a jail-denied slot its
     label in the notice, as on the phase report.
-
-    Imported here rather than at module level: ``review_orchestrator_base``
-    imports this package, and the consolidated page is generated long after
-    both are loaded.
     """
-    from .html_report_generator import build_report_notices
-    from .review_orchestrator_base import (
-        remaining_failed_models,
-        salvage_requested_models,
-    )
 
     failures, requested = remaining_failed_models(str(phase_dir))
     requested_count = len(requested) if requested is not None else None
@@ -1821,22 +1819,9 @@ def generate_consolidated_html(
         FileNotFoundError: If the consolidated report template is missing.
         ValueError: If the template does not contain the data placeholder.
     """
-    from datetime import datetime
 
     # The report page's own helpers: one template loader, one embedder, one
     # badge builder and one title rule for every page.
-    from .html_report_generator import (
-        CONSOLIDATED_REPORT_DATA,
-        derive_aggregate_validation_status,
-        build_sort_config,
-        embed_report_data,
-        load_report_template,
-        sidecar_json,
-        sum_usage,
-    )
-    from .metrics import describe_usage
-    from .report_view import build_model_metadata, plan_title, read_plan
-
     phase_path = Path(phase_dir)
     plan_file = Path(plan_path)
 

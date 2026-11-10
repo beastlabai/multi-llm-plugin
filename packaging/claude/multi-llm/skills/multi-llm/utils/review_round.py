@@ -73,6 +73,7 @@ from typing import Any, Callable, Dict, Iterator, List, Mapping, NamedTuple, Opt
 
 from . import report_markdown, status_file
 from .atomic_io import atomic_write_bytes, atomic_write_text
+from .cli_common import EXIT_NEEDS_HUMAN
 
 #: The key that holds the round id: top level in ``.status.json`` and the task
 #: file, under ``metadata`` in ``validation.json``.
@@ -381,8 +382,6 @@ class Claim:
 
 
 def _taken_over(claim: Claim, recorded: Optional[str], doing: str) -> RoundTakenOver:
-    from .cli_common import EXIT_NEEDS_HUMAN
-
     if recorded is None:
         print(f"ERROR: this run {claim.describe()} in {claim.phase_dir}, and "
               ".status.json no longer records that round: nothing ties the phase "
@@ -412,8 +411,6 @@ def _unreadable(claim: Claim, doing: str) -> RoundTakenOver:
 
 
 def _unlocked(claim: Claim, doing: str) -> RoundTakenOver:
-    from .cli_common import EXIT_NEEDS_HUMAN
-
     print(f"ERROR: this run {claim.describe()} in {claim.phase_dir}, and could "
           f"not take {status_file.STATUS_LOCK_FILENAME} to check that the "
           "checkpoint still records it.")
@@ -833,7 +830,6 @@ def refuse_foreign_round(claim: Claim, retry_command: str) -> None:
     content checks, as before round ids (docs/development/review-results.md,
     "Round identity").
     """
-    from .cli_common import EXIT_NEEDS_HUMAN
 
     rounds, stale = foreign_files(claim)
     if not stale:

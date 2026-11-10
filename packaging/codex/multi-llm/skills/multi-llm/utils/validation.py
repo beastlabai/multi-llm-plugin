@@ -8,6 +8,7 @@ merges and records their verdicts.
 """
 
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -25,6 +26,7 @@ from .state_manager import generate_group_id, CURRENT_FORMAT_VERSION
 from .state_manager import group_join_ids, records_by_unique_id, stamped_group_id
 from .cli_common import (
     current_replay_flags, durable_reaggregate_fields, retry_command,
+    typed_plan_for,
 )
 from .subagent_prompts import build_validation_prompt, code_review_validation_guidance
 from . import scope_policy as _sp
@@ -45,6 +47,15 @@ from .subagent_tasks import (
     split_indices,
     tasks_of,
 )
+from . import status_file
+from . import cli_common as _cli
+from . import process_control
+from .validation_context import build_validation_context, validation_context_notice
+from .status_file import read_status, remove_status_keys
+from .commit_range import display_range, pinned_endpoints, pinned_head_read_rule
+from .output_handler import output_dir_path
+from .commit_report import context_plan_path, run_commit_range
+from .git_utils import get_project_root
 
 
 #: The shared-context ceiling for a validation prompt, applied **per context
@@ -330,8 +341,6 @@ class ValidationContextError(TaskFileError):
 
 
 def _bytes_sha256(data: bytes) -> str:
-    import hashlib
-
     return hashlib.sha256(data).hexdigest()
 
 
@@ -880,12 +889,6 @@ def publish_validation_context(
     Returns:
         The published object, or ``None`` when the round is all inline.
     """
-    from .validation_context import (
-        build_validation_context,
-        validation_context_notice,
-    )
-    from .status_file import read_status, remove_status_keys, update_status
-    from . import cli_common as _cli
 
     obj = build_validation_context(
         phase=phase or os.path.basename(os.path.abspath(phase_dir)),
@@ -905,7 +908,7 @@ def publish_validation_context(
             recorder(None)
         _cli.record_notice(None)
         return None
-    update_status(phase_dir, {"validation_context": obj})
+    status_file.update_status(phase_dir, {"validation_context": obj})
     recorder = getattr(_cli, "record_validation_context", None)
     if recorder is not None:
         recorder(obj)
@@ -1128,7 +1131,6 @@ def host_views_lock(phase_dir: str) -> Iterator[bool]:
     holder that keeps the lock for :data:`HOST_VIEWS_LOCK_TIMEOUT_S` stops the
     run with exit 3 naming the lock file.
     """
-    from . import process_control
     key = os.path.realpath(host_views_lock_path(phase_dir))
     with _VIEWS_LOCKS_GUARD:
         state = _VIEWS_LOCKS.setdefault(key, _ViewsLockState())
@@ -2238,8 +2240,6 @@ def resolved_reaggregate_command(
     mode = document.get("reaggregate_mode")
     plan = document.get("plan_file")
     if mode and plan and typed_plan:
-        from .cli_common import typed_plan_for
-
         plan = typed_plan_for(str(plan))
     if mode and plan:
         # The live invocation of this mode wins over the document's stored
@@ -3198,8 +3198,6 @@ def pinned_validation_guidance(plan_file: Optional[str]) -> str:
     """
     if not plan_file:
         return ""
-    from .commit_range import display_range, pinned_endpoints, pinned_head_read_rule
-    from .output_handler import output_dir_path
     try:
         document = json.loads(
             (output_dir_path(Path(plan_file)) / "state.json").read_text(encoding="utf-8")
@@ -3252,7 +3250,6 @@ def revalidation_scope_binding(
     )
     state: Dict[str, Any] = {}
     if plan_file:
-        from .output_handler import output_dir_path
         try:
             loaded = json.loads(
                 (output_dir_path(Path(plan_file)) / "state.json").read_text(encoding="utf-8")
@@ -3457,9 +3454,6 @@ def prepare_batched_revalidation_tasks(
     # Create batched tasks for the subset
     # Revalidation reads the same frozen context plan, including when invoked
     # from apply-code-fixes. Carry its expected hash and source into the task file.
-    from .commit_report import context_plan_path, run_commit_range
-    from .git_utils import get_project_root
-
     commit_record = run_commit_range(plan_file)
     context_plan_file = (
         context_plan_path(commit_record, repo_root=get_project_root(plan_file))

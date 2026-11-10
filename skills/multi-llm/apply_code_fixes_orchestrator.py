@@ -10,9 +10,11 @@ Usage:
     uv run --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes plans/my-plan.md [options]
 """
 
+import copy
 import os
 import re
 import sys
+from argparse import SUPPRESS
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
@@ -44,7 +46,7 @@ from utils.code_fix_batcher import (
     estimate_batch_processing_stats,
     format_fix_batch_prompt,
 )
-from utils.git_utils import validate_git_ref
+from utils.git_utils import validate_git_ref, git_path
 from utils import importance as _importance
 from utils.importance import get_highest_importance
 from utils.output_handler import derive_prefix, find_output_dir
@@ -67,7 +69,21 @@ from utils.state_manager import (
 )
 from utils.validation import (
     load_validation_results as load_validation_v2,
+    bind_document_text,
+    pinned_validation_guidance,
 )
+from utils.scope_apply import selected_remedy
+from utils.commit_apply import (
+    group_files,
+    PROTECTED_NAMED_MAX,
+    ROOT_RANGE_LINE,
+    deleted_file_history,
+    guard_record,
+    history_lines,
+    write_protected_list,
+)
+from utils.commit_range import DATA_UNDER_REVIEW, pinned_record
+from utils.commit_front_door import hand_worker_the_stage_applier
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +246,6 @@ def merge_edited_issue_descriptions(
     Returns:
         Tuple of (updated_issues, edit_log)
     """
-    import copy
 
     updated_issues = copy.deepcopy(issues)
     edit_log = []
@@ -649,8 +664,6 @@ Finalization (run by the host AFTER every batch has been applied and verified):
         parser.set_defaults(max_batch_size=3)
         # A commit front door's `--detach` stage (plans/review-commits.md
         # §2.1), applied by the detached worker right after its lock. Hidden.
-        from argparse import SUPPRESS
-
         parser.add_argument("--commit-stage", dest="commit_stage", default=None,
                             help=SUPPRESS)
         return parser.parse_args(argv)
@@ -898,7 +911,6 @@ Finalization (run by the host AFTER every batch has been applied and verified):
         is then labelled a plan (bound like any plan revalidation), so the
         prompt says which document it actually carries.
         """
-        from utils.validation import bind_document_text
 
         code_review_dir = os.path.join(self.out_dir, self.review_subdir)
         context_path = os.path.join(code_review_dir, "diff_context.txt")
@@ -921,7 +933,6 @@ Finalization (run by the host AFTER every batch has been applied and verified):
         guidance for a ``diff``. ``""`` when nothing is pinned, which leaves an
         unpinned revalidation's prompts as they were.
         """
-        from utils.validation import pinned_validation_guidance
 
         return pinned_validation_guidance(str(self.plan_path))
 
@@ -1069,13 +1080,10 @@ Finalization (run by the host AFTER every batch has been applied and verified):
         pre-dispatch re-check and the protected-set check read (§2.7); a
         plan's run keeps its shape byte for byte.
         """
-        from utils.scope_apply import selected_remedy
 
         remedy = selected_remedy(group, self.scope_gate.policy)
         formatted = format_fix_for_output(group, index, selected_remedy=remedy)
         if getattr(self, "_pinned", None) is not None:
-            from utils.commit_apply import group_files
-
             formatted["files"] = group_files(group, repo_root=self._repo_root)
         # Under `--scope-policy preserve`: the fix's validated scope, its
         # original descriptions kept as evidence in the output JSON only.
@@ -1177,16 +1185,6 @@ Finalization (run by the host AFTER every batch has been applied and verified):
         pinned = getattr(self, "_pinned", None)
         if pinned is None or self.state is None:
             return None
-        from utils.commit_apply import (
-            PROTECTED_NAMED_MAX,
-            ROOT_RANGE_LINE,
-            deleted_file_history,
-            guard_record,
-            history_lines,
-            write_protected_list,
-        )
-        from utils.commit_range import DATA_UNDER_REVIEW, pinned_record
-        from utils.git_utils import git_path
 
         root = self._repo_root or os.getcwd()
         record = pinned_record(self.state.state) or {}
@@ -1317,7 +1315,6 @@ Finalization (run by the host AFTER every batch has been applied and verified):
 def main(argv=None) -> int:
     """Main entry point."""
     bootstrap_streams()
-    from utils.commit_front_door import hand_worker_the_stage_applier
 
     # A worker started here directly (apply-commit-fixes --detach) applies its
     # stage as the dispatcher's does.
