@@ -1091,7 +1091,7 @@ def _take_lock(mode: str, door: str, brief: Path) -> Any:
             detach.refuse_unconfirmed_cleanup(str(directory), plan_file=str(brief),
                                               phase=phase, lock=lock)
         except detach.DetachError as exc:
-            raise _stop(str(exc), _EXIT_NEEDS_HUMAN)
+            raise _stop(str(exc), _EXIT_NEEDS_HUMAN) from exc
         return lock
     owner = improve_workflow._inspect(str(brief), phase, directory) or improve_workflow.LiveOwner(  # noqa: SLF001
         directory=str(directory),

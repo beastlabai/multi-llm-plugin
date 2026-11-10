@@ -17,7 +17,6 @@ import io
 import json
 import logging
 import os
-import re
 import stat as _stat
 import sys
 from dataclasses import dataclass, field

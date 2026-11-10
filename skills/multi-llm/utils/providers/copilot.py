@@ -100,7 +100,6 @@ import json
 import os
 import re
 import shutil
-import sys
 from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
 
 from ..json_extractor import extract_json_from_text

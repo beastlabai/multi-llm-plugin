@@ -17,7 +17,7 @@ import sys
 from argparse import SUPPRESS
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
@@ -32,12 +32,10 @@ from utils.apply_orchestrator_base import (
 from utils.cli_common import dispatcher_prefix
 from utils.judge_vocab import JUDGE_AUTO_DECIDE, JUDGE_DECIDE, canonical_value
 from utils.apply_output_helpers import (
-    build_skipped_output,
     detail_pointer_lines,
     write_and_emit_output,
 )
 from utils.apply_path_helpers import load_json_file
-from utils.apply_selection_helpers import merge_validation_with_groups
 from utils.code_fix_batcher import (
     CodeFixBatch,
     batch_code_fixes,
@@ -48,12 +46,8 @@ from utils.code_fix_batcher import (
 )
 from utils.git_utils import validate_git_ref, git_path
 from utils import importance as _importance
-from utils.importance import get_highest_importance
-from utils.output_handler import derive_prefix, find_output_dir
 from utils.report_parser import (
     issue_numbering_digest,
-    load_html_selections,
-    merge_selections,
     normalize_description,
     parse_issue_descriptions,
     parse_issue_numbering_digest,
@@ -62,7 +56,6 @@ from utils.report_parser import (
 )
 from utils.state_manager import (
     CURRENT_FORMAT_VERSION,
-    StateManager,
     load_groups_payload,
     match_issues_to_suggestions,
     stamp_stable_ids,

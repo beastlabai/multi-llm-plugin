@@ -10,7 +10,7 @@ from .judge_vocab import JUDGE_DECIDE, JUDGE_DECIDE_ITEM_IDS, upgrade_legacy
 from . import importance as _importance
 from .importance import get_highest_importance
 
-from .validation import ERROR_TYPE_AMBIGUOUS, RECOVERABLE_ERROR_TYPES
+from .validation import ERROR_TYPE_AMBIGUOUS
 
 
 def resolve_bulk_option_conflicts(

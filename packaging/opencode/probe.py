@@ -1156,7 +1156,8 @@ def discover_registry_settings(binary: str, root: Path, *,
                  "--model", f"{PROVIDER}/{MODEL}", "registry discovery"],
                 cwd=work, env=env, budget_s=budget_s,
                 stdout=iso.root / "stdout.jsonl", stderr=iso.root / "stderr.txt",
-                stop=lambda: bool(recorder.package_requests(mark)) or lock.exists())
+                stop=lambda mark=mark, lock=lock: (
+                    bool(recorder.package_requests(mark)) or lock.exists()))
             asked = recorder.package_requests(mark)
             honoured: Optional[bool]
             fell_back: List[str] = []

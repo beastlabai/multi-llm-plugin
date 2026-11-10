@@ -215,10 +215,10 @@ class StopAccount:
         is_check = self._ctx.kind == "implement" and not declared_file_set(check)
         label = outcome.outcome_label or outcome.write_outcome or outcome.status
         if is_check and outcome.write_outcome == WRITE_CLEAN_FAILURE:
-            return f"the check failed" + (f" — {summary}" if summary else "")
+            return "the check failed" + (f" — {summary}" if summary else "")
         if outcome.write_outcome == WRITE_PARTIAL:
             return (
-                f"partial application (bytes moved, the batch did not finish)"
+                "partial application (bytes moved, the batch did not finish)"
                 + (
                     ": its runner ran past its time limit and was stopped, and "
                     "what it changed is kept in place"
@@ -357,7 +357,7 @@ class StopAccount:
             offered = bool(fixable or self._ctx.kind != "implement")
             if offered:
                 lines.append(
-                    f"  - "
+                    "  - "
                     + (f"your call: {clause}" if clause else "fix what the details name")
                     + ", then resume this phase; it is checked again before it is "
                     "dispatched, and the tasks after it follow:"

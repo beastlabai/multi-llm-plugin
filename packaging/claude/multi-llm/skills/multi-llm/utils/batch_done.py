@@ -159,7 +159,6 @@ from .commit_write_guard import (
     load_orchestrator_batches,
 )
 from .check_records import (
-    BATCH_CHECK_MARKER,
     check_findings_line,
     accepted_findings_for,
     accepted_findings_with_words_added,
@@ -361,7 +360,7 @@ def _protected_write_lines(
         f"reviewed commit {head7}\", list it in the phase's summary.md as "
         f"failed, and report that its fix needs a protected file changed: the "
         f"user makes that change by hand, or reviews a range that ends at HEAD"
-        + (f" (the context plan: or reviews again with --context-plan \"\")"
+        + (" (the context plan: or reviews again with --context-plan \"\")"
            if plans else "")
         + ".",
     ]

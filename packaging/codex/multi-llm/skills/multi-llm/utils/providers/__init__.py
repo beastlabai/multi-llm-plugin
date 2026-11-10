@@ -66,4 +66,5 @@ PROVIDER_CLASSES: Dict[str, Type[LLMProvider]] = _discover_provider_classes()
 # typed out one per line.
 globals().update(PROVIDER_CLASSES)
 
-__all__ = ["LLMProvider", "PROVIDER_CLASSES", *sorted(PROVIDER_CLASSES)]
+__all__ = ["LLMProvider", "PROVIDER_CLASSES"]
+__all__.extend(sorted(PROVIDER_CLASSES))

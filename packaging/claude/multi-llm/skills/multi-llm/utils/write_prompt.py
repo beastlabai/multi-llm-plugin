@@ -137,7 +137,6 @@ from .batch_prompt import (
 from .write_phase_bridge import WRITE_TASK_FILENAME
 from .write_safety import (
     PolicyViolation, WritePolicy, policy_allow_clause, policy_outside_note,
-    relative_to_root,
 )
 from . import scope_apply as _scope
 from .check_tree import check_tree_exclusions

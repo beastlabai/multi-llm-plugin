@@ -74,7 +74,7 @@ import tarfile
 import tempfile
 from pathlib import Path
 from typing import (
-    Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple,
+    Callable, Dict, List, Optional, Sequence, Tuple,
 )
 
 #: Repo-root-relative path of the manifest the allowlist is parsed out of.

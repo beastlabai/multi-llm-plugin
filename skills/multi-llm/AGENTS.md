@@ -29,6 +29,9 @@ uv run --project skills/multi-llm -- pytest skills/multi-llm/tests -m "not live 
 # Error-handling tests
 uv run --project skills/multi-llm -- pytest skills/multi-llm/tests -m robustness
 
+# Lint gate (ruff; CI runs the same command on its Linux leg)
+make lint
+
 # Check generated host documentation
 uv run --project skills/multi-llm -- python skills/multi-llm/hosts/render_capabilities.py --check
 ```

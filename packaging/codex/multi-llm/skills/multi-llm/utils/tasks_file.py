@@ -15,7 +15,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import List, NamedTuple, Optional, Sequence, Tuple, Union
+from typing import NamedTuple, Optional, Sequence, Union
 
 from .output_handler import sanitize_prefix
 from .tasks_marker import (  # noqa: F401 - the marker's reader, re-exported
@@ -287,7 +287,7 @@ def find_tasks_file(plan_path: str) -> str:
         with open(tasks_path, 'r', encoding='utf-8') as f:
             content = f.read()
     except (IOError, OSError) as e:
-        raise ValueError(f"Cannot read tasks file {tasks_path}: {e}")
+        raise ValueError(f"Cannot read tasks file {tasks_path}: {e}") from e
 
     if not content.strip():
         raise ValueError(

@@ -36,13 +36,11 @@ from typing import (
 
 from .apply_output_helpers import (
     build_confirmation_needed_output,
-    build_skipped_output,
     emit_json_output,
     invalidate_orchestrator_views,
     publish_orchestrator_views,
     write_and_emit_output,
 )
-from .apply_path_helpers import load_json_file
 from .cli_common import (
     add_retired_flag,
     build_parent_parser,
@@ -60,7 +58,6 @@ from .consolidation import load_merged_suggestions
 from .filtering import (
     filter_items,
     filter_user_skipped_groups,
-    resolve_bulk_option_conflicts,
     should_bypass_no_selection_confirmation,
     validate_judge_decide_items_honored,
 )
@@ -72,7 +69,7 @@ from .judge_vocab import (
     JUDGE_DECIDE_ITEM_IDS,
     canonical_value,
 )
-from .output_handler import derive_prefix, find_output_dir, get_phase_dir, output_dir_path
+from .output_handler import derive_prefix, find_output_dir, output_dir_path
 from .provider_registry import set_run_anchor
 from .report_parser import load_html_selections, merge_selections
 from .state_manager import (
@@ -1037,7 +1034,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             self.logger.error("Orchestrator failed: %s", e)
             self._stop_error = e.message
             return e.exit_code
-        except SystemExit as e:
+        except SystemExit:
             # Allow sys.exit() calls to propagate (used by early-exit paths)
             raise
         except Exception as e:
@@ -1874,7 +1871,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                         file=sys.stderr,
                     )
                 raise OrchestratorError(
-                    f"Phase _apply_user_feedback, step 25: --approve-all blocked by HIGH importance items",
+                    "Phase _apply_user_feedback, step 25: --approve-all blocked by HIGH importance items",
                     exit_code=1,
                 )
 

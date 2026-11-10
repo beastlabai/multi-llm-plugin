@@ -54,6 +54,11 @@ jobs:
           # two-commit repository is the better fix and is recorded as owed.
           fetch-depth: 0
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+      # The lint gate (`make lint`). Linux only: ruff reads source text, so one
+      # runner decides it for all three, and ruff is in the project's dev group.
+      - name: Lint
+        if: runner.os == 'Linux'
+        run: uv run --project skills/multi-llm -- ruff check --config skills/multi-llm/pyproject.toml skills/multi-llm packaging
       # The committed-secret guard is the one that actually holds the line for a
       # PUBLIC repo, so it has to run on a PR rather than only where a developer
       # happens to have the binary. Linux only: the guard is OS-independent, and

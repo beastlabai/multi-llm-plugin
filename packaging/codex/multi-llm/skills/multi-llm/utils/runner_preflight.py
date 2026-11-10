@@ -891,9 +891,9 @@ def _detect_nested_exec(
             f"{', '.join(denied)} denied (reason: nested_exec_denied) — "
             f"{_runner_selection._REASON_EXPLANATION['nested_exec_denied']}. "
             + (f"{notes} " if notes else "")
-            + f"Fix: drop --exec-subagents and let this host's own subagent "
-            f"mechanism run the phase, or run it from a host whose nested_exec "
-            f"permits a nested CLI. Nothing was dispatched.",
+            + "Fix: drop --exec-subagents and let this host's own subagent "
+            "mechanism run the phase, or run it from a host whose nested_exec "
+            "permits a nested CLI. Nothing was dispatched.",
             key=key,
             spec=spec,
             reason_code="nested_exec_denied",

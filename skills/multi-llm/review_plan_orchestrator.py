@@ -291,7 +291,7 @@ def consolidate_mode(phase_dir: str, plan_path: str, args=None) -> None:
         print(f"\n[CONSOLIDATION_BATCHES_PENDING] {tasks_path}")
         print(f"Batches: {total_batches}")
 
-    print(f"\nConsolidation prepared for Claude Code subagent.")
+    print("\nConsolidation prepared for Claude Code subagent.")
     if any(batch.get("prompt_path") for batch in tasks_metadata.get("batches", [])):
         # Live run 8: the host wrote these files itself, outside the
         # repository, when the batches named none.
@@ -342,7 +342,7 @@ def consolidate_mode(phase_dir: str, plan_path: str, args=None) -> None:
             tasks_metadata.get("replay_flags"), mode="review-plan"
         ),
     )
-    print(f"\nAfter consolidation completes, run:")
+    print("\nAfter consolidation completes, run:")
     print(f"  {reaggregate_cmd}")
 
 
@@ -378,7 +378,7 @@ def consolidate_dry_run_mode(phase_dir: str, plan_path: str) -> None:
     multi_sections = len([s for s in section_groups.values() if len(s) >= 2])
     total_groups = sum(len(indices) for indices in section_groups.values())
 
-    print(f"\n=== CONSOLIDATION DRY RUN ===")
+    print("\n=== CONSOLIDATION DRY RUN ===")
     print(f"Total valid groups: {total_groups}")
     print(f"Sections with 2+ groups: {multi_sections}")
     print(f"Singleton sections: {singleton_count}")
@@ -387,7 +387,7 @@ def consolidate_dry_run_mode(phase_dir: str, plan_path: str) -> None:
     for batch in tasks_metadata.get("batches", []):
         print(f"  Batch {batch['batch_index']}: {batch['groups_count']} groups in '{batch['section_key']}'")
 
-    print(f"\n[DRY_RUN_COMPLETE]")
+    print("\n[DRY_RUN_COMPLETE]")
 
 
 def reaggregate_consolidation_mode(
@@ -528,7 +528,7 @@ def reaggregate_consolidation_mode(
     print(f"Consolidated HTML: {html_path}")
 
     reduction_pct = round((1 - metadata["consolidation_ratio"]) * 100, 1)
-    print(f"\nConsolidation complete!")
+    print("\nConsolidation complete!")
     print(f"  {total_original} groups -> {len(consolidated_groups)} consolidated ({reduction_pct}% reduction)")
     print(f"  Merged: {merged_count}, Singletons: {singleton_count}")
 

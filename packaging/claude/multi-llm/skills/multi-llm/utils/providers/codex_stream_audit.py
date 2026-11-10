@@ -63,7 +63,7 @@ import json
 import os
 import re
 import shlex
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence
 
 from ..readonly_audit import AuditVerdict
 from ..redact import redact_text

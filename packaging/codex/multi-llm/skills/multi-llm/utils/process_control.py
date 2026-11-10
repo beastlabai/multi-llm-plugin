@@ -462,9 +462,9 @@ class PhaseLock:
             # rule is load-bearing (see the class docstring).
             os.set_inheritable(fd, False)
             self._lock_fd(fd)
-        except (OSError, IOError):
+        except (OSError, IOError) as exc:
             os.close(fd)
-            raise LockUnavailable(self.path, read_lock_holder(self.path))
+            raise LockUnavailable(self.path, read_lock_holder(self.path)) from exc
         self._fd = fd
         _HELD_PHASE_LOCKS[_phase_lock_key(self.path)] = self
         if payload is not None:
@@ -500,8 +500,8 @@ class PhaseLock:
         lock = cls(path)
         try:
             lock._lock_fd(fd)
-        except (OSError, IOError):
-            raise LockUnavailable(path, read_lock_holder(path))
+        except (OSError, IOError) as exc:
+            raise LockUnavailable(path, read_lock_holder(path)) from exc
         lock._fd = fd
         _HELD_PHASE_LOCKS[_phase_lock_key(path)] = lock
         if payload is not None:
@@ -4817,10 +4817,10 @@ def _spawn_detached_posix(
         pass
     try:
         return int(raw.decode("ascii").strip())
-    except (UnicodeDecodeError, ValueError):
+    except (UnicodeDecodeError, ValueError) as exc:
         raise SpawnFailed(
             "the detach intermediate did not report a worker pid"
-        )
+        ) from exc
 
 
 #: The last detached worker's ``{pid: start time}``, read the moment its pid

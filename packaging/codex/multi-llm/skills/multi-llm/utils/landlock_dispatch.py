@@ -45,7 +45,6 @@ import stat
 import sys
 import tempfile
 import threading
-import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 

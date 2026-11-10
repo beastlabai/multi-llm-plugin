@@ -49,7 +49,6 @@ import argparse
 import copy
 import json
 import os
-import re
 import shlex
 import sys
 from pathlib import Path

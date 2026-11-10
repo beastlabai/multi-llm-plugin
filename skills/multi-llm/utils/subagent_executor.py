@@ -52,27 +52,27 @@ a name here.
 
 from __future__ import annotations
 
-import subprocess
+import subprocess  # noqa: F401 - re-exported for readers of this module
 from typing import (
     Any, Dict, List, Tuple,
 )
 
-from . import process_capture
-from . import process_control
+from . import process_capture  # noqa: F401 - re-exported for readers of this module
+from . import process_control  # noqa: F401 - re-exported for readers of this module
 from .json_extractor import (
-    extract_json_from_text,
+    extract_json_from_text,  # noqa: F401 - re-exported for readers of this module
 )
 from .llm_client import (
-    expand_env_home,
+    expand_env_home,  # noqa: F401 - re-exported for readers of this module
 )
 from .provider_registry import (
-    SESSION_LAYER,
+    SESSION_LAYER,  # noqa: F401 - re-exported for readers of this module
 )
 from .providers.base import (
-    PROFILE_AGENT_READONLY,
-    PROFILE_AGENT_WRITE,
+    PROFILE_AGENT_READONLY,  # noqa: F401 - re-exported for readers of this module
+    PROFILE_AGENT_WRITE,  # noqa: F401 - re-exported for readers of this module
     ProfileUnsupported,
-    version_verdict,
+    version_verdict,  # noqa: F401 - re-exported for readers of this module
 )
 from .retry_ladder import (  # noqa: F401 - re-exported, see below
     BACKOFF_STATUSES,
@@ -104,26 +104,26 @@ from .retry_ladder import (  # noqa: F401 - re-exported, see below
     budget_exhausted_reason,
 )
 from .subagent_prompts import (
-    build_schema_repair_prompt,
+    build_schema_repair_prompt,  # noqa: F401 - re-exported for readers of this module
 )
 from .subagent_tasks import (
     KINDS,  # noqa: F401 - re-exported for callers that read it off this module
-    WRITE_KINDS,
+    WRITE_KINDS,  # noqa: F401 - re-exported for readers of this module
 )
-from . import known_checks as _known_checks
-from . import batch_reply as _batch_reply
-from . import failure_capture as _failure_capture
-from . import task_outcome as _task_outcome
-from . import task_result as _task_result
-from . import runner_selection as _runner_selection
-from . import probe_state as _probe_state
-from . import sandbox_walk as _sandbox_walk
-from . import dispatch_spawn as _dispatch_spawn
-from . import attempt_classifier as _attempt_classifier
-from . import runner_preflight as _runner_preflight
-from . import task_dispatch as _task_dispatch
-from . import task_batch as _task_batch
-from . import task_file_runner as _task_file_runner
+from . import known_checks as _known_checks  # noqa: F401 - `_MOVED` reads it
+from . import batch_reply as _batch_reply  # noqa: F401 - `_MOVED` reads it
+from . import failure_capture as _failure_capture  # noqa: F401 - `_MOVED` reads it
+from . import task_outcome as _task_outcome  # noqa: F401 - `_MOVED` reads it
+from . import task_result as _task_result  # noqa: F401 - `_MOVED` reads it
+from . import runner_selection as _runner_selection  # noqa: F401 - `_MOVED` reads it
+from . import probe_state as _probe_state  # noqa: F401 - `_MOVED` reads it
+from . import sandbox_walk as _sandbox_walk  # noqa: F401 - `_MOVED` reads it
+from . import dispatch_spawn as _dispatch_spawn  # noqa: F401 - `_MOVED` reads it
+from . import attempt_classifier as _attempt_classifier  # noqa: F401 - `_MOVED` reads it
+from . import runner_preflight as _runner_preflight  # noqa: F401 - `_MOVED` reads it
+from . import task_dispatch as _task_dispatch  # noqa: F401 - `_MOVED` reads it
+from . import task_batch as _task_batch  # noqa: F401 - `_MOVED` reads it
+from . import task_file_runner as _task_file_runner  # noqa: F401 - `_MOVED` reads it
 
 
 #: The status vocabulary, the D3k rung table, ``MIN_ATTEMPT_BUDGET_S`` and the

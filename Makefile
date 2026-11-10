@@ -125,7 +125,7 @@ export MLLM_E2E_MATRIX_TIMEOUT_S
         claude-regen claude-package claude-check-release claude-check-bump \
         claude-package-check-ci claude-package-container \
         bump-version claude-publish claude-hook-install claude-hook-uninstall \
-        test-for tests-map refresh-model-catalogs
+        test-for tests-map lint refresh-model-catalogs
 
 # `make help` lists every `target: ... ## description` line under its `##@` heading.
 # A new target needs a description and a .PHONY entry; tests/test_makefile_help.py checks both.
@@ -144,6 +144,11 @@ test-for: ## list the test files that import MODULE (a path under skills/multi-l
 
 tests-map: ## regenerate skills/multi-llm/tests/MODULE_TESTS.md
 	@$(TESTS_FOR) --write
+
+# The lint gate CI runs on its Linux leg. The config is passed by path because packaging/ sits
+# outside the project directory, where ruff would not find it.
+lint: ## ruff check of the skill and packaging sources: undefined names, unused imports, bug-class rules
+	@uv run --project skills/multi-llm -- ruff check --config skills/multi-llm/pyproject.toml skills/multi-llm packaging
 
 ##@ Containerized E2E harness (skills/multi-llm/tests/container/README.md)
 

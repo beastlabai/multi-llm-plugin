@@ -169,14 +169,14 @@ def _numbered_prompt(options: List[str], prompt: str) -> List[str]:
 
     try:
         user_input = input("> ").strip()
-    except EOFError:
+    except EOFError as exc:
         # stdin is closed (or the user pressed Ctrl-D): there is no channel to
         # answer on, which is a visible failure rather than "selected nothing".
         raise NoDecisionChannel(
             "No interactive channel for model selection: stdin is closed. "
             "Pass --models \"provider:model,...\" (or --quick), or configure "
             "defaults.models in providers.yaml."
-        )
+        ) from exc
     except KeyboardInterrupt:
         return []
 

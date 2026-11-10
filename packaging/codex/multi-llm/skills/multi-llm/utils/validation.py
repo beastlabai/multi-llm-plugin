@@ -22,7 +22,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from .atomic_io import atomic_write_bytes, read_back_text
 from .held_folder import write_in_plan_dir
-from .state_manager import generate_group_id, CURRENT_FORMAT_VERSION
+from .state_manager import generate_group_id, CURRENT_FORMAT_VERSION  # noqa: F401 - re-export
 from .state_manager import group_join_ids, records_by_unique_id, stamped_group_id
 from .cli_common import (
     current_replay_flags, durable_reaggregate_fields, retry_command,
@@ -2118,7 +2118,6 @@ def load_validation_results(
 from .validation_batcher import (
     batch_validation_groups,
     estimate_validation_batching_stats,
-    ValidationBatch,
 )
 
 

@@ -106,10 +106,10 @@ from .batch_ledger import (
     verdict_record,
 )
 from .task_ledger import (
-    ACCEPTED_REASON_PREFIX,
-    ANSWERED_SKIP_PREFIX,
-    COMPLETED_MANUAL_REASON,
-    USER_DECLINED_REASON,
+    ACCEPTED_REASON_PREFIX,  # noqa: F401 - re-exported for readers of this module
+    ANSWERED_SKIP_PREFIX,  # noqa: F401 - re-exported for readers of this module
+    COMPLETED_MANUAL_REASON,  # noqa: F401 - re-exported for readers of this module
+    USER_DECLINED_REASON,  # noqa: F401 - re-exported for readers of this module
 )
 from .text_clip import (
     clip,
@@ -136,7 +136,7 @@ from .batch_reply import (
     batch_check_findings,
     batch_check_note,
     batch_check_words,
-    check_findings_from,
+    check_findings_from,  # noqa: F401 - re-exported for readers of this module
     check_record,
     declined_items,
     read_check_reply,
@@ -159,7 +159,7 @@ from .runner_selection import (
 )
 from .subagent_tasks import (
     PHASE_BY_WRITE_KIND,
-    PRIOR_CHANGES_TOKEN,
+    PRIOR_CHANGES_TOKEN,  # noqa: F401 - re-exported for readers of this module
     APPLY_WRITE_KINDS,
     SHARED_ARTIFACT_WRITE_KINDS,
     WRITE_KINDS,
@@ -1688,7 +1688,9 @@ class WriteBatchScheduler:
                 # run that never started.
                 self._end_run(
                     result,
-                    lambda: self._stop.refusal_message(exc, batch_index, result),
+                    lambda exc=exc, batch_index=batch_index: (
+                        self._stop.refusal_message(exc, batch_index, result)
+                    ),
                     stopped=True,
                     summary=PARTIAL_SUMMARY_LINE if result.outcomes else None,
                 )
@@ -1722,7 +1724,9 @@ class WriteBatchScheduler:
                 # plan-side reference is still NOT inserted.
                 return self._end_run(
                     result,
-                    lambda: self._stop.stop_message(batch_index, outcomes, result),
+                    lambda batch_index=batch_index, outcomes=outcomes: (
+                        self._stop.stop_message(batch_index, outcomes, result)
+                    ),
                     stopped=True, summary=PARTIAL_SUMMARY_LINE,
                 )
 
@@ -2973,7 +2977,7 @@ class WriteBatchScheduler:
         ]
         verb = 'is' if len(snapshot.declared_entries()) == 1 else 'are'
         return (
-            f"the reply said 'applied'"
+            "the reply said 'applied'"
             + (f" and named {', '.join(named[:5])} as edited" if named else "")
             + (
                 f", but {declared} {verb} byte-for-byte as before the dispatch "

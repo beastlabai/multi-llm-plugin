@@ -125,7 +125,7 @@ def _open_child(parent: int, name: str, shown: str) -> int:
         try:
             info = os.stat(name, dir_fd=parent, follow_symlinks=False)
         except OSError:
-            raise exc
+            raise exc from None
         problem = _why_not_a_folder(shown, info)
         if problem:
             raise OSError(problem) from exc
@@ -351,7 +351,7 @@ class PromptFolder:
                 info = (os.lstat(shown) if self._handle is None
                         else os.stat(name, dir_fd=self._handle, follow_symlinks=False))
             except OSError:
-                raise exc
+                raise exc from None
             problem = _why_not_a_file(shown, info)
             if problem:
                 raise OSError(problem) from exc

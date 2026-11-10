@@ -1001,7 +1001,7 @@ def stamp_stable_ids(groups: List[Dict[str, Any]]) -> None:
         # consumer that filters by that hash (an apply-phase skip, an
         # `invalid` mark, a human decision) then hit both groups at once.
         ghash = _discriminated(
-            "group", f"G{g_num}", lambda d: generate_group_id(group, d)
+            "group", f"G{g_num}", lambda d, group=group: generate_group_id(group, d)
         )
         all_hashes[ghash] = ("group", g_idx, -1)
         group["group_hash"] = ghash
@@ -1012,7 +1012,7 @@ def stamp_stable_ids(groups: List[Dict[str, Any]]) -> None:
             s_num = s_idx + 1
             shash = _discriminated(
                 "suggestion", f"G{g_num}S{s_num}",
-                lambda d: generate_suggestion_id(sugg, d),
+                lambda d, sugg=sugg: generate_suggestion_id(sugg, d),
             )
             all_hashes[shash] = ("suggestion", g_idx, s_idx)
             sugg["suggestion_hash"] = shash

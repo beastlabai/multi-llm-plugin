@@ -2530,7 +2530,7 @@ class PhaseRun:
                 refuse_unconfirmed_cleanup(phase_dir, plan_file=plan_file, phase=phase)
             except DetachError as exc:
                 print(str(exc), file=sys.stderr)
-                raise SystemExit(exc.exit_code)
+                raise SystemExit(exc.exit_code) from exc
             return
         launcher = bool(getattr(args, "detach", False)) and not worker
         identity = {
@@ -2559,14 +2559,14 @@ class PhaseRun:
             print(str(exc), file=sys.stderr)
             if worker:
                 _record_worker_refusal(phase_dir, run_id, str(exc))
-            raise SystemExit(exc.exit_code)
+            raise SystemExit(exc.exit_code) from exc
         except (PhaseDirBusy, process_control.LockUnavailable) as busy:
             message = phase_dir_busy_message(
                 phase_dir, dict(busy.holder or {}), plan_file=plan_file, phase=phase)
             print(message)
             if worker:
                 _record_worker_refusal(phase_dir, run_id, message)
-            raise SystemExit(EXIT_NEEDS_HUMAN)
+            raise SystemExit(EXIT_NEEDS_HUMAN) from busy
         except OSError as exc:
             message = (
                 f"ERROR: could not lock {path} ({exc}).\n"
@@ -2576,7 +2576,7 @@ class PhaseRun:
             print(message)
             if worker:
                 _record_worker_refusal(phase_dir, run_id, message)
-            raise SystemExit(EXIT_NEEDS_HUMAN)
+            raise SystemExit(EXIT_NEEDS_HUMAN) from exc
         key = _entry_key(phase_dir)
         _ENTRY_HOLDS[key] = lock
         self._locks.append(lock)
@@ -2806,7 +2806,7 @@ class RunHandle:
                        f"adopted ({exc}), so it stopped before it changed anything "
                        f"in {self.phase_dir}.")
             _record_worker_refusal(self.phase_dir, self.run_id, message)
-            raise DetachError(message)
+            raise DetachError(message) from exc
         if handed is not None:
             self._lock = handed
             return
@@ -2852,7 +2852,7 @@ class RunHandle:
                 "dir over."
             )
             _record_worker_refusal(self.phase_dir, self.run_id, message)
-            raise DetachError(message)
+            raise DetachError(message) from exc
 
     # -- heartbeat ------------------------------------------------------
     def _beat_loop(self) -> None:
@@ -3409,7 +3409,7 @@ def launch(
             raise DetachError(
                 f"ERROR: could not lock {lock_path(phase_dir)} ({exc}), so nothing "
                 "was launched: a run writes its phase dir only while it holds it."
-            )
+            ) from exc
         if isinstance(gate, int):
             return gate
         hold = taken = gate
@@ -3590,7 +3590,7 @@ def _launch(
         _handed_over(hold)
         raise DetachError(
             f"ERROR: could not start the detached worker: {exc}", exit_code=EXIT_ERROR
-        )
+        ) from exc
     finally:
         if handoff is not None:
             os.close(handoff)

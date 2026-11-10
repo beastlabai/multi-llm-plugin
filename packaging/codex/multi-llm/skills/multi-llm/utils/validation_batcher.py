@@ -6,8 +6,8 @@ Groups validation items into batches to allow sequential subagent processing,
 where each subagent gets a fresh context window for better accuracy.
 """
 
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, List
 
 from . import importance as _importance
 

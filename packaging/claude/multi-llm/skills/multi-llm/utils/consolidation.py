@@ -11,7 +11,6 @@ import copy
 import hashlib
 import json
 import logging
-import os
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -21,10 +20,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Union
 # Import state_manager's generate_group_id for reference (both coexist)
 # Also import CURRENT_FORMAT_VERSION and load_groups_payload for v2 envelope support
 from .state_manager import (
-    generate_group_id as _state_generate_group_id,
     stamped_group_id as _stamped_group_id,
     CURRENT_FORMAT_VERSION,
-    load_groups_payload,
 )
 
 # Import report_parser functions for consolidated decision loading

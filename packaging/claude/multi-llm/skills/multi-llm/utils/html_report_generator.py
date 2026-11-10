@@ -1399,7 +1399,6 @@ def _load_data_source(
         return groups, None, notices
 
     consolidated_path = phase_dir / "consolidated.json"
-    grouped_path = phase_dir / "grouped.json"
 
     if data_source == "consolidated":
         if not consolidated_path.exists():

@@ -64,7 +64,6 @@ from .output_handler import (
     output_dir_path,
     PHASE_DIRECTORIES,
 )
-from .prompt_loader import load_prompt
 from . import unattended as _unattended
 from .provider_registry import (
     parse_model_spec,
@@ -78,9 +77,8 @@ from .json_extractor import (
     build_unsanitize_map,
     first_fenced_block,
     first_to_last_bracket,
-    generate_output_path,
+    generate_output_path,  # noqa: F401 - re-export
     has_salvageable_json,
-    read_json_from_file,
     sanitize_model_name,
 )
 from .schema_validator import drop_non_record_entries
@@ -119,7 +117,6 @@ from .providers.base import (
     MODE_CHECK_MARKER,
     PROFILE_GENERATE,
     SANDBOX_BYPASSED_MARKER,
-    SANDBOX_FALLBACK_AUTO,
     SANDBOX_RUNG_UNSANDBOXED,
     SandboxRung,
     classify_streams,
@@ -159,7 +156,6 @@ from .html_report_generator import (
     generate_html_report,
     write_html_report,
     model_label,
-    served_model_label,
     sort_raw_groups_by_priority,
     compute_max_importance,
 )
@@ -315,7 +311,7 @@ def recompute_consolidation_recommendation(
         _status_file.remove_status_keys(phase_dir, ["consolidation_recommended"])
         return None
     print(f"\n[CONSOLIDATION_RECOMMENDED] {valid_group_count} valid groups >= threshold ({threshold})")
-    print(f"Run: --consolidate to cluster related suggestions")
+    print("Run: --consolidate to cluster related suggestions")
     # The marker is a *log* line, and a detached run's caller never sees the log —
     # so on the route every host actually reads (the launch returns, `status
     # --view run` renders the checkpoint) the recommendation used to vanish
@@ -2469,9 +2465,9 @@ def validate_suggestion(suggestion: Any) -> Tuple[bool, Optional[str]]:
     if not isinstance(suggestion, dict):
         return (False, f"expected object, got {type(suggestion).__name__}")
 
-    for field in REQUIRED_FIELDS:
-        if field not in suggestion:
-            return (False, f"Missing required field: {field}")
+    for required in REQUIRED_FIELDS:
+        if required not in suggestion:
+            return (False, f"Missing required field: {required}")
 
     importance = suggestion.get("importance", "")
     if _importance.canonical(importance) is None:
@@ -8389,7 +8385,7 @@ async def _review_orchestration(
         # Aggregate results: the groups this run holds, never a grouped.json
         # read back (docs/development/review-results.md, "Consuming checked
         # bytes").
-        report_path = aggregate_results(
+        aggregate_results(
             prefix, out_dir, phase_dir, phase_name,
             model_specs, failed_models,
             validated_groups_for_report if validated_groups_for_report is not None

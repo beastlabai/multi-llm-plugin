@@ -58,7 +58,7 @@ from utils.cli_common import (
     EXIT_OK,
     build_parent_parser,
     dispatcher_prefix,
-    reaggregate_command,
+    reaggregate_command,  # noqa: F401 - re-export
     record_next,
     add_scope_policy_argument,
 )
@@ -189,9 +189,7 @@ from utils.provider_registry import (
 )
 from utils.json_extractor import (
     build_unsanitize_map,
-    generate_output_path,
     has_salvageable_json,
-    read_json_from_file,
     sanitize_model_name,
 )
 from utils.llm_client import (
@@ -199,7 +197,6 @@ from utils.llm_client import (
     describe_output_file,
     describe_usage,
     invoke_with_file_output,
-    invoke_with_provider,
     misnamed_result_baseline,
     requested_result_baseline,
     sandbox_record_word,
@@ -6050,8 +6047,8 @@ def _guard_partial_completion(
             sys.exit(3)
         elif validation_path.exists():
             print("ERROR: Partial completion detected for 'code-review'.")
-            print(f"  validation.json exists but report is missing.")
-            print(f"  Run: --reaggregate to regenerate the report.")
+            print("  validation.json exists but report is missing.")
+            print("  Run: --reaggregate to regenerate the report.")
             sys.exit(3)
         else:
             # Check for batch files. A retired round's
@@ -6064,19 +6061,19 @@ def _guard_partial_completion(
             if batch_files:
                 print("ERROR: Partial completion detected for 'code-review'.")
                 print(f"  Found {len(batch_files)} validation batch file(s).")
-                print(f"  Check if all batches are complete, then run: --reaggregate")
+                print("  Check if all batches are complete, then run: --reaggregate")
                 sys.exit(3)
             else:
                 print("ERROR: Partial completion detected for 'code-review'.")
-                print(f"  validation_tasks.json exists but validation has not started.")
-                print(f"  Resume it: for each task in that file, run task.prompt")
-                print(f"  (or the file at task.prompt_path, whose bytes are the same)")
-                print(f"  as a subagent and write the JSON it returns to task.output_path.")
+                print("  validation_tasks.json exists but validation has not started.")
+                print("  Resume it: for each task in that file, run task.prompt")
+                print("  (or the file at task.prompt_path, whose bytes are the same)")
+                print("  as a subagent and write the JSON it returns to task.output_path.")
                 sys.exit(3)
     elif grouped_path.exists():
         print("ERROR: Partial completion detected for 'code-review'.")
-        print(f"  grouped.json exists but no validation_tasks.json.")
-        print(f"  Run: --reaggregate to continue from grouping.")
+        print("  grouped.json exists but no validation_tasks.json.")
+        print("  Run: --reaggregate to continue from grouping.")
         sys.exit(3)
     else:
         # Check for per-model result files
@@ -6084,7 +6081,7 @@ def _guard_partial_completion(
         if model_files:
             print("ERROR: Partial completion detected for 'code-review'.")
             print(f"  Found {len(model_files)} per-model result file(s) but no grouped.json.")
-            print(f"  Run: --reaggregate to aggregate results.")
+            print("  Run: --reaggregate to aggregate results.")
             sys.exit(3)
 
 

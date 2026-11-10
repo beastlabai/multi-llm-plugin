@@ -37,3 +37,35 @@ addopts = "-m 'not container and not package and not codex_jail'"
 filterwarnings = [
     "ignore:cannot collect test class.*FixturePlan.*:pytest.PytestCollectionWarning",
 ]
+
+# Lint gate (stage 1). The command is `make lint`: it passes this file with
+# --config because packaging/ sits outside the project directory, so ruff would
+# not find it there. With --config the globs below resolve from the repo root.
+# See docs/development/ for the stages that follow.
+[tool.ruff]
+extend-exclude = [
+    "packaging/claude/multi-llm",
+    "packaging/codex/multi-llm",
+    "packaging/opencode/dist",
+    "packaging/opencode/skills",
+]
+
+[tool.ruff.lint]
+select = ["E9", "F", "B006", "B008", "B023", "B904", "PLE"]
+ignore = ["PLE2502"]
+
+[tool.ruff.lint.per-file-ignores]
+# The tests keep only the rules that find real defects: E9, F82x (undefined
+# names), F63x and F70x. Everything else the selection brings in is dropped for
+# them: unused imports and variables (F40x, F84x), format-string checks (F5),
+# dict and assert checks (F60x, F62x), annotations (F72x), `__all__` (F90x),
+# fixture-name shadowing (F811), the B and PLE families, late imports (E402),
+# one-line statements (E702) and short names (E741) are how the suite is written.
+"skills/multi-llm/tests/**" = [
+    "B", "PLE", "E402", "E702", "E741",
+    "F40", "F5", "F60", "F62", "F72", "F811", "F84", "F90",
+]
+# These two modules export their moved names lazily through a module-level
+# `__getattr__`, so `__all__` lists names the module does not bind.
+"skills/multi-llm/utils/subagent_executor.py" = ["F822"]
+"skills/multi-llm/utils/write_batch_scheduler.py" = ["F822"]
