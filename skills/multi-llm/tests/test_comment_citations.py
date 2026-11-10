@@ -9,8 +9,15 @@ a reader of the repository. The convention is written once, in
 This test counts those three citation shapes per file across
 
 * ``skills/multi-llm/**/*.py``, tests excluded (a test may name its fixtures),
-* the root ``Makefile``, and
-* ``skills/multi-llm/instructions/**``,
+* the root ``Makefile``,
+* ``skills/multi-llm/instructions/**`` and the host templates and data in
+  ``skills/multi-llm/hosts/**``, and
+* the hand-written packaging sources: ``packaging/<host>/*.py``,
+  ``packaging/<host>/*.mjs`` and ``packaging/opencode/src/**/*.mjs`` (the Codex
+  tool server and the OpenCode plugin ship to users). The generated trees
+  (``packaging/claude/multi-llm/``, ``packaging/codex/multi-llm/``) and the
+  ignored build output (``packaging/opencode/dist/``, its staged ``skills/``) are
+  copies of these sources and are never scanned,
 
 and compares each count with ``comment_citation_baseline.json``, committed beside
 this file. A count may only go down. An increase fails
@@ -85,19 +92,33 @@ def citations_in(text: str) -> List[Tuple[int, str]]:
     return found
 
 
+#: Text files scanned under the instruction and host folders.
+_TEXT_SUFFIXES = {".md", ".tmpl", ".txt", ".yaml"}
+
+#: The hand-written packaging sources, as globs under the repository root. Each
+#: stops above the generated trees and the build output, which sit deeper.
+PACKAGING_GLOBS = ("packaging/*/*.py", "packaging/*/*.mjs", "packaging/opencode/src/**/*.mjs")
+
+
 def _scanned_files() -> Iterator[Path]:
     for path in sorted(SKILL_ROOT.rglob("*.py")):
         if _SKIPPED_PARTS & set(path.relative_to(SKILL_ROOT).parts):
             continue
         yield path
-    instructions = SKILL_ROOT / "instructions"
-    if instructions.is_dir():
-        for path in sorted(instructions.rglob("*")):
-            if path.is_file() and path.suffix in {".md", ".tmpl", ".txt", ".yaml"}:
-                yield path
+    for folder in (SKILL_ROOT / "instructions", SKILL_ROOT / "hosts"):
+        if folder.is_dir():
+            for path in sorted(folder.rglob("*")):
+                if path.is_file() and path.suffix in _TEXT_SUFFIXES:
+                    yield path
     makefile = REPO_ROOT / "Makefile"
     if makefile.is_file():
         yield makefile
+    seen = set()
+    for pattern in PACKAGING_GLOBS:
+        for path in sorted(REPO_ROOT.glob(pattern)):
+            if path.is_file() and path not in seen:
+                seen.add(path)
+                yield path
 
 
 def current_counts() -> Dict[str, List[Tuple[int, str]]]:
@@ -197,6 +218,18 @@ def test_every_baseline_entry_names_a_scanned_file():
 def test_the_baseline_holds_positive_counts_only():
     bad = {name: n for name, n in load_baseline().items() if not isinstance(n, int) or n <= 0}
     assert not bad, bad
+
+
+def test_the_shipped_packaging_sources_are_scanned_and_their_copies_are_not():
+    scanned = {path.relative_to(REPO_ROOT).as_posix() for path in _scanned_files()}
+    for name in ("packaging/codex/mcp_server.py", "packaging/opencode/src/index.mjs",
+                 "packaging/common/surface.py", "skills/multi-llm/hosts/capabilities.yaml",
+                 "skills/multi-llm/hosts/codex/shim.md.tmpl"):
+        assert name in scanned, name
+    copies = sorted(name for name in scanned if name.startswith((
+        "packaging/claude/multi-llm/", "packaging/codex/multi-llm/",
+        "packaging/opencode/dist/", "packaging/opencode/skills/")))
+    assert copies == []
 
 
 def test_the_convention_section_exists():

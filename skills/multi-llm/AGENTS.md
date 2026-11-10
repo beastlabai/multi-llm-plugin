@@ -270,8 +270,10 @@ reorder the code; it does not say what the code used to do.
   Rule names that are the real vocabulary (`rule 9`, `rung 7`) stay.
 
 `tests/test_comment_citations.py` is the ratchet. It counts plan citations (`§N`, `fix round N`,
-`plans/*.md`) per file across `skills/multi-llm/**/*.py` (tests excluded), `Makefile` and
-`instructions/**`, and compares them with `tests/comment_citation_baseline.json`. A count may only
+`plans/*.md`) per file across `skills/multi-llm/**/*.py` (tests excluded), `Makefile`,
+`instructions/**`, `hosts/**` and the hand-written packaging sources (`packaging/<host>/*.py` and
+`*.mjs`, `packaging/opencode/src/**`; never the generated trees), and compares them with
+`tests/comment_citation_baseline.json`. A count may only
 go down: an increase fails naming the file. After removing citations, lower the baseline with
 `uv run --project skills/multi-llm -- python skills/multi-llm/tests/test_comment_citations.py --write`.
 Check that a comment-only change left the code alone by comparing each changed module's syntax tree

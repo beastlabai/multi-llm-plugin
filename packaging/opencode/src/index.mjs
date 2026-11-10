@@ -3182,20 +3182,36 @@ function errorResult(child, message, anchor, extra = {}) {
 
 /**
  * `util instructions <mode> --host <id>` — the core plus the three resolved
- * capability verbs.
+ * capability verbs: `{ text, why }`, or `{ error }` naming why none can be
+ * attached (`instructions_error`; the workflow's own fields stand). `why` is the
+ * dispatcher's stderr when the file could not be written and it printed the
+ * core instead.
  *
  * The command body is one line now, so the only place the model used to read the
  * workflow and the verb resolutions is gone. Nothing is copied into JS and
  * nothing is copied into the command body: the single owner still produces the
  * text, just at run time and through the tool.
+ *
+ * As a file, when the surface carries `runbook.core_file`: opencode cuts a tool
+ * result at 51,200 bytes, and the result is one JSON line, so a core over that
+ * cap would cost the model the whole result, not only the core's end. The fetch
+ * adds the file option and the result carries the `[CORE_FILE]` line and the
+ * surface's read rule instead (docs/development/hosts.md, "Host-neutral
+ * instruction core"). A printed core, the dispatcher's fallback when the file
+ * cannot be written, is attached only whole: its closing line there and its
+ * stdout uncut, since a cut keeps the tail.
  */
 async function fetchInstructions({ row, surface, ctx, env, uv, anchor }) {
-  if (!row.name) return null
+  if (!row.name) return {}
+  const file = surface.runbook?.core_file
+  const asFile = isNonEmptyString(file?.option) && isNonEmptyString(file?.marker) &&
+    isNonEmptyString(file?.read)
   const argv = [
     ...surface.dispatcher.instructions,
     row.name,
     surface.dispatcher.host_option,
     surface.host,
+    ...(asFile ? [file.option] : []),
   ]
   const child = await runChild({
     uv,
@@ -3206,16 +3222,77 @@ async function fetchInstructions({ row, surface, ctx, env, uv, anchor }) {
     marker: surface.dispatcher.result_marker,
     banner: surface.dispatcher.banner.fields,
   })
+  // The end of stderr names the reason (the dispatcher's own line comes last).
+  const said = (child.stderr ?? "").trim()
+  const stderr = said.length > 600 ? `…${said.slice(-600)}` : said
   if (child.spawnError || child.code !== surface.dispatcher.exit_codes.ok) {
-    return null
+    const how = child.spawnError ?? `exited ${child.code}`
+    return {
+      error: instructionsError(row.name,
+        `\`util instructions\` ${how}${stderr ? `: ${stderr}` : ""}`),
+    }
   }
   // Strip the trailing result line: it is the dispatcher's own envelope, not
   // part of the core text.
-  return child.stdout
+  const lines = child.stdout
     .split("\n")
     .filter((line) => !line.trim().startsWith(surface.dispatcher.result_marker))
-    .join("\n")
-    .trimEnd()
+  if (asFile) {
+    const pointer = lines
+      .map((line) => line.trim())
+      .find((line) => line.startsWith(`${file.marker} `))
+    const count = pointer ? /\blines=([0-9]+)\b/.exec(pointer) : null
+    if (count) {
+      const read = file.read.split("{mode}").join(row.name)
+        .split("{lines}").join(count[1])
+      return { text: `${pointer}\n${read}` }
+    }
+  }
+  if (child.truncated) {
+    return {
+      error: instructionsError(row.name,
+        `their output passed the ${STDOUT_TAIL_BYTES} bytes this tool keeps of ` +
+        "a child's output, so what arrived is the end of the core without its head"),
+    }
+  }
+  const sentinel = surface.runbook?.core_end_marker
+  if (
+    isNonEmptyString(sentinel) &&
+    !lines.some((line) => line.trimEnd() === `${sentinel} ${row.name}`)
+  ) {
+    return {
+      error: instructionsError(row.name,
+        `they arrived without their closing line (\`${sentinel} ${row.name}\`), ` +
+        "so what arrived is part of the core"),
+    }
+  }
+  return { text: lines.join("\n").trimEnd(), why: asFile ? stderr : "" }
+}
+
+/**
+ * The `instructions_error` for a core that cannot be attached: *reason*, and
+ * what the model does without the core. A documentation fetch never restates
+ * the run, so the result's own fields stand (the codex route's
+ * `runbook_error`).
+ */
+function instructionsError(mode, reason) {
+  return `The ${mode ? `${mode} ` : ""}core instructions are not attached: ${reason}. This ` +
+    "result's other fields stand as the run left them. Do not run the steps " +
+    "those instructions describe from memory: tell the user this, and stop."
+}
+
+/** The `instructions_error` for a printed core no result this host shows whole can carry. */
+function instructionsTooBig(mode, text, why) {
+  const bytes = Buffer.byteLength(text, "utf8")
+  const cause = why
+    ? `the core file could not be written (${why}), so the dispatcher printed the ` +
+      `core, and its ${bytes} bytes`
+    : `the printed core's ${bytes} bytes`
+  return instructionsError(mode,
+    `${cause} would make this result larger than the ${RESULT_MAX_BYTES} bytes ` +
+    "this host shows of a tool result whole" +
+    (why ? "; the fix is a writable `.multi-llm/tmp/cores` folder under the " +
+      "repository root, which the next fetch writes the core file into" : ""))
 }
 
 /**
@@ -3794,8 +3871,16 @@ function titleTheStop(input, output, surface) {
 }
 
 
-/** The whole contract, in one function. Returns; never throws. */
+/**
+ * The whole contract: `runCall`'s result, bounded to what the host shows of a
+ * tool result whole (`boundResult`). Returns; never throws.
+ */
 async function execute(args, ctx, surface, client) {
+  return boundResult(await runCall(args, ctx, surface, client))
+}
+
+/** The whole contract, in one function. Returns; never throws. */
+async function runCall(args, ctx, surface, client) {
   try {
     const env = { ...process.env }
     const anchor = resolveAnchor(ctx)
@@ -3875,10 +3960,22 @@ async function execute(args, ctx, surface, client) {
     // whose mode *and* whose outcome leave the model work after the dispatcher
     // returns — the predicate below implements both halves of that sentence.
     if (outcome.ok && rowNeedsInstructions(row, outcome, surface)) {
-      const instructions = await fetchInstructions({
+      const fetched = await fetchInstructions({
         row, surface, ctx, env, uv, anchor,
       })
-      if (instructions) outcome.instructions = instructions
+      if (typeof fetched.text === "string") {
+        // Attached only when the result can still be shown whole with it, its
+        // other long text cut first (`boundResult`); a printed core can be too
+        // big for that, the file pointer never is.
+        if (fitsWithInstructions({ ...outcome, instructions: fetched.text })) {
+          outcome.instructions = fetched.text
+        } else {
+          outcome.instructions_error = instructionsTooBig(
+            row.name, fetched.text, fetched.why)
+        }
+      } else if (fetched.error) {
+        outcome.instructions_error = fetched.error
+      }
     }
     // A blocked run owes the user a command they can type: the same phase,
     // resumed, in this route's own spelling. Asked of the dispatcher (which
@@ -4026,6 +4123,128 @@ function wayForwardFirst(outcome) {
   return ordered
 }
 
+// ---------------------------------------------------------------------------
+// The result's size: what the host shows of a tool result whole
+// ---------------------------------------------------------------------------
+
+/**
+ * The most bytes a tool result may serialize to. opencode cuts a tool result
+ * over its `tool_output.max_bytes` (51,200 by default) and keeps whole lines
+ * from the head, and this result is one JSON line, so a result over the cap
+ * shows the model none of itself, its way forward included; the room below the
+ * default is a margin (docs/development/hosts.md, "Host-neutral instruction
+ * core").
+ */
+const RESULT_MAX_BYTES = 48 * 1024
+/** The least of a long string a cut keeps, head and tail, on the first pass. */
+const CLIP_FLOOR_CHARS = 4 * 1024
+
+function resultBytes(value) {
+  return Buffer.byteLength(JSON.stringify(value), "utf8")
+}
+
+/**
+ * *text* with its middle replaced by a note naming *label*, keeping *keep*
+ * characters, head and tail; unchanged when it is no longer than that.
+ */
+function clipMiddle(text, keep, label) {
+  if (typeof text !== "string" || text.length <= keep) return text
+  const head = Math.ceil(keep / 2)
+  const tail = keep - head
+  const left = text.length - keep
+  return `${text.slice(0, head)}\n…[${left} characters of ${label} left out: ` +
+    `this tool result must stay within the ${RESULT_MAX_BYTES} bytes the host ` +
+    `shows whole]…\n${tail > 0 ? text.slice(-tail) : ""}`
+}
+
+/** Every string in *value* with its holder, key and dotted name, depth first. */
+function stringLeaves(value, name = "", out = []) {
+  if (Array.isArray(value) || (value && typeof value === "object")) {
+    for (const [key, item] of Object.entries(value)) {
+      const label = name ? `${name}.${key}` : key
+      if (typeof item === "string") out.push({ holder: value, key, label })
+      else stringLeaves(item, label, out)
+    }
+  }
+  return out
+}
+
+/**
+ * A copy of *outcome* whose strings, longest first and never *keep*'s top-level
+ * key, are cut in the middle until it fits, none below *floor* characters: the
+ * cut found by bisection on the whole serialized result, so JSON escapes count.
+ */
+function clipToFit(outcome, keep, floor) {
+  const copy = JSON.parse(JSON.stringify(outcome))
+  const leaves = stringLeaves(copy)
+    .filter(({ holder, key }) => !(holder === copy && key === keep))
+    .sort((a, b) => b.holder[b.key].length - a.holder[a.key].length)
+  for (const { holder, key, label } of leaves) {
+    if (resultBytes(copy) <= RESULT_MAX_BYTES) break
+    const whole = holder[key]
+    if (whole.length <= floor) continue
+    let low = floor
+    let high = whole.length
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2)
+      holder[key] = clipMiddle(whole, middle, label)
+      if (resultBytes(copy) <= RESULT_MAX_BYTES) low = middle
+      else high = middle - 1
+    }
+    holder[key] = clipMiddle(whole, low, label)
+  }
+  return copy
+}
+
+/** Whether *outcome*, its `instructions` kept whole, fits once its other text is cut. */
+function fitsWithInstructions(outcome) {
+  for (const floor of [CLIP_FLOOR_CHARS, 256]) {
+    if (resultBytes(clipToFit(outcome, "instructions", floor)) <= RESULT_MAX_BYTES) {
+      return true
+    }
+  }
+  return false
+}
+
+/**
+ * *outcome*, or a copy that fits in `RESULT_MAX_BYTES`: its long strings cut in
+ * the middle, longest first (`output`, the 64 KiB stdout tail, before anything
+ * else that long), the core instructions kept until nothing else is left to
+ * cut. A result that still does not fit keeps its way forward and an
+ * explicit `result_error`. Never throws: a failure here hands back the outcome.
+ */
+function boundResult(outcome) {
+  try {
+    if (resultBytes(outcome) <= RESULT_MAX_BYTES) return outcome
+    for (const floor of [CLIP_FLOOR_CHARS, 256]) {
+      const cut = clipToFit(outcome, "instructions", floor)
+      if (resultBytes(cut) <= RESULT_MAX_BYTES) return cut
+    }
+    if (typeof outcome.instructions === "string") {
+      const without = { ...outcome }
+      delete without.instructions
+      without.instructions_error = instructionsTooBig(
+        null, outcome.instructions, "")
+      for (const floor of [CLIP_FLOOR_CHARS, 256]) {
+        const cut = clipToFit(without, null, floor)
+        if (resultBytes(cut) <= RESULT_MAX_BYTES) return cut
+      }
+    }
+    const kept = {}
+    for (const key of ["ok", "state", ...WAY_FORWARD_KEYS, ...HANDED_BACK_LEAD_KEYS,
+      "exit", "run_id", "log", "anchor"]) {
+      if (key in outcome) kept[key] = outcome[key]
+    }
+    kept.message = clipMiddle(String(outcome.message ?? ""), 2048, "message")
+    kept.result_error = "This result was too large for the host to show whole " +
+      `(over ${RESULT_MAX_BYTES} bytes even with every long text cut), so only its ` +
+      "way forward is kept; the run's log names the rest."
+    return resultBytes(kept) <= RESULT_MAX_BYTES ? kept : clipToFit(kept, null, 64)
+  } catch {
+    return outcome
+  }
+}
+
 /**
  * Whether the result's own text shows a re-spelled command that re-invokes a
  * phase: an `options` call on a phase mode, spelled for the user
@@ -4077,6 +4296,8 @@ function rowNeedsInstructions(row, outcome, surface) {
 // rather than against an expectation someone typed from memory.
 const __testing = {
   PACKAGE_DIR,
+  RESULT_MAX_BYTES,
+  boundResult,
   SKILL_DIR,
   attachCommitBlocks,
   composeDispatcherArgv,

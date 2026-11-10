@@ -1664,7 +1664,7 @@ class PhaseProgress:
 
     Those counters are **read**, never recomputed into a second key:
     ``task_batch._mirror_status`` already writes ``progress.subagents``
-    (and ``write_batch_scheduler._mirror_status`` ``write_subagents``) on every
+    (and ``write_reports.WriteReports.mirror_status`` ``write_subagents``) on every
     outcome, straight through ``update_status``, so they reach a foreground
     checkpoint today. A ``progress.validation`` beside them would be the
     two-writers-for-one-fact failure the plan forbids.

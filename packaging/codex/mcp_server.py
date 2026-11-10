@@ -63,6 +63,8 @@ from urllib.parse import unquote, urlparse
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 SKILL_DIR = PLUGIN_ROOT / "skills" / "multi-llm"
+#: The skill's folder of conditional runbooks a core names by a relative path.
+REFERENCES_DIR = "references"
 SURFACE_PATH = PLUGIN_ROOT / "dist" / "cli-surface.json"
 MCP_JSON_PATH = PLUGIN_ROOT / ".mcp.json"
 PLUGIN_MANIFEST_PATH = PLUGIN_ROOT / ".codex-plugin" / "plugin.json"
@@ -119,6 +121,11 @@ DEFAULT_CONTINUATION_CAP = 8
 STDOUT_TAIL_CHARS = 64 * 1024
 STDERR_TAIL_CHARS = 8 * 1024
 STDOUT_LINE_BYTES = 4 * STDOUT_TAIL_CHARS
+#: What the runbook fetch keeps of its child's stdout: the whole core, never a
+#: tail, since a tail keeps the closing line and loses the head. A runbook that
+#: still arrives cut is refused (``fetch_runbook``; docs/development/hosts.md,
+#: "Paged delivery on the Codex tool route").
+RUNBOOK_STDOUT_CHARS = 1024 * 1024
 
 #: MCP protocol versions this server speaks; an unknown request gets the default.
 PROTOCOL_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25")
@@ -2443,14 +2450,16 @@ class Server:
     # -- one child ------------------------------------------------------------------
 
     def run_child(self, call: Call, dispatcher_argv, timeout_s: float,
-                  cancellable: bool = True) -> ChildRun:
+                  cancellable: bool = True,
+                  stdout_keep: int = STDOUT_TAIL_CHARS) -> ChildRun:
         """Spawn ``[bash, -lc, CONST, bash, anchor, *argv]`` and supervise it.
 
         One shell at this one site, an argv list, ``shell=False``, its own
         session (so the kill reaches uv's python grandchild; on Windows, its
         own Job Object, :class:`WindowsJob`), stdin from /dev/null (fd 0 is
         the protocol's read half), both pipes drained by their own threads so
-        a chatty child can never fill one.
+        a chatty child can never fill one. *stdout_keep* bounds the stdout
+        kept (its newest characters); keeping less sets ``truncated``.
         """
         argv = self.spawn_argv(dispatcher_argv)
         run = ChildRun(argv)
@@ -2483,19 +2492,21 @@ class Server:
             return run
         call.shell_argv = prefix
         try:
-            return self.supervise_child(call, run, proc, job, timeout_s, cancellable)
+            return self.supervise_child(call, run, proc, job, timeout_s, cancellable,
+                                        stdout_keep)
         finally:
             if job is not None:
                 job.close()
 
     def supervise_child(self, call: Call, run: ChildRun, proc, job, timeout_s: float,
-                        cancellable: bool) -> ChildRun:
+                        cancellable: bool,
+                        stdout_keep: int = STDOUT_TAIL_CHARS) -> ChildRun:
         """:meth:`run_child` from the spawn on: drain, wait, kill, collect."""
         dispatcher = self.surface["dispatcher"]
         fields = dispatcher["banner"].get("fields") or [dispatcher["banner"]["run_id_field"]]
         banner_re = re.compile(
             r"^\s*(" + "|".join(re.escape(f) for f in fields) + r"):\s*(.+?)\s*$")
-        out_tail, err_tail = _Tail(STDOUT_TAIL_CHARS), _Tail(STDERR_TAIL_CHARS)
+        out_tail, err_tail = _Tail(stdout_keep), _Tail(STDERR_TAIL_CHARS)
         drains = [
             threading.Thread(target=_drain_stdout, daemon=True, args=(
                 proc.stdout, run, dispatcher["result_marker"], banner_re, out_tail)),
@@ -3281,8 +3292,9 @@ class Server:
     def fetch_runbook(self, call: Call, row):
         """``util instructions <mode> --host <id>``, integrity-checked, banner
         dropped, scrubbed and redacted: ``(runbook, None, exit)``, or ``(None,
-        problem, exit)`` for a fetch that failed or a payload that arrived
-        without its closing line."""
+        problem, exit)`` for a fetch that failed, a payload that arrived
+        without its closing line, or one whose stdout was cut (kept to
+        :data:`RUNBOOK_STDOUT_CHARS`, or a line past the line bound)."""
         dispatcher = self.surface["dispatcher"]
         runbook = self.surface["runbook"]
         argv = list(dispatcher["instructions"]) + [
@@ -3290,10 +3302,16 @@ class Server:
         # Cut from the reserve the loop held back, not from the loop's deadline:
         # on the handoff edge that deadline has already passed.
         spare = max(1.0, call.hard_deadline - time.monotonic() - 0.5)
-        child = self.run_child(call, argv, spare)
+        child = self.run_child(call, argv, spare, stdout_keep=RUNBOOK_STDOUT_CHARS)
         problem = None
         if child.spawn_error or child.code != dispatcher["exit_codes"]["ok"]:
             problem = "the runbook fetch did not complete (exit {})".format(child.code)
+        elif child.truncated:
+            # A cut keeps the closing line, so the sentinel test below would pass
+            # on a runbook that lost its head: refuse it here.
+            problem = ("the runbook arrived cut (its output passed the {:,} characters "
+                       "this server keeps of it), so it is a partial payload and was "
+                       "not attached".format(RUNBOOK_STDOUT_CHARS))
         lines = (child.stdout or "").split("\n")
         # Drop the head banner: its character count describes the unscrubbed core.
         opening = runbook.get("banner_opening") or ""
@@ -3316,8 +3334,14 @@ class Server:
                        "partial payload and was not attached".format(sentinel))
         if problem:
             return None, problem, child.code
-        return (redact(scrub_runbook("\n".join(kept).strip("\n"), self.surface),
-                       None, self.surface), None, child.code)
+        text = redact(scrub_runbook("\n".join(kept).strip("\n"), self.surface),
+                      None, self.surface)
+        # The scrub removed every line that named the skill directory, so a
+        # runbook naming `references/<file>.md` opens with where that folder is.
+        line = runbook.get("references")
+        if isinstance(line, str) and REFERENCES_DIR + "/" in text:
+            text = fill(line, {"dir": str(SKILL_DIR / REFERENCES_DIR)}) + "\n" + text
+        return text, None, child.code
 
     def attach_runbook(self, call: Call, row, outcome) -> None:
         """The runbook an unfinished outcome owes: page 1 and its paging rule,

@@ -475,3 +475,126 @@ class TestPagesJoinToTheWholeRunbook:
                   "sha": info["sha"], "size": str(PAGES["size_min"]),
                   "smaller": str(PAGES["size_min"])}
         assert SERVER.fill(PAGES["floor"], values) in info["rule"]
+
+
+# ===========================================================================
+# The runbook says where its references are
+# ===========================================================================
+
+REFERENCE_NAME = re.compile(r"references/([A-Za-z0-9_.-]+\.md)")
+
+
+def _bare_server(monkeypatch, stdout: str, *, truncated=False, code=None):
+    """A :class:`Server` that never spawns: ``run_child`` hands back *stdout*."""
+    server = object.__new__(SERVER.Server)
+    server.surface = SURFACE
+    seen = {}
+
+    def run_child(call, argv, timeout_s, cancellable=True,
+                  stdout_keep=SERVER.STDOUT_TAIL_CHARS):
+        seen["stdout_keep"] = stdout_keep
+        child = SERVER.ChildRun(argv)
+        child.code = CODES["ok"] if code is None else code
+        child.stdout, child.truncated = stdout, truncated
+        return child
+
+    monkeypatch.setattr(server, "run_child", run_child, raising=False)
+    call = SERVER.Call(1, {}, None)
+    call.hard_deadline = SERVER.time.monotonic() + 60
+    return server, call, seen
+
+
+def _row(mode):
+    return next(row for row in SURFACE["modes"] if row["name"] == mode)
+
+
+class TestTheRunbookSaysWhereItsReferencesAre:
+    """The scrub removes every dispatcher command line, the only lines of a
+    served core that name the skill directory, so a runbook that names
+    ``references/<file>.md`` opens with the folder they are in."""
+
+    def test_the_surface_carries_the_line(self):
+        assert SURFACE["runbook"]["references"] == multi_llm.TOOL_REFERENCES_LINE
+        assert "{dir}" in SURFACE["runbook"]["references"]
+
+    @pytest.mark.parametrize("mode", DETACHED_MODES)
+    def test_every_reference_a_real_runbook_names_resolves(
+            self, monkeypatch, real_runbooks, mode):
+        monkeypatch.setattr(SERVER, "SKILL_DIR", SKILL_ROOT)
+        server, call, _ = _bare_server(monkeypatch, real_runbooks[mode])
+        text, problem, _ = server.fetch_runbook(call, _row(mode))
+        assert problem is None
+        names = set(REFERENCE_NAME.findall(text))
+        assert names, mode  # every detachable core names one (summary-format)
+        # No command line survives the scrub to name the skill directory ...
+        assert str(SKILL_ROOT) not in text.split("\n", 1)[1]
+        # ... so the first line names the folder, and every reference is there.
+        folder = SKILL_ROOT / "references"
+        assert text.split("\n", 1)[0] == SERVER.fill(
+            SURFACE["runbook"]["references"], {"dir": str(folder)})
+        assert sorted(name for name in names if not (folder / name).is_file()) == []
+
+    def test_a_runbook_naming_no_reference_gets_no_line(self, monkeypatch):
+        server, call, _ = _bare_server(
+            monkeypatch, runbook_text().replace("{MODE}", "implement"))
+        text, problem, _ = server.fetch_runbook(call, _row("implement"))
+        assert problem is None and text.startswith("# Core\n")
+
+    def test_the_wire_result_opens_with_the_plugins_own_folder(self, harness):
+        harness.runbook.write_text(runbook_text().replace(
+            "WORKFLOW-STEP:", "WORKFLOW-STEP: read `references/own-check.md`, then"),
+            encoding="utf-8")
+        envelope, _, _, _ = harness.run(page_call("implement", 1))
+        _fields, body = split_page(envelope["runbook"])
+        folder = harness.root.resolve() / "skills" / "multi-llm" / "references"
+        assert body.split("\n")[0] == SERVER.fill(
+            SURFACE["runbook"]["references"], {"dir": str(folder)})
+
+    def test_a_surface_without_the_line_attaches_the_runbook_as_before(
+            self, monkeypatch, real_runbooks):
+        surface = json.loads(surface_mod.cli_surface_json("codex"))
+        del surface["runbook"]["references"]
+        server, call, _ = _bare_server(monkeypatch, real_runbooks["implement"])
+        server.surface = surface
+        text, problem, _ = server.fetch_runbook(call, _row("implement"))
+        assert problem is None and not text.startswith("Every `references/")
+
+
+# ===========================================================================
+# The runbook is fetched whole, or not at all
+# ===========================================================================
+
+class TestTheRunbookIsFetchedWhole:
+    """A tail keeps the closing line and loses the head, so the fetch keeps the
+    whole core and refuses any stdout that was cut anyway."""
+
+    def test_the_fetch_keeps_more_than_the_tail_every_other_child_keeps(
+            self, monkeypatch, real_runbooks):
+        server, call, seen = _bare_server(monkeypatch, real_runbooks["implement"])
+        server.fetch_runbook(call, _row("implement"))
+        assert seen["stdout_keep"] == SERVER.RUNBOOK_STDOUT_CHARS
+        assert SERVER.RUNBOOK_STDOUT_CHARS > 8 * SERVER.STDOUT_TAIL_CHARS
+
+    def test_a_cut_runbook_is_refused_though_its_closing_line_arrived(
+            self, monkeypatch, real_runbooks):
+        stdout = real_runbooks["implement"]
+        assert (END_OF_CORE + " implement") in stdout
+        server, call, _ = _bare_server(monkeypatch, stdout, truncated=True)
+        text, problem, code = server.fetch_runbook(call, _row("implement"))
+        assert text is None and code == CODES["ok"]
+        assert "cut" in problem and "{:,}".format(SERVER.RUNBOOK_STDOUT_CHARS) in problem
+
+    def test_a_runbook_over_the_old_tail_arrives_with_its_head(self, harness):
+        """82 KB of runbook through the real server: every page joins to the
+        whole core, its first line included (the 64 KiB tail lost the head and
+        kept the closing line, so the cut passed for whole)."""
+        text = padded_runbook(2000).replace(
+            "# Core\n", "# Core\nFIRST-STEP: the step a tail would lose.\n")
+        assert len(text) > 80 * 1024
+        harness.runbook.write_text(text, encoding="utf-8")
+        client = harness.client()
+        (whole,), _ = read_pages(client, "implement", 10 ** 6)
+        assert client.close() == 0
+        assert whole.startswith("# Core\nFIRST-STEP: the step a tail would lose.\n")
+        assert whole.count("WORKFLOW-PADDING") == 2000
+        assert whole.split("\n").count(END_OF_CORE + " implement") == 1

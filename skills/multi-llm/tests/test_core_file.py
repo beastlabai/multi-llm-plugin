@@ -3,7 +3,8 @@
 Claude Code's ``SKILL.md`` and the OpenCode file shim load the core this way,
 so a capped tool result never hands them a fragment. The file holds exactly what
 the printed form holds after its head banner; the printed form itself is
-unchanged, since the package routes read it through a pipe.
+unchanged, since the Codex package server reads it through a pipe. The OpenCode
+package asks for this file form too (``tests/test_opencode_package.py``).
 """
 
 from __future__ import annotations
@@ -286,3 +287,29 @@ def test_an_unknown_option_names_every_option(repo, capsys):
     code, _body, err = _run(["review-plan", "--to-files"], capsys)
     assert code == 3
     assert "`--host <id>`, `--to-file`, `--page <i>` and `--page-size <bytes>`" in err
+
+
+#: The sentence each file shim carries for the phase cores a composite core loads
+#: with the host-neutral `util instructions <phase>`, which names no read form.
+NESTED_CORE_RULE = (
+    "Load every core this way, including a phase's core that a core tells you to "
+    "load with `util instructions <phase>`: add `--to-file` to that command and "
+    "read the file it names by the same rule."
+)
+
+
+@pytest.mark.parametrize("host_id", ["claude-code", "opencode"])
+def test_each_file_shim_loads_a_phase_core_as_a_file_too(host_id):
+    """Every phase core is over Claude Code's cap and the largest over
+    OpenCode's, so a printed phase core reaches the host as a stub or a cut
+    (docs/development/hosts.md, "Host-neutral instruction core")."""
+    if host_id == "claude-code":
+        text = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    else:
+        from utils import host_install
+
+        template = host_install.template_path(host_id).read_text(encoding="utf-8")
+        text = host_install.render(host_id, skill="/fixture/skill", template=template)
+    flat = " ".join(text.split())
+    assert "util instructions <mode> --to-file" in flat
+    assert NESTED_CORE_RULE in flat

@@ -484,6 +484,12 @@
       "again": "Fetch it again at --page-size {smaller} (`smaller` is that call, for page 1): a new size cuts the runbook afresh, so start again at page 1 with that size and keep it for every later page; never combine pages of two sizes.",
       "floor": "--page-size {size} is already the smallest this tool serves, so your host cannot pass a page whole: stop and tell the user.",
       "served": "This call fetched page {page} of {pages} of the {mode} runbook into `runbook`, and nothing else: it started, resumed and repeated no run. `runbook_pages` says when you hold the whole runbook."
+    },
+    "references": "Every `references/<file>.md` this runbook names, or a file it sends you to names, is the file of that name in `{dir}`: read it there when a step says to.",
+    "core_file": {
+      "option": "--to-file",
+      "marker": "[CORE_FILE]",
+      "read": "The {mode} core instructions, this host's capability verbs included, are in the file the line above names. Read that file in full, through line {lines}, before your next command or call: a read that stops early names the offset to go on from. Do not run any step of it until you have read all of it."
     }
   }
 }

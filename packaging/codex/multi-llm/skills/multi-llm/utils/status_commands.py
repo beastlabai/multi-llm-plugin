@@ -88,7 +88,7 @@ _RESUME_VERB_BY_MODE = {
 }
 
 #: The modes whose progress mirror is ``write_subagents``
-#: (``write_batch_scheduler._mirror_status``) rather than ``subagents``.
+#: (``write_reports.WriteReports.mirror_status``) rather than ``subagents``.
 _WRITE_MODES = ("apply-suggestions", "apply-task-suggestions",
                 "apply-code-fixes", "implement")
 
@@ -430,7 +430,7 @@ def _resume_shape(view: Dict[str, Any]) -> "tuple":
     mirror = progress.get("subagents") or {}
     if not mirror and isinstance(progress.get("write_subagents"), dict):
         # A write phase mirrors per-batch outcomes instead of a counts table
-        # (`write_batch_scheduler._mirror_status`); its shape is the transient
+        # (`write_reports.WriteReports.mirror_status`); its shape is the transient
         # default and its cost line counts batches.
         mirror = _write_mirror_as_counts(progress["write_subagents"])
     counts = mirror.get("counts") if isinstance(mirror.get("counts"), dict) else {}
@@ -681,7 +681,7 @@ def _run_runner_facts(
     keys that same run's executor mirror pinned, i.e. what its dispatches
     actually ran on rather than what a fresh resolution would pick now. Checked
     under both mirror keys — ``subagents`` (the read path) and
-    ``write_subagents`` (`write_batch_scheduler._mirror_status`, F7) — a write
+    ``write_subagents`` (`write_reports.WriteReports.mirror_status`, F7) — a write
     phase carries only the second, and until it recorded a runner at all
     `status` polled outside the launching session fell through to a fresh
     resolution and named the *polling* host's model instead of the run's.

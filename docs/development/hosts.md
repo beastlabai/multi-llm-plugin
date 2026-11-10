@@ -145,8 +145,10 @@ concrete mechanism *in the shim*; the matrix is never on an agent read path.
 
 **The read step comes in three forms, and the printed one never changes.** `util instructions <mode>`
 prints a head banner, the rendered core and the `MULTI_LLM_CORE_END: <mode>` line (`CORE_END_MARKER`),
-then the `--host` verb section when asked. The two package routes read that stdout through a pipe:
-they check the end line and drop the banner by `TRUNCATION_BANNER_OPENING`, so it stays byte for byte.
+then the `--host` verb section when asked. The Codex package server reads that stdout through a
+pipe: it checks the end line, refuses a stdout it had to cut, and drops the banner by
+`TRUNCATION_BANNER_OPENING`, so the banner stays byte for byte. The OpenCode package asks for the
+file form instead (below).
 `--to-file` writes the same text without the banner to
 `<repository root>/.multi-llm/tmp/cores/core-<mode>-<sha12>.md` and prints one
 `[CORE_FILE] <path> lines=<n> bytes=<n>` line. `cores/` is this command's own folder inside the
@@ -165,7 +167,25 @@ file shim's host (1.19.5, read off the shipped binary on 2026-11-08) cuts a tool
 bytes or 2,000 lines, keeps the head and tells the model to hand the saved output to a subagent
 rather than read it. Four cores are over that (`apply-suggestions`, `apply-task-suggestions`,
 `apply-code-fixes`, `implement`), so both shims read the file, through line `<n>`, paging as their
-read tool asks. The Codex file shim reads pages instead: codex has no file-read tool, and its shell
+read tool asks. The OpenCode package does the same on its tool route: `fetchInstructions` adds the
+surface's `runbook.core_file.option` to its fetch, and the result's `instructions` carries the
+`[CORE_FILE]` line and `runbook.core_file.read` (`multi_llm.TOOL_CORE_FILE_READ`) rather than the
+core. Its result is one JSON line, and opencode's cut keeps whole lines from the head (its
+`Truncate.output`, read off the shipped 1.19.5 binary, applies to a plugin tool's result too), so a
+result over the cap would keep none of itself: those four cores are each over 51,200 bytes once
+JSON-escaped. When the file cannot be written the dispatcher prints the core instead, and the package
+attaches that only whole, its end line there and its stdout uncut, and only while the result can
+still be shown whole with it. Otherwise, and when the fetch failed, the result carries
+`instructions_error`: why no core is attached (the dispatcher's own reason and the fix when the file
+could not be written), and that the model tells the user and stops rather than run the steps from
+memory, every other field as the run left it, as the codex route's `runbook_error` does. Every result
+is bounded besides (`execute` → `boundResult`, `RESULT_MAX_BYTES` = 48 KiB, below opencode's
+default): its long strings are cut in the middle, longest first (the 64 KiB `output` tail before
+anything else that long), the core kept until nothing else is left to cut, and a result that still
+does not fit keeps its way forward and a `result_error`. A file a host reads is read line by
+line, and opencode's read tool clips a line over 2,000 characters, so no line of an instruction or a
+reference is longer (`tests/test_instruction_line_length.py`, with every placeholder rendered against
+a long skill directory). The Codex file shim reads pages instead: codex has no file-read tool, and its shell
 keeps the head and the tail of an output over its budget and drops the middle (`…N tokens
 truncated…`), so a printed core, or a `cat` of the file, loses workflow steps while its end line
 survives. The printed banner therefore also counts a truncation or omission note from the host as an
@@ -194,7 +214,9 @@ rule, stated in that banner and in the Codex shim's step 3:
 
 The composite cores (`full-workflow`, the `improve-*` cores and the commit modes) load each phase's
 core with the host-neutral `util instructions <phase>`, which carries no read form of its own, so
-the Codex shim says to load every core the paged way, those phase cores included.
+every file shim says to load every core its own way, those phase cores included: `SKILL.md` and the
+OpenCode shim add `--to-file`, the Codex shim pages. Every phase core is over the Claude Code cap
+and the largest are over OpenCode's, so a printed phase core reaches the host as a stub or a cut.
 
 The default size, `CORE_PAGE_SIZE_DEFAULT`, is 16,000 bytes: about 4,000 tokens as codex counts them
 (4 bytes a token), 40% of the 10,000-token budget its models' `truncation_policy` and both its shell
@@ -241,7 +263,19 @@ unread, so fetching a page never starts, resumes or repeats a run, and a malform
 error before any spawn. The rule's words are `multi_llm.TOOL_PAGES_*`, built from the page constants,
 and the server spells none of them. The `runbook.pages` block is additive within surface schema v7: a
 server whose surface lacks it attaches the runbook whole and forwards a page flag as before. The
-OpenCode package reads its instructions from a file and does not page.
+OpenCode package does not page: its tool result names the core file (see the file form above).
+
+The fetch behind both keeps its child's whole stdout, up to `RUNBOOK_STDOUT_CHARS` (1 MiB), where
+every other child keeps a 64 KiB tail: a tail keeps the closing line and loses the head, and paging
+a head-cut runbook would frame the rest as complete. A stdout cut anyway (over that size, or a line
+over the line bound) is a `runbook_error`, like a missing closing line. The scrub removes every
+dispatcher command line, and those are the only lines of a served core that name the skill
+directory, while a core names its conditional runbooks by a relative `references/<file>.md`. So a
+runbook that names one opens with `runbook.references` (`multi_llm.TOOL_REFERENCES_LINE`), its
+`{dir}` filled with the server's own `skills/multi-llm/references`, inside the paged text and its
+sha. The cores keep the relative spelling, since a `{SKILL_DIR}` outside the dispatcher prefix
+breaks rule 1 of `tests/test_instruction_portability.py`; the file-shim routes and the OpenCode
+package keep the command lines, which name the directory.
 
 **Steps a clean run never takes live in `references/`, behind a trigger sentence.** A served core
 stays in the host's context for the whole phase, so a conditional branch (interrupted-run recovery,
@@ -437,7 +471,9 @@ is echoed.
 `next`, or a state that is not `done`); reading
 `row.supports_detach` alone shipped the whole rendered runbook with every finished run, measured
 2026-09-16 at 22 860 of a 25 829-char result, fifteen of its lines `uv run …` commands
-the same result's message forbids the model to run.
+the same result's message forbids the model to run. What it attaches is the core file's
+`[CORE_FILE]` line and the surface's read rule, never the core itself, or `instructions_error` when
+there is no core it can attach (the file form, in "Host-neutral instruction core").
 
 And `normalizePlan` strips **one** leading `@` — this host's
 file-attachment sigil, which is how a user names a file here and which reaches the model verbatim —

@@ -211,7 +211,20 @@ def test_v4_keys_are_present_and_non_empty(host):
             "floor": multi_llm.TOOL_PAGES_FLOOR,
             "served": multi_llm.TOOL_PAGES_SERVED,
         },
+        # Where a scrubbed runbook's references are (additive within v7).
+        "references": multi_llm.TOOL_REFERENCES_LINE,
+        # The file form a package route attaches instead of the core.
+        "core_file": {
+            "option": "--to-file",
+            "marker": multi_llm.CORE_FILE_MARKER,
+            "read": multi_llm.TOOL_CORE_FILE_READ,
+        },
     }
+    assert "{dir}" in rendered["runbook"]["references"]
+    core_file = rendered["runbook"]["core_file"]
+    assert core_file["option"] in multi_llm._INSTRUCTIONS_OPTIONS
+    for token in ("{mode}", "{lines}"):
+        assert token in core_file["read"]
     pages = rendered["runbook"]["pages"]
     # The page options are the ones `util instructions` itself takes, and every
     # template carries the tokens the server fills.

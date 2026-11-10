@@ -396,8 +396,9 @@ def test_the_codex_shim_reads_pages_and_states_the_rule():
 
 
 def test_every_core_that_loads_a_phase_core_uses_the_plain_command():
-    """The shim's "load every core this way" sentence covers these lines: each
-    is the host-neutral read command, which the Codex shim pages."""
+    """Each shim's "load every core this way" sentence covers these lines: each
+    is the host-neutral read command, which the Codex shim pages and the other
+    file shims read as a file."""
     loading = {}
     for path in sorted((SKILL_ROOT / "instructions").glob("*.md")):
         for line in path.read_text(encoding="utf-8").splitlines():

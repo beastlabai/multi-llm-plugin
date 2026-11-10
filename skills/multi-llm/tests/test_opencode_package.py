@@ -5103,6 +5103,187 @@ class TestInstructionsSurface:
         for sentence in caps.verb_sentences("opencode"):
             assert sentence not in text
 
+    @staticmethod
+    def _owing_run(built_package, uv_stub, instructions, mode="implement"):
+        """A run whose terminal poll hands back a non-mechanical ``next``, the
+        one outcome that owes the model its instructions, with *instructions*
+        as the ``util instructions`` child's scripted output."""
+        follow = "uv run -- python multi_llm.py review-code p.md"
+        launch = {
+            "exit": 0,
+            "stdout": ["run_id: R", "log: /l",
+                       'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}'],
+        }
+        done = {"exit": 0, "stdout": [
+            'MULTI_LLM_RESULT: {"state":"done","exit":0,"artifacts":["a"],'
+            '"next":' + json.dumps(follow) + '}']}
+        result, calls = uv_stub.run(
+            built_package,
+            {"mode": mode, "plan": "p.md", "question": "", "extra_flags": []},
+            [launch, done, instructions],
+        )
+        assert result["ok"] is True
+        fetch = [call for call in calls if "instructions" in _dispatcher_argv(call)]
+        assert len(fetch) == 1
+        return result, _dispatcher_argv(fetch[0])
+
+    def test_the_core_arrives_as_a_file_the_model_reads(
+        self, built_package, uv_stub, tmp_path
+    ):
+        """opencode cuts a tool result at 51,200 bytes, and the result is one
+        JSON line, so the cut keeps none of it: implement's core alone is over
+        the cap once JSON-escaped. The fetch asks for the file form and the
+        result carries the ``[CORE_FILE]`` line and the read rule, never the
+        core (docs/development/hosts.md, "Host-neutral instruction core")."""
+        from utils import host_capabilities as caps
+
+        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text(
+            encoding="utf-8"))
+        file = surface["runbook"]["core_file"]
+        # The real dispatcher writes the real file, in a repository of its own.
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        printed = subprocess.run(
+            [sys.executable, str(SKILL_ROOT / "multi_llm.py"), "util", "instructions",
+             "implement", "--host", "opencode", file["option"]],
+            capture_output=True, encoding="utf-8", timeout=180, cwd=repo,
+            check=True).stdout.splitlines()
+        pointer = next(line for line in printed if line.startswith(file["marker"] + " "))
+        core = Path(pointer.split()[1])
+        lines = re.search(r"\blines=([0-9]+)\b", pointer).group(1)
+        result, argv = self._owing_run(
+            built_package, uv_stub, {"exit": 0, "stdout": printed})
+        assert argv == ["util", "instructions", "implement", "--host", "opencode",
+                        file["option"]]
+        assert result["instructions"] == pointer + "\n" + file["read"].replace(
+            "{mode}", "implement").replace("{lines}", lines)
+        assert len(json.dumps(result).encode("utf-8")) < 51_200
+        text = core.read_text(encoding="utf-8")
+        assert str(text.count("\n")) == lines
+        assert (surface["runbook"]["core_end_marker"] + " implement") in text
+        for sentence in caps.verb_sentences("opencode"):
+            assert sentence in text
+
+    @pytest.mark.parametrize("child, reason", [
+        # The file could not be written, so the dispatcher printed the core, and
+        # it arrived without `MULTI_LLM_CORE_END: <mode>`: a partial payload.
+        ({"exit": 0, "stdout": ["# Core", "WORKFLOW-STEP: the first half of a core."]},
+         "without their closing line (`MULTI_LLM_CORE_END: implement`)"),
+        # Over the 64 KiB tail the child's stdout keeps, the head is gone while
+        # the closing line arrived: refused on the cut, not on the line.
+        ({"exit": 0, "stdout": ["# Core"]
+          + ["WORKFLOW-PADDING: a step the model owes."] * 2000
+          + ["MULTI_LLM_CORE_END: implement"]},
+         "what arrived is the end of the core without its head"),
+        ({"exit": 1, "stdout": [],
+          "stderr": ["ERROR: core instruction file missing; reinstall the skill."]},
+         "`util instructions` exited 1: ERROR: core instruction file missing"),
+    ], ids=["partial", "cut", "fetch-failed"])
+    def test_a_core_that_cannot_be_attached_says_why(
+        self, built_package, uv_stub, child, reason
+    ):
+        """No core is handed over as whole when it is not, and its absence is
+        said: ``instructions_error`` names the reason and what to do, while the
+        run's own fields stand (the codex route's ``runbook_error``)."""
+        result, _argv = self._owing_run(built_package, uv_stub, child)
+        assert "instructions" not in result
+        assert result["ok"] is True and result["state"] == "done"
+        assert result["next"]["args"]["mode"] == "review-code"
+        error = result["instructions_error"]
+        assert error.startswith("The implement core instructions are not attached: ")
+        assert reason in error
+        assert "tell the user this, and stop" in error
+
+    def test_a_printed_core_too_big_for_the_result_says_why_and_keeps_the_run(
+        self, built_package, uv_stub, tmp_path
+    ):
+        """``.multi-llm/tmp/cores`` is a file, so ``--to-file`` prints the core
+        instead: implement's, 58 KB, made a single-line result over opencode's
+        51,200-byte cap, which the host shows none of, ``next`` included. The
+        core gives way to an ``instructions_error`` that names the dispatcher's
+        reason and the fix; the result stays within the cap."""
+        repo = tmp_path / "unwritable-cores"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / ".multi-llm" / "tmp").mkdir(parents=True)
+        (repo / ".multi-llm" / "tmp" / "cores").write_text("not a folder", encoding="utf-8")
+        printed = subprocess.run(
+            [sys.executable, str(SKILL_ROOT / "multi_llm.py"), "util", "instructions",
+             "implement", "--host", "opencode", "--to-file"],
+            capture_output=True, encoding="utf-8", timeout=180, cwd=repo, check=True)
+        assert "printing the core instead" in printed.stderr
+        assert len(printed.stdout.encode("utf-8")) > 51_200
+        result, _argv = self._owing_run(built_package, uv_stub, {
+            "exit": 0, "stdout": printed.stdout.splitlines(),
+            "stderr": printed.stderr.splitlines()})
+        wire = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+        assert len(wire.encode("utf-8")) <= 51_200
+        assert "instructions" not in result
+        assert result["ok"] is True and result["artifacts"] == ["a"]
+        assert result["next"]["args"]["mode"] == "review-code"
+        error = result["instructions_error"]
+        assert "could not write the core file" in error
+        assert "writable `.multi-llm/tmp/cores` folder" in error
+
+    def test_a_long_output_is_cut_in_the_middle_to_keep_the_result_whole(
+        self, built_package, uv_stub
+    ):
+        """The child's 64 KiB stdout tail alone puts a result over the cap: its
+        middle gives way, head and tail kept, and the way forward stays."""
+        follow = "uv run -- python multi_llm.py review-code p.md"
+        noisy = {"exit": 0, "stdout": [
+            "progress line {:05d} ".format(n) + "x" * 60 for n in range(1500)] + [
+            'MULTI_LLM_RESULT: {"state":"done","exit":0,"artifacts":["a"],'
+            '"next":' + json.dumps(follow) + '}']}
+        launch = {
+            "exit": 0,
+            "stdout": ["run_id: R", "log: /l",
+                       'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}'],
+        }
+        core = ["# Core", "WORKFLOW-STEP: a short core.", "MULTI_LLM_CORE_END: implement"]
+        result, _calls = uv_stub.run(
+            built_package,
+            {"mode": "implement", "plan": "p.md", "question": "", "extra_flags": []},
+            [launch, noisy, {"exit": 0, "stdout": core}],
+        )
+        wire = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+        assert len(wire.encode("utf-8")) <= 51_200
+        assert result["ok"] is True and result["next"]["args"]["mode"] == "review-code"
+        assert result["instructions"] == "\n".join(core)  # the core, kept whole
+        output = result["output"]
+        assert "characters of output left out" in output
+        assert output.rstrip().endswith("x" * 60)  # the tail survives the cut
+
+    def test_the_bound_keeps_the_core_and_cuts_the_rest_first(self, built_package):
+        bounded = node_json(
+            """
+            const outcome = {
+              ok: true, state: "done", next: { tool: "multi_llm" },
+              message: "m", output: "o".repeat(60000), instructions: "i".repeat(30000),
+            }
+            const small = { ok: true, state: "done", message: "m" }
+            const crowded = { ok: true, state: "done", next: { tool: "x" },
+              message: "m", artifacts: Array.from({ length: 9000 }, (_, n) => `a${n}`) }
+            emit({
+              big: T.boundResult(outcome),
+              small: T.boundResult(small) === small,
+              crowded: T.boundResult(crowded),
+              limit: T.RESULT_MAX_BYTES,
+            })
+            """,
+            built_package,
+        )
+        big = bounded["big"]
+        assert big["instructions"] == "i" * 30000
+        assert "characters of output left out" in big["output"]
+        assert len(json.dumps(big, ensure_ascii=False, separators=(",", ":")).encode()) <= bounded["limit"]
+        assert bounded["small"] is True
+        crowded = bounded["crowded"]
+        assert crowded["next"] == {"tool": "x"} and "artifacts" not in crowded
+        assert "too large for the host to show whole" in crowded["result_error"]
+        assert bounded["limit"] < 51_200
+
     def test_a_finished_run_is_not_sent_the_manual_run_instructions(
         self, built_package, uv_stub
     ):

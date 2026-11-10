@@ -1729,7 +1729,7 @@ def stop_answers_on_record(
 
     Read from ``{phase}/.status.json``'s write mirror
     (``progress.write_subagents.stop.answers``, written by
-    ``write_batch_scheduler._stop_answers``): the run's own record of which
+    ``write_stop.StopAccount.stop_answers``): the run's own record of which
     ``--human-task`` answers its stop named. The folder is writable by every
     jailed batch and the entries become the tool routes' options, so each is
     kept only in the shape the plugin composes: ``flags`` as
@@ -1844,7 +1844,7 @@ def stop_resume_why_on_record(
 ) -> Optional[str]:
     """What the plain resume of the phase's last stop does, as the stop
     recorded it (``progress.write_subagents.stop.resume_why``, written by
-    ``write_batch_scheduler._stop_resume_why``), or ``None``.
+    ``write_stop.StopAccount.stop_resume_why``), or ``None``.
 
     The run's output folder is writable by every jailed batch, so the value
     is relayed only when it is one plain line of at most

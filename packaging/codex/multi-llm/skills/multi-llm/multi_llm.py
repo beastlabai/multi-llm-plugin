@@ -1510,6 +1510,32 @@ TOOL_PAGES_SERVED = (
     "`runbook_pages` says when you hold the whole runbook."
 )
 
+#: ``runbook.references``: the line a Codex tool-route runbook opens with when it
+#: names a reference. That route scrubs every dispatcher command line, and those
+#: are the only lines of a served core that name the skill directory, so the
+#: server states where ``references/`` is; ``{dir}`` is its own skill
+#: directory's ``references`` folder (docs/development/hosts.md, "Paged delivery
+#: on the Codex tool route").
+TOOL_REFERENCES_LINE = (
+    "Every `references/<file>.md` this runbook names, or a file it sends you to "
+    "names, is the file of that name in `{dir}`: read it there when a step says to."
+)
+
+#: ``runbook.core_file``: how a package route that hands the core to the model in
+#: a tool result hands it a file instead. OpenCode cuts a tool result at 51 200
+#: bytes and several cores are over that once JSON-escaped, so the OpenCode
+#: package asks ``util instructions <mode> --host <id>`` for this option's
+#: ``[CORE_FILE]`` line and attaches that line and :data:`TOOL_CORE_FILE_READ`
+#: (``{mode}``, ``{lines}``) in place of the core (docs/development/hosts.md,
+#: "Host-neutral instruction core").
+TOOL_CORE_FILE_OPTION = "--to-file"
+TOOL_CORE_FILE_READ = (
+    "The {mode} core instructions, this host's capability verbs included, are in "
+    "the file the line above names. Read that file in full, through line {lines}, "
+    "before your next command or call: a read that stops early names the offset "
+    "to go on from. Do not run any step of it until you have read all of it."
+)
+
 
 #: Heading the ``--host`` verb block is served under. The core files name the
 #: three capability verbs abstractly and it has always been the *shim's* section 4

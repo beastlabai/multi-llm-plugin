@@ -67,6 +67,7 @@ uv run --frozen --no-dev --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKI
 
 It writes the core, every path resolved, to a file and prints `[CORE_FILE] <path> lines=<n> bytes=<n>`: `Read` that file in full, through line `<n>` (paging if one read
 returns fewer), before you run anything else. No such line means it printed the core instead, and its first lines say how to check you have all of it.
+Load every core this way, including a phase's core that a core tells you to load with `util instructions <phase>`: add `--to-file` to that command and read the file it names by the same rule.
 The documented fallback, `${CLAUDE_SKILL_DIR}/instructions/<mode>.md`, leaves its path placeholder for you to fill.
 
 ## 5. Capability verbs — how this host answers each one

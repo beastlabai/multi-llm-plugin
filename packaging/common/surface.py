@@ -1053,6 +1053,23 @@ def cli_surface(host_id: str) -> Dict[str, Any]:
                 "floor": multi_llm.TOOL_PAGES_FLOOR,
                 "served": multi_llm.TOOL_PAGES_SERVED,
             },
+            # The line a server opens a runbook with when it names a
+            # `references/<file>.md`, `{dir}` filled with the server's own skill
+            # directory's `references` folder: the scrub removes every line that
+            # named the skill directory. Additive within v7, like `pages`; a
+            # server whose surface lacks it attaches the runbook as before.
+            "references": multi_llm.TOOL_REFERENCES_LINE,
+            # The file form, for a package that attaches the core to a tool result
+            # whose host caps it (the OpenCode package): `option` added to the
+            # fetch prints one `marker` line naming the file, and the result
+            # carries that line and `read` (`{mode}`, `{lines}`) instead of the
+            # core. A printed core, the fallback when the file cannot be written,
+            # is attached only whole. Additive within v7, like `pages`.
+            "core_file": {
+                "option": multi_llm.TOOL_CORE_FILE_OPTION,
+                "marker": multi_llm.CORE_FILE_MARKER,
+                "read": multi_llm.TOOL_CORE_FILE_READ,
+            },
         },
     }
 

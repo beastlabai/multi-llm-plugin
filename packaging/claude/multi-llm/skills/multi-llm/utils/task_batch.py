@@ -767,13 +767,14 @@ def _judge_dispatch_argv_preview(
 ) -> List[str]:
     """A best-effort argv for the F6 audit line — never the real dispatch's own.
 
-    Rendered as ``write_batch_scheduler._render_argv`` renders its own
-    (``dispatch_spawn.audit_argv``): the provider's own command builder, called
-    directly and never executed, on the rung the dispatch takes. The judge is
-    a read kind dispatched with no grant, so its rung and request are the ones
-    ``dispatch_spawn._dispatch_grant`` replays for it (the recorded rung, a
-    request built from ``cwd``): the audit line never shows a sandbox the
-    child did not get. Deliberately not :func:`_preview_argv` (the
+    Rendered as ``write_batch_scheduler.WriteBatchScheduler._render_argv``
+    renders its own (``dispatch_spawn.audit_argv``): the provider's own command
+    builder, called directly and never executed, on the rung the dispatch
+    takes. The judge is a read kind dispatched with no grant, so its rung and
+    request are the ones ``dispatch_spawn._dispatch_grant`` replays for it
+    (the recorded rung, a request built from ``cwd``): the audit line never
+    shows a sandbox the child did not get. Deliberately not
+    :func:`_preview_argv` (the
     ``--dry-run-subagents`` renderer), which enters the full dispatch context
     and materializes a schema sidecar per call — a judge task carries no
     schema, so that machinery would only double the per-attempt setup this
@@ -840,8 +841,8 @@ def _judge_audit_completed(phase_dir: str, outcome: _task_outcome.TaskOutcome) -
 
     Skipped when no attempt was ever made (a pre-dispatch refusal): a
     ``completed`` line with no matching ``dispatched`` line would claim a run
-    that never started, the same guard ``write_batch_scheduler._audit_terminal``
-    applies.
+    that never started, the same guard
+    ``write_batch_scheduler.WriteBatchScheduler._audit_terminal`` applies.
     """
     if not outcome.attempts:
         return

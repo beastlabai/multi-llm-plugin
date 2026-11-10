@@ -348,7 +348,7 @@ def kept_named(ids: Sequence[str], labels: Mapping[str, str], *, limit: int = 8)
 # -- the write mirror's rows -----------------------------------------------------
 
 #: The per-task id lists of the executor's write mirror
-#: (``write_batch_scheduler._mirror_status``) that its own ``tasks`` rows
+#: (``write_reports.WriteReports.mirror_status``) that its own ``tasks`` rows
 #: already carry, each with the row test it is read by: every row not ``ok``,
 #: every row naming a check's findings, every row naming a code batch's own
 #: failing check. The mirror stopped writing them; :func:`mirror_ids` reads

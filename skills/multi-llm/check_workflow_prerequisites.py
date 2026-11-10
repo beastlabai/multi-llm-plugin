@@ -1327,8 +1327,9 @@ def _mark_in_progress_apply(state: StateManager, phases: Dict[str, dict]) -> Non
     the host, ``StateManager.mark_phase_started``): it is ``in_progress``,
     not ``pending``, so a command for it carries ``--resume`` (a bare
     re-invocation starts the phase over). It records itself completed only
-    once every batch verified (``write_batch_scheduler._finalize``, or the
-    host's ``--mark-completed``), and a phase this payload already shows as
+    once every batch verified
+    (``write_batch_scheduler.WriteBatchScheduler._finalize``, or the host's
+    ``--mark-completed``), and a phase this payload already shows as
     completed or skipped is left alone. Batches whose phase last ran before
     its review last completed are an earlier cycle's and mark nothing:
     ``--resume`` there would replay that cycle's recorded decisions against
