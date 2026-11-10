@@ -535,6 +535,10 @@ class TestTheStatusConsumers:
             # fx mixes shell output into stderr, so an unqualified login
             # notice cannot identify the CLI's auth state. Use its own error.
             stdout, stderr = '{"error":"MissingCredentials"}', ""
+        elif name == "kilocode":
+            # kilocode's own diagnoses open with its bold-red `Error: ` paint;
+            # an unpainted line may be a tool's output, so it decides nothing.
+            stderr = "\x1b[91m\x1b[1mError: \x1b[0mnot logged in."
         assert (
             availability_from_failure(provider, stdout, stderr, 1)
             is Availability.NEEDS_AUTH

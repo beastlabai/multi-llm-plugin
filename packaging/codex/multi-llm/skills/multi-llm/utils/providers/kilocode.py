@@ -111,7 +111,7 @@ def _strip_ansi(text: str) -> str:
 #: reset flush against the cause, opening a stderr line. Every failure row of
 #: tests/fixtures/kilocode/manifest.yaml (7.8.27) prints it, the 401, 429 and 500
 #: rows included, and nothing else on stderr opens with it: the run banner and
-#: the tool trace (``ESC[0m→ ESC[0mRead plans/auth-feature.md``, the
+#: the tool trace (``ESC[0m→ ESC[0mRead <the file it opened>``, the
 #: ``multi-assistant`` row) open on a bare reset. :meth:`KiloCodeProvider.vendor_text`
 #: reads only the lines that open with it.
 _PAINTED_ERROR = "\x1b[91m\x1b[1mError: \x1b[0m"
@@ -246,8 +246,8 @@ class KiloCodeProvider(LLMProvider):
     #: (tests/fixtures/kilocode/manifest.yaml, 7.8.27): against a fail-forever
     #: stub, kilocode ran the same chain of 6 requests on a 429 (70.48 s), a
     #: 500 (78.18 s) and a reset connection (68 s) before printing its error, so
-    #: ``retries_rate_limit`` is ``True`` and §7.5 rule 6(b) sends no identical
-    #: re-dispatch of a rate-limited slot. Neither bound is proven:
+    #: ``retries_rate_limit`` is ``True`` and the retry ladder sends no identical
+    #: re-dispatch of a rate-limited slot (docs/development/providers.md). Neither bound is proven:
     #: ``max_requests`` is ``None`` because a run makes one request per model
     #: turn (2 on ``multi-assistant``, 3 on ``context-overflow``) and each turn
     #: may run its own chain, and ``max_wall_s`` is ``None`` because the observed
