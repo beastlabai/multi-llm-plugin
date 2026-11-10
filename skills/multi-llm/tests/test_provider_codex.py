@@ -632,7 +632,7 @@ T3_CODEX_CORPUS = (
     ("rows/invalid-model.stdout.txt",              "invalid_model",      "invalid_model"),
     ("rows/multi-assistant.stdout.txt",            None,                 None),
     ("rows/rate-limit.stdout.txt",                 "rate_limited",       "rate_limited"),
-    ("rows/stdout-error.stdout.txt",               None,                 None),
+    ("rows/stdout-error.stdout.txt",               "server_error",       "server_error"),
     ("rows/success.stdout.txt",                    None,                 None),
     ("rows/truncated.stdout.txt",                  None,                 None),
     ("rows/zero-body.stdout.txt",                  None,                 None),

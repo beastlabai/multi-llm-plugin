@@ -547,11 +547,13 @@ def _named_for_the_ladder(token: str, sentence: str) -> str:
       rung 2. One deadline, two behaviours on one ladder.
     * the step-3 denial, ``None`` as well: the same *outcome* as
       ``permission_denied`` — never retried — but reported under "Unknown".
-    * the 5xx ``error``. Its body says ``The server had an error`` and
-      ``(type=server_error)``, and neither is a :data:`SERVER_ERROR_MARKERS`
-      row: ``\\bserver error\\b`` wants a space where the type name has an
-      underscore, and the ``\\b5\\d{2}\\b\\s*(?:internal|server|…)`` row wants
-      one of its words straight after the code.
+    * the 5xx ``error``. Its body says ``(type=server_error)``, which is no
+      :data:`SERVER_ERROR_MARKERS` row: ``\\bserver error\\b`` wants a space
+      where the type name has an underscore, and the
+      ``\\b5\\d{2}\\b\\s*(?:internal|server|…)`` row wants one of its words
+      straight after the code. Its sentence is a row only when it is OpenAI's
+      whole ``The server had an error while processing your request``, so
+      another vendor's 5xx wording still needs the name.
 
     Naming the verdict here rather than widening those shared tables keeps the
     word where the shape is known *structurally*, so no other adapter's stream

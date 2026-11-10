@@ -302,11 +302,10 @@ class TestOmpStreamReading:
         assert provider.parse_output(stdout, stderr)["success"] is True
         assert provider.classify_failure(stdout, stderr, 0) is None
 
-    def test_the_five_hundred_row_needs_the_structural_branch(self, provider):
-        """The stub's 500 sentence matches no shared `SERVER_ERROR_MARKERS` row.
-
-        Read off `errorStatus` instead, so the wording of any one vendor's 5xx
-        body is immaterial.
+    def test_the_five_hundred_row_is_a_server_error(self, provider):
+        """Read off `errorStatus`, so the wording of any one vendor's 5xx body
+        is immaterial. The stub's body is OpenAI's own 500 sentence, which a
+        shared `SERVER_ERROR_MARKERS` row also reads, so both routes agree here.
         """
         assert provider.classify_failure(*self._row("stdout-error"), 1) == \
             CATEGORY_SERVER_ERROR

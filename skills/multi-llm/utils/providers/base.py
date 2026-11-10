@@ -969,9 +969,13 @@ class LLMProvider(ABC):
           could write.
         * **stderr is not reduced** by any shipped override: the echo lives in
           the structured stdout envelope, and the diagnosis a real failure
-          carries must reach the tables untouched. The one exception is
-          qwen-code's, which drops a single named advisory line (its ripgrep
-          fallback notice, whose ``EACCES`` is not a diagnosis) and nothing else.
+          carries must reach the tables untouched. There are two exceptions.
+          qwen-code's drops a single named advisory line (its ripgrep fallback
+          notice, whose ``EACCES`` is not a diagnosis) and nothing else.
+          kilocode's keeps only the lines it paints as its own ``Error:``,
+          colour off, because the rest of its stderr is a banner and a tool
+          trace naming what the model read; its stdout, the plain answer, goes
+          entirely.
 
         Applied in exactly two places. :meth:`classify_failure` applies it **to
         classify**. ``attempt_classifier._classify_failed_run`` applies it a

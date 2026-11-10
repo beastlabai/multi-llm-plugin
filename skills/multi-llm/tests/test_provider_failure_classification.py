@@ -525,7 +525,17 @@ LADDER_MODEL_NAMED_404 = (
 LADDER_SERVER_ERRORS = [
     "API error (status 503)",
     "internal server error",
+    # OpenAI's 500 sentence, and codex's gloss of it with either apostrophe
+    # (tests/fixtures/*/manifest.yaml `server-error` rows, codex `stdout-error`).
+    "Error: The server had an error while processing your request. Sorry about that!",
+    "We’re currently experiencing high demand, which may cause temporary errors.",
+    "We're currently experiencing high demand, which may cause temporary errors.",
 ]
+
+#: The two whole-clause server rows, each beside a verdict the ladder consults
+#: earlier: the earlier one must still win.
+OPENAI_500 = "The server had an error while processing your request. Sorry about that!"
+CODEX_500 = "We’re currently experiencing high demand, which may cause temporary errors."
 
 
 LADDER_ORDER_CASES = [(LADDER_MODEL_NAMED_404, "invalid_model")] + [
@@ -587,3 +597,39 @@ class TestClassifyLadderOrder:
 
         doc = classify_streams.__doc__ or ""
         assert "invalid model, then server" in doc
+
+
+class TestTheWholeClauseServerRows:
+    """OpenAI's 500 sentence and codex's gloss of it read ``server_error``
+    only as whole clauses, and only when nothing earlier in the ladder matched.
+    """
+
+    @pytest.mark.parametrize("sentence", [OPENAI_500, CODEX_500])
+    @pytest.mark.parametrize("earlier,expected", [
+        ("This model's maximum context length is 8192 tokens.", "context_length_exceeded"),
+        ("Incorrect API key provided. invalid api key", "auth_failed"),
+        ("Rate limit reached for stub-model", "rate_limited"),
+        ("Request timed out.", "timeout"),
+        ("Connection reset by server", "connection_error"),
+        (LADDER_MODEL_NAMED_404, "invalid_model"),
+    ], ids=["context", "auth", "rate", "timeout", "connection", "invalid-model"])
+    def test_an_earlier_verdict_in_the_same_capture_still_wins(
+        self, sentence, earlier, expected
+    ):
+        from utils.providers.base import classify_streams
+
+        assert classify_streams(sentence, earlier, 1) == expected
+        assert classify_streams(f"{earlier}\n{sentence}", "", 1) == expected
+
+    @pytest.mark.parametrize("fragment", [
+        "The server had an error.",
+        "while processing your request",
+        "the server had an error while processing your requests is a typo",
+        "We are currently experiencing high demand.",
+        "which may cause temporary errors",
+        "the review notes the endpoint is experiencing high demand",
+    ])
+    def test_a_fragment_of_either_clause_is_no_verdict(self, fragment):
+        from utils.providers.base import classify_streams
+
+        assert classify_streams(fragment, "", 1) is None

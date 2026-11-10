@@ -510,14 +510,15 @@ class TestAiderGlossIsNarrowedWhereItIsWritten:
         return (self.FIXTURES / f"{stem}.stdout.txt").read_text(encoding="utf-8")
 
     def test_the_gloss_alone_no_longer_says_rate_limited(self):
-        """The two rows the excision moves, from the committed bytes."""
+        """The two rows the excision moves, from the committed bytes. The 5xx
+        row's verdict is the vendor's own 500 sentence, a server marker."""
         provider = AiderProvider()
 
         assert provider.classify_failure(self._capture("truncated"), "", 0) == \
             "connection_error"
         assert provider.classify_failure(
             self._capture("exit-zero-failure"), "", 0
-        ) == "runner_error"
+        ) == "server_error"
 
     def test_and_the_gloss_is_still_in_those_bytes(self):
         """The fix is an excision at classification time, not an edited capture."""

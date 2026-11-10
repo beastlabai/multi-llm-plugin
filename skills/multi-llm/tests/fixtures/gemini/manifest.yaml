@@ -418,17 +418,16 @@ rows:
       on any other CLI: failserver `--mode 500`, fail-forever. **10 requests over
       202 s** (232 s at 0.25.2) — gemini retries a 5xx on the same ladder as a 429
       — exit **244** (500 & 0xFF), 14,484 bytes on stderr and **0 bytes on
-      stdout**. The measured
-      classification is **`None`**: the vendor line is *"The server had an error
-      while processing your request"*, and no SERVER_ERROR_MARKERS entry matches
-      that phrasing (`server error` as a phrase never appears, and the `5\d{2}`
-      pattern needs the status adjacent to the word). See README, defect 5.
+      stdout**. The vendor line is *"The server had an error while processing
+      your request"*, which the shared server table's row for OpenAI's 500
+      sentence reads as `server_error` (README, defect 5). Both lanes keep
+      `runner_error`: the fan-out puts `server_error` on that rung and the
+      executor forwards no server verdict.
     expect:
       lane_status: {lane_a: runner_error, lane_b: runner_error}
       success: false
       # C4 tier (i). 14,484 bytes of stderr and ten identical blobs, capped to
-      # one line. The classification cell is unchanged and still `null` — C4
-      # makes the sentence visible without touching a pattern table.
+      # one line.
       error_contains:
         - "JSON parse error"
         - "500: The server had an error while processing your request"
@@ -436,7 +435,7 @@ rows:
         - "The server had an error while processing your request"
         - "Attempt 1 failed with status 500"
         - '"code": 500'
-      classify_failure: null
+      classify_failure: "server_error"
 
   zero-byte-response:
     stdout: zero-byte-response.stdout.txt

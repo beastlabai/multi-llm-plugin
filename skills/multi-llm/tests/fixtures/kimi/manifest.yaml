@@ -241,22 +241,17 @@ rows:
     notes: >-
       Not a canonical row. failserver `--mode 500`, fail-forever: one request,
       `provider.api_error: The server had an error while processing your
-      request.` Neither kimi's `api_error` (underscored, so the `\bapi error\b`
-      marker does not match) nor OpenAI's sentence is a server marker, so it
-      classifies None.
+      request.` kimi's `api_error` is underscored, so the `\bapi error\b`
+      marker does not match it, and the verdict comes from the shared row for
+      OpenAI's sentence: `server_error`, on the same transport-retry statuses
+      as before in both lanes.
     expect:
       lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       salvage: none
       success: false
       error_contains: ["no assistant record"]
       raw_contains: ["provider.api_error: The server had an error while processing your request."]
-      classify_failure: null
-      known_wrong:
-        intended: server_error
-        reason: >-
-          A 500. kimi's `api_error` is underscored, so the `api error` marker's
-          word boundary misses it, and OpenAI's sentence is no server marker. U94
-          fixes the classifier and flips this row.
+      classify_failure: "server_error"
 
   zero-body:
     stdout: rows/zero-body.stdout.txt

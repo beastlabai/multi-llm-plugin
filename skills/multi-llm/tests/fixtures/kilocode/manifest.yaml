@@ -31,14 +31,14 @@ notes: >-
   (`answer_framing = "plain"`); stderr carries the run banner `> code ·
   stub-model` between ANSI resets, a tool trace line per tool call, and on a
   failure one painted line `ESC[91mESC[1mError: ESC[0m<cause>`. Every failure
-  exits 1 with zero bytes on stdout. **That paint is a classification bug these
-  rows expose, recorded and not fixed here:** the reset `ESC[0m` sits flush
-  against the cause's first word, so a pattern anchored with `\b` cannot match
-  it. `rate-limit` classifies None for exactly that reason (with the escapes
-  stripped, the same stderr classifies `rate_limited`); `invalid-model` and
-  `zero-body` classify only because their patterns are not word-anchored.
-  `auth-error` misses for a second reason too: OpenAI's `Incorrect API key
-  provided` wording is in no auth pattern.
+  exits 1 with zero bytes on stdout. `KiloCodeProvider.vendor_text` gives the
+  classification and its quote only that painted line, colour off: never
+  stdout (the model's answer) nor the banner and tool trace (which names what
+  the model read), and the stored streams stay as captured. The colour comes
+  off because the reset `ESC[0m` sits flush against the cause's first word,
+  where a word-anchored pattern cannot see a boundary; `auth-error` also needs
+  the adapter's own `Incorrect API key provided` auth pattern, and
+  `server-error` the shared row for OpenAI's 500 sentence.
 rows:
   success:
     stdout: rows/success.stdout.txt
@@ -162,25 +162,17 @@ rows:
     requests: 1
     notes: >-
       failserver `--mode 401`. One request, no retry, and the vendor sentence
-      reaches stderr verbatim. It classifies **None**: `Incorrect API key
-      provided` is in no auth pattern (the same hole cline had until its own
-      pattern), and the reset flush against `Incorrect` would defeat a
-      word-anchored one besides (see the manifest's notes). Both lanes read a
-      plain failed run, so a dead key is not reported as one.
+      reaches stderr verbatim. It classifies `auth_failed` on the adapter's own
+      `incorrect api key provided` pattern (cline and gemini declare the same
+      wording), read once `vendor_text` has taken the reset off `Incorrect` (see
+      the manifest's notes). Both lanes stop the batch on it as a dead key.
     expect:
-      lane_status: {lane_a: runner_error, lane_b: runner_error}
+      lane_status: {lane_a: auth_failed, lane_b: auth_failed}
       salvage: none
       success: false
       error_contains: ["Empty output"]
       raw_contains: ["Incorrect API key provided: sk-stub***"]
-      classify_failure: null
-      known_wrong:
-        intended: auth_failed
-        reason: >-
-          A 401 with a rejected key. OpenAI's `Incorrect API key provided` wording
-          is in no auth pattern, and the ANSI reset flush against `Incorrect` would
-          defeat a word-anchored one besides, so a dead key reads as a plain failed
-          run. U94 fixes the classifier and flips this row.
+      classify_failure: "auth_failed"
 
   rate-limit:
     stdout: rows/rate-limit.stdout.txt
@@ -191,24 +183,19 @@ rows:
     notes: >-
       failserver `--mode 429`, fail-forever. kilocode retries internally (6
       requests over 70.5 s) and then prints the vendor sentence, `Rate limit
-      reached for stub-model …`. It classifies **None** because the reset
-      sits flush against `Rate` (`ESC[0mRate`), so the `\brate limit` pattern
-      cannot match; the stripped stderr classifies `rate_limited`. A
-      rate-limited kilocode slot is therefore read as a plain failed run.
+      reached for stub-model …`, with the reset flush against `Rate`
+      (`ESC[0mRate`). `vendor_text` strips it, so the base `rate limit` pattern
+      sees its word boundary and the row classifies `rate_limited`. This chain
+      is why the adapter declares `internal_retries` with `retries_rate_limit`:
+      the ladder stops the slot here rather than backing off into the same
+      6-request chain again.
     expect:
-      lane_status: {lane_a: runner_error, lane_b: runner_error}
+      lane_status: {lane_a: rate_limited, lane_b: rate_limited}
       salvage: none
       success: false
       error_contains: ["Empty output"]
       raw_contains: ["\e[0mRate limit reached for stub-model"]
-      classify_failure: null
-      known_wrong:
-        intended: rate_limited
-        reason: >-
-          A 429. The ANSI reset sits flush against `Rate`, so the word-anchored
-          rate-limit pattern cannot match; the same stderr with its escapes
-          stripped classifies `rate_limited`. U94 fixes the classifier and flips
-          this row.
+      classify_failure: "rate_limited"
 
   invalid-model:
     stdout: rows/invalid-model.stdout.txt
@@ -272,21 +259,17 @@ rows:
     notes: >-
       Not a canonical row. failserver `--mode 500`, fail-forever: 6 requests
       over 78 s, then the vendor sentence `The server had an error while
-      processing your request.` That OpenAI wording is no server marker, so it
-      classifies None.
+      processing your request.`, which the shared server table reads as
+      `server_error`. Both lanes keep `runner_error`, one transport retry: the
+      fan-out puts `server_error` on that rung and the executor forwards no
+      server verdict.
     expect:
       lane_status: {lane_a: runner_error, lane_b: runner_error}
       salvage: none
       success: false
       error_contains: ["Empty output"]
       raw_contains: ["The server had an error while processing your request."]
-      classify_failure: null
-      known_wrong:
-        intended: server_error
-        reason: >-
-          A 500 after kilocode's own retries. OpenAI's `The server had an error
-          while processing your request.` is no server marker. U94 fixes the
-          classifier and flips this row.
+      classify_failure: "server_error"
 
   zero-body:
     stdout: rows/zero-body.stdout.txt

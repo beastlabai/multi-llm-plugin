@@ -189,12 +189,13 @@ rows:
       exit-0 failure, so this row is one representative (the 5xx; same bytes as
       `server-error`, a separate container). What it pins is that success is
       read off the stream and never off the exit code: exit 0, stderr empty, and
-      `parse_output` still fails with the vendor's sentence, named "Server
-      error" for Lane A's table.
+      `parse_output` still fails with the vendor's sentence, which Lane A's
+      table reads as `server_error` on its own, so it carries no "Server error"
+      prefix.
     expect:
       lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       success: false
-      error_contains: ["Server error: 500: The server had an error while processing your request"]
+      error_contains: ["500: The server had an error while processing your request"]
       classify_failure: "server_error"
       salvage: none
 
@@ -332,14 +333,14 @@ rows:
     wall_s: 14.38
     requests: 4
     notes: >-
-      failserver `--mode 500`, fail-forever: 4 requests over 14.4 s. Classified
-      NOTHING at 0.80.6 (OpenAI's 500 sentence is on no table); the `500:`
-      prefix now classifies `server_error` structurally, and the sentence is
-      named "Server error" so Lane A's string classifier agrees.
+      failserver `--mode 500`, fail-forever: 4 requests over 14.4 s. The `500:`
+      prefix classifies `server_error` structurally, and OpenAI's 500 sentence
+      is on the shared server table, so Lane A's string classifier agrees with
+      the sentence as it is (`_named_for_the_ladder` adds no "Server error").
     expect:
       lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       success: false
-      error_contains: ["Server error: 500: The server had an error while processing your request"]
+      error_contains: ["500: The server had an error while processing your request"]
       classify_failure: "server_error"
       salvage: none
 

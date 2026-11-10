@@ -7,6 +7,7 @@ from ..json_extractor import _ANSI_ESCAPE
 from .base import (
     LAUNCH_DIAGNOSTICS_NONE,
     REASONING_LADDER,
+    InternalRetryEnvelope,
     LLMProvider,
     ReasoningLadder,
     StructuredSchema,
@@ -104,6 +105,25 @@ def _resolve_binary() -> str:
 def _strip_ansi(text: str) -> str:
     """``text`` with the colour the CLI paints its own output in removed."""
     return _ANSI_ESCAPE.sub("", text or "")
+
+
+#: How kilocode frames a failure it reports itself: bold red ``Error: ``, then a
+#: reset flush against the cause, opening a stderr line. Every failure row of
+#: tests/fixtures/kilocode/manifest.yaml (7.8.27) prints it, the 401, 429 and 500
+#: rows included, and nothing else on stderr opens with it: the run banner and
+#: the tool trace (``ESC[0m→ ESC[0mRead plans/auth-feature.md``, the
+#: ``multi-assistant`` row) open on a bare reset. :meth:`KiloCodeProvider.vendor_text`
+#: reads only the lines that open with it.
+_PAINTED_ERROR = "\x1b[91m\x1b[1mError: \x1b[0m"
+
+
+def _painted_error_lines(stderr: str) -> str:
+    """The stderr lines that open with :data:`_PAINTED_ERROR`, colour off."""
+    return "\n".join(
+        _strip_ansi(line)
+        for line in (stderr or "").split("\n")
+        if line.startswith(_PAINTED_ERROR)
+    )
 
 
 def _one_line(text: str) -> str:
@@ -222,9 +242,60 @@ class KiloCodeProvider(LLMProvider):
     #: read for a batch-fatal verdict.
     LAUNCH_DIAGNOSTICS = LAUNCH_DIAGNOSTICS_NONE
 
+    #: :attr:`~.base.LLMProvider.internal_retries`, from the captures
+    #: (tests/fixtures/kilocode/manifest.yaml, 7.8.27): against a fail-forever
+    #: stub, kilocode ran the same chain of 6 requests on a 429 (70.48 s), a
+    #: 500 (78.18 s) and a reset connection (68 s) before printing its error, so
+    #: ``retries_rate_limit`` is ``True`` and §7.5 rule 6(b) sends no identical
+    #: re-dispatch of a rate-limited slot. Neither bound is proven:
+    #: ``max_requests`` is ``None`` because a run makes one request per model
+    #: turn (2 on ``multi-assistant``, 3 on ``context-overflow``) and each turn
+    #: may run its own chain, and ``max_wall_s`` is ``None`` because the observed
+    #: walls are a stub's, not a worst case. ``configurable_by`` is empty: the
+    #: argv carries no retry or timeout flag and the adapter sets no env.
+    internal_retries = InternalRetryEnvelope(
+        max_requests=None,
+        max_wall_s=None,
+        retries_rate_limit=True,
+        configurable_by=(),
+    )
+
+    #: OpenAI's 401 sentence, relayed verbatim on stderr
+    #: (tests/fixtures/kilocode/rows/auth-error, 7.8.27): ``Error: Incorrect API
+    #: key provided: sk-…``. No base pattern reads it; cline and gemini declare
+    #: the same wording. The whole clause, so a line that only mentions an API
+    #: key does not match. ``User not found.`` stays out (:meth:`describe_failure`).
+    auth_error_patterns = LLMProvider.auth_error_patterns + (
+        "incorrect api key provided",
+    )
+
     @property
     def name(self) -> str:
         return "kilocode"
+
+    def vendor_text(self, stdout: str, stderr: str) -> Tuple[str, str]:
+        """What kilocode itself reported: none of stdout, and only the stderr
+        lines it paints as its own ``Error:``, colour off.
+
+        stdout is the model's answer and nothing else (:attr:`answer_framing`),
+        so a failed run's partial answer quoting ``Incorrect API key provided``
+        or a rate limit is dropped whole. stderr also carries the run banner and
+        the tool trace, which names what the model chose to read or run
+        (``→ Read docs/<any name>.md``), so a line is kept only when it opens on
+        :data:`_PAINTED_ERROR`, the framing of every captured failure. The paint
+        comes off the kept line because its reset sits flush against the cause's
+        first word, where a pattern's left word boundary
+        (:func:`~.failure_classifier.stream_pattern`) cannot see one. Anything
+        else, a wrapped cause's continuation line included, gives no verdict:
+        text nobody can attribute is one bounded retry, never a stop.
+
+        It feeds the classification and its quote (the base docstring names the
+        two appliers), never the stored streams or :meth:`describe_failure`.
+        """
+        try:
+            return "", _painted_error_lines(stderr)
+        except Exception:  # noqa: BLE001 - a failed reduction returns its input
+            return stdout, stderr
 
     def is_available(self) -> bool:
         return any(shutil.which(name) is not None for name in BINARY_NAMES)
@@ -325,8 +396,9 @@ class KiloCodeProvider(LLMProvider):
         its docstring.
 
         **Diagnostics, never classification.** Nothing here moves any run's
-        :meth:`classify_failure` verdict — that reads the raw streams through the
-        declared pattern tables and never consults this method. In particular
+        :meth:`classify_failure` verdict — that reads only kilocode's painted
+        ``Error:`` lines (:meth:`vendor_text`) through the declared pattern
+        tables and never consults this method. In particular
         ``User not found.`` is *not* added to ``auth_error_patterns`` by this
         change: ``providers/cline`` declares that wording because it measured it,
         and declaring it here would move this capture's category from ``None`` to

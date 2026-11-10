@@ -12,7 +12,8 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from utils.providers.base import split_reasoning_effort
+from utils.json_extractor import _ANSI_ESCAPE
+from utils.providers.base import LLMProvider, split_reasoning_effort
 from utils.providers.kilocode import KiloCodeProvider
 
 
@@ -322,6 +323,257 @@ This concludes the review."""
 
         assert result["success"] is True
         assert result["data"] == data
+
+
+class TestKiloCodeReadsOnlyItsPaintedErrorLines:
+    """kilocode's ``vendor_text`` gives the classifier and its quote only the
+    stderr lines kilocode paints as its own ``Error:``, colour off: never
+    stdout (the model's answer), the banner or the tool trace. The captured
+    rows themselves are graded in test_provider_fixture_rows.py.
+    """
+
+    ROWS = Path(__file__).parent / "fixtures" / "kilocode" / "rows"
+    BANNER = "\x1b[0m\n> code · stub-model\n\x1b[0m\n"
+    PAINT = BANNER + "\x1b[91m\x1b[1mError: \x1b[0m{cause}\n"
+    #: The tool trace line exactly as ``multi-assistant`` captured it, with
+    #: what the model chose to read or run after the arrow.
+    TRACE = "\x1b[0m→ \x1b[0m{tool}\n"
+
+    #: The vendor sentences the tables read as a verdict, as a model's answer
+    #: or a tool's argument may quote them.
+    PHRASES = {
+        "401": "Incorrect API key provided",
+        "429": "Rate limit reached for gpt-4o in organization org-x on requests per min",
+        "500": "The server had an error while processing your request.",
+        "500-gloss": "currently experiencing high demand, which may cause temporary errors",
+    }
+    NEUTRAL = "The plan needs a focused regression test."
+
+    @pytest.fixture
+    def provider(self):
+        return KiloCodeProvider()
+
+    @staticmethod
+    def _lanes(stdout, stderr):
+        from tests.test_provider_fixture_rows import _lane_a_status, _lane_b_status
+        from utils.provider_outcome import Capture
+
+        capture = Capture(stdout=stdout, stderr=stderr, exit_code=1)
+        return (
+            _lane_a_status("kilocode", capture),
+            _lane_b_status("kilocode", capture),
+        )
+
+    @staticmethod
+    def _quote(provider, stdout, stderr):
+        from utils.attempt_classifier import _classify_failed_run
+        from utils.provider_outcome import Capture
+
+        return _classify_failed_run(
+            provider, Capture(stdout=stdout, stderr=stderr, exit_code=1), "m"
+        )
+
+    def test_the_hook_keeps_only_the_painted_lines_of_every_capture(self, provider):
+        """Every committed pair: no stdout, and of stderr exactly the lines that
+        open on the paint, each a piece of the capture with its escapes off."""
+        pairs = sorted(self.ROWS.glob("*.stderr.txt"))
+        assert pairs
+        for stderr_path in pairs:
+            stdout_path = stderr_path.with_name(
+                stderr_path.name.replace(".stderr.", ".stdout.")
+            )
+            stdout = stdout_path.read_bytes().decode("utf-8")
+            stderr = stderr_path.read_bytes().decode("utf-8")
+            reduced_out, reduced_err = provider.vendor_text(stdout, stderr)
+            assert reduced_out == "", stderr_path.name
+            painted = [
+                line for line in stderr.split("\n")
+                if line.startswith("\x1b[91m\x1b[1mError: \x1b[0m")
+            ]
+            kept = reduced_err.split("\n") if reduced_err else []
+            assert kept == [_ANSI_ESCAPE.sub("", line) for line in painted]
+            assert all(line.startswith("Error: ") for line in kept), stderr_path.name
+            assert "\x1b" not in reduced_err and "> code" not in reduced_err
+        multi = (self.ROWS / "multi-assistant.stderr.txt").read_text(encoding="utf-8")
+        assert "Read plans/auth-feature.md" in multi
+        assert provider.vendor_text("", multi) == ("", "")
+
+    def test_a_failed_reduction_returns_its_input(self, provider):
+        assert provider.vendor_text("answer", b"\x1b[0m") == ("answer", b"\x1b[0m")
+
+    @pytest.mark.parametrize("cause,expected", [
+        ("Rate limit reached for stub-model in organization org-stub.", "rate_limited"),
+        ("Incorrect API key provided: sk-stub***.", "auth_failed"),
+        ("The server had an error while processing your request. Sorry about that!",
+         "server_error"),
+        ("The model `stub-model` does not exist or you do not have access to it.",
+         "invalid_model"),
+        ("This model's maximum context length is 8192 tokens.", "context_length_exceeded"),
+        ("Connection reset by server", "connection_error"),
+        # Deliberately no verdict: see `KiloCodeProvider.describe_failure`.
+        ("User not found.", None),
+        ("run ended without an assistant message; the model returned no output", None),
+    ])
+    def test_the_painted_cause_is_classified(self, provider, cause, expected):
+        assert provider.classify_failure("", self.PAINT.format(cause=cause), 1) == expected
+
+    def test_the_paint_is_what_hid_the_rate_limit(self, provider):
+        """The same bytes through the base hook (identity): no boundary, no verdict."""
+        stderr = self.PAINT.format(cause="Rate limit reached for stub-model.")
+        with patch.object(KiloCodeProvider, "vendor_text", LLMProvider.vendor_text):
+            assert provider.classify_failure("", stderr, 1) is None
+        assert provider.classify_failure("", stderr, 1) == "rate_limited"
+
+    def test_the_auth_wording_is_the_whole_clause(self, provider):
+        assert "incorrect api key provided" in provider.auth_error_patterns
+        for line in ("Find your API key at the dashboard.", "an incorrect API key"):
+            assert provider.classify_failure("", self.PAINT.format(cause=line), 1) is None
+
+    @pytest.mark.parametrize("stderr", ["", "banner", "trace"])
+    @pytest.mark.parametrize("phrase", sorted(PHRASES))
+    def test_a_failed_runs_answer_quoting_a_vendor_sentence_decides_nothing(
+        self, provider, phrase, stderr
+    ):
+        """A non-zero exit after a partial answer that quotes the 401, 429 or
+        500 sentence: no verdict, and both lanes as for a neutral answer."""
+        stderr = {
+            "": "",
+            "banner": self.BANNER,
+            "trace": self.BANNER + self.TRACE.format(tool="Read plans/auth-feature.md"),
+        }[stderr]
+        answer = (
+            "Finding: preserve the vendor message \"" + self.PHRASES[phrase]
+            + "\" in the error log.\n"
+        )
+        assert provider.classify_failure(answer, stderr, 1) is None
+        assert self._lanes(answer, stderr) == self._lanes(self.NEUTRAL, stderr)
+
+    @pytest.mark.parametrize("phrase", sorted(PHRASES))
+    @pytest.mark.parametrize("tool", [
+        "Read docs/{phrase}.md",
+        "Grep \"{phrase}\" docs/",
+        "Bash echo '{phrase}'",
+    ])
+    def test_a_tool_trace_naming_a_vendor_sentence_decides_nothing(
+        self, provider, phrase, tool
+    ):
+        """The trace names what the model chose to read or run, so its words are
+        the model's: no verdict, and both lanes as for a neutral trace."""
+        stderr = self.BANNER + self.TRACE.format(
+            tool=tool.format(phrase=self.PHRASES[phrase])
+        )
+        neutral = self.BANNER + self.TRACE.format(tool="Read plans/auth-feature.md")
+        assert provider.classify_failure("", stderr, 1) is None
+        assert self._lanes("", stderr) == self._lanes("", neutral)
+
+    @pytest.mark.parametrize("phrase", sorted(PHRASES))
+    def test_an_unpainted_line_is_no_diagnosis(self, provider, phrase):
+        """Only the captured framing is kilocode's: the same sentence on a line
+        without it (a tool's output, a wrapped continuation) gives no verdict."""
+        for line in ("Error: " + self.PHRASES[phrase], self.PHRASES[phrase]):
+            assert provider.classify_failure("", self.BANNER + line + "\n", 1) is None
+
+    @pytest.mark.parametrize("row,expected", [
+        ("auth-error", "auth_failed"),
+        ("rate-limit", "rate_limited"),
+        ("server-error", "server_error"),
+    ])
+    def test_the_captured_401_429_and_500_keep_their_verdicts(self, provider, row, expected):
+        stdout = (self.ROWS / f"{row}.stdout.txt").read_text(encoding="utf-8")
+        stderr = (self.ROWS / f"{row}.stderr.txt").read_text(encoding="utf-8")
+        assert provider.classify_failure(stdout, stderr, 1) == expected
+
+    @pytest.mark.parametrize("answer_phrase,cause,expected", [
+        ("401", "Connection reset by server", "connection_error"),
+        ("401", "The server had an error while processing your request.", "server_error"),
+        ("429", "Incorrect API key provided: sk-stub***.", "auth_failed"),
+        ("500", "Rate limit reached for stub-model.", "rate_limited"),
+    ])
+    def test_an_answer_never_outranks_the_painted_cause(
+        self, provider, answer_phrase, cause, expected
+    ):
+        """The table order would let a quoted 401 beat a real dropped connection;
+        with the answer out of the haystack the painted cause decides."""
+        answer = "The log should keep: " + self.PHRASES[answer_phrase]
+        assert provider.classify_failure(answer, self.PAINT.format(cause=cause), 1) == expected
+
+    @pytest.mark.parametrize("row,answer_phrase", [
+        ("auth-error", "429"),
+        ("rate-limit", "401"),
+    ])
+    def test_the_verdict_quotes_the_painted_line_never_the_answer(
+        self, provider, row, answer_phrase
+    ):
+        """The executor's failure reason is cut from the same reduction: the
+        captured error line, colour off, and none of the answer."""
+        stderr = (self.ROWS / f"{row}.stderr.txt").read_text(encoding="utf-8")
+        answer = "ANSWER-TEXT: the plan quotes " + self.PHRASES[answer_phrase] + ".\n"
+        found = self._quote(provider, answer, stderr)
+        assert found is not None
+        status, reason = found
+        assert status == {"auth-error": "auth_failed", "rate-limit": "rate_limited"}[row]
+        assert "ANSWER-TEXT" not in reason and "\\x1b" not in reason
+        sentence = {"auth-error": "Incorrect API key provided", "rate-limit": "Rate limit reached"}
+        assert sentence[row] in reason
+
+
+class TestKiloCodeRetryEnvelope:
+    """kilocode retries a 429 itself (6 requests over 70.48 s against a
+    fail-forever stub, tests/fixtures/kilocode/manifest.yaml ``rate-limit``),
+    so the ladder must not re-dispatch the same chain."""
+
+    def test_the_declaration_is_the_measured_one(self):
+        envelope = KiloCodeProvider.internal_retries
+        assert envelope is not None
+        assert envelope.retries_rate_limit is True
+        # Unproven bounds stay unstated: a chain per model turn, a stub's wall.
+        assert envelope.max_requests is None and envelope.max_wall_s is None
+        assert envelope.configurable_by == ()
+
+    def test_the_capture_behind_it_is_a_chain(self):
+        import yaml
+
+        manifest = yaml.safe_load(
+            (Path(__file__).parent / "fixtures" / "kilocode" / "manifest.yaml")
+            .read_text(encoding="utf-8")
+        )
+        row = manifest["rows"]["rate-limit"]
+        assert row["requests"] == 6 and row["wall_s"] == pytest.approx(70.48)
+        assert row["expect"]["classify_failure"] == "rate_limited"
+
+    @staticmethod
+    def _dispatches(envelope, *, timeout=600.0, chain_s=70.5):
+        """How many times one slot dispatches a run that ends rate-limited
+        after a ``chain_s`` chain: the real ladder, a fake clock, no jitter."""
+        from utils.retry_ladder import STATUS_RATE_LIMITED, RetryLadder
+
+        clock = {"t": 0.0}
+        ladder = RetryLadder(
+            timeout=timeout, retries=1, envelope=envelope,
+            now=lambda: clock["t"], jitter=lambda: 0.0,
+        )
+        dispatched = 0
+        while ladder.next_attempt() is not None:
+            dispatched += 1
+            clock["t"] += chain_s
+            action = ladder.record(STATUS_RATE_LIMITED)
+            clock["t"] += action.delay
+            if not action.retry:
+                break
+        return dispatched, ladder
+
+    def test_a_rate_limited_slot_runs_one_chain(self):
+        from utils.retry_ladder import STOP_VENDOR_ALREADY_RETRIED
+
+        dispatched, ladder = self._dispatches(KiloCodeProvider().internal_retries)
+        assert dispatched == 1
+        assert ladder.stop_reason == STOP_VENDOR_ALREADY_RETRIED
+
+    def test_without_the_declaration_the_chain_repeats(self):
+        """The baseline the declaration removes: the ladder's own backoffs, each
+        one re-running kilocode's whole chain inside the same 600 s slot."""
+        dispatched, _ = self._dispatches(None)
+        assert dispatched == 4
 
 
 class TestKiloCodeDefaultModelSpecs:

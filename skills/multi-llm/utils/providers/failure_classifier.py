@@ -498,6 +498,18 @@ SERVER_ERROR_MARKERS = _markers(
     r"\bupstream error\b",
     r"\bapi error\b",
     r"\bserver error\b",
+    # OpenAI's 500 sentence, "The server had an error while processing your
+    # request. Sorry about that!", relayed verbatim by kilocode, kimi, opencode,
+    # gemini, cline, aider and pi (the `server-error` rows of
+    # tests/fixtures/<provider>/manifest.yaml, failserver `--mode 500`). None of
+    # the rows above reads it: it never says "server error" or a status beside
+    # one. The whole clause, so only that sentence matches.
+    r"\bserver had an error while processing your request\b",
+    # codex's own gloss of the same 500, which it prints instead of the vendor
+    # sentence (tests/fixtures/codex/rows/stdout-error, codex 0.167.0): "We’re
+    # currently experiencing high demand, which may cause temporary errors."
+    # Read from "currently" on, so either apostrophe matches.
+    r"\bcurrently experiencing high demand, which may cause temporary errors\b",
 )
 
 #: "The model you named does not exist / is not available to this account."

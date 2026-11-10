@@ -322,7 +322,9 @@ GEMINI_CLASSIFY = {
     "rate-limit": "rate_limited",
     "invalid-model": "invalid_model",
     "context-overflow": "context_length_exceeded",
-    "server-error": None,
+    # OpenAI's 500 sentence, a SERVER_ERROR_MARKERS row of its own (README,
+    # defect 5); a pattern-table change, not one of C4's prose changes.
+    "server-error": "server_error",
     "zero-byte-response": None,
 }
 

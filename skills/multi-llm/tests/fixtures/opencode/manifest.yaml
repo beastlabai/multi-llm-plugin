@@ -231,22 +231,17 @@ rows:
     notes: >-
       Not a canonical row. failserver `--mode 500`, fail-forever: 9 requests
       over 74 s, then the `error` event with `statusCode: 500` and
-      `isRetryable: true`. OpenAI's `The server had an error while processing
-      your request.` is no server marker and nothing reads the status field, so
-      it classifies None; recorded, not fixed.
+      `isRetryable: true`. Nothing reads the status field; the event's message,
+      OpenAI's `The server had an error while processing your request.`, is
+      what the shared server table reads, so the row classifies `server_error`
+      on the same transport-retry statuses as before in both lanes.
     expect:
       lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       salvage: none
       success: false
       error_contains: ["APIError: The server had an error"]
       raw_contains: ['"statusCode":500']
-      classify_failure: null
-      known_wrong:
-        intended: server_error
-        reason: >-
-          A 500 after opencode's own retries. The `error` event carries
-          `statusCode: 500`, but nothing reads that field and OpenAI's sentence is
-          no server marker. U94 fixes the classifier and flips this row.
+      classify_failure: "server_error"
 
   zero-body:
     stdout: rows/zero-body.stdout.txt

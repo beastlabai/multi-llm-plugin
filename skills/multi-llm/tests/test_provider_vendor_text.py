@@ -90,10 +90,10 @@ class TestVendorTextContract:
 
     @pytest.mark.parametrize("provider", [
         "agy", "aider", "claude-code", "cline", "cursor-agent",
-        "gemini", "grok", "kilocode", "kimi", "qwen-code",
+        "gemini", "grok", "kimi", "qwen-code",
     ])
     def test_every_non_echoing_adapter_still_gets_the_whole_capture(self, provider):
-        """The ten adapters no committed capture shows echoing.
+        """The nine adapters no committed capture shows echoing.
 
         "Non-echoing" means **echoes neither the prompt nor the repo**. opencode
         left this roster (T2.2): it does not echo our prompt, but its
@@ -101,7 +101,11 @@ class TestVendorTextContract:
         of a plan discussing rate limits was recorded ``rate_limited``. pi left
         it with ``--mode json`` (T7.4): its stream echoes our prompt, pi's own
         system prompt and every tool result, so ``PiProvider.vendor_text``
-        reduces it (``tests/fixtures/pi/markers-in-tool-result``).
+        reduces it (``tests/fixtures/pi/markers-in-tool-result``). kilocode is
+        not in it either: its stdout is the plain answer and its stderr a tool
+        trace naming what the model read, so ``KiloCodeProvider.vendor_text``
+        keeps only its painted ``Error:`` lines
+        (``TestKiloCodeReadsOnlyItsPaintedErrorLines``).
 
         The default being identity is what makes "fix the class for the adapters
         that echo" a bounded claim rather than a rewrite of every classifier.

@@ -421,10 +421,10 @@ rows:
       request per dispatch (§7.5 rule 6(c)) and makes no admission test. The
       row is here rather than under
       `exit-zero-failure` because cline's exit code is 1; it classifies
-      `runner_error` because OpenAI's 500 sentence ("The server had an error
-      while processing your request") matches no member of
-      base.SERVER_ERROR_MARKERS — every entry there wants the literal words
-      "server error", "internal server error" or "api error".
+      `server_error` on the shared server table's row for OpenAI's 500 sentence
+      ("The server had an error while processing your request"), which is
+      consulted before the `exit_zero_failure_markers` that used to answer
+      `runner_error`. Both lanes keep their statuses.
     expect:
       lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       salvage: none
@@ -433,7 +433,7 @@ rows:
       raw_contains:
         - "The server had an error while processing your request. Sorry about that!"
         - '"finishReason":"error"'
-      classify_failure: "runner_error"
+      classify_failure: "server_error"
 
   stall:
     stdout: stall.stdout.txt

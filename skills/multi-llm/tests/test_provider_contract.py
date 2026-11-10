@@ -152,7 +152,11 @@ class TestInternalRetryEnvelopeDeclarations:
             return
 
         if envelope.max_requests is None:
-            assert name == "fx", f"{name} has an unexplained unbounded retry declaration"
+            # fx retries without a cap; kilocode's measured chain is per model
+            # turn, and a run makes several (its declaration's comment).
+            assert name in ("fx", "kilocode"), (
+                f"{name} has an unexplained unbounded retry declaration"
+            )
             assert envelope.max_wall_s is None
             assert envelope.retries_rate_limit is True
             assert envelope.configurable_by == ()
@@ -167,7 +171,7 @@ class TestInternalRetryEnvelopeDeclarations:
         [
             n for n in _envelope_sweep_names()
             if n not in ("claude-code", "cline", "codex", "copilot", "gemini",
-                         "goose", "grok", "kimi",
+                         "goose", "grok", "kilocode", "kimi",
                          "muse", "omp", "pi", "qwen-code", "vibe", "fx")
         ],
     )

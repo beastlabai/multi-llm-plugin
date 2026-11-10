@@ -178,22 +178,18 @@ rows:
       substitutes its own `We’re currently experiencing high demand, which may
       cause temporary errors.` (with a curly apostrophe). The retry envelope is
       measured here: 30 requests in 24.0 s across the five reconnects, which
-      is `internal_retries` (30 requests, 25 s) exactly. Neither that sentence nor anything else on the row is a server
-      marker, so it classifies None; recorded, not fixed.
+      is `internal_retries` (30 requests, 25 s) exactly. That sentence is
+      codex's gloss of the 500, and the shared server table carries it, so the
+      row classifies `server_error`; both lanes keep their transport-retry
+      statuses (the fan-out puts `server_error` on `runner_error`'s rung, the
+      executor forwards no server verdict).
     expect:
       lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       salvage: none
       success: false
       error_contains: ["experiencing high demand"]
       raw_contains: ["We’re currently experiencing high demand, which may cause temporary errors.", '"type":"turn.failed"']
-      classify_failure: null
-      known_wrong:
-        intended: server_error
-        reason: >-
-          A fail-forever 500 after codex's whole retry envelope, reported in
-          codex's own `We’re currently experiencing high demand` sentence, which
-          is no server marker, and nothing else on the row is one. U94 fixes the
-          classifier and flips this row.
+      classify_failure: "server_error"
 
   empty:
     not_applicable: >-
