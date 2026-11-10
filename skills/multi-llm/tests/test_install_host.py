@@ -419,7 +419,7 @@ PINNED_TEMPLATE_SHA256 = {
     "codex":
         "8c748c4b9325f6794f5cbc53fea2c9c778b613802744b045617e378fa8c3bafc",
     "opencode":
-        "492a6378a4745758d01a504c974d9405f5acec7e6d2952b68bed72e89c20e7a3",
+        "e3c1349756e7cbad34c6c7bf0da8c0c5bfdd4aa2af900adc483e026a544861d0",
 }
 
 
