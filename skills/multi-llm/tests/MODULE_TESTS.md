@@ -215,7 +215,7 @@ cannot be narrowed by this map: choose by the file names or run the CI command.
 | `utils/task_dispatch.py` | 9 | `test_attempt_backpressure.py`, `test_checked_bytes_consumed.py`, `test_dispatch_steps.py`, `test_generate_tasks_orchestrator.py`, `test_lane_b_structured_output.py`, `test_subagent_executor.py`, `test_subagent_executor_moved_names.py`, `test_validation_batch_binding.py`, `test_validation_context_by_path.py` |
 | `utils/task_file_runner.py` | 6 | `test_checked_bytes_consumed.py`, `test_damaged_checkpoint_recovery.py`, `test_e2e_failures.py`, `test_rejected_slot_answers.py`, `test_subagent_executor.py`, `test_subagent_executor_moved_names.py` |
 | `utils/task_ledger.py` | 8 | `test_task_ledger.py`, `test_batch_own_check.py`, `test_check_findings_hold_dependents.py`, `test_implement_stop_account.py`, `test_refused_answers.py`, `test_status_after_a_stop.py`, `test_write_executor.py`, `test_write_legs_parity.py` |
-| `utils/task_outcome.py` | 2 | `test_dispatch_steps.py`, `test_subagent_executor_moved_names.py` |
+| `utils/task_outcome.py` | 3 | `test_plan_dir_writers_held.py`, `test_dispatch_steps.py`, `test_subagent_executor_moved_names.py` |
 | `utils/task_result.py` | 7 | `test_attempt_backpressure.py`, `test_checked_bytes_consumed.py`, `test_dispatch_steps.py`, `test_generate_tasks_orchestrator.py`, `test_plan_dir_writers_held.py`, `test_subagent_executor.py`, `test_subagent_executor_moved_names.py` |
 | `utils/tasks_file.py` | 5 | `test_tasks_file.py`, `test_apply_task_suggestions.py`, `test_generate_tasks_orchestrator.py`, `test_judge_vocab.py`, `test_update_plan_tasks.py` |
 | `utils/tasks_graph_check.py` | 1 | `test_tasks_graph_check.py` |
@@ -230,8 +230,8 @@ cannot be narrowed by this map: choose by the file names or run the CI command.
 | `utils/validation_sections.py` | 1 | `test_validation_sections.py` |
 | `utils/verification_lines.py` | 1 | `test_write_batch_scheduler_moved_names.py` |
 | `utils/wakeup_check.py` | 3 | `test_wakeup_check.py`, `test_hook_transcript_settle.py`, `test_report_check_composite.py` |
-| `utils/write_batch_scheduler.py` | 56 | **hub**, cannot narrow: `test_write_batch_scheduler_moved_names.py`, `test_accepted_check_rerun.py`, `test_accepted_finding_note.py`, `test_accepted_finding_restate.py`, `test_accepted_findings_scope.py`, `test_apply_fix_known_checks.py`, `test_apply_orchestrator_base.py`, `test_batch_own_check.py`, `test_check_always_reported.py`, `test_check_repeats_finding.py`, `test_code_fix_prior_batches.py`, `test_commit_write_policy.py`, +44 more |
-| `utils/write_check_holds.py` | 3 | `test_resume_why.py`, `test_scheduler_record_writers.py`, `test_write_batch_scheduler_moved_names.py` |
+| `utils/write_batch_scheduler.py` | 57 | **hub**, cannot narrow: `test_write_batch_scheduler_moved_names.py`, `test_accepted_check_rerun.py`, `test_accepted_finding_note.py`, `test_accepted_finding_restate.py`, `test_accepted_findings_scope.py`, `test_apply_fix_known_checks.py`, `test_apply_orchestrator_base.py`, `test_batch_own_check.py`, `test_check_always_reported.py`, `test_check_repeats_finding.py`, `test_code_fix_prior_batches.py`, `test_commit_write_policy.py`, +45 more |
+| `utils/write_check_holds.py` | 4 | `test_plan_dir_writers_held.py`, `test_resume_why.py`, `test_scheduler_record_writers.py`, `test_write_batch_scheduler_moved_names.py` |
 | `utils/write_commit_leg.py` | 3 | `test_commit_apply.py`, `test_write_batch_scheduler_moved_names.py`, `test_write_verdict_table.py` |
 | `utils/write_context.py` | 3 | `test_scheduler_null_state.py`, `test_scheduler_options.py`, `test_write_batch_scheduler_moved_names.py` |
 | `utils/write_dry_run.py` | 1 | `test_write_batch_scheduler_moved_names.py` |
@@ -242,8 +242,8 @@ cannot be narrowed by this map: choose by the file names or run the CI command.
 | `utils/write_prompt.py` | 11 | `test_write_prompt.py`, `test_selected_tasks_and_check_trees.py`, `test_apply_fix_known_checks.py`, `test_apply_suggestions_integration.py`, `test_batch_snapshot.py`, `test_code_fix_prior_batches.py`, `test_commit_write_policy.py`, `test_prior_batches_named_by_id.py`, `test_prompt_files_stay_inside.py`, `test_scope_policy_apply.py`, `test_write_executor_orchestrators.py` |
 | `utils/write_record.py` | 1 | `test_write_record.py` |
 | `utils/write_reports.py` | 2 | `test_plan_dir_writers_held.py`, `test_write_batch_scheduler_moved_names.py` |
-| `utils/write_resume.py` | 3 | `test_scheduler_record_writers.py`, `test_completion_predates.py`, `test_write_batch_scheduler_moved_names.py` |
-| `utils/write_safety.py` | 27 | `test_batch_ledger.py`, `test_check_gate_fixture.py`, `test_commit_apply.py`, `test_commit_write_policy.py`, `test_implement_continues_a_started_run.py`, `test_next_step_relay_rules.py`, `test_plugin_landlock_acceptance.py`, `test_policy_way_forward.py`, `test_resume_why.py`, `test_review_cycle_rule.py`, `test_selected_tasks_and_check_trees.py`, `test_write_executor.py`, +15 more |
+| `utils/write_resume.py` | 4 | `test_plan_dir_writers_held.py`, `test_scheduler_record_writers.py`, `test_completion_predates.py`, `test_write_batch_scheduler_moved_names.py` |
+| `utils/write_safety.py` | 28 | `test_batch_ledger.py`, `test_check_gate_fixture.py`, `test_commit_apply.py`, `test_commit_write_policy.py`, `test_implement_continues_a_started_run.py`, `test_next_step_relay_rules.py`, `test_plan_dir_writers_held.py`, `test_plugin_landlock_acceptance.py`, `test_policy_way_forward.py`, `test_resume_why.py`, `test_review_cycle_rule.py`, `test_selected_tasks_and_check_trees.py`, +16 more |
 | `utils/write_snapshots.py` | 2 | `test_write_batch_scheduler_moved_names.py`, `test_write_verdict_table.py` |
 | `utils/write_stop.py` | 1 | `test_write_batch_scheduler_moved_names.py` |
 | `utils/write_sweep.py` | 6 | `test_applied_without_changes.py`, `test_commit_write_policy.py`, `test_stop_resume_wording.py`, `test_write_batch_scheduler_moved_names.py`, `test_write_executor.py`, `test_write_verdict_table.py` |

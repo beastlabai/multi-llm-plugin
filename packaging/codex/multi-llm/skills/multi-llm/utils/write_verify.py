@@ -29,7 +29,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from . import batch_prompt as _batch_prompt
 from . import check_records as _check_records
@@ -485,36 +485,50 @@ VERIFY_EXIT_NOT_RUN = 127
 
 def _verify_timeout_note(
     timeout: int, verdict: Optional[str], pid: int, pgid: Optional[int],
+    outside: Sequence[_process_control.Descendant] = (),
 ) -> str:
     """The line a timed-out verify command's output ends with, from its kill's
     *verdict* (``kill_tree``). Only ``killed`` and
     ``gone`` confirm the command stopped (``process_control.unconfirmed_kill``);
     every other verdict, ``None`` for a kill that raised included, names the
-    pid and says the command may still be running, never that it was killed
-    (docs/development/write-scheduler.md, "When the verify command times out")."""
+    pid and says the command may still be running, never that it was killed.
+    *outside* are the command's processes outside its process group still
+    running after the kill (:meth:`VerifyCommand.left_the_group`): the group
+    kill never reaches them, so the line names them as still running whatever
+    the verdict (docs/development/write-scheduler.md, "When the verify command
+    times out")."""
     reason = _process_control.unconfirmed_kill(verdict)
-    if reason is None:
-        if verdict == "gone":
-            return (f"\n(timed out after {timeout}s: the command had already stopped, "
-                    f"and nothing of its process group still runs — verdict {verdict})")
-        return (f"\n(killed after {timeout}s: SIGTERM then SIGKILL to the command's "
-                f"whole process group — verdict {verdict})")
     who = f"pid {pid}" + (f", process group {pgid}" if pgid is not None else "")
-    if verdict == "skipped":
+    if reason is None and verdict == "gone":
+        body = (f"timed out after {timeout}s: the command had already stopped, "
+                f"and nothing of its process group still runs")
+    elif reason is None:
+        body = (f"killed after {timeout}s: SIGTERM then SIGKILL to the command's "
+                f"whole process group")
+    elif verdict == "skipped":
         # The kill could not trust the command's pid to name it any more.
-        return (f"\n(timed out after {timeout}s: termination attempted, but no signal "
-                f"was sent, so the command ({who}) may still be running — "
-                f"verdict {verdict})")
-    if verdict == "unresolved":
+        body = (f"timed out after {timeout}s: termination attempted, but no signal "
+                f"was sent, so the command ({who}) may still be running")
+    elif verdict == "unresolved":
         # What ran in its group that could not be identified as the command's
         # got nothing.
-        return (f"\n(timed out after {timeout}s: not every process of the command "
+        body = (f"timed out after {timeout}s: not every process of the command "
                 f"({who}) could be confirmed stopped; what could not be identified as "
-                f"the command's was not signalled and may still be running — "
-                f"verdict {verdict})")
-    return (f"\n(timed out after {timeout}s: termination attempted, but the command "
-            f"({who}) could not be confirmed stopped: {reason}, so it may still be "
-            f"running — verdict {verdict})")
+                f"the command's was not signalled and may still be running")
+    else:
+        body = (f"timed out after {timeout}s: termination attempted, but the command "
+                f"({who}) could not be confirmed stopped: {reason}, so it may still be "
+                f"running")
+    if outside:
+        count = len(outside)
+        body += (f" — verdict {verdict}; {count} process{'' if count == 1 else 'es'} "
+                 f"the command started outside its process group "
+                 f"{'is' if count == 1 else 'are'} out of the group kill's reach and "
+                 f"still {'runs' if count == 1 else 'run'}: "
+                 f"{VerifyCommand.named(outside)}")
+    else:
+        body += f" — verdict {verdict}"
+    return f"\n({body})"
 
 
 class VerifyCommand:
@@ -585,9 +599,11 @@ class VerifyCommand:
                 try:
                     exit_code = int(proc.wait(timeout=timeout))
                 except subprocess.TimeoutExpired:
+                    outside = self.left_the_group(proc.pid, pgid)
                     verdict = self.kill_tree(proc, pgid, job)
                     exit_code = VERIFY_EXIT_TIMEOUT
-                    note = _verify_timeout_note(timeout, verdict, proc.pid, pgid)
+                    left = self.left_outside(proc.pid, outside)
+                    note = _verify_timeout_note(timeout, verdict, proc.pid, pgid, left)
             finally:
                 if job is not None:
                     job.close()
@@ -649,6 +665,57 @@ class VerifyCommand:
                 + ("; the run's record keeps it for status --abort." if kept else ".")
             )
         return verdict
+
+    @staticmethod
+    def left_the_group(
+        pid: int, pgid: Optional[int],
+    ) -> List[_process_control.Descendant]:
+        """The timed-out command's descendants outside its process group
+        *pgid*, listed before the kill: the list follows parent links, and
+        once a process's parent dies it belongs to init. A ``setsid`` or a
+        daemon's double fork leaves the group, and the group kill never
+        reaches it. Empty when the group is unknown, on Windows (the command's
+        Job Object holds the whole tree) and when the process table cannot be
+        read (docs/development/write-scheduler.md, "When the verify command
+        times out")."""
+        if pgid is None or _process_control.IS_WINDOWS:
+            return []
+        try:
+            found = _process_control.descendants(pid)
+        except Exception:  # noqa: BLE001 - a look at the process table never fails the check
+            return []
+        return [entry for entry in found if entry.pgid != pgid]
+
+    @staticmethod
+    def named(outside: Sequence[_process_control.Descendant]) -> str:
+        """``pid 7 (process group 7)`` for each process in *outside*, for a
+        message."""
+        return ", ".join(
+            f"pid {entry.pid} (process group "
+            f"{entry.pgid if entry.pgid is not None else '?'})" for entry in outside)
+
+    def left_outside(
+        self, pid: int, outside: Sequence[_process_control.Descendant],
+    ) -> List[_process_control.Descendant]:
+        """The processes in *outside* (:meth:`left_the_group`, listed before
+        the kill) not confirmed gone after it: their pid is still that
+        process (its start time, where known) or cannot be told apart from
+        it. Each is logged as a warning: no signal reached them and none is
+        recorded for a later abort, so the user stops them by hand
+        (docs/development/write-scheduler.md, "When the verify command
+        times out")."""
+        left = [entry for entry in outside
+                if _process_control.probe(entry.pid, entry.start_time)
+                != _process_control.DEAD]
+        if left:
+            count = len(left)
+            self._ctx.log(
+                f"[write-subagents] warning: the timed-out verification command "
+                f"pid {pid} started {count} process{'' if count == 1 else 'es'} "
+                f"outside its process group, which the kill of the group does not "
+                f"reach, still running: {self.named(left)}. Nothing records "
+                f"{'it' if count == 1 else 'them'} for status --abort; check by hand.")
+        return left
 
     def output_tail(self, sink: Any) -> str:
         """The last :data:`VERIFY_OUTPUT_CAP_BYTES` the command wrote, as text."""

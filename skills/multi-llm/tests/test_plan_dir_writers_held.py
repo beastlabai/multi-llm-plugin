@@ -493,3 +493,180 @@ def test_the_restore_never_puts_state_back_through_a_swapped_output_folder(
     snapshot.restore()
     tree.outside_untouched("state.json")
     assert "could not restore" in capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# The write scheduler's rewrites of a result it persisted, and its inputs
+# binding (fable review F5)
+# ---------------------------------------------------------------------------
+
+#: An outside JSON object of a result's name: the only file a rewrite by path
+#: through a swapped phase folder would change (it reads, then rewrites, it).
+OUTSIDE_RESULT = json.dumps({"status": "applied", "verdict": {"ok": True}}).encode()
+
+
+def _persisted_then_swapped(tree, name: str) -> Path:
+    """A result persisted as the executor persists it (held), then the phase
+    folder swapped for a link to a folder holding :data:`OUTSIDE_RESULT` at
+    that name; the result's path."""
+    path = tree.phase / name
+    failure_capture._atomic_write_json(
+        str(path), {"status": "applied", "verdict": {"ok": True, "batch_check": ["x"]}})
+    (tree.outside / name).write_bytes(OUTSIDE_RESULT)
+    tree.swap_for_link(tree.phase)
+    return path
+
+
+def _outside_result_untouched(tree, name: str) -> None:
+    assert (tree.outside / name).read_bytes() == OUTSIDE_RESULT
+    assert sorted(p.name for p in tree.outside.iterdir()) == [name]
+
+
+def test_the_verdict_stamp_never_writes_through_a_swapped_phase_folder(tree):
+    from utils.task_outcome import TaskOutcome
+    from utils.write_batch_scheduler import WriteBatchScheduler
+
+    name = "implement_batch_1.json"
+    path = _persisted_then_swapped(tree, name)
+    lines: list = []
+    stub = types.SimpleNamespace(
+        _task_by_id=lambda task_id: None,
+        _evidence=types.SimpleNamespace(task_fingerprint=lambda task: "f"),
+        _checks=types.SimpleNamespace(tree_fingerprint=lambda: None),
+        _dispatch_rungs={}, log=lines.append)
+    outcome = TaskOutcome(task_id="implement-batch-1", kind="implement", runner="x",
+                          status="completed", output_path=str(path))
+
+    WriteBatchScheduler._stamp_verdict(stub, outcome)
+
+    _outside_result_untouched(tree, name)
+    assert any("could not record the verdict" in line for line in lines), lines
+
+
+def test_the_own_check_rerecord_never_writes_through_a_swapped_phase_folder(tree):
+    from utils.write_batch_scheduler import WriteBatchScheduler
+
+    name = "implement_batch_2.json"
+    path = _persisted_then_swapped(tree, name)
+    lines: list = []
+    stub = types.SimpleNamespace(log=lines.append)
+
+    WriteBatchScheduler._restamp_own_check(stub, str(path), None, {"T9": ["x"]})
+
+    _outside_result_untouched(tree, name)
+    assert any("could not re-record the own check" in line for line in lines), lines
+
+
+def test_the_tree_restamp_never_writes_through_a_swapped_phase_folder(tree):
+    from utils.write_check_holds import CheckHolds
+
+    name = "implement_batch_3.json"
+    path = _persisted_then_swapped(tree, name)
+    lines: list = []
+    holds = object.__new__(CheckHolds)
+    holds._ctx = types.SimpleNamespace(kind="implement", log=lines.append)
+    holds.tree_fingerprint = lambda: "the tree now"
+    outcome = types.SimpleNamespace(ok=True, check_findings=["x"], output_path=str(path),
+                                    task_id="implement-batch-3")
+
+    holds.restamp_check_trees(types.SimpleNamespace(outcomes=[outcome]))
+
+    _outside_result_untouched(tree, name)
+    assert any("could not re-stamp the tree" in line for line in lines), lines
+
+
+def test_the_inputs_binding_never_writes_through_a_swapped_phase_folder(tree):
+    from utils.write_resume import WRITE_FINGERPRINT_FILENAME, ResumeEvidence
+
+    (tree.outside / WRITE_FINGERPRINT_FILENAME).write_bytes(OUTSIDE_RESULT)
+    tree.swap_for_link(tree.phase)
+    lines: list = []
+    evidence = object.__new__(ResumeEvidence)
+    evidence._ctx = types.SimpleNamespace(phase_dir=str(tree.phase), kind="implement",
+                                          log=lines.append)
+    evidence.task_fingerprint = lambda task: "f"
+
+    evidence.record_fingerprint({"task_id": "implement-batch-1"})
+
+    _outside_result_untouched(tree, WRITE_FINGERPRINT_FILENAME)
+    assert any("could not record the inputs binding" in line for line in lines), lines
+
+
+def test_the_inputs_binding_is_written_and_its_folder_made(tree):
+    """Without a swap the binding is written, its phase folder made when
+    missing, with a new file's mode as before."""
+    from utils.write_resume import WRITE_FINGERPRINT_FILENAME, ResumeEvidence
+
+    phase = output_handler.phase_dir_path(tree.plan, "apply-code-fixes")
+    evidence = object.__new__(ResumeEvidence)
+    evidence._ctx = types.SimpleNamespace(phase_dir=str(phase), kind="implement",
+                                          log=print)
+    evidence.task_fingerprint = lambda task: "f"
+
+    evidence.record_fingerprint({"task_id": "implement-batch-1"})
+
+    data = json.loads((phase / WRITE_FINGERPRINT_FILENAME).read_text(encoding="utf-8"))
+    assert data["tasks"] == {"implement-batch-1": "f"}
+
+
+# ---------------------------------------------------------------------------
+# The write audit log and the pre-batch snapshot's manifest (fable review F6)
+# ---------------------------------------------------------------------------
+
+def test_the_audit_log_is_appended_owner_only(tree):
+    from utils.write_safety import AUDIT_FILENAME, AuditLog
+
+    audit = AuditLog(str(tree.phase))
+    audit._append({"event": "one"})
+    audit._append({"event": "two"})
+
+    path = tree.phase / AUDIT_FILENAME
+    assert [json.loads(line)["event"] for line in path.read_text().splitlines()] == [
+        "one", "two"]
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.parametrize("planted", ["symlink", "dangling symlink", "fifo",
+                                     "swapped phase folder"])
+def test_the_audit_log_is_never_appended_through_a_link(tree, planted):
+    """Fable review F6: a symlink at the audit log's name (one leading
+    nowhere included, which the append would have created), something that
+    is not a file there, or the phase folder swapped for a link never
+    carries the line outside, nor blocks: the append is refused. Before, it
+    was appended there."""
+    from utils.write_safety import AUDIT_FILENAME, AuditLog
+
+    tree.plant(AUDIT_FILENAME)
+    victim = tree.outside / AUDIT_FILENAME
+    if planted == "symlink":
+        os.symlink(victim, tree.phase / AUDIT_FILENAME)
+    elif planted == "dangling symlink":
+        os.symlink(tree.outside / "made-by-the-append", tree.phase / AUDIT_FILENAME)
+    elif planted == "fifo":
+        os.mkfifo(tree.phase / AUDIT_FILENAME)
+    else:
+        tree.swap_for_link(tree.phase)
+
+    refused = _refusal(AuditLog(str(tree.phase))._append, {"event": "completed"})
+
+    assert isinstance(refused, OSError), refused
+    tree.outside_untouched(AUDIT_FILENAME)
+
+
+def test_a_snapshot_manifest_never_writes_through_a_swapped_phase_folder(tree):
+    from utils.write_safety import MANIFEST_NAME, PAYLOAD_DIRNAME, PRE_BATCH_DIRNAME
+    from utils.write_safety import TaskSnapshot
+
+    repo = tree.plans.parent
+    (repo / "a.txt").write_text("a\n")
+    snapshot = TaskSnapshot.take(phase_dir=str(tree.phase), task_id="T1",
+                                 files=["a.txt"], root=str(repo))
+    folder = Path(PRE_BATCH_DIRNAME) / "T1"
+    tree.plant(str(folder / MANIFEST_NAME))
+    (tree.outside / folder / PAYLOAD_DIRNAME).mkdir()
+    tree.swap_for_link(tree.phase)
+
+    refused = _refusal(snapshot.save)
+
+    assert isinstance(refused, OSError), refused
+    assert (tree.outside / folder / MANIFEST_NAME).read_bytes() == VICTIM

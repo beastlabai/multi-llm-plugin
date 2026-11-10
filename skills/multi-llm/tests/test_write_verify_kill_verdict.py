@@ -12,6 +12,10 @@ Signalling itself is ``process_control.kill_tree``'s; these tests fake it.
 """
 
 import os
+import re
+import shutil
+import signal
+import subprocess
 import sys
 from pathlib import Path
 
@@ -211,6 +215,19 @@ class TestTheNoteClaimsOnlyWhatWasConfirmed:
         note = wbs._verify_timeout_note(9, "survived", PID, None)
         assert f"(pid {PID})" in note and "process group" not in note
 
+    @pytest.mark.parametrize("verdict", ["killed", "gone", "survived"])
+    def test_processes_left_outside_the_group_are_named_still_running(self, verdict):
+        """Fable review F11: whatever the group's verdict, the command's
+        processes outside its group that still run are named as running."""
+        outside = [process_control.Descendant(5151, 5151, 5151, None),
+                   process_control.Descendant(5152, None, None, None)]
+        note = wbs._verify_timeout_note(9, verdict, PID, PGID, outside)
+        assert note.startswith(wbs._verify_timeout_note(9, verdict, PID, PGID)[:-1])
+        assert note.endswith(
+            "; 2 processes the command started outside its process group are out "
+            "of the group kill's reach and still run: pid 5151 (process group "
+            "5151), pid 5152 (process group ?))")
+
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
 class TestThroughTheRunner:
@@ -269,3 +286,44 @@ class TestThroughTheRunner:
         monkeypatch.setattr(scheduler._verify_command, "env", lambda: None)
         assert scheduler._verify_command.run("exit 0", 5) == (0, "")
         assert launched == ["exit 0"]
+
+
+@pytest.mark.skipif(os.name == "nt" or shutil.which("setsid") is None,
+                    reason="POSIX process groups and setsid(1)")
+class TestADescendantThatLeftTheGroup:
+    """Fable review F11, the real runner and a real command: a child that
+    left the command's process group (``setsid``) survives the group kill,
+    so the note and a warning name it as still running instead of reporting
+    the whole command killed."""
+
+    def test_it_is_named_still_running(self, scheduler, monkeypatch, left_running):
+        monkeypatch.setattr(scheduler._verify_command, "env", lambda: None)
+        marker = f"sleep 47.{os.getpid() % 1000:03d}"
+        survivors: list = []
+        try:
+            exit_code, tail = scheduler._verify_command.run(
+                f"setsid {marker} & exec sleep 30", 1)
+            survivors = [int(pid) for pid in re.findall(r"still run[s]?: pid (\d+)", tail)]
+        finally:
+            found = subprocess.run(["pgrep", "-f", marker], capture_output=True,
+                                   text=True).stdout.split()
+            for pid in {*survivors, *(int(pid) for pid in found)}:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+        assert exit_code == wbs.VERIFY_EXIT_TIMEOUT
+        assert "verdict killed; 1 process the command started outside its process " \
+               "group is out of the group kill's reach and still runs: pid " in tail
+        assert survivors and str(survivors[0]) in " ".join(found)
+        [warning] = _warnings(scheduler)
+        assert f"still running: pid {survivors[0]} (process group {survivors[0]})" in warning
+        assert left_running == []
+
+    def test_a_command_that_stays_in_its_group_names_nothing_more(
+            self, scheduler, monkeypatch):
+        monkeypatch.setattr(scheduler._verify_command, "env", lambda: None)
+        exit_code, tail = scheduler._verify_command.run("sleep 30 & exec sleep 30", 1)
+        assert exit_code == wbs.VERIFY_EXIT_TIMEOUT
+        assert tail.rstrip().endswith("verdict killed)")
+        assert _warnings(scheduler) == []

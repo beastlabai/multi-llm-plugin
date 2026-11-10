@@ -40,7 +40,7 @@ imports the scheduler:
 | `utils/batch_prompt.py` | The dispatched prompt: `bind_prior_changes`, `with_result_contract` and the contract texts it appends, where a dispatched prompt is kept, and the code write kinds. |
 | `utils/write_outcomes.py` | The partial-application and resume rules around the verdict table, pure over `TaskOutcome`: the outcome of a dispatch the table never saw (`classify_attempt`, `partial_when_bytes_moved`), whether a `--human-task <batch>=skip` answer can keep a stopped batch (`check_partial_skips`, `partial_skip_refusal`), and what a stop's plain `--resume` does (`resume_why` over a `ResumeContext`). The scheduler reads what is on disk and passes it in, lazily. |
 | `utils/write_context.py` | `RunContext`, the frozen record of one run a collaborator may read (kind, phase, folders, repository root, anchor, tasks, the run's `StateManager`, write policy, audit log, log, summary file, dry run), and `Refusals`, the tasks the run refused before any runner started and why, a field of the run's result (`result.refusals`). |
-| `utils/write_verify.py` | `VerifyStep`: whether a task of the phase applied an edit still owed a check (`phase_has_applied_batches`), `driver.verify_command` after the last batch (`run`, `verification_message`), the "nothing ran the tests" line on a stop (`note_unverified_on_stop`), and `tracked_files` after each batch and at the end (`record_batch_tracking`, `finalize_tracking`, `touched_files`). Stateless. `VerifyCommand`, the command's runner: its own process group or Job Object, the bounded output tail, the kill of the whole tree on a timeout and the note its verdict words (`run`, `kill_tree`, `env`, `_verify_timeout_note`, the `VERIFY_*` bounds; [When the verify command times out](#write-scheduler-contract)). |
+| `utils/write_verify.py` | `VerifyStep`: whether a task of the phase applied an edit still owed a check (`phase_has_applied_batches`), `driver.verify_command` after the last batch (`run`, `verification_message`), the "nothing ran the tests" line on a stop (`note_unverified_on_stop`), and `tracked_files` after each batch and at the end (`record_batch_tracking`, `finalize_tracking`, `touched_files`). Stateless. `VerifyCommand`, the command's runner: its own process group or Job Object, the bounded output tail, the kill of the whole tree on a timeout and the note its verdict words, naming the command's processes left outside its group (`run`, `kill_tree`, `left_the_group`, `left_outside`, `env`, `_verify_timeout_note`, the `VERIFY_*` bounds; [When the verify command times out](#write-scheduler-contract)). |
 | `utils/write_sweep.py` | `ContainmentSweep`, the post-run containment sweep and its rollback store (D3l, [write safety](write-safety.md)): each dispatch's census, retained bytes and declared set (`begin`), the undeclared writes it closes with (`undeclared_writes`), the read-only peek (`moved_since_dispatch`), the audit rows of the paths it observed (`observed_with_undeclared`), the store's closing line and discard; `UndeclaredWrites` and the sweep's budgets (`SWEEP_MAX_FILES`, `SWEEP_RETAIN_MAX_BYTES`). Its state and lock are its own. |
 | `utils/write_eta.py` | `EtaLines`, the executor leg's `[ETA]` lines ([Dispatch counts](#dispatch-counts)): the baseline before the first dispatch (`start`), the tasks a line counts (`task_ids`, `progress`), each task's metric and line (`record`), what the run leaves (`left_out`) and the one closing line of every ending (`close`, `abort_line`, `finish`). Its counted sets are its own; the dispatch walk and the batch bookkeeping set them under `_effects_lock`. |
 | `utils/write_reports.py` | `WriteReports`, what the run leaves to read: the `write_subagents` mirror and its in-flight patch (`mirror_status`, `publish_in_flight`), `write_batch_report.json` with the executor's per-dispatch report (`write_report`, `WRITE_BATCH_REPORT_FILENAME`), `summary.md` (`write_summary`) and its reference in the plan, and the mirror of a refusal that ended the run (`record_refusal`). Read-only over the result; the mirror's writers never raise. |
@@ -77,7 +77,9 @@ objects, not copies. Five rules hold across the split:
   `_finalize` still owns `_reload_state` after `finalize_tracking`. The apply guard is the live
   dict inside it: `CommitGuardLeg` mutates it under `_effects_lock` and saves it back as the
   scheduler did (`commit_apply.save_guard`, under `state_file_lock`), so the state's next save
-  writes the same decision. `ResumeEvidence` writes only its own inputs binding beside the results.
+  writes the same decision. `ResumeEvidence` writes only its own inputs binding beside the results,
+  through its folder held below the plan's directory, as the scheduler's rewrites of a result it
+  persisted are (write-safety.md's [plan output containment](write-safety.md#plan-output-containment)).
 - **The order of the effects is the loop's.** The collaborators are called from the same places,
   in the same order, as the methods they replace: `_record_batch_effects`, `_dispatch_one`'s
   `finally` (`ContainmentSweep.abandon`), `_finalize` and `_end_run` are unchanged around them.
@@ -246,7 +248,20 @@ stopped" in the same runtime.md section); the warning says so when it did. The e
 `_verify_timeout_note` that carries the verdict into `verification.output_tail`: `killed after Ns:
 SIGTERM then SIGKILL` for `killed` alone, "had already stopped" for `gone`, and for the rest the pid
 and "may still be running", never a kill. The signals sent are `kill_tree`'s; this only reports
-them. `tests/test_write_verify_kill_verdict.py` pins each verdict.
+them. The verdict speaks for the command's process group alone: a child that left it (`setsid`, a
+daemon's double fork) is not in the group, and the group kill never reaches it (fable review F11,
+2026-11-10: a `setsid sleep` survived a `killed` note that said the whole group was killed). So
+before the kill `VerifyCommand.run` lists the command's descendants outside its group
+(`left_the_group`, through `process_control.descendants`, which follows parent links and so must run
+while the command is alive), and after it keeps those still running (`left_outside`, through
+`process_control.probe`: the same pid and start time, or one it cannot tell apart). Each is named in the note, whatever the verdict
+("N process(es) the command started outside its process group are out of the group kill's reach and
+still run: pid P (process group G)"), and in a `[write-subagents] warning:` that says nothing records
+them for `status --abort`. They are not signalled: a process that left the group on purpose is not
+the group kill's to end, and the user decides. What this cannot see: a descendant whose parent
+exited before the timeout belongs to init by then, and Windows lists none (the command's Job
+Object holds its whole tree). `tests/test_write_verify_kill_verdict.py` pins each verdict and the
+child outside the group.
 
 A run that dispatched every batch and produced none of those is a **failed** run.
 **`state.json` has exactly one writer per run, and it is the scheduler's
@@ -422,7 +437,9 @@ never deletes them.
 
 Resume reads the scheduler's **verdict**, never only the runner's claim (F1, 2026-09-16): every
 `_classify` branch ends by stamping `verdict: {write_outcome, status, ok}` onto the result file
-(`_stamp_verdict`; additive, the schema admits it), `ResumeEvidence.already_done` re-dispatches a
+(`_stamp_verdict`; additive, the schema admits it; written through the result's folder held below
+the plan's directory, as `persist_result` wrote it, so a phase folder swapped for a link in between is
+refused and the stamp is logged as not recorded), `ResumeEvidence.already_done` re-dispatches a
 file whose verdict is not `ok` or whose task `state.json` records
 `failed`, and the inputs fingerprint is recorded only for an `ok`
 outcome — a runner that printed `applied` with every id and then died mid-edit left a

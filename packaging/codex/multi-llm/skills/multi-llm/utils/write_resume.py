@@ -37,7 +37,7 @@ from . import human_task_plan as _human_task_plan
 from . import write_context as _write_context
 from . import write_outcomes as _write_outcomes
 from . import write_reports as _write_reports
-from .atomic_io import atomic_write_text
+from .held_folder import write_in_plan_dir
 from .batch_ledger import read_verdict_checks
 from .state_manager import _parse_completion_time, predates_review, stamp_or_mtime
 from .task_result import (
@@ -526,14 +526,15 @@ class ResumeEvidence:
         recorded[str(task.get("task_id", ""))] = self.task_fingerprint(task)
         path = self.fingerprint_path()
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
             # A new file's mode each time, as it always had (docs/development/
-            # runtime.md#atomic-file-writes).
-            atomic_write_text(path, json.dumps({
+            # runtime.md#atomic-file-writes); its folder made and held below
+            # the plan's directory
+            # (docs/development/write-safety.md#plan-output-containment).
+            write_in_plan_dir(path, json.dumps({
                 "fingerprint_version": 1,
                 "kind": self._ctx.kind,
                 "tasks": recorded,
-            }, indent=2, sort_keys=True), keep_mode=False)
+            }, indent=2, sort_keys=True).encode("utf-8"), make=True, keep_mode=False)
         except OSError as exc:  # noqa: BLE001 - bookkeeping must not fail a phase
             self._ctx.log(
                 f"[write-subagents] warning: could not record the inputs binding "

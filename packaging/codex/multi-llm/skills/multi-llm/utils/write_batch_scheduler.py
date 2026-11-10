@@ -99,7 +99,7 @@ from . import write_resume as _write_resume
 from . import write_grant as _write_grant
 from . import write_snapshots as _write_snapshots
 from . import write_dry_run as _write_dry_run
-from .atomic_io import atomic_write_text
+from .held_folder import write_in_plan_dir
 from .cli_common import EXIT_NEEDS_HUMAN, EXIT_OK
 from .batch_ledger import (
     outcome_from_verdict,
@@ -3213,8 +3213,10 @@ class WriteBatchScheduler:
             else:
                 verdict.pop("batch_check_repeats", None)
             # Owner-only, as the executor wrote it (docs/development/
-            # runtime.md#atomic-file-writes).
-            atomic_write_text(path, json.dumps(data, indent=2), mode=0o600)
+            # runtime.md#atomic-file-writes), through its folder held as
+            # `persist_result` writes it
+            # (docs/development/write-safety.md#plan-output-containment).
+            write_in_plan_dir(path, json.dumps(data, indent=2).encode("utf-8"), mode=0o600)
         except (OSError, ValueError) as exc:  # noqa: BLE001 - bookkeeping
             self.log(
                 f"[write-subagents] warning: could not re-record the own check "
@@ -3262,8 +3264,10 @@ class WriteBatchScheduler:
                 sandbox_rung=self._dispatch_rungs.get(outcome.task_id),
             )
             # Owner-only, as the executor wrote it (docs/development/
-            # runtime.md#atomic-file-writes).
-            atomic_write_text(path, json.dumps(data, indent=2), mode=0o600)
+            # runtime.md#atomic-file-writes), through its folder held as
+            # `persist_result` writes it
+            # (docs/development/write-safety.md#plan-output-containment).
+            write_in_plan_dir(path, json.dumps(data, indent=2).encode("utf-8"), mode=0o600)
         except (OSError, ValueError) as exc:  # noqa: BLE001 - bookkeeping must not fail a phase
             self.log(
                 f"[write-subagents] warning: could not record the verdict on "

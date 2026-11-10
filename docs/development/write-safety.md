@@ -220,6 +220,27 @@ its own descriptor (by path once closed, on Windows without `CopyFile2`): its na
 restore puts back the streams and attributes the store keeps too, for a file that is not read-only,
 and its encryption where it can (below). Tests: `tests/test_write_sweep_sees_the_same.py`.
 
+**The pre-batch snapshot reads each declared file once too, and an adopted write copies only bytes
+that hash to its blob's name** (fable review F9, 2026-11-10). U80's rule covered the store only:
+`TaskSnapshot.take` checked containment, then `shutil.copy2` and a second read for the hash, both by
+path, so a declared file (or its folder) swapped for a link to an outside file in between, by a
+sibling batch still running, put the outside bytes in `<phase>/pre_batch/<task>/files/` (the restore
+then refused them; the copy was the exposure). Now `take` opens each declared file with the store's
+walk (`_open_declared`: `_open_below_root` from the pinned root, never through a link; on Windows by
+path, then `lstat` against `fstat`), reads it once (`read_capped`, the snapshot cap applied to the
+bytes read) and writes those bytes, hashed as read, with the store's writer (`write_copy`, so the
+payload keeps the file's mode, times and extended attributes, and on Windows with Python 3.12+ is
+`CopyFile2`'s copy checked against them, as `copy2` gave it). The manifest's repo-relative path is
+taken from the checked path, never resolved again. A link found where the check resolved none, or a
+regular file that cannot be opened, refuses the batch (`WriteSafetyError`, nothing dispatched); an
+absent path or a directory is recorded absent, as before. `TaskSnapshot.adopt` opens its retained
+blob once without following a link at its name (on Windows, which cannot refuse one at the open, by
+path, and the name must then be the file opened: `lstat` against `fstat`, as `_open_declared` checks;
+Codex review of F01), and copies the bytes it read only when they hash to
+the digest (now required with `existed=True`; the sweep always gives it). The payload's folder is
+still made and reached by path, as the store's is (item 2 below). Tests: the snapshot cases at the
+end of `tests/test_write_sweep_sees_the_same.py`.
+
 **On Windows the blob is `CopyFile2`'s copy, checked against the bytes read; a refused copy is
 removed, or named when it cannot be** (Codex reviews of U80, 2026-11-08). With Python 3.12+ a copy
 from the descriptor's bytes would drop what base's `shutil.copy2` kept there through `CopyFile2`:
@@ -398,10 +419,32 @@ payload since U82. Now (`_restored_through_descriptor`, `_stage_and_rename` and 
    between any check of the name and `unlinkat` another process can swap its own file in, which the
    removal would delete, its only name perhaps (reproduced on base and in the first round). It is
    left, named and recorded ("... was left at <path> ...; check it and delete it by hand
-   (`rm -- <path>`): until it is gone, no write check counts it as a batch's file and no rollback
-   replaces or deletes it"; see the leftover record below). A name found where the staged file was to be is
+   (`rm -- <path>`): until it is gone, no write check in this process counts it as a batch's file
+   and no rollback in it replaces or deletes it; another process checks it as any other file"; see
+   the leftover set below). A name found where the staged file was to be is
    left and named too, but it is not the restore's, so it is not recorded. An unnamed file refused
-   before it is named leaves nothing.
+   before it is named leaves nothing. A directory at the file's path is refused before anything is
+   staged (`_refuse_a_directory`, through the held folder; `restore_path`'s link leg alike): a file
+   or link renamed over a directory fails once its staged name exists, so each attempt used to leave
+   one more copy of the pre-batch bytes beside it (fable review F4). A directory put there after
+   that look still fails the rename, and the staged name is then left as above.
+
+**The delete leg removes the name relative to its folder held** (fable review F3, 2026-11-10). Both
+rollbacks' delete leg (`TaskSnapshot.restore` for a file the batch made, `restore_path` with no
+source) revalidated the path, then called `os.unlink` by path, so a folder swapped for a link to an
+outside folder in between sent the removal there and deleted the user's file of that name.
+`_delete_entry` now reaches the folder from the pinned root without following a link and holds it
+(`_HeldFolder`, the restore's), looks at the name relative to it (`fstatat`: gone is "deleted
+(already absent)", a directory is "skipped: a directory is at the path now" on both legs), checks the
+folder is still the one at its path, and removes the name relative to it (`unlinkat`). A link met on
+the walk, something that is not a folder, a folder that cannot be opened, or a folder moved meanwhile,
+skips the path and says why. A folder that is gone (another process removed it after the
+revalidation) is "deleted (already absent)", as the removal by path said: when the walk fails, a
+second walk that finds a component missing (`ENOENT`, never following a link: `_folder_gone`)
+confirms there is nothing to delete (Codex review of F01). What stays open: between that
+last check and `unlinkat`, a writer of the folder above can move the folder away; the name removed is
+then the batch's file in the moved folder, never one a link leads to. Windows removes by path, the
+window a removal by path always had.
 
 `restore_path`'s symlink (the commit write policy putting a link back) follows the same rules
 (`_restored_link`): the link is made at the temp name relative to the held folder (`symlinkat`,
@@ -456,8 +499,8 @@ The identity checks compare `(st_dev, st_ino)` of a name and of the descriptor, 
 whose inode numbers are not stable across lookups (some FUSE mounts) fails them: the restore is then
 skipped and says why, never done unchecked.
 
-**A staged file kept for the user is recorded, and every write check leaves exactly it out**
-(Codex review 2 of U87, 2026-11-08). The staged name was `.<name>.restore.<pid>.tmp`. A file kept
+**A staged file kept for the user is recorded in the restoring process, and that process's write
+checks leave exactly it out** (Codex review 2 of U87, 2026-11-08; fable review F1, 2026-11-10). The staged name was `.<name>.restore.<pid>.tmp`. A file kept
 there after a failed rename was, to another batch whose containment sweep was open, an undeclared
 new file: the sweep adopted it into that batch's snapshot and its rollback deleted it, the very
 removal the restore refuses; and a second restore of the same file in the same process found the
@@ -470,13 +513,25 @@ name taken and was refused. Now:
   st_ctime_ns)`, read through the staged file's descriptor (the link's `lstat`, once it is still the
   link made; on Windows the handle's, or for `CopyFile2`'s copy an `lstat` of a regular file with
   one name that is still the file the copy made). `_replace_with_payload` and `_restored_link`
-  record it, path and identity, in `$XDG_STATE_HOME/multi-llm/write-safety/restore-leftovers/<key of
-  the repo root>.json` (`_leftovers_update`, under a `FileMutex`): beside the out-of-grant rollback
-  evidence, which a jailed batch cannot write, so a batch cannot record files of its own. The change
+  record it, path and identity, in the restoring process's memory (`_LEFTOVERS`, a registered
+  process cache, per repository root, under its lock), never on disk. The change
   time is part of the identity because a filesystem can give a removed file's inode number to the
   next file made, and no call sets it. A name swapped in for the staged file, or a link found at
   its name, is not the restore's and is never recorded.
-- `restore_leftovers(root)` reads the record; `RestoreLeftovers.holds(path)` is true only for a
+- **Only the restoring process's own record is trusted** (fable review F1, 2026-11-10). The first
+  version kept the record in `$XDG_STATE_HOME/multi-llm/write-safety/restore-leftovers/<key of the
+  repo root>.json`, trusted because a jailed batch cannot write the state home. That held on the
+  Landlock rung only: on the uncontained rung, exactly where the porcelain check runs, and for any
+  write batch on a provider with no jail, the runner has the user's rights, and a record it wrote
+  naming its own edit and its own new file, with their real identities, took them out of the
+  sweep's census, the porcelain check and both rollback legs (`--force` included). No file is out
+  of such a runner's reach, a key file included (it can read whatever the plugin can), so no
+  on-disk record or signature can be trusted on that rung; the parent process's memory is the one
+  place it cannot write. An entry is added only from the descriptor of a file this process staged,
+  so a runner cannot add one; it could only change the file, which changes its identity and makes
+  it an ordinary file again. Nothing on disk is read as a leftover. The set lasts as long as the
+  process: one command, or every run a process serves when it runs several in turn.
+- `restore_leftovers(root)` reads that set; `RestoreLeftovers.holds(path)` is true only for a
   recorded path whose entry, never followed, has the recorded identity. The scheduler's census
   (`ContainmentSweep.census`) skips those entries and hands back the paths it skipped, and the
   differences between a batch's first and final census (`_swept_moves`) leave those paths out on
@@ -484,28 +539,31 @@ name taken and was refused. Now:
   a deleted file, never adopted (with `existed=True`, which would send it to the replace leg) and
   never a deletion attributed to the batch (Codex review 3 of U87). Both legs of a rollback
   (`TaskSnapshot.restore`, `restore_path`) refuse one, `--force` included: neither replaces nor
-  deletes it, and its record stays, even for a snapshot that adopted it before it was recorded or
-  in an older release. The porcelain write check (`porcelain_snapshot`) drops it, so the user
-  deleting it while a read-only slot runs is no write of the slot's. There is no name-pattern
+  deletes it, and its record stays, even for a snapshot that adopted it before it was recorded. The
+  porcelain write check (`porcelain_snapshot`) drops one too; it runs in a review run, which
+  restores nothing, so there it drops none (below). There is no name-pattern
   exemption: a file a batch makes with a staging-like name, or at a kept file's path once that is
   gone, is swept as any other.
-- An entry that is gone, or whose path now holds another file, leaves the record at its next read
-  (any census, porcelain snapshot or restore in that repository); an empty record is removed. A
-  record that cannot be written leaves the entry unprotected, and the restore's message says so.
-- The record is never changed without its lock, and never from a read that failed: when the
-  `FileMutex` cannot be taken in time (a stopped holder), or the record cannot be read, the kept
-  entry is not recorded and the restore's message says it is unprotected and how to remove it,
-  while a census reads the record as it stands and writes nothing. Either way no other process's
-  entry is dropped (Codex review 3 of U87: a timed-out writer once went on unlocked, and the holder's
-  write then dropped its entry, which a later rollback deleted). Content that is not a record at
-  all is replaced: no entry in it can be read.
+- An entry that is gone, or whose path now holds another file, leaves the set at its next read
+  (any census, porcelain snapshot or restore in that repository). An entry whose identity could not
+  be read, or whose folder was moved, is not recorded, and the restore's message says it is
+  unprotected and how to remove it.
 
-What the record does not close: a first census taken in the instant between the staged file's
+What the set does not close: a first census taken in the instant between the staged file's
 naming and the failed rename's record sees the file; if the user deletes it before the batch's final
 census, that batch reads the deletion as its own, and its rollback puts the file back from the bytes
 the first census retained. The porcelain write check, taken in the same instant, reads the file's
 later absence from its snapshot as a write of the slot's (detection only, nothing is removed). A
-`CopyFile2` copy, made by its name, has no identity from before it was made.
+`CopyFile2` copy, made by its name, has no identity from before it was made. And the price of
+trusting the restoring process alone: a file a restore in another process kept (an earlier `util
+restore-batch`, another run, the commit write policy's restore in its own process) is an ordinary
+file to this one. It is in both of a batch's censuses, so it is no write of the batch's, unless it
+appears or goes during one: the user deleting it while a batch or a review slot runs reads as that
+batch's or slot's write (the batch's rollback puts it back from the bytes its first census
+retained), and a staged file another process kept while a batch's sweep was open is adopted by that
+batch and deleted by its rollback. Each is the checks reporting, or undoing, a change they cannot
+attribute, never a write they miss. Restore keeps no hard link: the file put back is a new file, so
+another name of the old one keeps the batch's bytes.
 
 **The store's discard removes it whole, or names what it cannot.** `ContainmentSweep.discard_store` used
 `shutil.rmtree(..., ignore_errors=True)`, and Windows will not delete a read-only file, which a blob
@@ -533,7 +591,9 @@ no path; the folder replaced during the flush or just before the rename, a link 
 failed rename leaving the staged name, which a removal would have lost to a swap; the flags through
 the descriptor, or left off and named, emulated; `restore_path`'s symlink swapped once made or at
 the rename, its folder replaced, a failed rename, a name already there, by descriptor and by path;
-the Windows staging over the emulated handle calls; Codex's U82 round 3 repros). The Windows staging
+the Windows staging over the emulated handle calls; Codex's U82 round 3 repros; a directory at the
+path, the delete leg's folder swapped for a link before and after it is held, and a leftover record a
+runner forges in a separate process, from fable review F1, F3 and F4). The Windows staging
 runs natively on Windows CI as the sweep tests' `staged copy` restore. A policy violation's reason
 says "no rollback point exists" only for a path the snapshot holds nothing for; any other path left
 on disk is named with the restore's own reason (`PolicyRestore.not_restored`), so a refusal with
@@ -604,8 +664,25 @@ output in: a check, then a write that cannot be redirected after it.
   sidecars and host views (`validation._write_one_sidecar`), the executor's JSON records
   (`failure_capture._atomic_write_json`: a result, `task_result.persist_result`; the executor's
   batch report; the write scheduler's `write_batch_report.json`; the task files and reports that
-  helper writes) and the generate-tasks restore's `state.json`, written or removed. Nothing a
-  writer stated changes: its mode, `fsync`, temp-file prefix, lock, and whether it made its folder;
+  helper writes), the write scheduler's rewrites of a result it persisted (the verdict stamp
+  `_stamp_verdict`, the own check's re-record `_restamp_own_check`, the tree's re-stamp
+  `CheckHolds.restamp_check_trees`) and its inputs binding (`ResumeEvidence.record_fingerprint`,
+  `write_fingerprints.json`, its folder made held) (fable review F5, 2026-11-10: they rewrote by
+  path the file `persist_result` writes held, so a phase folder swapped for a link between the two
+  had an outside JSON file of the result's name rewritten), a pre-batch snapshot's manifest
+  (`write_safety._atomic_write`, which writes held below a plan's directory and by path in the
+  out-of-grant directory) and the generate-tasks restore's `state.json`, written or removed. The
+  write audit log, `subagent_audit.jsonl`, is appended through its folder held the same way
+  (`write_safety._open_to_append`): opened `O_APPEND|O_NOFOLLOW|O_NONBLOCK` relative to the folder,
+  which must still be the one at its path, and the entry opened must be a regular file its name
+  still holds, so a symlink at its name (a dangling one included, which the append used to create),
+  a FIFO, or a phase folder swapped for a link refuses the append (`OSError`, which stops the run
+  as any failed audit write does) instead of appending to an outside file (fable review F6,
+  2026-11-10); in the out-of-grant directory, and on Windows, its folder is made and reached by
+  path with the same checks on the name. A hard link at the name is still appended through:
+  refusing a second name would stop every run in a tree a backup hard-links, and with the
+  protected-hardlinks sysctl (on by default on Linux) only a process that owns a file, or can read
+  and write it, can link it. Nothing a writer stated changes: its mode, `fsync`, temp-file prefix, lock, and whether it made its folder;
   only the publication is held, so a normal run writes the same bytes with the same mode and the
   same flushes (`tests/test_held_folder.py`). Codex's re-check of U86a (2026-11-09) found these
   writing by path after the run's start check, so a link swapped in during the run redirected
@@ -669,7 +746,11 @@ output in: a check, then a write that cannot be redirected after it.
   `.status.lock`, made by `FileMutex` at their path, so a folder swapped for a link before the lock
   is taken gets an empty lock file where the link leads), and in `validation.write_prompt_sidecars`
   the phase folder's `makedirs`, the removal of the previous round's sidecars and the all-or-none
-  cleanup. The other files in the output folder are written by path; holding one is the same call.
+  cleanup. A pre-batch snapshot's payloads and their `files/` folder (`TaskSnapshot.take` and
+  `adopt`) and the rollback store's blobs and folders are made and reached by path, each payload or
+  blob created exclusively and never through a link at its name (`write_copy`); what they hold is
+  read through a descriptor (the store's reads, above). The other files in the output folder are
+  written by path; holding one is the same call.
   A sweep of the raw writes (`open(..., "w")`, `shutil.copy*`, `os.replace`, `os.rename`) on
   2026-11-09 found these: the reports, the grouped, consolidated and validation documents and the
   HTML report (`consolidation`, `apply_report`, `apply_output_helpers`,

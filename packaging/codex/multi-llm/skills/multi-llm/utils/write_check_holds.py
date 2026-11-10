@@ -29,7 +29,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence
 from . import check_records as _check_records
 from . import git_utils as _git_utils
 from . import write_context as _write_context
-from .atomic_io import atomic_write_text
+from .held_folder import write_in_plan_dir
 from .task_dispatch import STATUS_BATCH_FAILED
 from .retry_ladder import STATUS_OK
 from .batch_reply import (
@@ -459,8 +459,11 @@ class CheckHolds:
                     continue
                 verdict["tree_fingerprint"] = current
                 # Owner-only, as the executor wrote it (docs/development/
-                # runtime.md#atomic-file-writes).
-                atomic_write_text(path, json.dumps(data, indent=2), mode=0o600)
+                # runtime.md#atomic-file-writes), through its folder held as
+                # `persist_result` writes it
+                # (docs/development/write-safety.md#plan-output-containment).
+                write_in_plan_dir(path, json.dumps(data, indent=2).encode("utf-8"),
+                                  mode=0o600)
             except (OSError, ValueError) as exc:  # noqa: BLE001 - bookkeeping
                 self._ctx.log(
                     f"[write-subagents] warning: could not re-stamp the tree on "

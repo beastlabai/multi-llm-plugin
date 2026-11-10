@@ -1130,9 +1130,10 @@ def _restore_tmp(target: Path) -> Path:
 
 
 #: How a restore's ``skipped`` state ends once it left a staged file of its
-#: own for the user, recorded (``write_safety.restore_leftovers``).
-KEPT_FOR_THE_USER = ("until it is gone, no write check counts it as a batch's "
-                     "file and no rollback replaces or deletes it")
+#: own for the user, recorded in this process (``write_safety.restore_leftovers``).
+KEPT_FOR_THE_USER = ("until it is gone, no write check in this process counts it "
+                     "as a batch's file and no rollback in it replaces or deletes "
+                     "it; another process checks it as any other file")
 
 
 def _kept_for_the_user(state: str) -> None:
@@ -1281,6 +1282,9 @@ def test_a_read_only_payload_is_staged_by_the_restore_itself(env, monkeypatch, r
 
     try:
         snapshot, _payload = _snapshot_of(env)
+        # The snapshot's own copy (``TaskSnapshot.take`` copies the file as
+        # ``shutil.copy2`` does where ``CopyFile2`` copies) is not the restore's.
+        copies.clear()
         os.chmod(target, stat.S_IREAD | stat.S_IWRITE)
         target.write_bytes(b"a = 2\n")
         with monkeypatch.context() as patched:
@@ -2164,3 +2168,152 @@ def test_a_read_only_blob_is_named_and_left_by_the_discard(env):
         for left in _store(scheduler).rglob("*"):
             if left.is_file():
                 os.chmod(left, stat.S_IREAD | stat.S_IWRITE)
+
+
+# ---------------------------------------------------------------------------
+# The pre-batch snapshot reads each file once, without following a link
+# (fable review F9)
+# ---------------------------------------------------------------------------
+
+#: An outside file's bytes, which no rollback storage may ever hold.
+OUTSIDE_SECRET = b"OUTSIDE SECRET\n"
+
+
+def _payloads(env) -> list:
+    return [path.read_bytes() for path in Path(env.phase_dir).rglob("*")
+            if path.is_file() and write_safety.PAYLOAD_DIRNAME in path.parts]
+
+
+@pytest.mark.skipif(not write_safety.OPENS_WITHOUT_FOLLOWING,
+                    reason="Windows opens by path, then checks the name (lstat)")
+@pytest.mark.parametrize("swapped", ["the file", "its folder"])
+def test_a_declared_file_swapped_for_a_link_is_never_snapshotted(
+        env, tmp_path, monkeypatch, swapped):
+    """Fable review F9: a declared file, or its folder, swapped for a link
+    to an outside file between ``take``'s containment check and its read (a
+    sibling batch still running) is refused, nothing dispatched, and no
+    payload holds the outside bytes. Before, ``copy2`` followed the link."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "a.py").write_bytes(OUTSIDE_SECRET)
+    target = env.root / "src" / "a.py"
+    real = write_safety.contain_under_root
+
+    def racing(*args, **kwargs):
+        resolved = real(*args, **kwargs)
+        if swapped == "the file":
+            target.unlink()
+            target.symlink_to(outside / "a.py")
+        else:
+            target.parent.rename(target.parent.with_name("src.moved"))
+            target.parent.symlink_to(outside)
+        return resolved
+
+    monkeypatch.setattr(write_safety, "contain_under_root", racing)
+    with pytest.raises(write_safety.WriteSafetyError, match="without following a link"):
+        write_safety.TaskSnapshot.take(
+            phase_dir=str(env.phase_dir), task_id="T-S", files=["src/a.py"],
+            root=str(env.root))
+
+    assert OUTSIDE_SECRET not in _payloads(env)
+
+
+def test_a_snapshot_holds_the_bytes_it_hashed(env):
+    """Each payload is the bytes read once and hashed, with the file's mode
+    and times; an absent file and a directory are recorded absent."""
+    target = env.root / "src" / "a.py"
+    target.chmod(0o640)
+    os.utime(target, ns=(1_600_000_000_000_000_000, 1_650_000_000_000_000_000))
+    (env.root / "src" / "dir").mkdir()
+    snapshot = write_safety.TaskSnapshot.take(
+        phase_dir=str(env.phase_dir), task_id="T-H", root=str(env.root),
+        files=["src/a.py", "src/new.py", "src/dir"])
+
+    entry = snapshot.entry_for("src/a.py")
+    payload = Path(snapshot.directory) / write_safety.PAYLOAD_DIRNAME / entry.payload
+    assert entry.existed and entry.size == len(target.read_bytes())
+    assert entry.sha256 == hashlib.sha256(payload.read_bytes()).hexdigest()
+    assert payload.read_bytes() == target.read_bytes()
+    assert stat.S_IMODE(payload.stat().st_mode) == 0o640
+    assert payload.stat().st_mtime_ns == 1_650_000_000_000_000_000
+    for absent in ("src/new.py", "src/dir"):
+        assert not snapshot.entry_for(absent).existed
+        assert snapshot.entry_for(absent).payload is None
+
+
+def test_adopt_copies_the_bytes_it_hashed_and_never_through_a_link(env, tmp_path, monkeypatch):
+    """Fable review F9: ``adopt`` reads the retained blob once and copies only
+    bytes that hash to its digest. A blob swapped for a link to an outside
+    file once its hash was checked (here, where the old code checked it) is
+    never copied; a blob that is a link is no rollback point."""
+    snapshot = write_safety.TaskSnapshot.take(
+        phase_dir=str(env.phase_dir), task_id="T-A", files=["src/a.py"],
+        root=str(env.root))
+    blob = tmp_path / "blob"
+    blob.write_bytes(b"retained\n")
+    digest = hashlib.sha256(b"retained\n").hexdigest()
+    secret = tmp_path / "secret"
+    secret.write_bytes(OUTSIDE_SECRET)
+    real_hash = write_safety.file_sha256
+
+    def hash_then_swap(path):
+        answer = real_hash(path)
+        if os.fsdecode(path) == str(blob):
+            blob.unlink()
+            blob.symlink_to(secret)
+        return answer
+
+    monkeypatch.setattr(write_safety, "file_sha256", hash_then_swap)
+    entry = snapshot.adopt("src/b.py", existed=True, sha256=digest, size=9,
+                           payload_source=str(blob))
+
+    assert OUTSIDE_SECRET not in _payloads(env)
+    if entry is not None:
+        payload = Path(snapshot.directory) / write_safety.PAYLOAD_DIRNAME / entry.payload
+        assert payload.read_bytes() == b"retained\n"
+    linked = tmp_path / "linked-blob"
+    linked.symlink_to(blob)
+    assert snapshot.adopt("src/c.py", existed=True,
+                          sha256=hashlib.sha256(linked.read_bytes()).hexdigest(),
+                          size=9, payload_source=str(linked)) is None
+    assert snapshot.adopt("src/d.py", existed=True, sha256=None, size=9,
+                          payload_source=str(tmp_path / "blob")) is None
+
+
+@pytest.mark.parametrize("copying", ["CopyFile2", "plain copy"])
+def test_adopt_by_path_refuses_a_blob_name_that_is_a_link(env, tmp_path, monkeypatch, copying):
+    """Codex review of F01, point 2: where a link cannot be refused at the
+    open (Windows: no ``O_NOFOLLOW``, emulated here, ``CopyFile2`` or the
+    plain copy), ``adopt`` opens the blob by path and its name must be the
+    file opened (``lstat`` against ``fstat``): a blob name that is a link
+    is no rollback point, before anything is copied, though its target's
+    bytes hash right. A blob that is a plain file is adopted as before."""
+    snapshot = write_safety.TaskSnapshot.take(
+        phase_dir=str(env.phase_dir), task_id="T-W", files=["src/a.py"],
+        root=str(env.root))
+    blob = tmp_path / "blob"
+    blob.write_bytes(b"retained\n")
+    linked = tmp_path / "linked-blob"
+    linked.symlink_to(blob)
+    digest = hashlib.sha256(b"retained\n").hexdigest()
+    monkeypatch.setattr(write_safety, "OPENS_WITHOUT_FOLLOWING", False, raising=False)
+    if copying == "plain copy":
+        monkeypatch.setattr(write_safety, "_COPY_FILE2", None, raising=False)
+    elif getattr(write_safety, "_COPY_FILE2", None) is None:
+        monkeypatch.setattr(write_safety, "_COPY_FILE2", _copy_file2_off_windows,
+                            raising=False)
+    payloads = Path(snapshot.directory) / write_safety.PAYLOAD_DIRNAME
+    before = sorted(payloads.iterdir())
+
+    with monkeypatch.context() as windows:
+        if hasattr(os, "O_NOFOLLOW"):
+            windows.delattr(os, "O_NOFOLLOW")
+        refused = snapshot.adopt("src/b.py", existed=True, sha256=digest, size=9,
+                                 payload_source=str(linked), save=False)
+        adopted = snapshot.adopt("src/c.py", existed=True, sha256=digest, size=9,
+                                 payload_source=str(blob), save=False)
+
+    assert refused is None
+    assert adopted is not None
+    assert sorted(payloads.iterdir()) == sorted(before + [payloads / adopted.payload])
+    assert (payloads / adopted.payload).read_bytes() == b"retained\n"

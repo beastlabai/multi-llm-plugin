@@ -70,7 +70,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Union
 
-from .atomic_io import atomic_write_bytes, atomic_write_text, temp_path_for
+from .atomic_io import atomic_write_bytes, temp_path_for
 from .clock import local_iso_seconds
 from .git_utils import pin_repo_root, find_git_entry_root
 # The walk and the hold (a folder reached from a root without following a link,
@@ -85,13 +85,17 @@ from .held_folder import (  # noqa: F401 - OPENS_WITHOUT_FOLLOWING is re-exporte
     _REMOVED,
     _WRITTEN,
     OPENS_WITHOUT_FOLLOWING,
+    _checked,
     _folder_moved,
     _HeldFolder,
     _in_held_folder,
     _open_below_root,
     _Wording,
+    plan_dir_of,
+    write_in_plan_dir,
 )
 from .process_control import FileMutex, descriptor_owning_handle, handle_of_descriptor
+from .process_state import process_cache
 from .provider_registry import get_write_paths
 # Redaction is the leaf module utils/redact.py and the state home lives in
 # output_handler, so the layers below this one reach them without importing it.
@@ -637,9 +641,10 @@ class CopyNotContained(OSError):
         self.pending = pending
 
 
-#: A file's identity as the leftover record keeps it: ``(st_dev, st_ino,
-#: st_ctime_ns)``. The change time is in it because a filesystem can give a
-#: removed file's inode number to the next file made, and no call sets it.
+#: A file's identity as the leftover set keeps it (:data:`_LEFTOVERS`):
+#: ``(st_dev, st_ino, st_ctime_ns)``. The change time is in it because a
+#: filesystem can give a removed file's inode number to the next file made, and
+#: no call sets it.
 _Identity = Tuple[int, int, int]
 
 
@@ -1595,6 +1600,62 @@ class SnapshotEntry:
         )
 
 
+def _open_declared(resolved: Path, resolved_root: Path, relative: str,
+                   task_id: str) -> Optional[Tuple[int, os.stat_result]]:
+    """A read-only descriptor of the declared file *resolved* and its
+    ``fstat``, for :meth:`TaskSnapshot.take` to read once; ``None`` when no
+    regular file is there (absent, a directory: nothing to snapshot).
+
+    *resolved* is :func:`contain_under_root`'s answer, below *resolved_root*
+    with every link resolved, and *relative* its path below it. Where the
+    platform can (:data:`OPENS_WITHOUT_FOLLOWING`), it is opened one
+    component at a time from the root, never through a link
+    (:func:`_open_below_root`, the walk the rollback store's reads take);
+    elsewhere by path, and its own entry must then be the file opened
+    (``lstat`` against ``fstat``). The check resolved every link, so a link
+    found now, or a file that cannot be opened, was put there since: refused
+    (:class:`WriteSafetyError`), nothing is dispatched
+    (docs/development/write-safety.md, the rollback store's reads)."""
+    parts = list(PurePosixPath(relative).parts)
+    handle: Optional[int] = None
+    if parts and OPENS_WITHOUT_FOLLOWING:
+        handle = _open_below_root(str(resolved_root), parts)
+    elif parts:
+        try:
+            handle = os.open(str(resolved), _READ_FLAGS)
+        except OSError:
+            handle = None
+    if handle is not None:
+        try:
+            info = os.fstat(handle)
+        except OSError:
+            info = None
+        if info is not None and stat.S_ISREG(info.st_mode) and (
+                OPENS_WITHOUT_FOLLOWING or _names_file(str(resolved), info)):
+            return handle, info
+        os.close(handle)
+        if info is not None and not stat.S_ISREG(info.st_mode):
+            return None
+    try:
+        named = os.lstat(str(resolved))
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except OSError as exc:
+        named, why = None, str(exc)
+    else:
+        why = ""
+    if named is not None and not (stat.S_ISREG(named.st_mode) or stat.S_ISLNK(named.st_mode)
+                                  or _names_another_path(named)):
+        return None
+    raise WriteSafetyError(
+        f"Refusing to dispatch task {task_id}: {relative} could not be opened "
+        f"for its pre-batch snapshot without following a link"
+        + (f" ({why})" if why else "")
+        + ": a link was put there after its containment check, or the file "
+        "cannot be read. A batch with no rollback point is not dispatched (D3h)."
+    )
+
+
 @dataclass
 class TaskSnapshot:
     """The mandatory pre-batch snapshot for one write task (D3h).
@@ -1636,35 +1697,57 @@ class TaskSnapshot:
         A snapshot is taken even for a file that does not exist yet: "absent
         before, present after" is the creation case, and recording the absence is
         what lets ``util restore-batch`` delete a file the batch created.
+
+        Each file is read once, through a descriptor opened without following
+        a link below the root (:func:`_open_declared`), and the payload is
+        those bytes, hashed as read (:func:`write_copy`, the rollback store's
+        writer): a link swapped in after the containment check, by a sibling
+        batch still running, is refused and never read, so the payload never
+        holds another file's bytes (docs/development/write-safety.md, the
+        rollback store's reads).
         """
         directory = Path(safety_dir(phase_dir)) / PRE_BATCH_DIRNAME / _safe_component(task_id)
         payload_dir = directory / PAYLOAD_DIRNAME
         payload_dir.mkdir(parents=True, exist_ok=True)
+        resolved_root = Path(root).resolve()
         entries: List[SnapshotEntry] = []
         for index, candidate in enumerate(files):
             resolved = contain_under_root(candidate, root, what="snapshot target")
-            relative = relative_to_root(str(resolved), root)
-            existed = resolved.is_file()
-            size = resolved.stat().st_size if existed else 0
-            if existed and size > MAX_SNAPSHOT_BYTES:
-                raise WriteSafetyError(
-                    f"Refusing to dispatch task {task_id}: {relative} is {size} "
-                    f"bytes, over the {MAX_SNAPSHOT_BYTES}-byte snapshot cap. A "
-                    f"batch with no rollback point is not dispatched — every "
-                    f"declared file must be snapshottable (D3h)."
-                )
+            # Taken from the checked path itself, never resolved again: a
+            # second resolution follows whatever link is there by now.
+            relative = resolved.relative_to(resolved_root).as_posix()
+            opened = _open_declared(resolved, resolved_root, relative, task_id)
+            if opened is None:
+                entries.append(SnapshotEntry(
+                    relative=relative, absolute=str(resolved), existed=False,
+                    sha256=None, size=0, payload=None,
+                ))
+                continue
+            source, info = opened
             payload_name = f"{index:03d}-{_safe_component(relative)}"
-            payload = None
-            if existed:
-                shutil.copy2(str(resolved), str(payload_dir / payload_name))
-                payload = payload_name
+            try:
+                data = (read_capped(source, MAX_SNAPSHOT_BYTES, size_hint=info.st_size)
+                        if info.st_size <= MAX_SNAPSHOT_BYTES else None)
+                if data is None:
+                    size = (f"is {info.st_size} bytes" if info.st_size > MAX_SNAPSHOT_BYTES
+                            else "grew while it was read")
+                    raise WriteSafetyError(
+                        f"Refusing to dispatch task {task_id}: {relative} {size}, "
+                        f"over the {MAX_SNAPSHOT_BYTES}-byte snapshot cap. A "
+                        f"batch with no rollback point is not dispatched — every "
+                        f"declared file must be snapshottable (D3h)."
+                    )
+                write_copy(str(payload_dir / payload_name), data, source,
+                           path=str(resolved))
+            finally:
+                os.close(source)
             entries.append(SnapshotEntry(
                 relative=relative,
                 absolute=str(resolved),
-                existed=existed,
-                sha256=file_sha256(str(resolved)) if existed else None,
-                size=size,
-                payload=payload,
+                existed=True,
+                sha256=hashlib.sha256(data).hexdigest(),
+                size=len(data),
+                payload=payload_name,
             ))
         snapshot = cls(task_id=task_id, directory=str(directory), root=str(root),
                        entries=entries,
@@ -1696,10 +1779,10 @@ class TaskSnapshot:
         exactly like a declared one.
 
         Args:
-            payload_source: The retained pre-run bytes. Required when
-                ``existed`` — an entry claiming a rollback point it has no copy
-                for is worse than an honest ``None``, which is what this returns
-                instead.
+            payload_source: The retained pre-run bytes. Required, with the
+                ``sha256`` they must hash to, when ``existed`` — an entry
+                claiming a rollback point it has no copy for is worse than an
+                honest ``None``, which is what this returns instead.
             save: Off when a caller adopts a batch of paths and saves once; the
                 manifest is rewritten whole, so per-path saves are quadratic.
 
@@ -1707,7 +1790,7 @@ class TaskSnapshot:
             The entry, or ``None`` when no rollback point could be recorded.
         """
         resolved = contain_under_root(relative, self.root, what="observed write")
-        key = relative_to_root(str(resolved), self.root)
+        key = resolved.relative_to(Path(self.root).resolve()).as_posix()
         existing = self.entry_for(key)
         if existing is not None:
             return existing
@@ -1716,18 +1799,38 @@ class TaskSnapshot:
         # with no payload.
         payload: Optional[str] = None
         if existed:
-            if not payload_source or not Path(payload_source).is_file():
+            if not payload_source or not sha256:
                 return None
-            # The retained bytes are content-addressed by `sha256`; a blob
-            # whose bytes no longer hash to it was rewritten after the sweep
-            # retained it (the store sits where the batch can write) and is
-            # no rollback point (review fixes 2026-10-05).
-            if sha256 and file_sha256(payload_source) != sha256:
+            # The retained bytes are content-addressed by `sha256`. The blob
+            # is read once, through a descriptor that never follows a link at
+            # its name (where the platform cannot refuse one at the open, the
+            # name must be the file opened: `lstat` against `fstat`), and only
+            # bytes that hash to it are copied: a blob rewritten after the
+            # sweep retained it (the store sits where the batch can write), or
+            # swapped for a link to another file, is no rollback point (review
+            # fixes 2026-10-05; docs/development/write-safety.md, the rollback
+            # store's reads).
+            flags = _READ_FLAGS | (os.O_NOFOLLOW if OPENS_WITHOUT_FOLLOWING else 0)
+            try:
+                source = os.open(payload_source, flags)
+            except OSError:
                 return None
-            payload = f"{len(self.entries):03d}-{_safe_component(key)}"
-            payload_dir = Path(self.directory) / PAYLOAD_DIRNAME
-            payload_dir.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(payload_source), str(payload_dir / payload))
+            try:
+                info = os.fstat(source)
+                data = (read_capped(source, MAX_SNAPSHOT_BYTES, size_hint=info.st_size)
+                        if stat.S_ISREG(info.st_mode) and (
+                            OPENS_WITHOUT_FOLLOWING
+                            or _names_file(str(payload_source), info))
+                        else None)
+                if data is None or hashlib.sha256(data).hexdigest() != sha256:
+                    return None
+                payload = f"{len(self.entries):03d}-{_safe_component(key)}"
+                payload_dir = Path(self.directory) / PAYLOAD_DIRNAME
+                payload_dir.mkdir(parents=True, exist_ok=True)
+                write_copy(str(payload_dir / payload), data, source,
+                           path=str(payload_source))
+            finally:
+                os.close(source)
         entry = SnapshotEntry(
             relative=key,
             absolute=str(resolved),
@@ -2077,16 +2180,10 @@ class TaskSnapshot:
                     continue
                 report[relative] = "restored"
             else:
-                # Absent before the batch: the correct rollback is deletion.
-                # `os.unlink` removes the entry itself, so a symlink left in the
-                # file's place is removed rather than followed.
-                try:
-                    os.unlink(str(target))
-                    report[relative] = "deleted"
-                except FileNotFoundError:
-                    report[relative] = "deleted (already absent)"
-                except OSError as exc:
-                    report[relative] = f"skipped: {exc}"
+                # Absent before the batch: the correct rollback is deletion
+                # of the entry itself (a symlink left in the file's place is
+                # removed, never followed), relative to its folder held.
+                report[relative] = _delete_entry(self.root, target)
         return report
 
 
@@ -2114,15 +2211,7 @@ def restore_path(root: str, relative: str, source: Optional[str]) -> str:
     if restore_leftovers(root).holds(str(target)):
         return _kept_for_the_user(str(target))
     if source is None:
-        try:
-            if stat.S_ISDIR(os.lstat(str(target)).st_mode):
-                return "skipped: a directory is at the path now"
-            os.unlink(str(target))
-        except FileNotFoundError:
-            return "deleted (already absent)"
-        except OSError as exc:
-            return f"skipped: {exc}"
-        return "deleted"
+        return _delete_entry(root, target)
     try:
         if os.path.islink(source):
             _restored_link(os.readlink(source), target, root)
@@ -2133,6 +2222,84 @@ def restore_path(root: str, relative: str, source: Optional[str]) -> str:
     except OSError as exc:
         return f"skipped: {exc}"
     return "restored"
+
+
+def _delete_entry(root: str, target: Path) -> str:
+    """A rollback's delete leg: remove the entry *target*, which
+    :func:`_revalidated_target` derived under the pinned *root*, never a
+    link's target and never a directory. ``"deleted"``, ``"deleted (already
+    absent)"`` or ``"skipped: <why>"``.
+
+    On Linux and macOS the name is removed relative to its folder, reached
+    from *root* without following a link and held (:class:`_HeldFolder`),
+    which must still be the folder at its path just before the removal: a
+    folder swapped for a link after the revalidation is refused, and a
+    removal never lands in a folder a link leads to
+    (docs/development/write-safety.md, restore). A folder that cannot be
+    reached because it is gone (:func:`_folder_gone`) leaves nothing to
+    delete. Windows removes it by path, the window a removal by path always
+    had."""
+    if not _PUBLISHES_BY_DESCRIPTOR:
+        try:
+            if stat.S_ISDIR(os.lstat(str(target)).st_mode):
+                return "skipped: a directory is at the path now"
+            os.unlink(str(target))
+        except FileNotFoundError:
+            return "deleted (already absent)"
+        except OSError as exc:
+            return f"skipped: {exc}"
+        return "deleted"
+    try:
+        folder = _HeldFolder.open(root, target, say=_REMOVED)
+    except OSError as exc:
+        if _folder_gone(root, target):
+            return "deleted (already absent)"
+        return f"skipped: {exc}"
+    try:
+        try:
+            info = os.lstat(target.name, dir_fd=folder.fd)
+        except FileNotFoundError:
+            return "deleted (already absent)"
+        if stat.S_ISDIR(info.st_mode):
+            return "skipped: a directory is at the path now"
+        if not folder.in_place():
+            return f"skipped: {_folder_moved(folder, str(target))}"
+        os.unlink(target.name, dir_fd=folder.fd)
+    except FileNotFoundError:
+        return "deleted (already absent)"
+    except OSError as exc:
+        return f"skipped: {_respelled(exc, str(target))}"
+    finally:
+        os.close(folder.fd)
+    return "deleted"
+
+
+def _folder_gone(root: str, target: Path) -> bool:
+    """Whether *target*'s folder below *root* is gone: a fresh walk from
+    the root, each folder opened without following a link relative to the
+    one above (as :class:`_HeldFolder` walks), finds one missing. A link
+    met first, something that is not a folder, or a folder that cannot be
+    opened is not absence, so :func:`_delete_entry` still refuses those."""
+    resolved = str(Path(root).resolve())
+    try:
+        parts = target.parent.relative_to(resolved).parts
+        handle = os.open(resolved, os.O_RDONLY | os.O_DIRECTORY | _CLOEXEC)
+    except (ValueError, OSError):
+        return False
+    try:
+        for name in parts:
+            try:
+                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+                                | _CLOEXEC, dir_fd=handle)
+            except FileNotFoundError:
+                return True
+            except OSError:
+                return False
+            os.close(handle)
+            handle = child
+        return False
+    finally:
+        os.close(handle)
 
 
 def _short(digest: Optional[str]) -> str:
@@ -2149,8 +2316,9 @@ def _skipped_leaving(left: CopyNotContained) -> str:
     if not isinstance(left, _StagingLeft):
         return f"skipped: {left}; check what is left there and delete it by hand"
     if left.unrecorded is None:
-        meanwhile = ("until it is gone, no write check counts it as a batch's "
-                     "file and no rollback replaces or deletes it")
+        meanwhile = ("until it is gone, no write check in this process counts it "
+                     "as a batch's file and no rollback in it replaces or deletes "
+                     "it; another process checks it as any other file")
     else:
         meanwhile = (f"it could not be recorded as the restore's ({left.unrecorded}), "
                      f"so a write check can count it as a batch's file meanwhile")
@@ -2159,11 +2327,11 @@ def _skipped_leaving(left: CopyNotContained) -> str:
 
 
 def _kept_for_the_user(path: str) -> str:
-    """A rollback's ``skipped`` state for a staged entry a restore kept for
-    the user (:func:`restore_leftovers`), on either leg."""
-    return (f"skipped: {path} is a file a restore left for you to check, so no "
-            f"rollback replaces or deletes it; delete it by hand once checked "
-            f"({_removal_command(path)})")
+    """A rollback's ``skipped`` state for a staged entry a restore in this
+    process kept for the user (:func:`restore_leftovers`), on either leg."""
+    return (f"skipped: {path} is a file a restore in this process left for you "
+            f"to check, so no rollback in it replaces or deletes it; delete it by "
+            f"hand once checked ({_removal_command(path)})")
 
 
 def _removal_command(path: str) -> str:
@@ -2174,18 +2342,20 @@ def _removal_command(path: str) -> str:
     return f"rm -- {shlex.quote(path)}"
 
 
-#: Where the staged entries a restore kept for the user are recorded, one
-#: file per repository, beside the out-of-grant rollback evidence
-#: (:data:`STATE_SUBDIR`), which a jailed batch cannot write
+#: The staged entries a restore in this process kept for the user, per
+#: repository: ``{normcase(realpath(root)): {normcase(path): (path, identity)}}``.
+#: Held in this process's memory alone, never on disk: an entry takes its file
+#: out of every write check, and whatever a runner can write (the state home
+#: and the phase dir included, on the uncontained rung) it could forge
 #: (docs/development/write-safety.md, restore).
-LEFTOVERS_SUBDIR = "restore-leftovers"
-#: The record's in-process lock; :class:`FileMutex` serializes processes.
 _LEFTOVERS_LOCK = threading.Lock()
+_LEFTOVERS: Dict[str, Dict[str, Tuple[str, _Identity]]] = process_cache(
+    "utils.write_safety._LEFTOVERS", lock=_LEFTOVERS_LOCK)
 
 
 class RestoreLeftovers:
-    """The staged entries a restore kept in one repository for the user to
-    check and remove, as recorded: each its absolute path and
+    """The staged entries a restore in this process kept in one repository
+    for the user to check and remove: each its absolute path and
     :data:`_Identity` (:func:`restore_leftovers`)."""
 
     def __init__(self, entries: Sequence[Tuple[str, _Identity]]) -> None:
@@ -2203,18 +2373,18 @@ class RestoreLeftovers:
 
 
 def restore_leftovers(root: str) -> RestoreLeftovers:
-    """The staged entries a restore kept under the repository *root* for the
-    user (:class:`_StagingLeft`), each still at its path. The write checks
-    leave exactly these out: the containment sweep's census and the
-    differences it computes, the porcelain write check, and both legs of a
-    rollback (replace and delete). An entry that is gone, or with
-    another file at its path, leaves the record here: whatever is there is
-    an ordinary file again. Never raises: an unreadable record holds none
+    """The staged entries a restore in this process kept under the
+    repository *root* for the user (:class:`_StagingLeft`), each still at its
+    path. The write checks this process runs leave exactly these out: the
+    containment sweep's census and the differences it computes, the
+    porcelain write check, and both legs of a rollback (replace and delete).
+    An entry that is gone, or with another file at its path, is dropped:
+    whatever is there is an ordinary file again. Only this process's own
+    restores add one, from the staged file's descriptor, so nothing a runner
+    writes can: a file another process kept (an earlier ``util
+    restore-batch``, another run) is checked as any other
     (docs/development/write-safety.md, restore)."""
-    try:
-        return RestoreLeftovers(_leftovers_update(root))
-    except OSError:
-        return RestoreLeftovers(())
+    return RestoreLeftovers(_leftovers_live(root))
 
 
 def _record_left(root: str, left: _StagingLeft) -> None:
@@ -2226,90 +2396,32 @@ def _record_left(root: str, left: _StagingLeft) -> None:
     elif not os.path.isabs(left.pending):
         left.unrecorded = "the folder it is in was moved"
     else:
-        try:
-            _leftovers_update(root, (os.path.abspath(left.pending), left.identity))
-        except OSError as exc:
-            left.unrecorded = str(exc)
+        _leftovers_live(root, (os.path.abspath(left.pending), left.identity))
 
 
 def _forget_gone(root: str) -> None:
     """Drop the recorded leftovers under *root* that are gone, once a
     restore there put its file back."""
-    try:
-        _leftovers_update(root)
-    except OSError:
-        pass
+    _leftovers_live(root)
 
 
-def _leftovers_update(
+def _leftovers_live(
     root: str, kept: Optional[Tuple[str, _Identity]] = None,
 ) -> List[Tuple[str, _Identity]]:
-    """*root*'s record (:data:`LEFTOVERS_SUBDIR`), under its lock: the
-    entries still at their paths, *kept* added; rewritten when that changed
-    it, removed once empty. Raises ``OSError`` without changing it when the
-    record cannot be read, or when *kept* is given and the lock cannot be
-    taken."""
-    resolved = os.path.realpath(root)
-    record = os.path.join(_output_handler.state_home(), STATE_SUBDIR, LEFTOVERS_SUBDIR,
-                          _phase_key(os.path.normcase(resolved)) + ".json")
-    if kept is None and not os.path.exists(record):
-        return []
+    """*root*'s entries in :data:`_LEFTOVERS` still at their paths, under its
+    lock, those that are gone dropped; then *kept* added, its identity read
+    from the staged file's descriptor (its name is not looked up again)."""
+    key = os.path.normcase(os.path.realpath(root))
     with _LEFTOVERS_LOCK:
-        os.makedirs(os.path.dirname(record), mode=0o700, exist_ok=True)
-        mutex = FileMutex(record + ".lock")
-        if not mutex.acquire():
-            # Never rewritten without the lock: the write could drop an entry
-            # another process published meanwhile. *kept* stays unrecorded
-            # (``_StagingLeft.unrecorded``); a read takes the record as it is.
-            if kept is not None:
-                raise OSError(f"the lock on {record} could not be taken")
-            return [(path, identity) for path, identity in _read_leftovers(record) or ()
-                    if _identity_at(path) == identity]
-        try:
-            recorded = _read_leftovers(record)
-            live = [(path, identity) for path, identity in recorded or ()
-                    if _identity_at(path) == identity]
-            if kept is not None:
-                live = [entry for entry in live if os.path.normcase(entry[0])
-                        != os.path.normcase(kept[0])] + [kept]
-            if live and live != recorded:
-                _atomic_write(record, json.dumps({"root": resolved, "left": [
-                    {"path": path, "dev": dev, "ino": ino, "ctime_ns": ctime}
-                    for path, (dev, ino, ctime) in live]}, indent=2) + "\n")
-            elif not live and recorded != []:
-                try:
-                    os.unlink(record)
-                except FileNotFoundError:
-                    pass
-            return live
-        finally:
-            mutex.release()
-
-
-def _read_leftovers(record: str) -> Optional[List[Tuple[str, _Identity]]]:
-    """The entries in *record*; ``[]`` when there is none, ``None`` when its
-    content is not one. Raises the ``OSError`` of a read that failed, which
-    says nothing about its entries."""
-    try:
-        data = json.loads(Path(record).read_text(encoding="utf-8"))
-    except FileNotFoundError:
-        return []
-    except ValueError:
-        return None
-    entries = data.get("left") if isinstance(data, dict) else None
-    if not isinstance(entries, list):
-        return None
-    out: List[Tuple[str, _Identity]] = []
-    for item in entries:
-        if not isinstance(item, dict):
-            return None
-        path = item.get("path")
-        identity = (item.get("dev"), item.get("ino"), item.get("ctime_ns"))
-        if not (isinstance(path, str) and os.path.isabs(path)
-                and all(type(part) is int for part in identity)):
-            return None
-        out.append((path, identity))  # type: ignore[arg-type]
-    return out
+        live = {name: entry for name, entry in _LEFTOVERS.get(key, {}).items()
+                if _identity_at(entry[0]) == entry[1]}
+        if kept is not None:
+            live[os.path.normcase(kept[0])] = kept
+        if live:
+            _LEFTOVERS[key] = live
+        else:
+            _LEFTOVERS.pop(key, None)
+        return list(live.values())
 
 
 def _identity_at(path: str, dir_fd: Optional[int] = None) -> Optional[_Identity]:
@@ -2534,6 +2646,7 @@ def _restored_through_descriptor(source: str, tmp: Path, target: Path,
             raise OSError(f"{source} is no longer the snapshot's payload file")
         folder = _HeldFolder.open(root, target)
         try:
+            _refuse_a_directory(folder.fd, target.name, str(target))
             _stage_and_rename(payload, folder, source, str(tmp), str(target), sha256)
         finally:
             os.close(folder.fd)
@@ -2698,6 +2811,24 @@ def _check_staged(folder: int, name: str, staged: int, tmp: str, target: str,
 def _given_another_name(tmp: str, target: str, say: _Wording = _PUT_BACK) -> str:
     return (f"{tmp}, {say.staged}, was given another name before it could be "
             f"renamed over {target}, so nothing was {say.done}")
+
+
+def _refuse_a_directory(fd: Optional[int], name: str, target: str) -> None:
+    """Raise ``IsADirectoryError`` when a directory is at *target* (its
+    *name* relative to the folder descriptor *fd*, or by path without one),
+    before anything is staged: a file or link renamed over a directory fails
+    once its staged name exists, and that name is never removed
+    (:func:`_leave_staged`), so each attempt would leave one more copy
+    (docs/development/write-safety.md, restore). A directory put there after
+    this look still fails the rename, and the staged name is then left."""
+    try:
+        info = os.lstat(name, dir_fd=fd)
+    except OSError:
+        return
+    if stat.S_ISDIR(info.st_mode):
+        raise IsADirectoryError(
+            f"{target} is a directory now, so nothing was put back (the snapshot "
+            f"is kept)")
 
 
 def _leave_staged(folder: Optional[_HeldFolder], name: str, tmp: str,
@@ -3001,6 +3132,7 @@ def _link_and_rename(folder: Optional[_HeldFolder], text: str, tmp: str,
         name, target_name = os.path.basename(tmp), os.path.basename(target)
     else:
         name, target_name = tmp, target
+    _refuse_a_directory(fd, target_name, target)
     try:
         os.symlink(text, name, dir_fd=fd)
     except FileExistsError as exc:
@@ -3482,9 +3614,82 @@ def _safe_component(text: str) -> str:
 def _atomic_write(path: str, payload: str) -> None:
     """*payload* replaces *path* by ``atomic_io``'s write, 0600 and flushed,
     its folder made first — as D3f requires (an exclusively created temp file
-    beside it: docs/development/runtime.md#atomic-file-writes)."""
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_text(path, payload, mode=0o600)
+    beside it: docs/development/runtime.md#atomic-file-writes). Below a plan's
+    directory (a snapshot's manifest in the phase dir) it is published through
+    its folder held there (``held_folder.write_in_plan_dir``); elsewhere (the
+    out-of-grant directory in the state home) by path
+    (docs/development/write-safety.md#plan-output-containment)."""
+    write_in_plan_dir(path, payload.encode("utf-8"), make=True, mode=0o600)
+
+
+#: How the audit log is opened to append a line: made owner-only when
+#: missing, never through a link at its name, never blocking on a FIFO put
+#: there (:func:`_open_to_append`).
+_APPEND_FLAGS = (os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+                 | getattr(os, "O_NONBLOCK", 0) | _CLOEXEC)
+#: Whether the audit log's folder is held while it is opened (Linux, macOS):
+#: reached from the plan's directory without following a link, a missing one
+#: made relative to its parent's descriptor.
+_APPENDS_HELD = bool(OPENS_WITHOUT_FOLLOWING and os.mkdir in os.supports_dir_fd
+                     and os.stat in os.supports_dir_fd)
+
+
+def _open_to_append(path: str) -> int:
+    """A descriptor to append to the file *path*, made owner-only (0600) when
+    missing; the caller closes it (:meth:`AuditLog._append`).
+
+    Never through a symlink: ``O_NOFOLLOW`` refuses one at the name, and
+    the entry opened must be a regular file that the name, never followed,
+    still names. Below a plan's directory, on Linux and macOS, the file's
+    folder is reached from that directory without following a link, a
+    missing one made on the way, and held (:class:`_HeldFolder`); it must
+    resolve inside it (``OutsidePlanDir``) and still be the folder at its
+    path once the file is open. Elsewhere (the out-of-grant directory in the
+    state home, Windows) the folder is made and reached by path. A hard link
+    at the name is appended through, as before
+    (docs/development/write-safety.md#plan-output-containment says why).
+    ``OSError`` with nothing appended otherwise."""
+    root = plan_dir_of(path)
+    if root is not None and _APPENDS_HELD:
+        target = _checked(path, root, what="append to")
+        folder = _HeldFolder.open(root, target, make=True, say=_WRITTEN,
+                                  resolve_root=False)
+        try:
+            try:
+                handle = os.open(target.name, _APPEND_FLAGS, 0o600, dir_fd=folder.fd)
+            except OSError as exc:
+                raise _respelled(exc, str(target)) from exc
+            try:
+                if not folder.in_place():
+                    raise OSError(_folder_moved(folder, str(target)))
+                _check_appended(handle, os.lstat(target.name, dir_fd=folder.fd),
+                                str(target))
+            except BaseException:
+                os.close(handle)
+                raise
+        finally:
+            os.close(folder.fd)
+        return handle
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    handle = os.open(path, _APPEND_FLAGS, 0o600)
+    try:
+        _check_appended(handle, os.lstat(path), path)
+    except BaseException:
+        os.close(handle)
+        raise
+    return handle
+
+
+def _check_appended(handle: int, named: os.stat_result, path: str) -> None:
+    """Refuse the descriptor *handle*, opened as *path* (whose own entry,
+    never followed, is *named*), unless it is a regular file and that entry
+    (:func:`_open_to_append`)."""
+    opened = os.fstat(handle)
+    if not (stat.S_ISREG(opened.st_mode)
+            and (named.st_dev, named.st_ino) == (opened.st_dev, opened.st_ino)):
+        raise OSError(
+            f"{path} is not the regular file its name holds (a link, or not a "
+            f"regular file), so nothing was appended to it")
 
 
 # ---------------------------------------------------------------------------
@@ -3596,10 +3801,10 @@ class AuditLog:
     # -- writing --------------------------------------------------------
 
     def _append(self, record: Dict[str, Any]) -> None:
-        Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(record, sort_keys=True) + "\n"
-        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
-        handle = os.open(self.path, flags, 0o600)
+        # Never through a link, its folder held below the plan's directory
+        # (docs/development/write-safety.md#plan-output-containment).
+        handle = _open_to_append(self.path)
         try:
             with os.fdopen(handle, "a", encoding="utf-8") as stream:
                 stream.write(line)

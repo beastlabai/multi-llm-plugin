@@ -321,17 +321,23 @@ def test_a_swap_between_the_last_check_and_the_rename_is_reported(
 def test_a_failed_rename_leaves_the_staged_name_for_the_user(
     env, monkeypatch, staging,
 ):
-    """A rename the file system refuses (a directory at the path now): the
-    staged file, named by then either way, is left at its name and named for
-    the user, never removed. Removing it would be a check, then
-    ``unlink(2)`` by the name, and a process that swaps its own file in
-    between (here at the removal itself) would lose it, as it did on base
-    and in U87's first round. The directory is left as it is, the error
-    names both paths in full, and the snapshot is kept."""
+    """A rename the file system refuses (a directory put at the path once
+    the restore looked: one there before is refused with nothing staged,
+    ``test_a_directory_at_the_path_stages_nothing``): the staged file, named
+    by then either way, is left at its name and named for the user, never
+    removed. Removing it would be a check, then ``unlink(2)`` by the name,
+    and a process that swaps its own file in between (here at the removal
+    itself) would lose it, as it did on base and in U87's first round. The
+    directory is left as it is, the error names both paths in full, and the
+    snapshot is kept."""
     snapshot, target, payload, tmp = _rolled_back(env)
-    target.unlink()
-    target.mkdir()
-    (target / "inside.txt").write_bytes(b"kept\n")
+
+    def directory_now(_handle):
+        target.unlink()
+        target.mkdir()
+        (target / "inside.txt").write_bytes(b"kept\n")
+
+    _at_the_flush(monkeypatch, directory_now)
     removals: list = []
 
     def removing(real):
@@ -883,11 +889,19 @@ def test_restore_path_refuses_a_link_whose_folder_was_replaced(env, tmp_path, mo
 
 
 def test_restore_path_leaves_a_link_it_could_not_rename(env, tmp_path, monkeypatch, link_ways):
-    """A rename the file system refuses (a directory at the path now): the
-    link made is left at its name and named, never removed by it."""
+    """A rename the file system refuses (a directory put at the path once
+    the restore looked, here as the link is made): the link made is left at
+    its name and named, never removed by it."""
     source, target, tmp = _link_restore(env, tmp_path)
-    target.unlink()
-    target.mkdir()
+    real_symlink = os.symlink
+
+    def symlink(text, name, *args, **kwargs):
+        real_symlink(text, name, *args, **kwargs)
+        if os.path.basename(os.fsdecode(name)) == tmp.name:
+            target.unlink()
+            target.mkdir()
+
+    monkeypatch.setattr(os, "symlink", symlink)
     removals: list = []
     real_unlink = os.unlink
 
@@ -1135,7 +1149,8 @@ def test_a_kept_staged_file_a_snapshot_adopted_is_never_deleted(env, staging, mo
 
     state = b_snapshot.restore([relative])[relative]
 
-    assert state.startswith(f"skipped: {tmp} is a file a restore left for you"), state
+    assert state.startswith(f"skipped: {tmp} is a file a restore in this process "
+                            f"left for you"), state
     assert f"(rm -- {tmp})" in state
     assert write_safety.restore_path(str(env.root), relative, None) == state
     assert os.path.lexists(tmp)
@@ -1195,20 +1210,18 @@ def test_a_retry_after_a_kept_staged_file_puts_the_file_back(env, staging, monke
     assert staged == [kept.name]
 
 
-def test_the_record_forgets_a_kept_file_once_it_is_gone(env, monkeypatch):
-    """Once the user deletes the kept file, the next read of the record, a
-    later restore's included, drops it and removes the record."""
+def test_a_kept_file_is_forgotten_once_it_is_gone(env, monkeypatch):
+    """Once the user deletes the kept file, the next look at the set (a
+    later restore's included) drops it, and nothing about it is on disk."""
     snapshot, _target, tmp, _state = _kept(env, monkeypatch)
-    record = list(Path(write_safety.state_home(), write_safety.STATE_SUBDIR,
-                       write_safety.LEFTOVERS_SUBDIR).glob("*.json"))
-    assert len(record) == 1 and str(tmp) in record[0].read_text(encoding="utf-8")
+    assert write_safety.restore_leftovers(str(env.root)).holds(str(tmp))
     os.unlink(tmp)
 
     monkeypatch.setattr(write_safety, "_staging_token", _DRAWN_TOKEN)
     assert snapshot.restore()["src/a.py"] == "restored"
 
-    assert not record[0].exists()
     assert not write_safety.restore_leftovers(str(env.root))
+    assert not write_safety._LEFTOVERS
 
 
 def test_a_kept_link_is_recorded(env, tmp_path, monkeypatch):
@@ -1246,145 +1259,110 @@ def test_the_porcelain_write_check_leaves_a_kept_file_out(env, monkeypatch):
         str(look_alike.relative_to(env.root))]
 
 
-# -- the record changes only under its lock; recorded files are no batch's
-# -- (Codex review 3 of U87) ------------------------------------------------
+# -- only this process's own restores are trusted (fable review F1) ----------
 
 #: The skill root, for a helper process to import ``utils`` from.
 SKILL_ROOT = Path(write_safety.__file__).resolve().parents[1]
-#: How long a test's own record update waits for the lock: the real lock,
-#: not the generous default a stopped holder is bounded by.
-SHORT_LOCK_WAIT_S = 0.05
 
-#: A helper process that records *path* as a kept file of the repository
-#: *root*, pausing under the record's lock between reading the record and
-#: writing it until *done* exists; *ready* says it read.
-_PAUSED_RECORDER = textwrap.dedent("""
-    import sys, time
-    from pathlib import Path
-    skill_root, root, path, ready, done = sys.argv[1:]
-    sys.path.insert(0, skill_root)
-    from utils import write_safety as ws
-    real = ws._read_leftovers
-    def paused(record):
-        value = real(record)
-        Path(ready).touch()
-        deadline = time.monotonic() + 30
-        while not Path(done).exists():
-            if time.monotonic() > deadline:
-                sys.exit("never told to go on")
-            time.sleep(0.01)
-        return value
-    ws._read_leftovers = paused
-    ws._leftovers_update(root, (path, ws._identity_at(path)))
+#: The uncontained rung's runner, as a separate process with every right the
+#: user has: it edits a tracked file, makes an undeclared one, and records both
+#: as a restore's leftovers wherever an earlier release kept that record (the
+#: state home), plus a copy beside the phase dir, with their real identities.
+_FORGING_RUNNER = textwrap.dedent("""
+    import hashlib, json, os, sys
+    root, phase, record_folder, edited, made = sys.argv[1:]
+    with open(edited, "w") as handle:
+        handle.write("print('backdoored')\\n")
+    with open(made, "w") as handle:
+        handle.write("import os\\n")
+    left = []
+    for path in (edited, made):
+        info = os.lstat(path)
+        left.append({"path": path, "dev": info.st_dev, "ino": info.st_ino,
+                     "ctime_ns": info.st_ctime_ns})
+    key = hashlib.sha256(os.path.normcase(root).encode()).hexdigest()[:32]
+    for folder in (record_folder, phase):
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, key + ".json"), "w") as handle:
+            json.dump({"root": root, "left": left}, handle)
 """)
 
 
-def _record_file(env) -> Path:
-    """The leftover record of the test repository."""
-    root = os.path.normcase(os.path.realpath(env.root))
-    return Path(write_safety.state_home(), write_safety.STATE_SUBDIR,
-                write_safety.LEFTOVERS_SUBDIR, write_safety._phase_key(root) + ".json")
+def _forge(env, edited: Path, made: Path) -> None:
+    """Run :data:`_FORGING_RUNNER` against the test repository."""
+    root = os.path.realpath(env.root)
+    record_folder = os.path.join(write_safety.state_home(), write_safety.STATE_SUBDIR,
+                                 "restore-leftovers")
+    subprocess.run([sys.executable, "-c", _FORGING_RUNNER, root, str(env.phase_dir),
+                    record_folder, str(edited), str(made)],
+                   check=True, timeout=60)
 
 
-def _short_lock_wait(monkeypatch) -> None:
-    """The record's real lock, waited for :data:`SHORT_LOCK_WAIT_S`."""
-    real = write_safety.FileMutex.acquire
-    monkeypatch.setattr(write_safety.FileMutex, "acquire",
-                        lambda self, **_: real(self, timeout_s=SHORT_LOCK_WAIT_S))
+def test_a_record_a_runner_forges_exempts_nothing(env):
+    """Fable review F1, on the uncontained rung: a runner with the user's
+    rights writes a leftover record naming its own edit and its own new
+    file, with their real identities. Nothing on disk is read as a
+    leftover, so the porcelain write check reports both, the sweep's census
+    counts the new file, and a rollback restores the edit and deletes the
+    new file. Before, all four left them out."""
+    from utils import review_orchestrator_base as base
+
+    tracked = env.root / "src" / "a.py"
+    made = env.root / "src" / "evil.py"
+    snapshot = write_safety.TaskSnapshot.take(
+        phase_dir=str(env.phase_dir), task_id="T-F", root=str(env.root),
+        files=["src/a.py", "src/evil.py"])
+    original = tracked.read_bytes()
+    scheduler, b_snapshot = _batch(env, "T-B", ["plans/p.md"])
+    before = base.porcelain_snapshot(str(env.root))
+
+    _forge(env, tracked, made)
+
+    after = base.porcelain_snapshot(str(env.root))
+    assert {"src/a.py", "src/evil.py"} <= set(base.unexpected_writes(before, after))
+    assert not write_safety.restore_leftovers(str(env.root))
+    observed = scheduler._undeclared_writes("T-B", b_snapshot)
+    assert {"src/a.py", "src/evil.py"} <= set(observed.paths)
+    assert snapshot.restore() == {"src/a.py": "restored", "src/evil.py": "deleted"}
+    assert tracked.read_bytes() == original and not made.exists()
 
 
-def _recorded_by_hand(env, name: str) -> Path:
-    """A file under ``src/`` recorded as kept, as a restore records one."""
-    path = env.root / "src" / name
-    path.write_bytes(b"a restore's staged file\n")
-    write_safety._leftovers_update(str(env.root), (str(path), write_safety._identity_at(str(path))))
-    return path
-
-
-def test_a_record_update_that_cannot_lock_writes_nothing(env, monkeypatch, tmp_path):
-    """Codex review 3 of U87, with the real lock: process A holds the record's
-    lock, paused between reading the record and writing it, while B's
-    restore keeps its staged file and cannot take the lock in time. B writes
-    nothing, so A's write drops no entry of B's, and B's message says its
-    file is unrecorded: unprotected, to be deleted by hand. Before, B went on
-    unlocked, A's write dropped B's entry, and a later rollback deleted the
-    file B's message said no rollback would."""
-    seeded = _recorded_by_hand(env, ".seeded")
-    other = env.root / "src" / ".other"
-    other.write_bytes(b"process A's staged file\n")
-    snapshot, _target, _payload, tmp = _rolled_back(env)
-    ready, done = tmp_path / "ready", tmp_path / "done"
-    holder = subprocess.Popen([sys.executable, "-c", _PAUSED_RECORDER, str(SKILL_ROOT),
-                               str(env.root), str(other), str(ready), str(done)])
-    try:
-        deadline = time.monotonic() + 30
-        while not ready.exists():
-            assert holder.poll() is None, "the holder died before reading the record"
-            assert time.monotonic() < deadline, "the holder never read the record"
-            time.sleep(0.01)
-        _short_lock_wait(monkeypatch)
-        _failing_rename_once(monkeypatch, lambda name: name == tmp.name)
-
+def test_a_file_another_process_kept_is_checked_as_any_other(env):
+    """The price of trusting this process alone: a staged file a restore in
+    another process kept (an earlier ``util restore-batch``) is an ordinary
+    file here, censused, and a rollback holding it deletes it."""
+    script = textwrap.dedent("""
+        import errno, os, sys
+        skill_root, phase, root = sys.argv[1:]
+        sys.path.insert(0, skill_root)
+        from utils import write_safety as ws
+        snapshot = ws.TaskSnapshot.take(phase_dir=phase, task_id="T-O", root=root,
+                                        files=["src/a.py"])
+        with open(os.path.join(root, "src", "a.py"), "w") as handle:
+            handle.write("changed\\n")
+        real = os.replace
+        def replace(source, destination, *args, **kwargs):
+            if ".restore." in os.fsdecode(source):
+                raise PermissionError(errno.EACCES, "transient rename failure")
+            return real(source, destination, *args, **kwargs)
+        os.replace = replace
         state = snapshot.restore()["src/a.py"]
+        assert state.startswith("skipped:"), state
+        print(next(iter(ws.restore_leftovers(root)._entries)))
+    """)
+    shown = subprocess.run(
+        [sys.executable, "-c", script, str(SKILL_ROOT), str(env.phase_dir),
+         os.path.realpath(env.root)],
+        check=True, timeout=60, capture_output=True, text=True).stdout.strip()
+    kept = Path(shown)
+    assert kept.name.startswith(".a.py.restore.") and os.path.lexists(kept)
+    relative = str(kept.relative_to(os.path.realpath(env.root)))
 
-        assert os.path.lexists(tmp), state
-        assert "check it and delete it by hand (" in state, state
-        assert (f"it could not be recorded as the restore's (the lock on "
-                f"{_record_file(env)} could not be taken), so a write check can "
-                f"count it as a batch's file meanwhile") in state, state
-    finally:
-        done.touch()
-        holder.wait(timeout=30)
-    assert holder.returncode == 0
-    leftovers = write_safety.restore_leftovers(str(env.root))
-    assert leftovers.holds(str(seeded)) and leftovers.holds(str(other))
-    assert not leftovers.holds(str(tmp))
-
-
-def test_a_read_that_cannot_lock_leaves_the_record_as_it_is(env, monkeypatch):
-    """A read of the record (any census) that cannot take the lock reads it
-    as it stands and writes nothing, not even to drop a file that is gone:
-    the holder may be publishing an entry that write would drop."""
-    kept = _recorded_by_hand(env, ".kept")
-    gone = _recorded_by_hand(env, ".gone")
-    os.unlink(gone)
-    record = _record_file(env)
-    before = record.read_bytes()
-    holder = write_safety.FileMutex(str(record) + ".lock")
-    assert holder.acquire()
-    try:
-        _short_lock_wait(monkeypatch)
-        leftovers = write_safety.restore_leftovers(str(env.root))
-        assert leftovers.holds(str(kept)) and not leftovers.holds(str(gone))
-        assert record.read_bytes() == before
-    finally:
-        holder.release()
-
-
-@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0,
-                    reason="root reads a file whatever its mode")
-def test_a_record_that_cannot_be_read_is_never_rewritten(env, monkeypatch):
-    """A record whose read fails says nothing about its entries, so a
-    restore keeping a file then neither rewrites nor removes it: the kept
-    file is unrecorded and its message says so, and the entries already
-    recorded survive. Before, the failed read counted as an empty record,
-    and the new entry replaced every other."""
-    kept = _recorded_by_hand(env, ".kept")
-    record = _record_file(env)
-    before = record.read_bytes()
-    snapshot, _target, _payload, tmp = _rolled_back(env)
-    _failing_rename_once(monkeypatch, lambda name: name == tmp.name)
-    record.chmod(0)
-    try:
-        state = snapshot.restore()["src/a.py"]
-    finally:
-        record.chmod(0o600)
-
-    assert os.path.lexists(tmp), state
-    assert "it could not be recorded as the restore's (" in state, state
-    assert record.read_bytes() == before
-    leftovers = write_safety.restore_leftovers(str(env.root))
-    assert leftovers.holds(str(kept)) and not leftovers.holds(str(tmp))
+    assert not write_safety.restore_leftovers(str(env.root))
+    _scheduler, b_snapshot = _batch(env, "T-B", ["plans/p.md"])
+    assert b_snapshot.adopt(relative, existed=False) is not None
+    assert b_snapshot.restore([relative]) == {relative: "deleted"}
+    assert not os.path.lexists(kept)
 
 
 def test_a_kept_file_a_first_census_saw_is_no_batch_write(env, staging, monkeypatch):
@@ -1451,10 +1429,172 @@ def test_the_replace_leg_refuses_a_kept_file_a_snapshot_adopted(env, monkeypatch
     overrides = {"expected": {relative: None}, "force": True} if forced else {}
     state = b_snapshot.restore([relative], **overrides)[relative]
 
-    assert state.startswith(f"skipped: {tmp} is a file a restore left for you to "
-                            f"check, so no rollback replaces or deletes it"), state
+    assert state.startswith(f"skipped: {tmp} is a file a restore in this process "
+                            f"left for you to check, so no rollback in it replaces "
+                            f"or deletes it"), state
     assert f"(rm -- {tmp})" in state
     assert write_safety.restore_path(str(env.root), relative, str(retained)) == state
     assert tmp.read_bytes() == held
     assert write_safety._identity_at(str(tmp)) == identity
     assert write_safety.restore_leftovers(str(env.root)).holds(str(tmp))
+
+
+# -- a directory at the path stages nothing (fable review F4) ---------------
+
+def test_a_directory_at_the_path_stages_nothing(env, staging):
+    """Fable review F4, on both staging ways: a directory at the file's
+    path before the restore is refused before anything is staged, so no
+    attempt leaves a copy of the pre-batch bytes beside it; the directory
+    and the snapshot are kept. Before, each attempt left one staged copy."""
+    snapshot, target, payload, _tmp = _rolled_back(env)
+    target.unlink()
+    target.mkdir()
+    (target / "inside.txt").write_bytes(b"kept\n")
+
+    states = [snapshot.restore()["src/a.py"] for _ in range(2)]
+
+    assert states == [f"skipped: {target} is a directory now, so nothing was put "
+                      f"back (the snapshot is kept)"] * 2
+    assert [p.name for p in target.parent.iterdir() if ".restore." in p.name] == []
+    assert (target / "inside.txt").read_bytes() == b"kept\n" and payload.exists()
+    assert not write_safety.restore_leftovers(str(env.root))
+
+
+def test_restore_path_puts_no_link_beside_a_directory(env, tmp_path, link_ways):
+    """``restore_path``'s link leg refuses a directory at the path before it
+    makes the link, so nothing is left beside it."""
+    source, target, tmp = _link_restore(env, tmp_path)
+    target.unlink()
+    target.mkdir()
+
+    state = write_safety.restore_path(str(env.root), "src/link", source)
+
+    assert state == (f"skipped: {target} is a directory now, so nothing was put "
+                     f"back (the snapshot is kept)")
+    assert not os.path.lexists(tmp) and target.is_dir()
+
+
+# -- the delete leg removes relative to its folder held (fable review F3) ----
+
+def _made_by_the_batch(env, tmp_path):
+    """``src/new/made.txt``, absent when snapshotted and made by the batch,
+    and an outside folder holding the user's own ``made.txt``; the snapshot,
+    the outside file and its bytes."""
+    (env.root / "src" / "new").mkdir()
+    snapshot = write_safety.TaskSnapshot.take(
+        phase_dir=str(env.phase_dir), task_id="T-D", root=str(env.root),
+        files=["src/new/made.txt"])
+    (env.root / "src" / "new" / "made.txt").write_bytes(b"made by the batch\n")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / "made.txt"
+    victim.write_bytes(b"the user's own file\n")
+    return snapshot, victim
+
+
+def _swap_new_for_a_link(env, victim: Path) -> None:
+    folder = env.root / "src" / "new"
+    folder.rename(folder.with_name("new.moved"))
+    os.symlink(victim.parent, folder)
+
+
+@pytest.mark.parametrize("leg", ["snapshot", "restore_path"])
+@pytest.mark.parametrize("when", ["before the hold", "once held"])
+def test_the_delete_leg_never_removes_through_a_folder_swapped_in(
+        env, tmp_path, monkeypatch, leg, when):
+    """Fable review F3: between the delete leg's revalidation and its
+    removal, the file's folder is swapped for a link to an outside folder
+    holding a file of the same name (a provider tree still running). The
+    removal is made relative to the folder reached without following a link
+    and still at its path, so it is refused, and the outside file stays.
+    Before, the name was unlinked by path and the outside file was deleted."""
+    snapshot, victim = _made_by_the_batch(env, tmp_path)
+    if when == "before the hold":
+        real = write_safety._revalidated_target
+
+        def racing(*args, **kwargs):
+            target = real(*args, **kwargs)
+            _swap_new_for_a_link(env, victim)
+            return target
+
+        monkeypatch.setattr(write_safety, "_revalidated_target", racing)
+    else:
+        real_lstat = os.lstat
+
+        def lstat(path, *args, **kwargs):
+            if kwargs.get("dir_fd") is not None and os.fsdecode(path) == "made.txt" \
+                    and not os.path.islink(env.root / "src" / "new"):
+                _swap_new_for_a_link(env, victim)
+            return real_lstat(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "lstat", lstat)
+
+    if leg == "snapshot":
+        state = snapshot.restore()["src/new/made.txt"]
+    else:
+        state = write_safety.restore_path(str(env.root), "src/new/made.txt", None)
+
+    assert state.startswith("skipped:"), state
+    assert victim.read_bytes() == b"the user's own file\n"
+    assert (env.root / "src" / "new.moved" / "made.txt").exists()
+
+
+@pytest.mark.parametrize("leg", ["snapshot", "restore_path"])
+@pytest.mark.parametrize("change", ["removed", "replaced by a file", "unreadable"])
+def test_a_folder_changed_between_the_checks(env, tmp_path, monkeypatch, leg, change):
+    """Codex review of F01, point 1: the file's folder removed by another
+    process between the delete leg's revalidation and its hold leaves
+    nothing to delete, so the leg says ``deleted (already absent)``, as it
+    did before the hold. A folder replaced by a file, or one that cannot be
+    opened, is not absence: still refused, and nothing is removed."""
+    if change == "unreadable" and hasattr(os, "geteuid") and os.geteuid() == 0:
+        pytest.skip("root opens a folder whatever its mode")
+    snapshot, _victim = _made_by_the_batch(env, tmp_path)
+    folder = env.root / "src" / "new"
+    real = write_safety._revalidated_target
+
+    def racing(*args, **kwargs):
+        target = real(*args, **kwargs)
+        if change == "unreadable":
+            folder.chmod(0)
+        else:
+            shutil.rmtree(folder)
+            if change == "replaced by a file":
+                folder.write_bytes(b"another process's file\n")
+        return target
+
+    monkeypatch.setattr(write_safety, "_revalidated_target", racing)
+    try:
+        if leg == "snapshot":
+            state = snapshot.restore()["src/new/made.txt"]
+        else:
+            state = write_safety.restore_path(str(env.root), "src/new/made.txt", None)
+    finally:
+        if folder.is_dir():
+            folder.chmod(0o755)
+
+    if change == "removed":
+        assert state == "deleted (already absent)"
+    else:
+        assert state.startswith("skipped:") and "could not be reached" in state, state
+    if change == "replaced by a file":
+        assert folder.read_bytes() == b"another process's file\n"
+    if change == "unreadable":
+        assert (folder / "made.txt").exists()
+
+
+def test_the_delete_leg_still_deletes_and_leaves_a_directory(env, tmp_path):
+    """Without a swap the delete leg removes the batch's file, a second
+    pass finds it gone, and a directory at the path is left on either leg."""
+    snapshot, _victim = _made_by_the_batch(env, tmp_path)
+    made = env.root / "src" / "new" / "made.txt"
+
+    assert snapshot.restore() == {"src/new/made.txt": "deleted"}
+    assert not made.exists()
+    assert snapshot.restore() == {"src/new/made.txt": "deleted (already absent)"}
+    made.mkdir()
+    assert snapshot.restore() == {
+        "src/new/made.txt": "skipped: a directory is at the path now"}
+    assert write_safety.restore_path(str(env.root), "src/new/made.txt", None) == (
+        "skipped: a directory is at the path now")
+    assert made.is_dir()
