@@ -184,6 +184,8 @@ The orchestrator will:
 5. Write output to `{plan}/apply-fixes/orchestrator_output.json`
 6. Exit — the driving agent handles the actual application
 
+An exit 3 naming another review round is a stop, with nothing applied or recorded: the review's `validation.json` holds an earlier round's verdicts, and a later run of the code review (`review-code --force`, say) has not produced its own — it is still running, or it stopped before it validated. Report the two ways forward it names: let that run finish (`status`), or run the code review again with `--force`; then run this phase again. Never apply the earlier round's suggestions by hand.
+
 ### 2a. Handle No-Selections Confirmation
 
 After the orchestrator completes, check if its stdout contains `"status": "confirmation_needed"`.
@@ -250,7 +252,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
    ```
    `{task.task_id}` is this batch's `task_id` from `write_tasks.json` (`apply-fix-batch-0`, `apply-fix-batch-1`, … in dispatch order). The command rewrites the batch's prompt with the prior-batch context bound **now** — from `{plan}/prior_changes.jsonl` as it is at this moment, i.e. the batches step 7 has already appended — and the result contract appended: exactly the text the `--exec-subagents` executor would dispatch for this batch. It writes it to `{plan}/apply-fixes/prompts/{task.task_id}.prompt.txt` and prints three lines: `[WRITE_PROMPT] <path>`, `[WRITE_PROMPT_LINES] <n>` and `[WRITE_PROMPT_CONTEXT] …`. Note the path and the line count for step 2. Never substitute `{prior_changes_context}` yourself and never hand the subagent `batch.prompt` from the JSON: the literal token must never reach a subagent.
 
-   **Error handling**: an exit 3 names the problem (no `write_tasks.json` — re-run the orchestrator; an unknown task id — the known ids are listed). Do not fall back to the raw `batch.prompt`; stop and report.
+   **Error handling**: an exit 3 names the problem (no `write_tasks.json` — re-run the orchestrator; an unknown task id — the known ids are listed). Do not fall back to the raw `batch.prompt`; stop and report. A batch whose review round was superseded (the message names the two rounds: a later run of the review started another) is a stop: dispatch nothing, record nothing for it, close the phase without `--mark-completed` and report the way forward it names.
 
    A `[WRITE_PROMPT_ORDER]` line (on stderr; the prompt is still written) names an earlier batch whose summary this prompt does not carry — recorded but not appended yet, or not finished: do what it says, then run this `util write-prompt` again before spawning the subagent.
 

@@ -555,8 +555,10 @@ def unsettled_refusal(change: PolicyChange, *, mode_word: str) -> List[str]:
         f"batches now could apply its half-applied items again. Nothing was "
         f"changed.",
         f"  1) Settle it first: re-run {mode_word} with --resume {sp.FLAG} "
-        f"{change.previous}, or restore its pre-batch snapshot with util "
-        f"restore-batch, then run {mode_word} {sp.FLAG} {change.current} again.",
+        f"{change.previous}, or put back what it changed (after an "
+        f"--exec-subagents run, util restore-batch restores its pre-batch "
+        f"snapshot; a native batch has none there, so by hand), then run "
+        f"{mode_word} {sp.FLAG} {change.current} again.",
         f"  2) Or start a fresh review of the current artifact under {sp.FLAG} "
         f"{change.current}.",
     ]

@@ -390,6 +390,209 @@ class TestAnInterruptedForcedReviewIsNotCompletedByAPlainOne:
         assert f"records round {R2}" in result.stdout
 
 
+#: (review orchestrator, its phase dir, what every model answers, the apply
+#: orchestrator that applies its verdicts, that phase's output dir).
+APPLY_PHASES = [
+    pytest.param("review_plan", "review-plan", [SUGGESTION], "apply_suggestions",
+                 "apply-suggestions", id="apply-suggestions"),
+    pytest.param("review_tasks", "review-tasks", [SUGGESTION], "apply_task_suggestions",
+                 "apply-task-suggestions", id="apply-task-suggestions"),
+    pytest.param("code_review", "code-review", CODE_ISSUES, "apply_fixes",
+                 "apply-fixes", id="apply-code-fixes"),
+]
+
+
+@pytest.mark.parametrize("orchestrator,phase,response,apply,apply_dir", APPLY_PHASES)
+class TestAnApplyPhaseAppliesOnlyTheRoundOnRecord:
+    """A forced review whose models all failed leaves the previous round's
+    verdicts beside a pending review; apply-suggestions and apply-code-fixes
+    applied them at exit 0 (Fable review 2026-11-10, P1). Refused now, before
+    anything is written, as `--reaggregate` refuses the same files.
+    apply-task-suggestions stops earlier, at its own review-tasks completion
+    gate, which the `--force` cleared."""
+
+    def test_the_earlier_round_s_verdicts_are_refused(
+        self, tmp_path, orchestrator, phase, response, apply, apply_dir,
+    ):
+        runner, plan, phase_dir = _complete_round(tmp_path, orchestrator, phase, response)
+        _interrupted_force_run(runner, orchestrator, plan)
+        recorded = review_round.validation_file_round(phase_dir / "validation.json")
+        assert review_round.round_files(phase_dir).owner(
+            review_round.VALIDATION_NAME) == review_round.STALE
+        state_before = (plan.parent / plan.stem / "state.json").read_bytes()
+
+        result = runner.run_orchestrator(apply, plan, "--yes", timeout=120)
+
+        output = result.stdout + result.stderr
+        if apply == "apply_task_suggestions":
+            assert result.exit_code == 1, output
+            assert "review-tasks phase has not been completed" in output
+        else:
+            assert result.exit_code == 3, output
+            assert "refused" in output and f"verdicts of review round {recorded}" in output
+            assert "--force" in output
+        assert not (plan.parent / plan.stem / apply_dir / "orchestrator_output.json").exists()
+        assert (plan.parent / plan.stem / "state.json").read_bytes() == state_before
+
+    def test_the_round_on_record_s_verdicts_are_applied(
+        self, tmp_path, orchestrator, phase, response, apply, apply_dir,
+    ):
+        """`--yes` stays usable when the latest round is complete."""
+        runner, plan, phase_dir = _complete_round(tmp_path, orchestrator, phase, response)
+        assert review_round.round_files(phase_dir).owner(
+            review_round.VALIDATION_NAME) == review_round.OWNED
+
+        result = runner.run_orchestrator(apply, plan, "--yes", timeout=120)
+
+        output = result.stdout + result.stderr
+        assert "verdicts of review round" not in output
+        assert result.exit_code == 0, output
+
+    def test_an_emitted_batch_of_a_superseded_round_is_not_handed_out(
+        self, tmp_path, orchestrator, phase, response, apply, apply_dir,
+    ):
+        """Codex review of F02, #2b: round 1 complete, its batches emitted,
+        then a forced review that failed opened round 2; `util write-prompt`
+        still handed round 1's batch out. The emit records the round, and the
+        batch is refused once the review records another."""
+        import subprocess
+
+        runner, plan, phase_dir = _complete_round(tmp_path, orchestrator, phase, response)
+        recorded = review_round.validation_file_round(phase_dir / "validation.json")
+        result = runner.run_orchestrator(apply, plan, "--yes", timeout=120)
+        assert result.exit_code == 0, result.stdout + result.stderr
+        apply_phase = plan.parent / plan.stem / apply_dir
+        document = json.loads((apply_phase / "write_tasks.json").read_text(encoding="utf-8"))
+        assert document["native_run"]["review_round"] == {
+            "review": phase, "round_id": recorded}
+        task_id = document["batches"][0]["task_id"]
+        _interrupted_force_run(runner, orchestrator, plan)
+
+        bound = subprocess.run(
+            [sys.executable, str(SKILL_ROOT / "multi_llm.py"), "util", "write-prompt",
+             "--phase-dir", str(apply_phase), "--task-id", task_id],
+            env=runner._build_env(), cwd=tmp_path, capture_output=True, text=True,
+            timeout=120,
+        )
+
+        assert bound.returncode == 3, bound.stdout + bound.stderr
+        assert "[WRITE_PROMPT]" not in bound.stdout
+        flat = " ".join(bound.stderr.split())
+        assert f"{task_id} is not handed out" in flat
+        assert f"verdicts of review round {recorded}" in flat
+        assert not (apply_phase / "prompts" / f"{task_id}.prompt.txt").exists()
+
+
+class TestTheVerdictsAreReadOnceAndCheckedAgain:
+    """Codex review of F02, #2a: the round was checked at setup, the verdicts
+    read later, and a forced review that started in between went unnoticed."""
+
+    @staticmethod
+    def _apply_in_process(runner, plan, monkeypatch, after_check):
+        import contextlib
+        import io
+
+        from apply_suggestions_orchestrator import ApplySuggestionsOrchestrator as Apply
+
+        for key, value in runner._build_env().items():
+            monkeypatch.setenv(key, value)
+        checked = Apply._refuse_another_rounds_verdicts
+
+        def check_then(self):
+            checked(self)
+            after_check()
+
+        monkeypatch.setattr(Apply, "_refuse_another_rounds_verdicts", check_then)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = Apply(Apply.parse_args([
+                "--plan-file", str(plan), "--yes", "--no-confirm",
+                "--output-format", "json"])).run()
+        return code, out.getvalue() + err.getvalue()
+
+    def test_a_round_started_after_the_check_stops_the_apply(self, tmp_path, monkeypatch):
+        runner, plan, phase_dir = _complete_round(
+            tmp_path, "review_plan", "review-plan", [SUGGESTION])
+
+        code, output = self._apply_in_process(
+            runner, plan, monkeypatch,
+            lambda: _interrupted_force_run(runner, "review_plan", plan))
+
+        assert code == 3, output
+        assert "verdicts of review round" in output
+        apply_phase = plan.parent / plan.stem / "apply-suggestions"
+        assert not (apply_phase / "write_tasks.json").exists()
+        assert not (apply_phase / "orchestrator_output.json").exists()
+
+    def test_the_verdicts_applied_are_the_bytes_that_were_checked(
+        self, tmp_path, monkeypatch,
+    ):
+        """validation.json rewritten after the check (same round, every
+        verdict `invalid`): the apply uses the bytes it checked."""
+        runner, plan, phase_dir = _complete_round(
+            tmp_path, "review_plan", "review-plan", [SUGGESTION])
+        path = phase_dir / "validation.json"
+
+        def rewrite():
+            document = json.loads(path.read_text(encoding="utf-8"))
+            for entry in document["groups"]:
+                entry["status"] = "invalid"
+            path.write_text(json.dumps(document), encoding="utf-8")
+
+        code, output = self._apply_in_process(runner, plan, monkeypatch, rewrite)
+
+        assert code == 0, output
+        document = json.loads((plan.parent / plan.stem / "apply-suggestions"
+                               / "write_tasks.json").read_text(encoding="utf-8"))
+        assert document["batches"], output
+
+    def test_the_executor_checks_the_round_before_each_batch(self, tmp_path, monkeypatch):
+        """Codex re-check of F02, #3: a forced review that opened a new round
+        after the last check, under `--exec-subagents`, still had the
+        scheduler dispatch the earlier round's batches. The next queued batch
+        is refused before any child starts, with the native loop's words."""
+        import contextlib
+        import io
+        import subprocess
+
+        from apply_suggestions_orchestrator import ApplySuggestionsOrchestrator as Apply
+        from utils.write_batch_scheduler import WriteBatchScheduler
+
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
+        runner, plan, phase_dir = _complete_round(
+            tmp_path, "review_plan", "review-plan", [SUGGESTION])
+        for key, value in runner._build_env().items():
+            monkeypatch.setenv(key, value)
+        monkeypatch.chdir(tmp_path)
+        recheck = Apply._recheck_verdicts_round
+
+        def last_check_then_force(self, step):
+            recheck(self, step)
+            if "_write_outputs" in step:
+                _interrupted_force_run(runner, "review_plan", plan)
+
+        dispatched = []
+
+        def no_dispatch(self, task, *args, **kwargs):
+            dispatched.append(task["task_id"])
+            raise AssertionError("dispatched a batch of a superseded round")
+
+        monkeypatch.setattr(Apply, "_recheck_verdicts_round", last_check_then_force)
+        monkeypatch.setattr(WriteBatchScheduler, "_dispatch_executor", no_dispatch)
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = Apply(Apply.parse_args([
+                "--plan-file", str(plan), "--yes", "--no-confirm", "--exec-subagents",
+                "--output-format", "json"])).run()
+
+        output = " ".join((out.getvalue() + err.getvalue()).split())
+        assert code == 3, output
+        assert dispatched == []
+        assert "refused before any child started" in output
+        assert "is not handed out" in output and "verdicts of review round" in output
+        assert "--mark-completed" not in output.split("is not handed out", 1)[1][:400]
+
+
 # ---------------------------------------------------------------------------
 # 3. util resume-state: owned, stale and legacy files, every phase
 # ---------------------------------------------------------------------------

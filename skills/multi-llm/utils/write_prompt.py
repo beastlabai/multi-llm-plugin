@@ -53,9 +53,9 @@ which its ``util batch-done`` compares with (:func:`commit_bind`). Exit 3 names 
 ``write_tasks.json`` (run the phase's orchestrator first), an unknown task id
 (the known ids are listed), a human task (it never dispatches), a prompt
 without the token (a producer bug, the scheduler's own refusal) or a
-shared-artifact batch whose snapshot cannot be taken or kept (no repository,
-no artifact, an earlier batch of the run not recorded yet, the slot's evidence
-damaged or its bound baseline altered, the slot bound to another batch of the
+shared-artifact batch whose snapshot cannot be taken or kept (a repository
+git cannot pin, no artifact, an earlier batch of the run not recorded yet, the
+slot's evidence damaged or its bound baseline altered, the slot bound to another batch of the
 run that is not recorded, another call holding the slot, a slot lock its file
 system cannot take). A phase dir that is a link is refused with exit 1 before
 anything is read through it or written.
@@ -81,13 +81,14 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from . import known_checks as _known_checks
 from .clock import parse_iso
 from . import process_control as _process_control
 from . import prior_changes as _prior_changes
 from . import prompt_files as _prompt_files
+from . import review_round as _review_round
 from .git_utils import (
     find_git_entry_root, pin_repo_root, worktree_file_stats, worktree_fingerprint,
 )
@@ -134,7 +135,7 @@ from .batch_prompt import (
     last_phase_end,
     with_result_contract,
 )
-from .write_phase_bridge import WRITE_TASK_FILENAME
+from .write_phase_bridge import NATIVE_RUN_KEY, REVIEW_ROUND_KEY, WRITE_TASK_FILENAME
 from .write_safety import (
     PolicyViolation, WritePolicy, policy_allow_clause, policy_outside_note,
 )
@@ -172,6 +173,9 @@ __all__ = [
     "snapshot_copy_name",
     "snapshot_binding_name",
     "prepare_batch_snapshot",
+    "superseded_round_refusal",
+    "superseded_round_text",
+    "round_superseded",
     "completion_stamp",
     "record_completion_stamp",
     "main",
@@ -956,7 +960,9 @@ def changed_since_bound(
 #
 # * One slot per phase dir and artifact, `<slot>` =
 #   `batch_snapshot_<plan|tasks>_<plan stem>-<key>` in `<repo root>/.multi-llm/tmp`,
-#   the root taken from the pin, never found again through the phase path.
+#   the root taken from the pin, never found again through the phase path; for a
+#   phase dir no repository holds, in its own `snapshots/` folder, reached
+#   through the pin like `prompts/`, whatever the working directory.
 # * A generation is a copy `<slot>.<sha12>.md` and the binding
 #   `<slot>.binding.json` naming it. The binding is renamed into place last:
 #   it is the commit point, and the previous generation's copy goes only after.
@@ -985,6 +991,9 @@ SNAPSHOT_ROLES = {"apply_suggestions": "plan", "apply_task_suggestions": "tasks"
 
 #: The self-ignoring workspace temp dir, under the repository root.
 WORKSPACE_TMP = (".multi-llm", "tmp")
+
+#: The folder of a phase dir no repository holds where its slots live.
+PHASE_SNAPSHOTS = "snapshots"
 
 #: The binding's and the lock's names beside a slot's copies.
 SNAPSHOT_BINDING_SUFFIX = ".binding.json"
@@ -1050,17 +1059,129 @@ def _plan_stem(phase_dir: Path, kind: str, artifact: Path) -> str:
     return phase_dir.parent.name
 
 
-def _snapshot_root(pin: "_prompt_files.PhasePin", task_id: str) -> str:
-    """The repository root holding the pinned phase dir, from the pin."""
+#: The review phase dirs whose verdicts the apply phases' batches carry.
+_REVIEW_DIRS = ("review-plan", "review-tasks", "code-review")
+
+
+def superseded_round_text(
+    task_id: str, review: str, recorded: str, current: Optional[str], *,
+    native: bool = True,
+) -> str:
+    """The refusal of *task_id*, whose verdicts came from review round
+    *recorded* while *review*'s checkpoint records *current*: the native
+    loop's (:func:`superseded_round_refusal`) and, without *native*, the
+    executor's before each batch (``SchedulerOptions.before_batch``)."""
+    stop = (
+        f" Do not dispatch {task_id} and record nothing for it; stop the loop "
+        f"here and close the phase without --mark-completed." if native else ""
+    )
+    return (
+        f"{task_id} is not handed out: this phase's batches were built from the "
+        f"verdicts of review round {recorded}, and {review}'s .status.json now "
+        f"records another round, {current}: a later run of the review started "
+        f"it. The batch would apply a review the phase has since replaced.{stop} "
+        f"Way forward: once that round is complete (`status`; if it stopped, run "
+        f"the review again with --force), run this phase again, which builds its "
+        f"batches from that round's verdicts. Nothing was written for {task_id}."
+    )
+
+
+def round_superseded(review_dir: Path, recorded: Optional[str]) -> Optional[str]:
+    """The round *review_dir*'s checkpoint records now, when it is another
+    than *recorded*; ``None`` when it is the same, or either has no id (which
+    proves nothing, as before round ids)."""
+    current = _review_round.current_round(review_dir)
+    if _review_round.ownership(current, recorded) != _review_round.STALE:
+        return None
+    return current
+
+
+def superseded_round_refusal(pin: "_prompt_files.PhasePin", task_id: str) -> Optional[str]:
+    """Why *task_id* is not handed out because its verdicts' review round was
+    superseded, or ``None``.
+
+    A native apply emit records the review round its verdicts came from in
+    ``write_tasks.json`` (``native_run.review_round``). Once that review's
+    ``.status.json`` records another round (a later run of the review started
+    it), the batches would apply a review the phase has since replaced. A
+    file or checkpoint with no round id proves nothing, as before round ids
+    (docs/development/review-results.md, "Round identity"). Whatever cannot
+    be read here is left to the render, which names it."""
+    try:
+        document = json.loads(_prompt_files.read_in_phase_dir(pin, WRITE_TASK_FILENAME))
+    except (OSError, ValueError):
+        return None
+    run = document.get(NATIVE_RUN_KEY) if isinstance(document, dict) else None
+    entry = run.get(REVIEW_ROUND_KEY) if isinstance(run, dict) else None
+    if not isinstance(entry, dict):
+        return None
+    review, recorded = entry.get("review"), _review_round.valid_round(entry.get("round_id"))
+    if review not in _REVIEW_DIRS or recorded is None:
+        return None
+    current = round_superseded(Path(pin.path).parent / str(review), recorded)
+    if current is None:
+        return None
+    return superseded_round_text(task_id, str(review), recorded, current)
+
+
+@dataclass(frozen=True)
+class _SlotHome:
+    """Where a slot's copies, binding and lock live: the folder *folder* below
+    the pinned directory *pin*, reached without following a link. *root* is
+    what the binding records and a relative declaration is read against;
+    *workspace* marks the repository's self-ignoring workspace temp dir."""
+
+    pin: "_prompt_files.PhasePin"
+    folder: str
+    root: str
+    workspace: bool
+
+    @property
+    def path(self) -> str:
+        return os.path.join(self.pin.path, self.folder)
+
+    def open(self, *, create: bool) -> "_prompt_files.PromptFolder":
+        """The folder, created (the workspace temp dir self-ignoring) when
+        *create*. Raises ``OSError`` when a component is a link or a file, or
+        (*create* off) when it does not exist."""
+        if self.workspace and create:
+            try:
+                os.mkdir(self.pin.path)
+            except FileExistsError:
+                pass  # a link there is refused by the walk below
+        folder = _prompt_files.PromptFolder.open(self.pin, create=create, folder=self.folder)
+        if self.workspace and create:
+            try:
+                if ".gitignore" not in folder.names():
+                    folder.write(".gitignore", "*\n")
+            except BaseException:
+                folder.close()
+                raise
+        return folder
+
+
+def _snapshot_home(pin: "_prompt_files.PhasePin", task_id: str) -> _SlotHome:
+    """Where the pinned phase dir's slots live. In a repository: its root's
+    ``.multi-llm/tmp``, the root taken from the pin, where ``pin_repo_root``
+    must agree with it (refused otherwise, as a git redirect or a disagreeing
+    ``core.worktree`` is). In no repository: the phase dir's own
+    :data:`PHASE_SNAPSHOTS` folder, fixed by the pin, so every bind, record
+    and resume of the run reaches the one slot and one lock from any working
+    directory (docs/development/write-safety.md, "The native leg's per-batch
+    snapshot")."""
+    if find_git_entry_root(pin.root) is None:
+        return _SlotHome(pin, PHASE_SNAPSHOTS, pin.root, workspace=False)
     root, problem = pin_repo_root(pin.root)
-    if root is None or problem or os.path.realpath(root) != os.path.realpath(pin.root):
+    if problem or root is None or os.path.realpath(root) != os.path.realpath(pin.root):
         raise WritePromptError(
             f"Cannot take {task_id}'s pre-batch snapshot: "
-            f"{problem or f'no git repository holds {pin.path}'}. multi-llm "
-            f"requires running inside a git repository. {task_id} was not "
-            f"handed out."
+            f"{problem or f'{pin.path} now lies in the repository {root}, not where it was pinned ({pin.root})'}. "
+            f"{task_id} was not handed out."
         )
-    return root
+    return _SlotHome(
+        _prompt_files.PhasePin(root=root, parts=WORKSPACE_TMP[:1]), WORKSPACE_TMP[1],
+        root, workspace=True,
+    )
 
 
 def _read_run(pin: "_prompt_files.PhasePin") -> Tuple[str, Dict[str, Any]]:
@@ -1115,10 +1236,19 @@ def _recorded_with(
     back or forward cannot hide a record or pass an old one off."""
     if (state.get("task_status") or {}).get(task_id) not in _RECORDED_STATUSES:
         return False
+    entry = _stamp_of(state, phase_word, task_id)
+    return entry is not None and entry.get(key) == value
+
+
+def _stamp_of(
+    state: Dict[str, Any], phase_word: str, task_id: str,
+) -> Optional[Dict[str, Any]]:
+    """*task_id*'s :func:`completion_stamp` as ``state.json`` keeps it under
+    :data:`SNAPSHOT_RECORDS_KEY`, or ``None`` when there is none."""
     records = state.get(SNAPSHOT_RECORDS_KEY)
     phase = records.get(phase_word) if isinstance(records, dict) else None
     entry = phase.get(task_id) if isinstance(phase, dict) else None
-    return isinstance(entry, dict) and entry.get(key) == value
+    return entry if isinstance(entry, dict) else None
 
 
 def _batch_index(task: Dict[str, Any]) -> Optional[int]:
@@ -1130,14 +1260,21 @@ def _batch_index(task: Dict[str, Any]) -> Optional[int]:
 
 def _order_refusal(
     pin: "_prompt_files.PhasePin", document: Dict[str, Any], task: Dict[str, Any],
-    task_id: str, run: str,
+    task_id: str, run: str, bound_in_run: Callable[[str], bool],
 ) -> Optional[str]:
     """Why *task_id* cannot be bound before an earlier batch of its run, or
     ``None``. The batches of a shared-artifact phase edit one file one at a
     time, in order, and the slot holds one baseline: a later batch bound
     first would wait for the earlier one while the earlier one waited for it.
     An earlier batch counts once its record carries *run*, the sha256 of the
-    ``write_tasks.json`` it was made under."""
+    ``write_tasks.json`` it was made under.
+
+    A recorded status with no stamp at all was made by a plugin version that
+    kept none, for a loop begun before the upgrade or for an earlier run.
+    Which one cannot be told, so that refusal names both ways forward,
+    ``--resume`` among them, unless the slot's binding names that batch of
+    this run (*bound_in_run*): this version bound it, so a record of it made
+    since would carry a stamp, and the general refusal applies."""
     own = _batch_index(task)
     if own is None:
         return None
@@ -1165,6 +1302,25 @@ def _order_refusal(
     phase_word = Path(pin.path).name
     for batch_id in ids:
         if not _recorded_with(state, phase_word, batch_id, RECORD_RUN_KEY, run):
+            status = (state.get("task_status") or {}).get(batch_id)
+            if (status in _RECORDED_STATUSES
+                    and _stamp_of(state, phase_word, batch_id) is None
+                    and not bound_in_run(batch_id)):
+                return (
+                    f"{task_id} cannot be bound yet: {batch_id}, an earlier "
+                    f"batch, is recorded {status} in state.json, but its record "
+                    f"carries no run stamp ({SNAPSHOT_RECORDS_KEY}): a plugin "
+                    f"version that kept none made it, so nothing says it is "
+                    f"this run's record and not an earlier run's (a --resume "
+                    f"numbers its batches afresh). If this loop has not run "
+                    f"{batch_id}, run it first — bind it with this command, "
+                    f"then the loop's steps for it. If it has (the loop began "
+                    f"before the upgrade), or that cannot be told, re-run the "
+                    f"phase's orchestrator with --resume: it skips every item "
+                    f"already recorded and emits the rest as a new run; then "
+                    f"continue the loop with that run's first batch. Nothing "
+                    f"was written and {task_id} was not handed out."
+                )
             return (
                 f"{task_id} cannot be bound yet: {batch_id}, an earlier batch of "
                 f"this run, has no `util batch-done` record from this run. The "
@@ -1178,26 +1334,23 @@ def _order_refusal(
     return None
 
 
-def _workspace_pin(root: str) -> "_prompt_files.PhasePin":
-    return _prompt_files.PhasePin(root=root, parts=WORKSPACE_TMP[:1])
-
-
-def _open_workspace(root: str) -> "_prompt_files.PromptFolder":
-    """``<root>/.multi-llm/tmp``, created (self-ignoring) when absent and
-    reached without following a link. Raises ``OSError`` when it or
-    ``.multi-llm`` is a link or a file."""
+def _slot_bound_to(
+    home: _SlotHome, slot: str, identity: Dict[str, Any], batch_id: str, run: str,
+) -> bool:
+    """Whether *slot*'s binding names *batch_id* of *run*. Read without the
+    slot's lock, as :func:`completion_stamp` reads it: a binding is only ever
+    replaced whole. ``False`` for anything that cannot be read."""
     try:
-        os.mkdir(os.path.join(root, WORKSPACE_TMP[0]))
-    except FileExistsError:
-        pass  # a link there is refused by the walk below
-    folder = _prompt_files.PromptFolder.open(_workspace_pin(root), folder=WORKSPACE_TMP[1])
+        folder = home.open(create=False)
+    except OSError:
+        return False
     try:
-        if ".gitignore" not in folder.names():
-            folder.write(".gitignore", "*\n")
-    except BaseException:
+        bound = _read_slot(folder, slot, identity).binding
+    except OSError:
+        bound = None
+    finally:
         folder.close()
-        raise
-    return folder
+    return bound is not None and bound["task_id"] == batch_id and bound["run"] == run
 
 
 @dataclass
@@ -1298,6 +1451,7 @@ class BatchSnapshot:
     artifact: Path
     binding: Dict[str, Any]
     data: bytes
+    place: str = ""
     kept: bool = False
     previous: Optional[str] = None
     obsolete: Tuple[str, ...] = ()
@@ -1306,7 +1460,8 @@ class BatchSnapshot:
 
     @property
     def path(self) -> Path:
-        return Path(self.root, *WORKSPACE_TMP, str(self.binding["copy"]))
+        """The generation's copy, in the slot's home (:class:`_SlotHome`)."""
+        return Path(self.place, str(self.binding["copy"]))
 
     def commit(self) -> None:
         """Publish the generation: the copy, then the binding naming it, each
@@ -1352,9 +1507,9 @@ class BatchSnapshot:
 def _batch_identity(
     pin: "_prompt_files.PhasePin", task: Dict[str, Any], task_id: str, kind: str,
     run: str,
-) -> Tuple[str, Path, str, Dict[str, Any]]:
-    """``(root, artifact, slot, identity)`` of a shared-artifact batch in the
-    pinned phase dir."""
+) -> Tuple[_SlotHome, Path, str, Dict[str, Any]]:
+    """``(home, artifact, slot, identity)`` of a shared-artifact batch in the
+    pinned phase dir (:func:`_snapshot_home`)."""
     phase_dir = Path(pin.path)
     declared = declared_file_set(task)
     if len(declared) != 1:
@@ -1363,10 +1518,10 @@ def _batch_identity(
             f"artifact, so it has no pre-batch snapshot: re-run the phase's "
             f"orchestrator to re-materialize {WRITE_TASK_FILENAME}."
         )
-    root = _snapshot_root(pin, task_id)
+    home = _snapshot_home(pin, task_id)
     artifact = Path(declared[0])
     if not artifact.is_absolute():
-        artifact = Path(root) / artifact
+        artifact = Path(home.root) / artifact
     artifact = Path(os.path.normpath(str(artifact)))
     phase_identity = pin.identity or _prompt_files.identify(pin).identity
     identity = {
@@ -1378,7 +1533,7 @@ def _batch_identity(
         "expected_ids": [str(item) for item in task.get("expected_ids") or []],
     }
     slot = snapshot_slot(kind, _plan_stem(phase_dir, kind, artifact), pin.path, str(artifact))
-    return root, artifact, slot, identity
+    return home, artifact, slot, identity
 
 
 def _take_slot_lock(
@@ -1433,8 +1588,9 @@ def prepare_batch_snapshot(
     its generation, ``kept``, once its copy still hashes to the binding.
     Another batch: a copy of the artifact, read now under the lock and
     published by :meth:`BatchSnapshot.commit` after the prompt. Raises
-    :class:`WritePromptError` (exit 3, nothing written) when there is no
-    repository, an earlier batch of the run is not recorded yet, the slot
+    :class:`WritePromptError` (exit 3, nothing written) when the repository
+    holding the phase dir cannot be pinned, an earlier batch of the run is
+    not recorded yet, the slot
     is held by another call for too long or its lock cannot be taken on its
     file system at all, its evidence is damaged (a binding that cannot be
     read or misses a field, copies no binding names, a state file that cannot
@@ -1447,15 +1603,18 @@ def prepare_batch_snapshot(
         return None
     task_id = str(task.get("task_id") or "")
     run, document = _read_run(pin)
-    root, artifact, slot, identity = _batch_identity(pin, task, task_id, kind, run)
-    refused = _order_refusal(pin, document, task, task_id, run)
+    home, artifact, slot, identity = _batch_identity(pin, task, task_id, kind, run)
+    refused = _order_refusal(
+        pin, document, task, task_id, run,
+        lambda batch_id: _slot_bound_to(home, slot, identity, batch_id, run),
+    )
     if refused:
         raise WritePromptError(refused)
-    folder = _open_workspace(root)
+    folder = home.open(create=True)
     lock: Optional[int] = None
     try:
         lock = _take_slot_lock(folder, slot, task_id)
-        snapshot = _decide(pin, folder, root, slot, artifact, identity, kind, task_id)
+        snapshot = _decide(pin, folder, home.root, slot, artifact, identity, kind, task_id)
     except BaseException:
         if lock is not None:
             _process_control.release_fd_lock(lock)
@@ -1499,7 +1658,7 @@ def _decide(
                 f"bytes it was taken with ({state}). A new copy of {artifact} "
                 f"could carry {task_id}'s own edits, so none is taken. "
                 + _way_out(artifact, [binding_path, *shown], task_id))
-        return BatchSnapshot(root, slot, artifact, bound, held, kept=True)
+        return BatchSnapshot(root, slot, artifact, bound, held, place=folder.path, kept=True)
     elif bound["run"] == identity["run"] and bound.get("phase_identity") == identity["phase_identity"]:
         # Another batch of this run: replaced once that batch is recorded.
         earlier = bound["task_id"]
@@ -1554,7 +1713,7 @@ def _decide(
         "taken_at": datetime.now().isoformat(timespec="microseconds"),
     }
     return BatchSnapshot(
-        root, slot, artifact, binding, data,
+        root, slot, artifact, binding, data, place=folder.path,
         previous=previous, obsolete=tuple(now.copies),
     )
 
@@ -1580,9 +1739,8 @@ def completion_stamp(phase_dir: Path, kind: str, task: Dict[str, Any]) -> Dict[s
         return {}
     stamp = {RECORD_RUN_KEY: run}
     try:
-        root, _artifact, slot, identity = _batch_identity(pin, task, task_id, kind, run)
-        folder = _prompt_files.PromptFolder.open(
-            _workspace_pin(root), create=False, folder=WORKSPACE_TMP[1])
+        home, _artifact, slot, identity = _batch_identity(pin, task, task_id, kind, run)
+        folder = home.open(create=False)
     except (OSError, WritePromptError):
         return stamp
     try:
@@ -1671,6 +1829,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             file=sys.stderr,
         )
         return 1
+    # Before anything is recorded for the batch: a batch whose verdicts'
+    # review round was superseded is not handed out.
+    superseded = superseded_round_refusal(pin, args.task_id)
+    if superseded is not None:
+        print(f"ERROR: {superseded}", file=sys.stderr)
+        return 3
     # Re-checked before the prompt is bound; a
     # batch whose fix files changed since the apply guard decided gets none.
     stale = commit_stale_check(Path(args.phase_dir), args.task_id)

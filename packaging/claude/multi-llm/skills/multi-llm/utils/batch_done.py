@@ -183,9 +183,9 @@ from .batch_prompt import (
 )
 from .write_record import BatchFacts, record_batch_facts
 from .write_prompt import (
-    WritePromptError, changed_since_bound, check_tree_fingerprint,
-    completion_stamp, discard_check_tree, load_write_task,
-    record_completion_stamp,
+    MARKER_SNAPSHOT, SNAPSHOT_ROLES, WritePromptError, changed_since_bound,
+    check_tree_fingerprint, completion_stamp, discard_check_tree,
+    load_write_task, record_completion_stamp,
 )
 from .write_verify import load_finalize_tracking
 
@@ -1118,10 +1118,37 @@ def _not_applied_items(
             f"--skipped keeps what {task_id} applied and goes on without the "
             f"items its report left out, but here every item of {task_id} is "
             f"declined or skipped, so by its report it applied nothing to "
-            f"keep. Restore the batch (util restore-batch) or fix the cause, "
-            f"then resume; it is handed out again."
+            f"keep. Stop the loop as for a partial application: "
+            f"{_native_undo(kind)}; fix the cause, then resume, and "
+            f"{task_id} is handed out again."
         )
     return out
+
+
+#: What a native apply batch edits, by kind, in the apply instructions' words.
+_NATIVE_TARGETS = {"apply_suggestions": "the plan", "apply_task_suggestions": "tasks.md"}
+
+
+def _native_undo(kind: str) -> str:
+    """How a human puts back what a native apply batch changed, worded as the
+    apply instructions' partial-application step words it: the native loop
+    has no ``pre_batch/`` slot, so ``util restore-batch`` (the executor's
+    rollback) finds nothing of its batches (docs/development/write-safety.md,
+    "The native leg's per-batch snapshot")."""
+    if kind in SNAPSHOT_ROLES:
+        target = _NATIVE_TARGETS.get(kind, "the file")
+        return (
+            f"if the batch changed {target}, copy it back by hand from the "
+            f"pre-batch snapshot util write-prompt printed as {MARKER_SNAPSHOT} "
+            f"(read the diff first: the batch's subagent could write that copy "
+            f"too); util restore-batch holds nothing of a native batch's"
+        )
+    return (
+        "if the batch changed files, undo them by hand: this loop takes no "
+        "snapshot of them, so util restore-batch holds nothing of the batch's, "
+        "and `git diff -- <the batch's files>` shows its edits, together with "
+        "any earlier batch's uncommitted edits to the same files"
+    )
 
 
 def _changed_a_file_message(phase_dir: Path, task_id: str, changed: List[str]) -> str:

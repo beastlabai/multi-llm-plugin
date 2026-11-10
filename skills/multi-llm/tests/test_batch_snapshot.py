@@ -281,19 +281,155 @@ class TestThePreBatchSnapshot:
         assert "pre-batch snapshot" in err and str(plan.resolve()) in err
         assert not (phase_dir / "prompts" / "apply-batch-0.prompt.txt").exists()
 
-    def test_outside_a_repository_it_refuses(self, tmp_path_factory, capsys):
-        base = tmp_path_factory.mktemp("no-repo")
-        plan = base / "plans" / "feature.md"
+    @staticmethod
+    def _outside_with_two_repos(tmp_path_factory):
+        """A plan and its phase dir in no repository, and two repositories
+        A and B a host could run the loop from."""
+        import subprocess
+
+        base = tmp_path_factory.mktemp("two-repos")
+        repos = []
+        for name in ("A", "B"):
+            repo = base / name
+            repo.mkdir()
+            subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+            repos.append(repo)
+        plan = base / "notes" / "feature.md"
         plan.parent.mkdir()
-        plan.write_text("# Feature\n", encoding="utf-8")
-        out = base / "plans" / "feature"
+        plan.write_text("ORIGINAL\n", encoding="utf-8")
+        out = base / "notes" / "feature"
         out.mkdir()
         phase_dir, _tasks = _materialize(
             plan, out, "apply_suggestions", _suggestion_batches(), "apply-suggestions")
+        _seed_state(out, plan)
+        return base, plan, out, phase_dir, repos
+
+    def test_a_plan_outside_every_repository_keeps_its_slot_in_the_phase_dir(
+        self, tmp_path_factory, capsys, monkeypatch,
+    ):
+        """Fable review 2026-11-10, F2: every batch of a plan outside every
+        repository was refused. Its slot lives in the phase dir's own
+        `snapshots/` folder, whatever the working directory (none here), and
+        the loop runs batch after batch."""
+        base, plan, out, phase_dir, _repos = self._outside_with_two_repos(tmp_path_factory)
+        monkeypatch.chdir(base)
+
+        code, stdout, err = _bind(phase_dir, "apply-batch-0", capsys)
+        assert code == 0, err
+        snapshot = _marker(stdout, write_prompt.MARKER_SNAPSHOT)
+        assert snapshot.parent == Path(os.path.realpath(phase_dir)) / write_prompt.PHASE_SNAPSHOTS
+        assert snapshot.read_text(encoding="utf-8") == "ORIGINAL\n"
+        assert list(base.rglob(".multi-llm")) == []
+
+        # The batch's record carries the generation, and the next batch binds.
+        plan.write_text("APPLIED\n", encoding="utf-8")
+        _record(phase_dir, "apply-batch-0", capsys)
+        state = json.loads((out / "state.json").read_text(encoding="utf-8"))
+        assert write_prompt.RECORD_GENERATION_KEY in (
+            state[write_prompt.SNAPSHOT_RECORDS_KEY]["apply-suggestions"]["apply-batch-0"])
+        code, stdout, err = _bind(phase_dir, "apply-batch-1", capsys)
+        assert code == 0, err
+        assert _marker(stdout, write_prompt.MARKER_SNAPSHOT).read_text(
+            encoding="utf-8") == "APPLIED\n"
+
+    def test_binds_and_records_from_any_repository_reach_the_one_slot(
+        self, tmp_path_factory, capsys, monkeypatch,
+    ):
+        """Codex reviews of F02 (#1 and its re-check): with the slot under the
+        working directory's repository, batch 0 bound again from B took a new
+        baseline of its own half-applied bytes, a record from B missed A's
+        generation, and the next batch moved the slot; a kept record of the
+        chosen repository could itself be replaced. The slot is fixed by the
+        phase dir: from A, then B, every call reaches it and the original
+        baseline stays."""
+        base, plan, out, phase_dir, (repo_a, repo_b) = self._outside_with_two_repos(
+            tmp_path_factory)
+        monkeypatch.chdir(repo_a)
+        code, first, err = _bind(phase_dir, "apply-batch-0", capsys)
+        assert code == 0, err
+        baseline = _marker(first, write_prompt.MARKER_SNAPSHOT)
+        plan.write_text("PARTLY APPLIED\n", encoding="utf-8")
+
+        monkeypatch.chdir(repo_b)
+        code, again, err = _bind(phase_dir, "apply-batch-0", capsys)
+        assert code == 0, err
+        assert _marker(again, write_prompt.MARKER_SNAPSHOT) == baseline
+        assert baseline.read_text(encoding="utf-8") == "ORIGINAL\n"
+
+        _record(phase_dir, "apply-batch-0", capsys)
+        state = json.loads((out / "state.json").read_text(encoding="utf-8"))
+        assert write_prompt.RECORD_GENERATION_KEY in (
+            state[write_prompt.SNAPSHOT_RECORDS_KEY]["apply-suggestions"]["apply-batch-0"])
+        monkeypatch.chdir(repo_a)
+        code, nxt, err = _bind(phase_dir, "apply-batch-1", capsys)
+        assert code == 0, err
+        moved = _marker(nxt, write_prompt.MARKER_SNAPSHOT)
+        assert moved.parent == baseline.parent
+        assert moved.read_text(encoding="utf-8") == "PARTLY APPLIED\n"
+        assert not (repo_a / ".multi-llm").exists() and not (repo_b / ".multi-llm").exists()
+
+    def test_a_first_bind_from_another_repository_waits_for_the_one_lock(
+        self, tmp_path_factory, capsys, monkeypatch,
+    ):
+        """Codex re-check of F02, #2: two first binds from different
+        repositories each chose their own repository, lock and baseline. B's
+        bind, interleaved while A holds the slot (before A reads it), now
+        meets A's lock in the phase dir, and once A is done it keeps A's
+        baseline."""
+        base, plan, out, phase_dir, (repo_a, repo_b) = self._outside_with_two_repos(
+            tmp_path_factory)
+        monkeypatch.setattr(write_prompt, "SNAPSHOT_LOCK_TIMEOUT_S", 0.2)
+        decide = write_prompt._decide
+        interleaved = []
+
+        def b_binds_meanwhile(*args, **kwargs):
+            monkeypatch.setattr(write_prompt, "_decide", decide)
+            os.chdir(repo_b)
+            interleaved.append(write_prompt.main(
+                ["--phase-dir", str(phase_dir), "--task-id", "apply-batch-0"]))
+            os.chdir(repo_a)
+            if interleaved[-1] == 0:
+                # B was handed the batch: its subagent edits the plan.
+                plan.write_text("PARTLY APPLIED AFTER B\n", encoding="utf-8")
+            return decide(*args, **kwargs)
+
+        monkeypatch.setattr(write_prompt, "_decide", b_binds_meanwhile)
+        monkeypatch.chdir(repo_a)
+        code, first, err = _bind(phase_dir, "apply-batch-0", capsys)
+
+        assert interleaved == [3]
+        assert f"holds {os.path.realpath(phase_dir)}" in " ".join(err.split())
+        assert code == 0
+        baseline = _marker(first, write_prompt.MARKER_SNAPSHOT)
+        assert baseline.read_text(encoding="utf-8") == "ORIGINAL\n"
+        monkeypatch.chdir(repo_b)
+        code, again, err = _bind(phase_dir, "apply-batch-0", capsys)
+        assert code == 0, err
+        assert _marker(again, write_prompt.MARKER_SNAPSHOT) == baseline
+        assert not (repo_b / ".multi-llm").exists()
+
+    def test_a_repository_git_disagrees_with_is_not_passed_over(
+        self, plan_dir, capsys, monkeypatch, tmp_path_factory,
+    ):
+        """The plan's repository cannot be pinned (a `core.worktree` that
+        disagrees): refused, never answered from the working directory's."""
+        import subprocess
+
+        plan, out = plan_dir
+        phase_dir, _tasks = _materialize(
+            plan, out, "apply_suggestions", _suggestion_batches(), "apply-suggestions")
+        _seed_state(out, plan)
+        elsewhere = tmp_path_factory.mktemp("elsewhere")
+        subprocess.run(["git", "-C", str(_root(out)), "config", "core.worktree",
+                        str(elsewhere)], check=True)
+        other = tmp_path_factory.mktemp("cwd-repo")
+        subprocess.run(["git", "init", "-q", str(other)], check=True, capture_output=True)
+        monkeypatch.chdir(other)
         code, stdout, err = _bind(phase_dir, "apply-batch-0", capsys)
         assert code == 3
         assert write_prompt.MARKER_PATH not in stdout
-        assert "requires running inside a git repository" in err
+        assert "pre-batch snapshot" in err
+        assert not (other / ".multi-llm").exists()
 
     def test_stdout_mode_keeps_stdout_the_prompt_and_still_takes_it(self, phase, capsys):
         plan, _out, phase_dir = phase
@@ -768,11 +904,66 @@ class TestTheBatchesGoInOrder:
                 for item in ("g-email", "g-password")}})
 
         code, _stdout, err = _bind(phase_dir, "apply-batch-1", capsys)
-        assert code == 3 and "no `util batch-done` record from this run" in " ".join(err.split())
+        # A record with no stamp at all: its own message, both ways named.
+        flat = " ".join(err.split())
+        assert code == 3 and "carries no run stamp" in flat
+        assert "If this loop has not run apply-batch-0, run it first" in flat
 
         assert _bind(phase_dir, "apply-batch-0", capsys)[0] == 0
         _record(phase_dir, "apply-batch-0", capsys)
         assert _bind(phase_dir, "apply-batch-1", capsys)[0] == 0
+
+    def test_an_earlier_run_s_stamped_record_keeps_the_general_message(
+        self, phase, capsys
+    ):
+        """A record stamped by another run (a `--resume` renumbered its
+        batches): the batch has not run in this one, so run it first."""
+        plan, out, phase_dir = phase
+        state = json.loads((out / "state.json").read_text(encoding="utf-8"))
+        state["task_status"] = {"apply-batch-0": "completed"}
+        state[write_prompt.SNAPSHOT_RECORDS_KEY] = {"apply-suggestions": {
+            "apply-batch-0": {write_prompt.RECORD_RUN_KEY: "f" * 64}}}
+        (out / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        code, _stdout, err = _bind(phase_dir, "apply-batch-1", capsys)
+        flat = " ".join(err.split())
+        assert code == 3 and "no `util batch-done` record from this run" in flat
+        assert "carries no run stamp" not in flat
+
+    def test_a_loop_begun_before_records_were_stamped_is_sent_to_resume(
+        self, phase, capsys,
+    ):
+        """A native loop begun on a plugin version whose `util batch-done`
+        kept no stamp: its next batch was refused with advice to record the
+        recorded batch again (Fable review 2026-11-10, F10). The message
+        names `--resume`, which emits what is left as a new run."""
+        plan, out, phase_dir = phase
+        # The loop as the older version left it: batch 0 bound, applied and
+        # recorded, with no stamp and no binding of the slot.
+        plan.write_bytes(plan.read_bytes() + b"\nbatch 0 landed\n")
+        state = json.loads((out / "state.json").read_text(encoding="utf-8"))
+        task = json.loads((phase_dir / WRITE_TASK_FILENAME).read_text(encoding="utf-8"))
+        batch0 = next(t for t in task.get("batches") or task["tasks"] if t["task_id"] == "apply-batch-0")
+        state["task_status"] = {"apply-batch-0": "completed"}
+        state["processed_apply-suggestions"] = {
+            item: {"status": "applied", "timestamp": datetime.now().isoformat(),
+                   "details": {"task_id": "apply-batch-0", "leg": "native"}}
+            for item in batch0["expected_ids"]}
+        (out / "state.json").write_text(json.dumps(state), encoding="utf-8")
+
+        code, stdout, err = _bind(phase_dir, "apply-batch-1", capsys)
+        flat = " ".join(err.split())
+        assert code == 3 and stdout == ""
+        assert "carries no run stamp" in flat
+        assert "re-run the phase's orchestrator with --resume" in flat
+        assert "record it with util batch-done" not in flat
+        assert not (_root(out) / ".multi-llm").exists()
+
+    def test_the_loops_name_the_stampless_record_s_way_forward(self):
+        for core in ("apply-suggestions", "apply-task-suggestions"):
+            flat = _flat(core)
+            assert ("an earlier batch whose record carries no run stamp (an older "
+                    "plugin version made it)") in flat
+            assert "re-run the phase's orchestrator with `--resume`" in flat
 
 
 # ---------------------------------------------------------------------------

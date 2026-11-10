@@ -120,6 +120,7 @@ from . import routes as _routes
 from . import metrics
 from . import scope_policy_runs as _scope_policy_runs
 from . import review_orchestrator_base
+from . import review_round as _review_round
 from . import write_safety
 from . import write_batch_scheduler
 from . import write_phase_bridge
@@ -147,6 +148,7 @@ from .check_records import write_result_notice
 from .write_phase_bridge import native_run_record
 from .host_capabilities import resolve_host_id
 from .batch_done import resume_refusal_lines, unrecorded_logged_batches
+from .write_prompt import round_superseded, superseded_round_text
 from .verification_lines import native_apply_fixes_unverified_line
 
 
@@ -187,6 +189,18 @@ _STOP_STATUS_BY_EXIT: Dict[int, str] = {
     2: "nothing_to_do",
     3: "needs_human",
 }
+
+
+#: The file under its phase dir that holds a phase's target as the phase
+#: found it (``write_target_backup``): ``backup.md``, except for
+#: apply-task-suggestions, which publishes it as ``tasks-backup.md`` (its
+#: ``tasks_file_backup`` output). apply-code-fixes keeps none.
+_TARGET_BACKUP_NAMES: Dict[str, str] = {"apply-task-suggestions": "tasks-backup.md"}
+
+
+def target_backup_name(phase_name: str) -> str:
+    """The name of *phase_name*'s target backup (:data:`_TARGET_BACKUP_NAMES`)."""
+    return _TARGET_BACKUP_NAMES.get(phase_name, "backup.md")
 
 
 def _system_exit_code(exc: SystemExit) -> int:
@@ -1346,6 +1360,10 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 exit_code=1,
             )
 
+        # Step 9a: the review's verdicts belong to the round on record, checked
+        # before anything is written (`--fresh` below clears progress).
+        self._refuse_another_rounds_verdicts()
+
         # Step 10: Initialize StateManager + handle --fresh
         self.state = StateManager(Path(self.plan_path))
 
@@ -1428,6 +1446,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 f"Phase _load_and_parse_inputs, step 11: load_data failed: {e}",
                 exit_code=1,
             ) from e
+
+        # Step 11a: the round the verdicts came from is still the one on record.
+        self._recheck_verdicts_round("Phase _load_and_parse_inputs, step 11a")
 
         self.logger.info(
             "Loaded %d groups, %d validation results",
@@ -2838,6 +2859,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         """
         self.logger.debug("Entering _write_outputs phase")
 
+        # Before any batch is published: the verdicts' round is still on record.
+        self._recheck_verdicts_round("Phase _write_outputs, step 32")
+
         # Build resume_info
         resume_info: Optional[Dict[str, Any]] = None
         if self.state is not None:
@@ -3158,6 +3182,133 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             getattr(self, "write_kind", ""),
         )
 
+    def _refuse_another_rounds_verdicts(self) -> None:
+        """Step 9a: apply only the verdicts of the review round on record.
+
+        A review re-run stamps a new round id in the review's ``.status.json``
+        before it replaces the previous round's files (``utils/review_round``).
+        One that is still running, or stopped before it validated (every
+        model failed, or it was interrupted), leaves the previous round's
+        ``validation.json`` in place while the review phase is pending, and
+        applying it would apply a review the phase has since replaced. So a
+        ``validation.json`` that records another round than the checkpoint's
+        is refused at exit 3, before anything is written, as
+        ``--reaggregate`` refuses it; one of the round on record goes ahead.
+        A file or a checkpoint with no round id (written before round ids, or
+        unreadable) proves nothing and is applied as before
+        (docs/development/review-results.md, "Round identity").
+
+        The file is read once, here: ``load_data`` parses these bytes
+        (:meth:`held_verdicts`), never a later read, and the round they
+        record is kept (:attr:`_verdicts_round`) for the re-checks before
+        work is published (:meth:`_recheck_verdicts_round`) and for the
+        native emit's batches, which ``util write-prompt`` refuses once the
+        review has started another round.
+        """
+        self._held_verdicts = None
+        self._verdicts_round = None
+        review_dir = os.path.join(self.out_dir, self.review_subdir)
+        path = os.path.abspath(os.path.join(review_dir, _review_round.VALIDATION_NAME))
+        try:
+            data = Path(path).read_bytes()
+        except FileNotFoundError:
+            return
+        except OSError:
+            return  # left to load_data, which names the problem
+        self._held_verdicts = (path, data)
+        recorded = _review_round.verdicts_of(data).round_id
+        current = _review_round.current_round(review_dir)
+        owner = _review_round.ownership(current, recorded)
+        if owner == _review_round.OWNED:
+            self._verdicts_round = recorded
+        elif owner == _review_round.STALE:
+            self._refuse_superseded_verdicts(recorded, current, "Phase _setup, step 9a")
+
+    def held_verdicts(self, validation_path: Any) -> Optional[bytes]:
+        """The bytes of ``validation.json`` step 9a read and checked, when
+        *validation_path* names that file; ``None`` otherwise (read it then).
+        ``load_data`` parses these, so the verdicts applied are the ones whose
+        round was checked."""
+        held = getattr(self, "_held_verdicts", None)
+        if held is None or os.path.abspath(str(validation_path)) != held[0]:
+            return None
+        return held[1]
+
+    def _recheck_verdicts_round(self, step: str) -> None:
+        """Before judged decisions are recorded and before batches are
+        published: the review's checkpoint still records the round the held
+        verdicts came from, or the run stops as step 9a stops it (a review
+        run started a new round since). Nothing for verdicts with no round
+        id."""
+        recorded = getattr(self, "_verdicts_round", None)
+        if recorded is None:
+            return
+        current = _review_round.current_round(
+            os.path.join(self.out_dir, self.review_subdir))
+        if _review_round.ownership(current, recorded) == _review_round.STALE:
+            self._refuse_superseded_verdicts(recorded, current, step)
+
+    def _superseded_before_batch(
+        self, batch_index: int, tasks: Sequence[Dict[str, Any]],
+    ) -> Optional[str]:
+        """The executor's check before each batch it dispatches
+        (``SchedulerOptions.before_batch``): once the review's checkpoint
+        records another round than the held verdicts' (a review run started
+        one after the last check), the batch is refused with the native
+        loop's words (``write_prompt.superseded_round_text``) and nothing
+        later is dispatched. Verdicts with no round id are never refused."""
+        recorded = getattr(self, "_verdicts_round", None)
+        if recorded is None:
+            return None
+        current = round_superseded(
+            Path(self.out_dir) / self.review_subdir, recorded)
+        if current is None:
+            return None
+        task_id = str((tasks[0] or {}).get("task_id") or "") if tasks else ""
+        return superseded_round_text(
+            task_id or f"batch {batch_index}", self.review_subdir, recorded, current,
+            native=False,
+        )
+
+    def _refuse_superseded_verdicts(
+        self, recorded: Optional[str], current: Optional[str], step: str,
+    ) -> None:
+        """Print the refusal of verdicts from round *recorded* while the
+        review's checkpoint records *current*, and stop at exit 3."""
+        review_dir = os.path.join(self.out_dir, self.review_subdir)
+        try:
+            host_id = _hosts.resolve_host_id(explicit=getattr(self.args, "host", None))
+            rerun = _words.phase_command(
+                str(self.args.plan_file), host_id, _routes.resolve_route(host_id),
+                self.review_subdir, "--force",
+            )
+        except Exception:  # noqa: BLE001 - advisory: the flag is named instead
+            rerun = f"the review ({self.review_subdir}) again with --force"
+        lines = [
+            f"ERROR: {self.confirmation_phase_name or self.phase_name} refused: "
+            f"{os.path.join(review_dir, _review_round.VALIDATION_NAME)} "
+            f"holds the verdicts of review round {recorded}, but "
+            f"{self.review_subdir}'s .status.json records another round, "
+            f"{current}: a later run of the review started it and it has "
+            f"not produced verdicts — it is still running, or it stopped before "
+            f"it validated (every model failed, or it was interrupted). "
+            f"Applying the earlier round's verdicts would apply a review the "
+            f"phase has since replaced. Nothing was applied or recorded.",
+            "  If that round is still running, let it finish (`status`), then "
+            "run this again.",
+            "  Otherwise run the review again with --force (it keeps each "
+            "reusable model result, regroups and validates again), then run "
+            f"this again: {rerun}",
+        ]
+        for line in lines:
+            print(line, file=sys.stderr)
+        record_error(lines[0])
+        raise OrchestratorError(
+            f"{step}: validation.json belongs to an earlier review round than "
+            f"the one on record",
+            exit_code=3,
+        )
+
     def _fresh_target_refusal(self) -> Optional[str]:
         """Why ``--fresh`` must not run against the target as it is, or ``None``.
 
@@ -3212,7 +3363,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         if not hits:
             return None
         task_id, stamped = hits[-1]
-        backup = os.path.join(phase_dir, "backup.md")
+        backup = os.path.join(phase_dir, target_backup_name(self.phase_name))
         backup_hint = (
             f"copy the pre-run file back from {backup}"
             if os.path.isfile(backup)
@@ -3292,7 +3443,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             return None
         phase_dir = os.path.join(self.out_dir, self.phase_name)
         os.makedirs(phase_dir, exist_ok=True)
-        backup_path = os.path.join(phase_dir, "backup.md")
+        backup_path = os.path.join(phase_dir, target_backup_name(self.phase_name))
         if (
             os.path.exists(backup_path)
             and not getattr(self.args, "fresh", False)
@@ -3541,6 +3692,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 # answer the stop offers, in this host's spelling.
                 partial_skips=getattr(self, "partial_skips", None) or None,
                 user_commands=self._stop_user_commands(),
+                before_batch=self._superseded_before_batch,
                 **self.scope_gate.scheduler_kwargs(),
             ))
         except (ExecutorError, WriteSafetyError) as exc:
@@ -3623,6 +3775,12 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # across a `--resume` and none of an earlier run's records.
         run = native_run_record(
             phase_dir, tasks, resume=bool(getattr(self.args, "resume", False)))
+        # The review round its verdicts came from: `util write-prompt`
+        # refuses a batch once the review has started another.
+        if getattr(self, "_verdicts_round", None):
+            run[write_phase_bridge.REVIEW_ROUND_KEY] = {
+                "review": self.review_subdir, "round_id": self._verdicts_round,
+            }
         return write_phase_bridge.write_task_file_for_phase(
             kind=self.write_kind, tasks=tasks, phase_dir=phase_dir,
             plan_file=self.plan_path, tasks_file=tasks_file, grouped_file=grouped,

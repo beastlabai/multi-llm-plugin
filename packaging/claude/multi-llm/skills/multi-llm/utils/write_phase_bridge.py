@@ -283,6 +283,12 @@ def materialize_write_tasks(
 #: (``run_status._native_apply_not_applied``).
 NATIVE_RUN_KEY = "native_run"
 
+#: The key under :data:`NATIVE_RUN_KEY` naming the review round the batches'
+#: verdicts came from, ``{review, round_id}``, when they record one: ``util
+#: write-prompt`` refuses a batch once that review has started another round
+#: (``write_prompt.superseded_round_refusal``).
+REVIEW_ROUND_KEY = "review_round"
+
 
 def native_run_record(
     phase_dir: str,

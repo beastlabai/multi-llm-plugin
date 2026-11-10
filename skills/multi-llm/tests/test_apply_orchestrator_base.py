@@ -5597,6 +5597,49 @@ class TestTheTargetFileIsBackedUpBeforeTheFirstBatch:
         assert probe.write_target_backup() == str(phase_dir / "tasks-backup.md")
         assert not (phase_dir / "backup.md").exists()
 
+    @pytest.mark.parametrize("module,cls,backup", [
+        ("apply_suggestions_orchestrator", "ApplySuggestionsOrchestrator", "backup.md"),
+        ("apply_task_suggestions_orchestrator", "ApplyTaskSuggestionsOrchestrator",
+         "tasks-backup.md"),
+    ])
+    def test_the_fresh_refusal_names_the_phase_s_own_backup(
+        self, tmp_path, module, cls, backup,
+    ):
+        """`--fresh` over a target that still carries an executor run's edits
+        offers the phase's backup to copy back from: apply-task-suggestions
+        keeps it as tasks-backup.md, and the refusal used to say there was
+        no backup.md (Fable review 2026-11-10, F7)."""
+        import hashlib
+        import importlib
+        import subprocess
+
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        orchestrator = getattr(importlib.import_module(module), cls)
+        probe = orchestrator.__new__(orchestrator)
+        plan = tmp_path / "plan.md"
+        plan.write_text("# plan\n", encoding="utf-8")
+        target = tmp_path / "plan" / "target.md"
+        target.parent.mkdir()
+        target.write_text("edited by the previous run\n", encoding="utf-8")
+        probe.plan_path = str(plan)
+        probe.out_dir = str(tmp_path / "plan")
+        probe.write_target_file = lambda: str(target)
+        probe._review_completed_at = lambda: None
+        phase_dir = Path(probe.out_dir) / probe.phase_name
+        phase_dir.mkdir()
+        (phase_dir / backup).write_text("pre-run\n", encoding="utf-8")
+        after = hashlib.sha256(target.read_bytes()).hexdigest()
+        (phase_dir / "subagent_audit.jsonl").write_text(json.dumps({
+            "event": "completed", "task_id": "batch-0",
+            "timestamp": "2026-11-10T10:00:00Z",
+            "observed": {"plan/target.md": {"sha256_before": "0" * 64,
+                                            "sha256_after": after}},
+        }) + "\n", encoding="utf-8")
+        refusal = probe._fresh_target_refusal()
+        assert refusal is not None
+        assert f"copy the pre-run file back from {phase_dir / backup}" in refusal
+        assert "there is no" not in refusal
+
 
 _ROUND_ONE, _REVIEWED, _ROUND_TWO = (
     "2026-01-01T10:00:00", "2026-01-02T10:00:00", "2026-01-03T10:00:00",

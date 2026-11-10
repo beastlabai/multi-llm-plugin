@@ -893,6 +893,12 @@ class SchedulerOptions:
     #: The scope policy an apply dispatch enforces, and its baseline.
     scope_policy: Optional[str] = None
     scope_baseline_id: Optional[str] = None
+    #: Asked before each batch is dispatched, as ``before_batch(batch_index,
+    #: tasks)``: a message refuses that batch and stops the run as any
+    #: pre-dispatch refusal does (exit 3, no child started for it, nothing
+    #: later dispatched); ``None`` lets it go. The apply phases pass the check
+    #: that the review round their verdicts came from is still on record.
+    before_batch: Optional[Callable[[int, Sequence[Dict[str, Any]]], Optional[str]]] = None
 
 
 class WriteBatchScheduler:
@@ -1668,6 +1674,10 @@ class WriteBatchScheduler:
             if not runnable:
                 continue
             try:
+                guard = self.options.before_batch
+                refused = guard(batch_index, runnable) if guard is not None else None
+                if refused:
+                    raise ExecutorError(refused)
                 outcomes = self._run_batch(batch_index, runnable, result)
             except ExecutorError as exc:
                 # D3k rung 1: a pre-dispatch refusal (a missing binary, an

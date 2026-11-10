@@ -23,7 +23,9 @@ from typing import Any, Dict, List, Optional
 sys.path.insert(0, str(Path(__file__).parent))
 
 from utils.stream_bootstrap import bootstrap_streams
-from utils.apply_orchestrator_base import OrchestratorError, build_common_arg_parser
+from utils.apply_orchestrator_base import (
+    OrchestratorError, build_common_arg_parser, target_backup_name,
+)
 from utils.apply_suggestion_phase import SuggestionApplyPhase
 from utils.cli_common import dispatcher_prefix
 from utils.apply_output_helpers import (
@@ -83,7 +85,7 @@ class ApplyTaskSuggestionsOrchestrator(SuggestionApplyPhase):
         second copy named `backup.md` would be the same bytes under a name
         nothing references, so the base's snapshot is answered rather than run.
         """
-        path = os.path.join(self.out_dir, self.phase_name, "tasks-backup.md")
+        path = os.path.join(self.out_dir, self.phase_name, target_backup_name(self.phase_name))
         return path if os.path.isfile(path) else None
 
     # ----------------------------------------------------------------
@@ -255,7 +257,7 @@ Bulk Approval Examples:
         # backup a previous run took is the one that still holds the pre-phase
         # bytes, and it is kept rather than overwritten (measured 2026-09-15:
         # three resumes in a row each copied the partial edits over it).
-        tasks_backup_path = os.path.join(phase_dir, "tasks-backup.md")
+        tasks_backup_path = os.path.join(phase_dir, target_backup_name(self.phase_name))
         if getattr(self.args, "resume", False) and os.path.isfile(tasks_backup_path):
             print(
                 f"Tasks file backup kept from the previous run: {tasks_backup_path}",

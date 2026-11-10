@@ -96,7 +96,7 @@ because an automatic revert would destroy the state a human needs to inspect.
 apply-task-suggestions, `util write-prompt` copies the batch's one artifact (the plan, the tasks
 file) byte for byte into the workspace temp dir (`write_prompt.prepare_batch_snapshot`,
 2026-11-08; the host used to copy it in a turn of its own), and the host's byte diff against it
-decides the batch. It is a convenience copy: it lies in the repository, which the batch's subagent
+decides the batch. It is a convenience copy: it lies in the repository (or the phase dir), which the batch's subagent
 can write, so its checksums catch an accidental change and prove nothing against a subagent. No
 command restores from it; the apply instructions tell a human how to copy it back by hand, and
 that code-fix batches have none. Trustworthy native rollback needs the executor's protected
@@ -106,7 +106,17 @@ storage, a larger design (plans/apply-phase-throughput.md; Codex review 2 of U31
   (exit 1) before anything is read through it or written — no commit re-check record, check-tree
   record, commit bind or snapshot — in every output mode, and the snapshot's root is the pinned
   phase dir's repository, taken from the pin (`git_utils.pin_repo_root` must agree with it), never
-  found again through the phase path. `write_tasks.json` is read for the run stamp through the
+  found again through the phase path. A phase dir no repository holds (a plan kept outside
+  every repository) keeps its slots in its own `snapshots/` folder instead, reached through the
+  pin as `prompts/` is (`write_prompt._snapshot_home`): nothing is chosen from the working
+  directory, so every bind, record and resume of the run reaches one slot and one lock from any
+  directory, and no git answer is asked for. Only a repository holding the phase dir that
+  `pin_repo_root` cannot pin is refused (Fable review of 2026-11-10, F2; Codex reviews of F02:
+  a slot under the working directory's repository, and then a kept record of the chosen one,
+  let a bind from another directory take a second baseline). The folder lies inside the phase
+  dir, outside every repository, so no census, porcelain check or sweep (all repository-scoped)
+  can count it as a batch's write, and the check tree leaves the phase dir out anyway
+  (`check_tree.check_tree_exclusions`). `write_tasks.json` is read for the run stamp through the
   pin too, so a folder swapped after the pin is refused as a link (Codex review of U31, #1).
 - *One slot per phase dir and artifact.* The slot is
   `.multi-llm/tmp/batch_snapshot_<plan|tasks>_<plan stem>-<key>`, the key 12 hex digits of the
@@ -154,8 +164,16 @@ storage, a larger design (plans/apply-phase-throughput.md; Codex review 2 of U31
   its run (lower `batch_index`, not a human task) has no record from this run — one whose
   stamp names this run. The batches edit one file one at a
   time, and without this a batch bound early and the batch before it each waited on the other
-  (review 2, #6). The `[WRITE_PROMPT_ORDER]` warning stays advisory for the other kinds.
-- Outside a repository, or with an artifact it cannot read, the call refuses (exit 3).
+  (review 2, #6). A record with no stamp at all (made by a plugin version that kept none: a loop
+  begun before the upgrade, or an earlier run) is refused with its own message unless the slot's
+  binding names that batch of this run (this version bound it, so a record of it would carry a
+  stamp): run that batch first if this loop has not, else `--resume`, which emits what is left as
+  a new run that needs no earlier record.
+  The general message's "record it with util batch-done" would re-record a batch already
+  recorded (Fable review of 2026-11-10, F10). The `[WRITE_PROMPT_ORDER]` warning stays advisory
+  for the other kinds.
+- With a repository holding the phase dir that git cannot pin, or with an artifact it cannot
+  read, the call refuses (exit 3).
   apply-code-fixes and implement take no native snapshot: their instructions send a human to undo
   a native batch by hand.
 

@@ -1139,6 +1139,26 @@ class TestTheNativeLegRecordsADeclinedItem:
         assert (f"every item of {task_id} is declined or skipped, so by its "
                 f"report it applied nothing to keep") in err
         assert task_id not in (_state(out).get("task_status") or {})
+        # The native way back, never the executor's rollback, which holds
+        # nothing of a native batch (Fable review 2026-11-10, F8).
+        assert "Restore the batch (util restore-batch)" not in err
+        assert "util restore-batch holds nothing of a native batch's" in err
+        assert "[WRITE_SNAPSHOT]" in err and "copy it back by hand" in err
+
+    def test_a_code_fix_batch_that_applied_nothing_is_sent_to_undo_by_hand(self):
+        """apply-code-fixes' native loop takes no snapshot: the refusal says
+        so, as its instructions' partial-application step does."""
+        from utils import batch_done
+
+        with pytest.raises(batch_done.WritePromptError) as caught:
+            batch_done._not_applied_items(
+                "apply-fix-batch-0", {"expected_ids": ["F1", "F2"]},
+                "apply_code_fixes", "completed", None, ["F1", "F2"])
+        said = str(caught.value)
+        assert "applied nothing to keep" in said
+        assert "Restore the batch (util restore-batch)" not in said
+        assert "this loop takes no snapshot" in said
+        assert "git diff -- <the batch's files>" in said
 
     def test_implement_has_no_decline(self, plan_dir, capsys):
         from tests.support.batch_done_world import _implement_batches

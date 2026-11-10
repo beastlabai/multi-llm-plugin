@@ -996,7 +996,9 @@ Finalization (run by the host AFTER every batch has been applied and verified):
 
         # Load validation results (using v2 loader with migration)
         if validation_path.exists():
-            validation = load_validation_v2(validation_path)
+            # The bytes whose round step 9a checked (`held_verdicts`).
+            validation = load_validation_v2(
+                validation_path, raw=self.held_verdicts(validation_path))
         else:
             print("WARNING: Validation results not found, treating all as needs-human-decision", file=sys.stderr)
             validation = []

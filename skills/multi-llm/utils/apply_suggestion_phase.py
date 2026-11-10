@@ -64,7 +64,9 @@ class SuggestionApplyPhase(
         if not validation_path.exists():
             self._validation_missing(validation_path, groups)
 
-        validation = load_validation_results(validation_path)
+        # The bytes whose round step 9a checked (`held_verdicts`), not a new read.
+        validation = load_validation_results(
+            validation_path, raw=self.held_verdicts(validation_path))
 
         if groups is None:
             raise OrchestratorError(

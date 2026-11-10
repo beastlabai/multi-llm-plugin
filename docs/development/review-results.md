@@ -882,6 +882,26 @@ captures): a task file or `validation.json` recording another round is refused a
 past its stamp merged the previous round's files and wrote a report claiming the new round.
 Files with no id on either side keep the reaggregate's content checks, as before round ids.
 
+**An apply phase applies only the round on record's verdicts**
+(`ApplyOrchestratorBase._refuse_another_rounds_verdicts`, step 9a of its setup, for apply-suggestions,
+apply-task-suggestions and apply-code-fixes alike): a review `validation.json` that records another
+round than the review's checkpoint is refused at exit 3 before anything is written (`--fresh`'s
+clear included), naming the two ways forward: let that round finish, or run the review again with
+`--force`. A re-run that stamped its round and stopped before it regrouped (every model failed, or
+it was interrupted) leaves the earlier round's verdicts beside a pending review, and the apply used
+to apply them (Fable review of 2026-11-10, P1). A file or checkpoint with no id proves nothing and
+is applied as before round ids; a completed round's own verdicts go ahead, `--yes` included.
+The file is read once at that check and `load_data` parses those bytes
+(`ApplyOrchestratorBase.held_verdicts`); the checkpoint is checked again after loading and before
+any batch is published (`_recheck_verdicts_round`), and the native emit records the round in
+`write_tasks.json` (`native_run.review_round`), so `util write-prompt` refuses a batch once the
+review has started another round (`write_prompt.superseded_round_refusal`, exit 3, nothing
+written). Under `--exec-subagents` the scheduler asks the same before each batch it dispatches
+(`SchedulerOptions.before_batch`, `ApplyOrchestratorBase._superseded_before_batch`): a superseded
+round refuses that batch with the same words, before any child starts, and nothing later is
+dispatched. A round started while a batch's model runs is caught at the next batch; no lock is
+held across model execution (Codex review of F02, #2, and its re-check, #3).
+
 ## Consuming checked bytes
 
 **A run uses the bytes it checked, wrote or validated, never a later read of the same file**
