@@ -1,0 +1,4 @@
+name: row-capture-empty-answer
+on_unmatched: default
+fallback:
+  content: ''

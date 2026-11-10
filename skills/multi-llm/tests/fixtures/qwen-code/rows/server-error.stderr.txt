@@ -1,0 +1,7 @@
+{
+  "error": {
+    "type": "AlreadyReportedError",
+    "message": "[API Error: 500 The server had an error while processing your request. Sorry about that!]",
+    "code": 1
+  }
+}

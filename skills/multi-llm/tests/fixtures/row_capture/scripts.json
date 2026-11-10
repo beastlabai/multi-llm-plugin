@@ -1,0 +1,7 @@
+{
+  "codex": {"tool": "get_goal", "args": "{}"},
+  "kilocode": {"tool": "read", "args": "{\"filePath\": \"/work/sample-project/plans/auth-feature.md\"}"},
+  "kimi": {"tool": "Read", "args": "{\"path\": \"/work/sample-project/plans/auth-feature.md\"}"},
+  "opencode": {"tool": "read", "args": "{\"filePath\": \"/work/sample-project/plans/auth-feature.md\"}"},
+  "qwen-code": {"tool": "read_file", "args": "{\"absolute_path\": \"/work/sample-project/plans/auth-feature.md\"}"}
+}

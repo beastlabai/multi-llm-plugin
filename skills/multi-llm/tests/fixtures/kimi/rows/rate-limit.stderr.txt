@@ -1,0 +1,2 @@
+error: failed to run prompt: provider.rate_limit: Rate limit reached for stub-model in organization org-stub on requests per min (RPM): Limit 3, Used 3. Please try again in 20s.
+See log: /tmp/mllm-inv/kimi-0449cf31d368/.kimi-code/logs/kimi-code.log

@@ -43,7 +43,9 @@ failures (`401`, `404`, `429`, `429ra`, `500`, `ctx`, `empty`, `stall` and the t
 modes). The reproducible place to run them is the pinned image (`tests/container/Dockerfile`
 at the `cli-versions.lock` pins, `--network none`). The `method:` paragraph of each
 `tests/fixtures/<provider>/manifest.yaml` records the exact vehicle a sibling used; copy the
-closest one.
+closest one. `tests/fixtures/row_capture/` is the general one: a driver that takes one row
+per container for any wrapped CLI (`run_row.sh <cli> <row> <stub|fail|script> [mode]`), with
+its argv held to `build_command` by `test_row_capture_kit.py`; add the CLI to its `CLIS`.
 
 Then work through the steps in order. Each test named fails until its step is done.
 
@@ -815,7 +817,10 @@ status, not this result, so it shares the fields and its readers accept a `Captu
 as the review fan-out reads it with no result file, `lane_b` from the executor's readers. A row
 whose two statuses retry differently carries `open: <unit>` until that unit settles it, or
 `by_design: <reason>` for the one permanent difference: an exit 0 of an adapter that is not
-`EXIT0_CLASSIFIABLE`, which the fan-out stops on and the executor retries once.
+`EXIT0_CLASSIFIABLE`, which the fan-out stops on and the executor retries once. A row whose
+measured `expect.classify_failure` is a known bug keeps that measured pin and adds
+`expect.known_wrong: {intended: <verdict>, reason: <why>}`; the grader fails once the adapter
+gives `intended`, so the fix deletes the marker and re-pins the row.
 
 ### Launch diagnostics
 

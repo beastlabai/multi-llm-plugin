@@ -1990,9 +1990,9 @@ def test_goal_3_answer_text_is_never_transport(provider, relative):
     ``success`` rows unwrap to a findings array), so "never parses as JSON"
     would fail on correct output. A ``"plain"``-framed adapter's JSON or NDJSON
     answer *is* its raw stdout, so it is exempt from the first two clauses and
-    from matching its own records; the envelope-key clause still holds. No
-    ``"plain"`` adapter has a committed capture today (kilocode has none), so
-    the exemption covers no row yet.
+    from matching its own records; the envelope-key clause still holds.
+    kilocode is the one ``"plain"`` adapter with captures (its manifest's
+    ``rows/``).
     """
     stdout = _fixture(f"{provider}/{relative}")
     adapter = get_provider(provider)
@@ -2033,8 +2033,7 @@ def test_the_goal_3_sweep_covers_every_adapter_with_captures():
     with_dirs = {
         p.name for p in FIXTURES.iterdir() if p.is_dir() and p.name in _PROVIDERS
     }
-    # kilocode's directory holds only its model catalog (§14).
-    assert swept == with_dirs - {"kilocode"}
+    assert swept == with_dirs
     # Not vacuous. Since 2026-10-02 opencode commits one release's captures
     # (the 72 rig cases of its pin), not five releases', so the sweep is ~280.
     assert len(GOAL_3_ROWS) > 250

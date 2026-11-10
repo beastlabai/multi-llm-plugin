@@ -1,0 +1,2 @@
+error: failed to run prompt: provider.auth_error: Incorrect API key provided: sk-stub***. You can find your API key at https://platform.openai.com/account/api-keys.
+See log: /tmp/mllm-inv/kimi-78fc5745a49b/.kimi-code/logs/kimi-code.log

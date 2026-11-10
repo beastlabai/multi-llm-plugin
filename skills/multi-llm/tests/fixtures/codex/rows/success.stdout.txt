@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"01a1c326-a1cf-7740-904c-5e3357a7cf27"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"[\n  {\"id\": \"S001\", \"title\": \"Bound the retry ladder\", \"severity\": \"high\"},\n  {\"id\": \"S002\", \"title\": \"Strip the vendor token\", \"severity\": \"medium\"}\n]"}}
+{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0}}

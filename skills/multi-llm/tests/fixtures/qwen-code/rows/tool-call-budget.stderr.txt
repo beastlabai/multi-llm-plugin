@@ -1,0 +1,7 @@
+{
+  "error": {
+    "type": "FatalBudgetExceededError",
+    "message": "Run aborted: tool-call budget of 0 exceeded (--max-tool-calls); observed 1.",
+    "code": 55
+  }
+}

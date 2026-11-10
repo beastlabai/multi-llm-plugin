@@ -1,0 +1,5 @@
+{"role":"meta","type":"system.version","version":"2.5.2"}
+{"role":"assistant","content":"FIRST ANSWER (must NOT be selected)\n[\n  {\"id\": \"D999\", \"title\": \"Decoy\", \"severity\": \"low\"}\n]","tool_calls":[{"type":"function","id":"call_rowcap_1","function":{"name":"Read","arguments":"{\"path\":\"/work/sample-project/plans/auth-feature.md\"}"}}]}
+{"role":"tool","tool_call_id":"call_rowcap_1","content":"1\t# Auth feature\n2\t\n3\t## Tasks\n4\t\n5\t### Task 1: Add a retry ladder\n6\t\n7\tRetry the token refresh."}
+{"role":"assistant","content":"[\n  {\"id\": \"S001\", \"title\": \"Bound the retry ladder\", \"severity\": \"high\"},\n  {\"id\": \"S002\", \"title\": \"Strip the vendor token\", \"severity\": \"medium\"}\n]"}
+{"role":"meta","type":"session.resume_hint","session_id":"session_205a7865-b786-4c4d-bbdf-ad7457135667","command":"kimi -r session_205a7865-b786-4c4d-bbdf-ad7457135667","content":"To resume this session: kimi -r session_205a7865-b786-4c4d-bbdf-ad7457135667"}

@@ -1,0 +1,4 @@
+[0m
+> code · stub-model
+[0m
+[91m[1mError: [0mrun ended without an assistant message; the model returned no output

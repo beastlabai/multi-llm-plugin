@@ -1,0 +1,9 @@
+{"type":"thread.started","thread_id":"01a1c32f-dfbc-7122-95ea-5c8760be3cc0"}
+{"type":"turn.started"}
+{"type":"error","message":"Reconnecting... 1/5 (unexpected status 401 Unauthorized: Incorrect API key provided: sk-stub***. You can find your API key at https://platform.openai.com/account/api-keys., url: http://127.0.0.1:8099/s/ad2067c1ad91/v1/responses)"}
+{"type":"error","message":"Reconnecting... 2/5 (unexpected status 401 Unauthorized: Incorrect API key provided: sk-stub***. You can find your API key at https://platform.openai.com/account/api-keys., url: http://127.0.0.1:8099/s/ad2067c1ad91/v1/responses)"}
+{"type":"error","message":"Reconnecting... 3/5 (unexpected status 401 Unauthorized: Incorrect API key provided: sk-stub***. You can find your API key at https://platform.openai.com/account/api-keys., url: http://127.0.0.1:8099/s/ad2067c1ad91/v1/responses)"}
+{"type":"error","message":"Reconnecting... 4/5 (unexpected status 401 Unauthorized: Incorrect API key provided: sk-stub***. You can find your API key at https://platform.openai.com/account/api-keys., url: http://127.0.0.1:8099/s/ad2067c1ad91/v1/responses)"}
+{"type":"error","message":"Reconnecting... 5/5 (unexpected status 401 Unauthorized: Incorrect API key provided: sk-stub***. You can find your API key at https://platform.openai.com/account/api-keys., url: http://127.0.0.1:8099/s/ad2067c1ad91/v1/responses)"}
+{"type":"error","message":"unexpected status 401 Unauthorized: Incorrect API key provided: sk-stub***. You can find your API key at https://platform.openai.com/account/api-keys., url: http://127.0.0.1:8099/s/ad2067c1ad91/v1/responses"}
+{"type":"turn.failed","error":{"message":"unexpected status 401 Unauthorized: Incorrect API key provided: sk-stub***. You can find your API key at https://platform.openai.com/account/api-keys., url: http://127.0.0.1:8099/s/ad2067c1ad91/v1/responses"}}

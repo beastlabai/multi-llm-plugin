@@ -33,6 +33,9 @@ provider may sit without one — by name, with a reason.
           error_contains: ["..."]    # optional: substrings of ["error"]
           raw_contains: ["..."]      # optional: substrings of the captured bytes
           classify_failure: null     # optional, and `null` is an assertion
+          known_wrong:               # optional: the measured verdict is wrong
+            intended: rate_limited   #   what classify_failure should give
+            reason: "..."            #   why it does not yet
           salvage: answer            # optional: none | partial | answer
           lane_status: {lane_a: ok, lane_b: ok}   # required: see below
       empty:
@@ -76,6 +79,15 @@ fan-out is the deliberate exception
 (docs/development/delegation.md#read-and-analyze-executor).
 Every graded row carries it, so a parser or classifier change shows here first.
 
+``expect.known_wrong`` marks a ``classify_failure`` pin that records a known
+bug rather than the right verdict. ``classify_failure`` stays the measured
+value, so the row keeps grading what the adapter does today; ``intended`` names
+the verdict it should give, one of :data:`CLASSIFY_VERDICTS`, and ``reason``
+says why it does not. When the adapter starts giving ``intended``, the
+classification check fails and asks for the marker to go and the pin to move,
+so a classifier fix flips each such row deliberately. The marker never skips a
+row: its parse, salvage and lane checks run as on any other.
+
 A row carries **either** files+``exit_code``+``expect`` **or**
 ``not_applicable`` with a measured reason — §6.3's rule, enforced here: *"not
 applicable, because …" is an acceptable cell; an untested one is not.* Every
@@ -101,6 +113,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.provider_registry import _PROVIDERS  # noqa: E402
+from utils.providers import failure_classifier as _fc  # noqa: E402
 from tests.roster_check import RECIPE  # noqa: E402
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -142,14 +155,14 @@ CANONICAL_ROWS = (
 #: nothing graded their classification, so both shipped a *successful* run that
 #: `classify_failure` read as ``rate_limited`` — from our own echoed prompt —
 #: with no test in the repo able to see it. Their manifests now pin that cell.
-#: The remaining rows are the same exposure until each is migrated.
-MANIFEST_PENDING = {
-    "codex": "TestCodexParseRealCaptures",
-    "kilocode": "TestKiloCodeDefaultModelSpecs",
-    "kimi": "TestKimiProvider",
-    "opencode": "TestOpenCodeRealSchema",
-    "qwen-code": "TestQwenCodeProvider",
-}
+#:
+#: **This table is now empty.** codex, kilocode, kimi, opencode and qwen-code
+#: left it on 2026-11-10 with manifests over captures from
+#: tests/fixtures/row_capture/, and their first grading found the same class of
+#: gap: kilocode's 401 and 429 classify None (see its manifest's notes). It is
+#: kept, like ``FIXTURES_PENDING``, as the named place a provider with
+#: fixtures but no manifest has to be listed.
+MANIFEST_PENDING: dict[str, str] = {}
 
 #: Group B — no fixture set exists at all (plans/harness-full-coverage.md
 #: Wave 5). The value is the measured reason, and the directory is asserted
@@ -175,7 +188,20 @@ _ALLOWED_TOP = {"schema_version", "provider", "cli_version", "captured", "method
 _ALLOWED_ROW = {"stdout", "stderr", "exit_code", "expect", "not_applicable",
                 "synthesized", "provenance", "notes", "wall_s", "requests"}
 _ALLOWED_EXPECT = {"success", "data", "error_contains", "raw_contains",
-                   "classify_failure", "salvage", "lane_status"}
+                   "classify_failure", "known_wrong", "salvage", "lane_status"}
+#: Every verdict ``classify_failure`` gives besides ``None``: the ladder
+#: statuses and ``CATEGORY_*`` names ``failure_classifier.classify_streams``
+#: returns. ``expect.known_wrong.intended`` must be one of them.
+CLASSIFY_VERDICTS = frozenset({
+    _fc.STATUS_AUTH_FAILED, _fc.STATUS_CONTEXT_LENGTH_EXCEEDED,
+    _fc.STATUS_RATE_LIMITED, _fc.STATUS_RUNNER_ERROR, _fc.STATUS_SPAWN_FAILED,
+    _fc.STATUS_TIMEOUT, _fc.CATEGORY_CONNECTION_ERROR, _fc.CATEGORY_SERVER_ERROR,
+    _fc.CATEGORY_INVALID_MODEL, _fc.CATEGORY_PERMISSION_DENIED,
+    _fc.CATEGORY_SANDBOX_UNAVAILABLE,
+})
+#: ``expect.known_wrong``'s keys, both required: the verdict the row should
+#: get, and why it does not yet.
+KNOWN_WRONG_KEYS = frozenset({"intended", "reason"})
 #: ``expect.salvage``'s whole vocabulary (see the module docstring).
 SALVAGE_LABELS = ("none", "partial", "answer")
 #: ``expect.lane_status``'s keys: the two statuses, and the markers of a row
@@ -220,6 +246,42 @@ ROW_IDS = [
 
 def _row(provider: str, row: str) -> dict:
     return MANIFESTS[provider]["rows"][row]
+
+
+def known_wrong_problems(expect: dict) -> list:
+    """What is wrong with ``expect.known_wrong``: empty when it is absent or
+    well formed (see the module docstring)."""
+    if "known_wrong" not in expect:
+        return []
+    marker = expect["known_wrong"]
+    if not isinstance(marker, dict):
+        return ["expect.known_wrong is a mapping: {intended: <verdict>, reason: <why>}"]
+    problems = []
+    if set(marker) != KNOWN_WRONG_KEYS:
+        problems.append(
+            f"expect.known_wrong takes exactly {sorted(KNOWN_WRONG_KEYS)}, "
+            f"not {sorted(marker)}"
+        )
+    if "classify_failure" not in expect:
+        problems.append(
+            "expect.known_wrong sits beside the measured expect.classify_failure, "
+            "which stays pinned"
+        )
+    intended = marker.get("intended")
+    if not isinstance(intended, str) or intended not in CLASSIFY_VERDICTS:
+        problems.append(
+            f"expect.known_wrong.intended is {intended!r}; it must be one of "
+            f"{sorted(CLASSIFY_VERDICTS)}"
+        )
+    elif intended == expect.get("classify_failure"):
+        problems.append(
+            "expect.known_wrong.intended is the measured classify_failure, so "
+            "nothing is wrong: delete the marker"
+        )
+    reason = marker.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        problems.append("expect.known_wrong.reason says why the measured verdict is wrong")
+    return problems
 
 
 def _stream(provider: str, row: dict, key: str) -> str:
@@ -367,6 +429,8 @@ def test_row_is_well_formed(provider, row_name):
     assert isinstance(expect.get("success"), bool), (
         "expect.success is required — it is the minimum a fixture may pin"
     )
+    problems = known_wrong_problems(expect)
+    assert not problems, "; ".join(problems)
     if "salvage" in expect:
         assert expect["salvage"] in SALVAGE_LABELS, (
             f"expect.salvage is {expect['salvage']!r}; it must be one of "
@@ -446,7 +510,8 @@ def test_row_classifies_as_declared(provider, row_name):
 
     ``classify_failure: null`` is an assertion in its own right — "nothing was
     recognized here" — and on a success row it is the one that catches an
-    adapter reading its own happy path as a failure.
+    adapter reading its own happy path as a failure. A row with
+    ``known_wrong`` fails once the adapter gives its ``intended`` verdict.
     """
     row = _row(provider, row_name)
     if "not_applicable" in row:
@@ -455,12 +520,78 @@ def test_row_classifies_as_declared(provider, row_name):
         pytest.skip("this row declares no classification")
 
     adapter = _PROVIDERS[provider]
-
-    assert adapter.classify_failure(
+    verdict = adapter.classify_failure(
         _stream(provider, row, "stdout"),
         _stream(provider, row, "stderr"),
         row["exit_code"],
-    ) == row["expect"]["classify_failure"]
+    )
+
+    marker = row["expect"].get("known_wrong")
+    if marker is not None:
+        assert verdict != marker["intended"], (
+            f"{provider}/{row_name}: classify_failure now gives the intended "
+            f"{verdict!r}. Delete the row's expect.known_wrong marker, set "
+            f"expect.classify_failure: {verdict!r}, and re-pin expect.lane_status"
+        )
+    assert verdict == row["expect"]["classify_failure"], (
+        f"{provider}/{row_name}: classify_failure gave {verdict!r}, the manifest "
+        f"pins {row['expect']['classify_failure']!r}"
+    )
+
+
+#: The rows whose measured verdict carries ``expect.known_wrong``.
+KNOWN_WRONG_ROWS = [
+    (provider, row_name)
+    for provider, row_name in ROW_IDS
+    if "known_wrong" in (_row(provider, row_name).get("expect") or {})
+]
+
+_GOOD_MARKER = {"intended": "rate_limited", "reason": "the reset defeats the pattern"}
+
+
+@pytest.mark.parametrize("expect,needle", [
+    ({"classify_failure": None, "known_wrong": "rate_limited"}, "is a mapping"),
+    ({"classify_failure": None,
+      "known_wrong": {**_GOOD_MARKER, "fix": "U94"}}, "takes exactly"),
+    ({"classify_failure": None,
+      "known_wrong": {"intended": "rate_limited"}}, "takes exactly"),
+    ({"known_wrong": _GOOD_MARKER}, "beside the measured"),
+    ({"classify_failure": None,
+      "known_wrong": {**_GOOD_MARKER, "intended": "rate-limited"}}, "must be one of"),
+    ({"classify_failure": None,
+      "known_wrong": {**_GOOD_MARKER, "intended": None}}, "must be one of"),
+    ({"classify_failure": "rate_limited", "known_wrong": _GOOD_MARKER}, "nothing is wrong"),
+    ({"classify_failure": None,
+      "known_wrong": {**_GOOD_MARKER, "reason": "  "}}, "reason says why"),
+    ({"classify_failure": None,
+      "known_wrong": {**_GOOD_MARKER, "reason": None}}, "reason says why"),
+], ids=["not-a-mapping", "unknown-key", "no-reason-key", "no-measured-pin",
+        "unknown-verdict", "null-verdict", "intended-is-measured", "blank-reason",
+        "null-reason"])
+def test_a_malformed_known_wrong_marker_is_rejected(expect, needle):
+    problems = known_wrong_problems(expect)
+    assert any(needle in problem for problem in problems), problems
+
+
+def test_a_well_formed_known_wrong_marker_passes():
+    assert known_wrong_problems({"classify_failure": None, "known_wrong": _GOOD_MARKER}) == []
+    assert known_wrong_problems({"classify_failure": None}) == []
+
+
+@pytest.mark.parametrize("provider,row_name", KNOWN_WRONG_ROWS,
+                         ids=[f"{p}-{r}" for p, r in KNOWN_WRONG_ROWS])
+def test_a_known_wrong_row_fails_once_its_verdict_is_fixed(
+    provider, row_name, monkeypatch
+):
+    """The classifier fix the marker waits for: the adapter gives ``intended``
+    and the row's own classification check asks for the marker to go."""
+    intended = _row(provider, row_name)["expect"]["known_wrong"]["intended"]
+    monkeypatch.setattr(
+        _PROVIDERS[provider], "classify_failure", lambda *_args, **_kwargs: intended
+    )
+
+    with pytest.raises(AssertionError, match="Delete the row's expect.known_wrong marker"):
+        test_row_classifies_as_declared(provider, row_name)
 
 
 # --------------------------------------------------------------------------- #

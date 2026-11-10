@@ -1,0 +1,7 @@
+{
+  "error": {
+    "type": "AlreadyReportedError",
+    "message": "[API Error: 401 Incorrect API key provided: sk-stub***. You can find your API key at https://platform.openai.com/account/api-keys.]",
+    "code": 1
+  }
+}

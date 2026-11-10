@@ -621,6 +621,21 @@ T3_CODEX_CORPUS = (
     # the commands' own output is full of `Permission denied`, none of it the
     # vendor's. Graded `permission_denied` without the hook, nothing with it.
     ("landlock/jail_writes.out.jsonl",             "permission_denied",  None),
+    # The §6.2 rows on 0.167.0 (tests/fixtures/codex/manifest.yaml, 2026-11-10):
+    # the hook moves none of them. The manifest grades them again with their
+    # own stderr and exit code.
+    ("rows/auth-error.stdout.txt",                 "auth_failed",        "auth_failed"),
+    ("rows/context-overflow.stdout.txt",           "context_length_exceeded",
+     "context_length_exceeded"),
+    ("rows/ephemeral-only.stdout.txt",             None,                 None),
+    ("rows/error-envelope.stdout.txt",             None,                 None),
+    ("rows/invalid-model.stdout.txt",              "invalid_model",      "invalid_model"),
+    ("rows/multi-assistant.stdout.txt",            None,                 None),
+    ("rows/rate-limit.stdout.txt",                 "rate_limited",       "rate_limited"),
+    ("rows/stdout-error.stdout.txt",               None,                 None),
+    ("rows/success.stdout.txt",                    None,                 None),
+    ("rows/truncated.stdout.txt",                  None,                 None),
+    ("rows/zero-body.stdout.txt",                  None,                 None),
 )
 
 
@@ -677,6 +692,7 @@ class TestCodexVendorTextGradesEveryCapture:
             for path in root.rglob("*")
             if path.is_file()
             and path.suffix in (".jsonl", ".json", ".txt")
+            and not path.name.endswith(".stderr.txt")
             and not set(path.relative_to(root).parts) & set(_T3_CODEX_NOT_CAPTURES)
         }
         assert on_disk == {row[0] for row in T3_CODEX_CORPUS}

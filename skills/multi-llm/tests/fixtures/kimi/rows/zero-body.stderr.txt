@@ -1,0 +1,2 @@
+error: failed to run prompt: provider.connection_error: Connection error.
+See log: /tmp/mllm-inv/kimi-255383d2ea16/.kimi-code/logs/kimi-code.log
