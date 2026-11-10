@@ -27,6 +27,7 @@ child's argv shape rather than bypassing it.
 """
 
 import argparse
+import contextlib
 import json
 import os
 import signal
@@ -70,6 +71,18 @@ def _phase_dir(plan: Path, phase: str = "review-plan") -> Path:
     directory = plan.parent / plan.stem.replace(" ", "_") / phase
     directory.mkdir(parents=True, exist_ok=True)
     return directory
+
+
+@contextlib.contextmanager
+def _foreground_run_holds(phase: Path):
+    """The phase lock a live foreground review run holds from its entry to its
+    exit (``detach.PhaseRun``); ``status`` probes it (``lock_held``)."""
+    lock = process_control.PhaseLock(detach.lock_path(str(phase)))
+    lock.acquire({"holder": "review-plan (foreground)", "pid": os.getpid()})
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 WORKER_TEMPLATE = '''
@@ -1821,7 +1834,8 @@ class TestStatusSurface:
         assert view["verdict"] == detach.VERDICT_NO_RUN
         assert view["verdict"] not in detach.TERMINAL_VERDICTS
 
-        assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
+        with _foreground_run_holds(phase):
+            assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
         out = capsys.readouterr().out
 
         assert "running in foreground (2/4 models, no detached run record)" in out
@@ -2605,10 +2619,11 @@ class TestStatusSurface:
         assert "run" not in status_file.read_status(str(phase))
         clock = _WaitClock(monkeypatch)
         clock.start()
-        code = run_status.main([
-            "--plan-file", str(plan), "--view", "run", "--host", "opencode",
-            "--wait",
-        ])
+        with _foreground_run_holds(phase):
+            code = run_status.main([
+                "--plan-file", str(plan), "--view", "run", "--host", "opencode",
+                "--wait",
+            ])
         elapsed = clock.elapsed
         out = capsys.readouterr().out
         assert code == 2
@@ -5799,11 +5814,46 @@ class TestTheForegroundHeadLineHasATense:
     def test_a_working_foreground_phase_still_says_running(self, tmp_path, capsys):
         """The mirror row: the tense has to distinguish, not just soften."""
         plan = _plan(tmp_path)
-        self._foreground(plan, state="models_running", step="fanout", done=1)
+        phase = self._foreground(plan, state="models_running", step="fanout", done=1)
+
+        with _foreground_run_holds(phase):
+            assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
+        out = capsys.readouterr().out
+        assert "running in foreground (1/2 models, no detached run record)" in out
+
+    def test_a_fanout_whose_process_ended_without_a_final_state_says_so(
+        self, tmp_path, capsys
+    ):
+        """P3: a review fan-out whose every model failed exits 3 and leaves
+        ``state: models_running`` behind. Its foreground run held the phase
+        lock for its whole life, so a free lock says that run has ended: the
+        head line stops calling it running. The verdict and exit code stay."""
+        plan = _plan(tmp_path)
+        phase = self._foreground(plan, state="models_running", step="fanout", done=2)
+
+        assert detach.classify_run(str(phase))["verdict"] == detach.VERDICT_NO_RUN
+        assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
+        out = capsys.readouterr().out
+        assert ("ended in foreground without a final state (2/2 models, no detached "
+                "run record)") in out
+        assert "running in foreground" not in out, out
+        assert "phase state:    models_running" in out
+
+    def test_a_phase_whose_foreground_run_holds_no_lock_still_says_running(
+        self, tmp_path, capsys
+    ):
+        """generate-tasks, implement and the apply phases run in the foreground
+        without the phase lock, so a free lock tells nothing there."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, "generate-tasks")
+        status_file.write_status(str(phase), {
+            "phase": "generate-tasks", "state": "task_generation_running",
+            "progress": {"step": "dispatch"},
+        })
 
         assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
         out = capsys.readouterr().out
-        assert "running in foreground (1/2 models, no detached run record)" in out
+        assert "running in foreground (no detached run record)" in out
 
     def test_the_host_handoff_state_counts_as_finished(self, tmp_path, capsys):
         """`validation_pending` is a terminal step, not a stalled one.

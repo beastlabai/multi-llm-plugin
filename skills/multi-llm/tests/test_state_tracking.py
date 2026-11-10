@@ -365,3 +365,20 @@ class TestPhaseCompletionTimestamps:
         # They could be the same if executed fast enough, so just verify both exist
         assert ts1 is not None
         assert ts2 is not None
+
+
+def test_a_new_state_outside_a_git_repository_is_a_clear_stop(tmp_path, monkeypatch):
+    """P5: every phase records the commit its run starts from, so a new state
+    outside a repository stops with a message (``NeedsHuman``: exit 3, printed
+    alone by the dispatcher), never a ``GitError`` traceback."""
+    from utils.unattended import NeedsHuman
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path.parent))
+    plan = tmp_path / "plan.md"
+    plan.write_text("# Plan\n", encoding="utf-8")
+    with pytest.raises(NeedsHuman) as stopped:
+        StateManager(plan)
+    assert f"{tmp_path} is not inside a git repository" in stopped.value.message
+    assert "git init" in stopped.value.message
+    assert not (tmp_path / "plan" / "state.json").exists()

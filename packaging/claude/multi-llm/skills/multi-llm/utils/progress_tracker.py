@@ -79,6 +79,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
+from .clock import parse_local
 from .process_state import process_cache
 # A slot's end states live in status_file, where the result-file reader below
 # this module counts them too; read here and re-exported.
@@ -235,7 +236,7 @@ def _stamp_after(delay_s: Any) -> Optional[str]:
         return None
 
     try:
-        when = datetime.fromisoformat(_now_iso()) + timedelta(seconds=number)
+        when = parse_local(_now_iso()) + timedelta(seconds=number)
     except (ValueError, OverflowError):
         return None
     return when.isoformat()

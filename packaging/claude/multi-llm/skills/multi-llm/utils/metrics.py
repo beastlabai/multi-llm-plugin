@@ -33,6 +33,7 @@ from typing import (
 )
 
 from . import state_file as _state_file
+from .clock import parse_local
 from .stream_bootstrap import bootstrap_streams
 from .text_clip import clip
 
@@ -674,7 +675,7 @@ def finish_phase_in_state(
     started_at_raw = entry.get("started_at")
     if started_at_raw:
         try:
-            started_at = datetime.fromisoformat(started_at_raw)
+            started_at = parse_local(started_at_raw)
             elapsed_ms = int((datetime.now() - started_at).total_seconds() * 1000)
         except (ValueError, TypeError):
             elapsed_ms = None
@@ -853,7 +854,7 @@ def _compute_eta(
     elapsed_ms: Optional[int] = None
     if progress and progress.get("started_at"):
         try:
-            started_at = datetime.fromisoformat(progress["started_at"])
+            started_at = parse_local(progress["started_at"])
             elapsed_ms = int((datetime.now() - started_at).total_seconds() * 1000)
             worked = done - len(failed_here)
             worked_ms = elapsed_ms - failed_ms

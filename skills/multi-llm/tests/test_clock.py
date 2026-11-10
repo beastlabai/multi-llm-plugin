@@ -236,3 +236,26 @@ def test_the_ordered_comparison_does_not_depend_on_the_zone_of_the_machine(new_y
     # 10:00:10Z is 06:00:10 in New York, earlier than a naive 10:00:00 local record.
     assert scope_policy_runs.resolve_run_choice(None, state, "improve-code") == (
         "preserve", "continuation")
+
+
+def test_no_skill_module_parses_a_stamp_with_a_bare_fromisoformat():
+    """One stamp parser: every module reads an ISO stamp through
+    ``clock.parse_iso`` or ``clock.parse_local``, which read the ``Z``/``z``
+    spelling ``datetime.fromisoformat`` refuses on some Pythons (Python 3.10
+    refuses ``Z``, every Python ``z``). A ``date.fromisoformat`` (a date, not
+    a stamp) is not this rule's."""
+    import ast
+
+    skill = Path(__file__).resolve().parents[1]
+    found = []
+    for path in sorted(skill.rglob("*.py")):
+        parts = path.relative_to(skill).parts
+        if parts[0] in ("tests", ".venv") or "__pycache__" in parts:
+            continue
+        if path.relative_to(skill).as_posix() == "utils/clock.py":
+            continue
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if (isinstance(node, ast.Attribute) and node.attr == "fromisoformat"
+                    and isinstance(node.value, ast.Name) and node.value.id == "datetime"):
+                found.append(f"{path.relative_to(skill)}:{node.lineno}")
+    assert found == []

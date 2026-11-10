@@ -50,11 +50,13 @@ from .progress_tracker import (
 from .text_clip import clip, join_clauses, plain_line
 from .validation_context import validation_context_notice, validation_context_text
 from .status_views import (
+    ENDED_IN_FOREGROUND,
     STOPPED_IN_FOREGROUND,
     STOPPED_STEP,
     _a_dispatch_failed,
     _checkpoint_in_flight,
     _died,
+    _foreground_run_gone,
     _document_word,
     _failed_model_specs,
     _is_executor_implement_view,
@@ -633,14 +635,16 @@ def _verdict_text(view: Dict[str, Any]) -> str:
             return STOPPED_IN_FOREGROUND
         if progress:
             tense = "running" if _checkpoint_in_flight(view) else "finished"
+            head = f"{tense} in foreground"
+            if _foreground_run_gone(view):
+                # Its checkpoint still reads in flight, but the lock its run
+                # held for its whole life is free: that run has ended.
+                head = ENDED_IN_FOREGROUND
             total = progress.get("models_total")
             if isinstance(total, int) and not isinstance(total, bool) and total:
                 done = progress.get("models_done", 0)
-                return (
-                    f"{tense} in foreground ({done}/{total} models, no detached "
-                    "run record)"
-                )
-            return f"{tense} in foreground (no detached run record)"
+                return f"{head} ({done}/{total} models, no detached run record)"
+            return f"{head} (no detached run record)"
     return str(verdict)
 
 

@@ -124,6 +124,32 @@ def _checkpoint_in_flight(view: Dict[str, Any]) -> bool:
     return False
 
 
+#: The phases whose foreground run holds its phase dir's ``.lock`` from before
+#: its first checkpoint write to its exit: the review fan-outs (``detach.PhaseRun``)
+#: and ask (its question lock). Their checkpoint read as in flight under a
+#: free lock, with no ``run`` record, was left by a run that is gone.
+FOREGROUND_LOCKED_PHASES = frozenset({"review-plan", "review-tasks", "code-review", "ask"})
+
+#: How such a run heads its block (:func:`_foreground_run_gone`).
+ENDED_IN_FOREGROUND = "ended in foreground without a final state"
+
+
+def _foreground_run_gone(view: Dict[str, Any]) -> bool:
+    """Whether a foreground checkpoint that reads in flight
+    (:func:`_checkpoint_in_flight`) was left by a run that has ended: no
+    ``run`` record, a phase of :data:`FOREGROUND_LOCKED_PHASES`, and nobody
+    holds the phase lock (``classify_run``'s ``lock_held``, probed). A fan-out
+    whose every model failed exits 3 with ``state: models_running`` still on
+    disk; this is what tells it from one still running. Text only: the
+    verdict stays ``no_run`` (docs/development/status.md)."""
+    return (
+        view.get("verdict") == detach.VERDICT_NO_RUN
+        and view.get("phase") in FOREGROUND_LOCKED_PHASES
+        and view.get("lock_held") is False
+        and _checkpoint_in_flight(view)
+    )
+
+
 def _names_this_run(view: Dict[str, Any], run_id: Optional[str]) -> bool:
     """Did the caller pin this poll to *this view's own* ``run`` record?
 

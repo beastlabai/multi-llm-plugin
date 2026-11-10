@@ -3102,6 +3102,11 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # nothing and only has to claim the phase dir.
         if not (self._is_detach_invoker()
                 or getattr(self.args, "internal_worker", False)):
+            # The foreground run replaces a damaged checkpoint, never a dry run
+            # (utils/detach.py, `settle_foreground_checkpoint`).
+            if not getattr(self.args, "dry_run", False):
+                _detach.settle_foreground_checkpoint(
+                    os.path.join(self.out_dir, self.phase_name), phase=self.phase_name)
             return None
 
         phase_dir = os.path.join(self.out_dir, self.phase_name)

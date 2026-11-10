@@ -55,7 +55,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, Sequence, Tuple, Union
 
 from . import (
     output_handler,
@@ -1794,6 +1794,136 @@ def record_worker_refusal(phase_dir: str, run_id: Optional[str], message: str) -
     _record_worker_refusal(phase_dir, run_id, message)
 
 
+# -- a damaged checkpoint at a run's start ---------------------------------
+
+def _phase_of(mode: Optional[str], phase: Optional[str]) -> Optional[str]:
+    """*phase*, or the phase the mode table gives *mode*; ``None`` when
+    neither names one (``status_file.records_withheld_answers`` then takes
+    it for a phase that withholds answers)."""
+    if phase:
+        return str(phase)
+    row = modes_table().resolve(str(mode)) if mode else None
+    found = getattr(row, "phase", None) if row is not None else None
+    return str(found) if found else None
+
+
+def _damaged_checkpoint(
+    phase_dir: str,
+) -> Tuple[Optional[status_file.CheckpointDamage], Optional[str]]:
+    """*phase_dir*'s checkpoint, judged before a run's first write to it:
+    ``(damage, None)`` when it is damaged (``status_file.checkpoint_damage``),
+    ``(None, None)`` when it is absent or readable, and ``(None, why)`` when
+    it cannot be read and nothing proves its bytes damaged: such a file is
+    left as it is."""
+    try:
+        return status_file.checkpoint_damage(phase_dir), None
+    except status_file.CheckpointUnreadable as exc:
+        cause = exc.__cause__ or exc
+        return None, (
+            f"{status_file.status_path(phase_dir)} could not be read ({cause}), on "
+            f"each of {status_file.CHECKPOINT_READ_ATTEMPTS} reads: nothing shows "
+            f"that its bytes are damaged, so it is left as it is.")
+
+
+def _replace_damaged(
+    phase_dir: str, damage: status_file.CheckpointDamage, *, phase: Optional[str],
+) -> Optional[str]:
+    """Replace *damage* for the run that owns *phase_dir*
+    (``status_file.replace_damaged_checkpoint``), with a warning; ``None``
+    when it was replaced, else why not. A phase whose checkpoint records
+    withheld answers is never replaced here: only a fresh run of it recovers
+    one (``review_lane.recover_damaged_checkpoint``)."""
+    status = status_file.status_path(phase_dir)
+    found = f"{status} is damaged ({damage.detail}, {damage.size} bytes)"
+    if status_file.records_withheld_answers(phase):
+        return (f"{found}, and it records which answers this phase withholds: only "
+                f"a fresh run of the phase recovers it, before that run records "
+                f"itself there.")
+    try:
+        archived = status_file.replace_damaged_checkpoint(phase_dir, damage, phase=phase)
+    except (OSError, status_file.CheckpointUnreadable,
+            status_file.CheckpointLockUnavailable) as exc:
+        return f"{found}, and it could not be replaced ({exc or type(exc).__name__})."
+    print(f"WARNING: {found}: its bytes are kept as {os.path.basename(archived)}, and "
+          f"a fresh checkpoint replaced it, nothing read from it (this phase's "
+          f"checkpoint holds run and progress records only).", file=sys.stderr)
+    return None
+
+
+@contextlib.contextmanager
+def _repair_hold(phase_dir: str, phase: Optional[str]) -> Iterator[bool]:
+    """*phase_dir*'s ``.lock`` for a foreground run's checkpoint repair:
+    ``True`` while this process holds it (a hold it already had, or one taken
+    here the way a run's entry takes it, :func:`_take_entry_lock`, and
+    released on the way out), ``False`` when another process holds it or it
+    cannot be taken at all; then nothing may be replaced."""
+    if holds_phase_lock(phase_dir):
+        yield True
+        return
+    payload = {
+        "holder": f"{phase or 'phase'} (foreground checkpoint repair)",
+        "mode": phase,
+        "pid": os.getpid(),
+        "process_start_time": process_control.process_start_time(os.getpid()),
+        "acquired_at": status_file.now_iso(),
+    }
+    lock: Optional[process_control.PhaseLock]
+    try:
+        lock = _take_entry_lock(lock_path(phase_dir), payload)
+    except (PhaseDirBusy, OSError):
+        lock = None
+    if lock is None:
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        lock.release()
+
+
+def settle_foreground_checkpoint(
+    phase_dir: str, *, mode: Optional[str] = None, phase: Optional[str] = None,
+) -> None:
+    """A foreground run's start, before its first write to *phase_dir*'s
+    checkpoint: a damaged one is replaced (:func:`_replace_damaged`), or a
+    warning says why it is not and that the run goes on unrecorded there.
+
+    Never stops: a foreground run's outputs do not depend on its checkpoint,
+    whose writes skip a file they cannot read (``status_file.update_status``).
+    Does nothing in a phase whose checkpoint records withheld answers (its
+    own lane recovers it, ``review_lane.recover_damaged_checkpoint``), or
+    over a folder or checkpoint that does not exist; and leaves a damaged
+    one to the run that holds the phase lock, when that is another process.
+    The replacement runs under that lock, held from a second look at the file
+    to the rename (:func:`_repair_hold`): a worker that took the lock between
+    a first look and the rename would find the damage, lose it to this run's
+    replacement, and refuse without publishing its run. A detached worker
+    settles its own in :meth:`RunHandle.start`
+    (docs/development/review-results.md, "Recovering a damaged one")."""
+    phase_dir = str(phase_dir)
+    phase = _phase_of(mode, phase)
+    if status_file.records_withheld_answers(phase):
+        return
+    if not os.path.lexists(status_file.status_path(phase_dir)):
+        return
+    damage, problem = _damaged_checkpoint(phase_dir)
+    if damage is not None:
+        with _repair_hold(phase_dir, phase) as held:
+            if held:
+                damage, problem = _damaged_checkpoint(phase_dir)
+                if damage is not None:
+                    problem = _replace_damaged(phase_dir, damage, phase=phase)
+            else:
+                problem = (f"{status_file.status_path(phase_dir)} is damaged "
+                           f"({damage.detail}), and another process holds "
+                           f"{lock_path(phase_dir)}: the run that owns it replaces it.")
+    if problem is not None:
+        print(f"WARNING: {problem} This run goes on, but until the file is replaced "
+              f"nothing it records there is kept, and `status` shows no run of it. "
+              f"{status_file.unreadable_checkpoint_advice(phase_dir, phase=phase)}",
+              file=sys.stderr)
+
+
 def _read_worker_refusal(phase_dir: str, run_id: str) -> Optional[Dict[str, Any]]:
     """The refusal record run *run_id*'s worker left, removed once read."""
     path = worker_refusal_path(phase_dir, run_id)
@@ -2638,8 +2768,12 @@ class RunHandle:
         replay_flags: Optional[Sequence[str]] = None,
         plan_arg: Optional[str] = None,
         commit_stage: Optional[str] = None,
+        phase: Optional[str] = None,
     ):
         self.phase_dir = str(phase_dir)
+        # The phase the dir belongs to: whether its checkpoint records withheld
+        # answers decides what `start` does over a damaged one.
+        self.phase: Optional[str] = _phase_of(mode, phase)
         # A commit front door's `--detach` stage (`--commit-stage`), applied
         # once this worker owns the dir (see `start`).
         self.commit_stage: Optional[str] = str(commit_stage) if commit_stage else None
@@ -2677,6 +2811,24 @@ class RunHandle:
             _record_worker_refusal(self.phase_dir, self.run_id, str(exc))
             raise
         self._apply_commit_stage()
+        # Still before this run's first write: `claim_run` over a checkpoint it
+        # cannot read writes nothing, and the launch would wait out its
+        # handshake while this worker ran the phase. A damaged one is replaced
+        # (every phase but those whose checkpoint records withheld answers,
+        # which their own fresh run recovers before this point); anything else
+        # refuses at once, and the launch reports why
+        # (docs/development/review-results.md, "Recovering a damaged one").
+        damage, problem = _damaged_checkpoint(self.phase_dir)
+        if damage is not None:
+            problem = _replace_damaged(self.phase_dir, damage, phase=self.phase)
+        if problem is not None:
+            message = (
+                f"ERROR: {problem} This run recorded nothing and dispatched nothing. "
+                f"{status_file.unreadable_checkpoint_advice(self.phase_dir, phase=self.phase)}"
+            )
+            _record_worker_refusal(self.phase_dir, self.run_id, message)
+            self._lock.release()
+            raise DetachError(message)
         identity = process_control.identity()
         # Recorded, never re-derived: after the double spawn the group leader is
         # the exited intermediate, so once this worker dies nothing can ask the
@@ -3857,7 +4009,8 @@ def handle_phase_detach(
     """
     if getattr(args, "internal_worker", False):
         begin_worker_run(
-            phase_dir=phase_dir, mode=mode, plan_file=plan_file, args=args
+            phase_dir=phase_dir, mode=mode, plan_file=plan_file, args=args,
+            phase=phase,
         )
         return None
     if not getattr(args, "detach", False):
@@ -3883,7 +4036,8 @@ def handle_phase_detach(
 
 
 def begin_worker_run(
-    *, phase_dir: str, mode: str, plan_file: str, args: Any
+    *, phase_dir: str, mode: str, plan_file: str, args: Any,
+    phase: Optional[str] = None,
 ) -> "RunHandle":
     """Start this process's ownership of a phase dir as the detached worker."""
     run_id = getattr(args, "internal_run_id", None) or str(uuid.uuid4())
@@ -3927,6 +4081,7 @@ def begin_worker_run(
         replay_flags=replay,
         plan_arg=plan_arg,
         commit_stage=getattr(args, "commit_stage", None),
+        phase=phase,
     )
     handle.start()
     return handle

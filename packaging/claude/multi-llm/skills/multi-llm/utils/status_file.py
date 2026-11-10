@@ -12,10 +12,13 @@ changed in the move — same atomic temp+rename, same best-effort swallow, same
 merge semantics — so every existing consumer and test keeps its meaning. One
 rule was added since: a merge that cannot read the checkpoint skips its update
 rather than writing the update alone over it (:func:`update_status`,
-:func:`load_status`). And one writer replaces a checkpoint whole: a fresh
-review run's recovery of a damaged one (:func:`checkpoint_damage`,
-:func:`archive_damaged_checkpoint`, :func:`publish_checkpoint`, called by
-``review_lane.recover_damaged_checkpoint``).
+:func:`load_status`). And two writers replace a damaged checkpoint whole
+(:func:`checkpoint_damage`, :func:`archive_damaged_checkpoint`,
+:func:`publish_checkpoint`): a fresh run's recovery in a phase whose
+checkpoint records withheld answers (:data:`WITHHELD_RECORD_PHASES`,
+``review_lane.recover_damaged_checkpoint``), and the owning run's
+replacement in every other phase (:func:`replace_damaged_checkpoint`,
+called by ``detach``).
 
 **The schema is additive, never forked.** ``{phase}/.status.json`` is the
 orchestrator checkpoint: ``ask_orchestrator`` reads ``question`` byte-for-byte as
@@ -151,6 +154,7 @@ import stat
 import sys
 import threading
 import time
+from datetime import datetime
 from typing import Any, Dict, Iterable, Iterator, NamedTuple, Optional, Tuple
 
 from . import process_control
@@ -383,7 +387,9 @@ def update_status(phase_dir: str, updates: dict) -> None:
     (:func:`load_status`), is kept as it is and the update is skipped: written
     over it, the update alone would replace every key it does not name, the
     records of withheld slot answers among them
-    (docs/development/review-results.md, "Withheld slot answers").
+    (docs/development/review-results.md, "Withheld slot answers"). A damaged
+    one is replaced whole only at a run's start, by the run that owns the
+    dir (:func:`replace_damaged_checkpoint`, ``review_lane.recover_damaged_checkpoint``).
     """
     with checkpoint_lock(phase_dir):
         try:
@@ -514,27 +520,63 @@ def load_status(phase_dir: str, *, attempts: int = 1) -> Optional[Dict[str, Any]
     raise CheckpointUnreadable(path) from failure
 
 
-def unreadable_checkpoint_advice(phase_dir: str) -> str:
+#: The phases whose checkpoint records which model answers are withheld
+#: (``result_files``: ``models_rejected``, ``models_unchecked``,
+#: ``checkpoint_recovered``): the review fan-outs (review-plan, review-tasks,
+#: review-code and review-commits, whose phase is ``code-review``) and ask.
+#: Only a fresh run of the phase recovers their damaged checkpoint, every
+#: earlier answer set aside and every model withheld after
+#: (``review_lane.recover_damaged_checkpoint``). Every other phase's
+#: checkpoint holds run, progress and display records only, so the run that
+#: owns the dir replaces a damaged one (:func:`replace_damaged_checkpoint`)
+#: (docs/development/review-results.md, "Recovering a damaged one").
+WITHHELD_RECORD_PHASES: Tuple[str, ...] = ("review-plan", "review-tasks", "code-review", "ask")
+
+
+def records_withheld_answers(phase: Optional[str]) -> bool:
+    """Whether *phase*'s checkpoint can record withheld answers
+    (:data:`WITHHELD_RECORD_PHASES`). A phase that cannot be named
+    (``None``) is taken to, so nothing is replaced over it."""
+    return phase is None or phase in WITHHELD_RECORD_PHASES
+
+
+def unreadable_checkpoint_advice(phase_dir: str, *, phase: Optional[str] = None) -> str:
     """What every stop over a phase checkpoint that cannot be read tells the
     user to do, the same everywhere (docs/development/review-results.md,
-    "Withheld slot answers"). The checkpoint is what withholds answers whose
-    safety checks failed or never finished: moved aside alone, it would leave
-    their files beside a phase that no longer records them, and they would
-    be read as results. A fresh review run recovers a damaged one in that
-    order: every earlier result set aside first, its bytes copied aside and
-    a fresh checkpoint renamed over it after
-    (``review_lane.recover_damaged_checkpoint``)."""
+    "Withheld slot answers").
+
+    In a phase whose checkpoint records withheld answers
+    (:func:`records_withheld_answers`, the default when *phase* is not
+    given) the checkpoint is what withholds answers whose safety checks
+    failed or never finished: moved aside alone, it would leave their files
+    beside a phase that no longer records them, and they would be read as
+    results. A fresh run of the phase, a review fan-out or ask, recovers a
+    damaged one in that order: every earlier result set aside or withheld
+    first, its bytes copied aside and a fresh checkpoint renamed over it
+    after (``review_lane.recover_damaged_checkpoint``). Every other phase's
+    run replaces a damaged one at its start
+    (:func:`replace_damaged_checkpoint`), and its checkpoint may be moved
+    aside alone."""
+    if not records_withheld_answers(phase):
+        return (
+            f"If the read failure has passed, running again is enough. If the file "
+            f"is damaged, run the phase again: its run keeps the damaged file as "
+            f"{STATUS_FILENAME}{UNREADABLE_ARCHIVE_INFIX}<time> and starts a fresh "
+            f"one (this phase's checkpoint holds run and progress records only). "
+            f"If the file cannot be opened at all, or that replacement stops, move "
+            f"{status_path(phase_dir)} aside, or delete it, and run the phase again."
+        )
     return (
         f"If the read failure has passed, running again is enough. If the file "
         f"is damaged, run the phase again without --reaggregate once no run of "
-        f"this phase is live (`status`): a fresh review run sets every earlier "
-        f"result in the folder aside, keeps the damaged file as "
-        f"{STATUS_FILENAME}{UNREADABLE_ARCHIVE_INFIX}<time> and starts a new round "
-        f"that reuses none of them. If the file cannot be opened at all, or that "
-        f"recovery stops, move the whole phase folder {phase_dir} aside, or "
-        f"delete it, and run the phase again. Never move .status.json aside on "
-        f"its own: the result files left beside it would then be read as "
-        f"results, answers whose safety checks failed among them."
+        f"this phase is live (`status`): a fresh run (a review fan-out, or the "
+        f"same ask question) keeps the damaged file as "
+        f"{STATUS_FILENAME}{UNREADABLE_ARCHIVE_INFIX}<time> and reuses no earlier "
+        f"result in the folder: every model runs again. If the file cannot be "
+        f"opened at all, or that recovery stops, move the whole phase folder "
+        f"{phase_dir} aside, or delete it, and run the phase again. Never move "
+        f".status.json aside on its own: the result files left beside it would "
+        f"then be read as results, answers whose safety checks failed among them."
     )
 
 
@@ -700,6 +742,41 @@ def publish_checkpoint(
         if back != data:
             raise OSError(f"{path} does not read back as written")
         return back
+
+
+def replace_damaged_checkpoint(
+    phase_dir: str, damage: CheckpointDamage, *, phase: Optional[str],
+) -> str:
+    """Replace *damage*, a damaged checkpoint of a phase whose checkpoint
+    records no withheld answers, with a fresh one; the path of the damaged
+    bytes' copy.
+
+    For the run that owns *phase_dir*, at its start, before its first
+    checkpoint write. Nothing of the damaged file is read: its bytes are
+    copied to ``.status.json.unreadable-<stamp>``
+    (:func:`archive_damaged_checkpoint`), then ``{"phase": phase}`` is
+    renamed over it in one step, only while it still holds those bytes, and
+    read back (:func:`publish_checkpoint`), under one hold of the checkpoint
+    mutex. What is lost is the run, progress and display records an earlier
+    run wrote there, which no later run decides on.
+
+    Refused with ``ValueError``, nothing written, for a phase in
+    :data:`WITHHELD_RECORD_PHASES` or one not named: only a fresh run of such
+    a phase recovers its checkpoint, every earlier answer set aside first
+    (``review_lane.recover_damaged_checkpoint``). Raises
+    :class:`CheckpointLockUnavailable` when the mutex cannot be taken,
+    ``OSError`` when the copy or the replacement fails or the bytes changed,
+    and :class:`CheckpointUnreadable` when the fresh one cannot be read back
+    (docs/development/review-results.md, "Recovering a damaged one")."""
+    if records_withheld_answers(phase):
+        raise ValueError(
+            f"{status_path(phase_dir)} records withheld answers ({phase or 'phase not named'}): "
+            f"only a fresh run of the phase recovers it")
+    stamp = datetime.now().strftime("%Y%m%dT%H%M%S%f")
+    with checkpoint_lock(phase_dir, required=True):
+        archived = archive_damaged_checkpoint(phase_dir, damage, stamp)
+        publish_checkpoint(phase_dir, {"phase": phase}, replacing=damage)
+    return archived
 
 
 def read_run(phase_dir: str) -> Dict[str, Any]:

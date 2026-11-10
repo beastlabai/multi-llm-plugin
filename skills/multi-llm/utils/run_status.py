@@ -169,6 +169,8 @@ _MOVED: Dict[str, Tuple[str, ...]] = {
     "status_views": (
         "CHECKPOINT_TERMINAL_STATES",
         "CHECKPOINT_TERMINAL_STEPS",
+        "ENDED_IN_FOREGROUND",
+        "FOREGROUND_LOCKED_PHASES",
         "GENERIC_NEEDS_HUMAN_ERROR",
         "STOPPED_IN_FOREGROUND",
         "STOPPED_STEP",
@@ -181,6 +183,7 @@ _MOVED: Dict[str, Tuple[str, ...]] = {
         "_document_file_label",
         "_document_word",
         "_failed_model_specs",
+        "_foreground_run_gone",
         "_is_ask",
         "_is_executor_implement_view",
         "_names_this_run",

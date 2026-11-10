@@ -51,7 +51,6 @@ import argparse
 import asyncio
 import contextlib
 import hashlib
-import json
 import os
 import re as _re
 import shlex
@@ -95,6 +94,7 @@ from utils.detach import (
     VERDICT_RUNNING,
     VERDICT_STALE,
     VERDICT_STARTING,
+    PhaseRun,
     classify_run,
     lock_path,
     record_output_files,
@@ -122,6 +122,7 @@ from utils.review_lane import (
     UNRECORDED_REASON,
     arm_slot,
     clear_unchecked_slot,
+    recover_damaged_checkpoint,
     slot_results,
     withheld_record,
 )
@@ -982,8 +983,10 @@ def set_withheld_answer_aside(
     this slot's own can be read at that path (docs/development/workflows.md#ask-mode).
 
     A rejected model's file goes to ``answer_<model>.md.violated``
-    (:func:`set_violated_answer_aside`), an unchecked one's to
-    ``answer_<model>.md.unchecked``; never deleted. Returns whether the path
+    (:func:`set_violated_answer_aside`), an unchecked one's, or one a
+    recovered folder withholds (``result_files.RECOVERED_KEY``: no file there
+    is this run's), to ``answer_<model>.md.unchecked``; never deleted.
+    Returns whether the path
     is shown free of it: renamed, or shown absent by the rename's own
     ``FileNotFoundError``. Nothing reads the file's metadata first, so no
     metadata error can pass for an absence; any other error returns
@@ -991,7 +994,7 @@ def set_withheld_answer_aside(
     renamed then), so the slot is not dispatched."""
     if withheld.rejected:
         return set_violated_answer_aside(model_spec, answer_path)
-    if withheld.key != _result_files.UNCHECKED_MODELS_KEY:
+    if withheld.key not in (_result_files.UNCHECKED_MODELS_KEY, _result_files.RECOVERED_KEY):
         return False
     name = os.path.basename(answer_path)
     target = answer_path + ".unchecked"
@@ -1591,6 +1594,11 @@ def resolve_question_dir(phase_dir: str, slug: str, question: str) -> Tuple[str,
     - If it exists with a *different* stored question (astronomically-unlikely
       hash+prefix collision) → route to a suffixed sibling (``<slug>-2``, ...),
       never overwriting another question's answers.
+
+    The checkpoint is read with ``status_file.read_status``, before any lock:
+    one that cannot be read (damaged, or anything but a regular file) stores
+    no question, and the run that takes the question lock recovers it or
+    stops over it (:func:`_recover_question_checkpoint`).
     """
     base = os.path.join(phase_dir, slug)
     candidate = base
@@ -1599,14 +1607,7 @@ def resolve_question_dir(phase_dir: str, slug: str, question: str) -> Tuple[str,
         if not os.path.exists(candidate):
             return candidate, False
         if os.path.isdir(candidate):
-            status_path = os.path.join(candidate, ".status.json")
-            stored_q: Optional[str] = None
-            if os.path.exists(status_path):
-                try:
-                    with open(status_path, "r", encoding="utf-8") as f:
-                        stored_q = json.load(f).get("question")
-                except (json.JSONDecodeError, OSError, IOError):
-                    stored_q = None
+            stored_q = _status_file.read_status(candidate).get("question")
             if stored_q is None or stored_q == question:
                 return candidate, True
         # Different question (or a non-dir collision) → try a sibling.
@@ -2374,10 +2375,22 @@ async def _main(argv: Optional[List[str]], held: contextlib.ExitStack) -> int:
     setup = _prepare_fanout(inputs)
     if isinstance(setup, int):
         return setup
+    worker = bool(getattr(args, "internal_worker", False))
+    if worker:
+        # The worker holds the question lock its launch handed it from here,
+        # so a damaged checkpoint is recovered before `RunHandle` claims the
+        # run in it at the boundary (`_recover_question_checkpoint`).
+        held.enter_context(PhaseRun()).take(
+            setup.question_dir, mode="ask", plan_file=setup.inputs.plan_path,
+            args=args, phase="ask",
+        )
+        _recover_question_checkpoint(setup)
     _cross_detach_boundary(setup)
     refused = _hold_question_dir(args, setup.question_dir, held)
     if refused is not None:
         return refused
+    if not worker:
+        _recover_question_checkpoint(setup)
     refused = _record_launch(setup)
     if refused is not None:
         return refused
@@ -2512,18 +2525,14 @@ def _prepare_fanout(inputs: "AskInputs") -> Union["AskSetup", int]:
     os.makedirs(question_dir, exist_ok=True)
 
     # Plan-freshness check on resume (warn only; --force is how to act on it).
+    # Read before any lock, so a checkpoint that cannot be read records no
+    # plan hash here (`status_file.read_status`): the recovery decides on it.
     if is_resume:
-        status_path = os.path.join(question_dir, ".status.json")
-        if os.path.exists(status_path):
-            try:
-                with open(status_path, "r", encoding="utf-8") as f:
-                    prior = json.load(f)
-                if prior.get("plan_hash") and prior.get("plan_hash") != inputs.plan_hash:
-                    print("WARNING: plan file has changed since these answers were "
-                          "generated; existing answers may be stale — re-run with "
-                          "--rerun-all to refresh every model's answer.")
-            except (json.JSONDecodeError, OSError, IOError):
-                pass
+        prior_hash = _status_file.read_status(question_dir).get("plan_hash")
+        if prior_hash and prior_hash != inputs.plan_hash:
+            print("WARNING: plan file has changed since these answers were "
+                  "generated; existing answers may be stale — re-run with "
+                  "--rerun-all to refresh every model's answer.")
 
     template = load_prompt(ASK_PROMPT_FILE)
     inline_plan, truncated = build_inline_plan(inputs.plan_content, plan_path)
@@ -2589,7 +2598,8 @@ def _hold_question_dir(
     on the detached worker, which already holds it).
     """
     # One writer per question dir, whatever the lane. The detached worker took
-    # `{question_dir}/.lock` at the boundary (`RunHandle`). A
+    # `{question_dir}/.lock` before the boundary (`PhaseRun`, handed over to
+    # `RunHandle` there). A
     # foreground ask writes no `run` record, so this lock is its liveness. It is
     # held until `main` returns, and the OS drops it if the process dies. It is
     # what `classify_run` reports as `lock_held`, and what refuses a second ask
@@ -2607,6 +2617,39 @@ def _hold_question_dir(
             )
         held.callback(lock.release)
     return None
+
+
+def _recover_question_checkpoint(setup: AskSetup) -> None:
+    """A damaged question checkpoint, recovered before this run's first write
+    to it (``review_lane.recover_damaged_checkpoint``, the review lanes'
+    recovery): by the process that holds the question lock (the foreground
+    run after :func:`_hold_question_dir`, the worker before its boundary's
+    claim), its bytes kept as ``.status.json.unreadable-<stamp>`` and a fresh
+    checkpoint recording ``checkpoint_recovered`` renamed over it, with this
+    question's ``question``, ``question_slug`` and ``plan_hash``. Nothing to
+    do over an absent or readable one; a step that fails stops the run at
+    exit 3 before anything is dispatched.
+
+    Ask's answers are ``answer_<model>.md`` files, which the recovery's
+    result glob does not set aside: the record withholds every one of them
+    instead, so each model is asked again (its earlier answer set aside as
+    ``.unchecked`` first, as for any withheld model) and the close counts
+    only the answers this run's checked slots produced
+    (docs/development/workflows.md#ask-mode)."""
+    recovery = recover_damaged_checkpoint(
+        phase_dir=setup.question_dir, phase_name="ask",
+        plan_file=setup.inputs.plan_path,
+        run_id=getattr(setup.inputs.args, "internal_run_id", None),
+        fields={
+            "question": setup.inputs.question,
+            "question_slug": setup.slug,
+            "plan_hash": setup.inputs.plan_hash,
+        },
+    )
+    if recovery is not None:
+        print(f"[CHECKPOINT_RECOVERED] The earlier answers in {setup.question_dir} "
+              f"stay where they are and none is counted: every selected model is "
+              f"asked again, its earlier answer set aside as .unchecked first.")
 
 
 def _record_launch(setup: AskSetup) -> Optional[int]:

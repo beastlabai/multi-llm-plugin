@@ -184,7 +184,8 @@ binds the *other* end: when a plan carries a `TASKS_FILE` marker whose target is
 `implement` is exit **3** naming the path and `--generate-tasks`, never the old
 WARNING-and-parse-the-plan fallback, which fabricated 18 tasks titled ". Overview" with
 `camera.update` declared as a file to create (measured 2026-09-16); only a plan with **no**
-marker at all (the legacy embedded-task format) still parses its own content.
+marker at all and no default task list beside it (`tasks_file.default_tasks_path`,
+`{plan}/tasks/tasks.md`; the legacy embedded-task format) still parses its own content.
 
 The marker has one reader, `utils/tasks_marker.py` (text only; `utils/tasks_file.py` re-exports it
 and does the rest): `TASKS_FILE_MARKER_PATTERN` (whitespace
@@ -195,8 +196,9 @@ path as written; `""` for a marker naming nothing, `<!--TASKS_FILE:-->` included
 still a marker), `resolve_tasks_marker` (each relative, no `..`, real path inside the plan's
 directory, else `TasksFileRefused`; markers leading to different files are
 `TasksFileAmbiguous`, since following the first would implement a stale or pasted list) and
-`read_task_list` (the named file's text, the plan's only without a marker,
-`TasksFileMissing` when the file is not there). Code detection errs on the marker's side: a
+`read_task_list` (the named file's text; without a marker the default task list's when that is
+a file, as `find_tasks_file` reads it, so no two phases read two task lists, and the plan's only
+when it is not; `TasksFileMissing` when a named file is not there). Code detection errs on the marker's side: a
 fence never closed is not code, and a stray backtick never reaches a marker on its own line.
 The writer, `plan_updater.insert_tasks_file_reference`, rewrites every marker that counts
 (its `## Implementation Tasks` section whole, any other in place) and leaves quoted examples
@@ -644,9 +646,9 @@ the review lanes ([Withheld slot answers](review-results.md#withheld-slot-answer
 question folder's `.status.json` keeps the same two maps, `models_rejected` and
 `models_unchecked`, through the same `result_files` helpers. `_record_launch` carries both maps
 across its opening write, every model's, read whole under the lock that write holds, then reads
-the checkpoint back; over a checkpoint it cannot read (after `CHECKPOINT_READ_ATTEMPTS` reads),
-or one it cannot read back, the run stops at exit 3 before anything is dispatched, with
-`status_file.unreadable_checkpoint_advice`. Each slot that passes the sandbox gate is recorded
+the checkpoint back; over a checkpoint it cannot read (after `CHECKPOINT_READ_ATTEMPTS` reads;
+a damaged one was recovered just before, below), or one it cannot read back, the run stops at exit
+3 before anything is dispatched, with `status_file.unreadable_checkpoint_advice`. Each slot that passes the sandbox gate is recorded
 under `models_unchecked` before anything is dispatched or removed (`review_lane.arm_slot`), in
 the question folder's checkpoint whatever its resolved answer path points into; one whose
 record cannot be written and read back, or whose launched run has no checkpoint left to record
@@ -683,12 +685,25 @@ cannot read, and while a withheld model's answer file is in place; a withheld mo
 counted only with a `WARNING` naming why it was withheld, once both its records are cleared
 (`result_files.clear_withheld_model`). A readable checkpoint written before these maps
 withholds nothing, so an older question resumes as it did. `tests/test_ask_withheld_answers.py`
-holds the cases. Ask never recovers a damaged checkpoint itself, but `_record_launch` carries a
-`checkpoint_recovered` record over like the maps, so the resume skip and `--accept-partial` keep
-withholding every model by it, and the closing scan counts no answer file but one a slot of this
-run produced with its checks passed (`withheld_after_run`); `--accept-partial` then records the
-model under the record's `accepted` (the operator's choice, never a passed check) and reads it
-back before it reports `[ACCEPTED]` ([Withheld slot answers](review-results.md#withheld-slot-answers)).
+holds the cases. Ask recovers a damaged question checkpoint as the review lanes do, with their
+function (`_recover_question_checkpoint`, `review_lane.recover_damaged_checkpoint` with this
+question's `question`, `question_slug` and `plan_hash`; [Recovering a damaged
+one](review-results.md#withheld-slot-answers)): by the process that holds the question lock, the
+foreground run after `_hold_question_dir` and before `_record_launch`, the detached worker under
+the lock its launch handed it (`detach.PhaseRun.take`) before its boundary, where `RunHandle`
+claims the run in the checkpoint. A checkpoint that cannot be read and is not proven damaged stops
+the run at exit 3 before anything is dispatched. The two reads before the lock, the question-dir
+resolver's `question` and the plan-freshness check's `plan_hash`, go through
+`status_file.read_status`: a checkpoint they cannot read (not JSON, not an object, not UTF-8, not
+a regular file) gives them no metadata, never an exception, so every run reaches the recovery. The recovery's result glob sets no answer file
+aside (they are `answer_<model>.md`); the fresh checkpoint's `checkpoint_recovered` record
+withholds them all instead, and `_record_launch` carries it over like the maps, so the resume skip
+and `--accept-partial` keep withholding every model by it: each selected model's earlier answer is
+set aside as `.unchecked` before the model is asked again (`set_withheld_answer_aside`), and the
+closing scan counts no answer file but one a slot of this run produced with its checks passed
+(`withheld_after_run`); `--accept-partial` then records the model under the record's `accepted`
+(the operator's choice, never a passed check) and reads it back before it reports `[ACCEPTED]`
+([Withheld slot answers](review-results.md#withheld-slot-answers)).
 
 ## Implementation artifacts and state
 

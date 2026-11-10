@@ -1111,15 +1111,27 @@ def test_the_unreadable_checkpoint_advice_names_the_recovery_and_the_folder_fall
     assert advice == (
         "If the read failure has passed, running again is enough. If the file "
         "is damaged, run the phase again without --reaggregate once no run of "
-        "this phase is live (`status`): a fresh review run sets every earlier "
-        "result in the folder aside, keeps the damaged file as "
-        ".status.json.unreadable-<time> and starts a new round that reuses none "
-        "of them. If the file cannot be opened at all, or that recovery stops, "
-        "move the whole phase folder /work/out/review-plan aside, or delete it, "
-        "and run the phase again. Never move .status.json aside on its own: the "
-        "result files left beside it would then be read as results, answers "
-        "whose safety checks failed among them."
+        "this phase is live (`status`): a fresh run (a review fan-out, or the "
+        "same ask question) keeps the damaged file as "
+        ".status.json.unreadable-<time> and reuses no earlier result in the "
+        "folder: every model runs again. If the file cannot be opened at all, or "
+        "that recovery stops, move the whole phase folder /work/out/review-plan "
+        "aside, or delete it, and run the phase again. Never move .status.json "
+        "aside on its own: the result files left beside it would then be read "
+        "as results, answers whose safety checks failed among them."
     )
+    for phase in status_file.WITHHELD_RECORD_PHASES:
+        assert status_file.unreadable_checkpoint_advice(
+            "/work/out/review-plan", phase=phase) == advice
+
+
+def test_a_phase_without_withheld_answers_is_told_its_run_replaces_the_file():
+    """Its checkpoint holds run and progress records only: the run replaces a
+    damaged one, and moving the file aside alone is safe there."""
+    advice = status_file.unreadable_checkpoint_advice("/work/out/implement", phase="implement")
+    assert "run the phase again: its run keeps the damaged file" in advice
+    assert "move /work/out/implement/.status.json aside" in advice
+    assert "Never move" not in advice and "--reaggregate" not in advice
 
 
 @pytest.mark.parametrize("lane_class", [PlanLane, CodeLane], ids=["review-plan", "review-code"])

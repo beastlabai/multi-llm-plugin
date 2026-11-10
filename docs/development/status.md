@@ -63,6 +63,19 @@ unreadable. A host prints any non-zero exit as an error, so the two read steps t
 `|| …` is chained onto the call, which would cost Claude Code's permission allow
 rule.
 
+**A foreground run's head line takes its tense from the checkpoint.** A phase dir with a
+checkpoint and no `run` record is a foreground run (verdict `no_run`, exit `2`): `running in
+foreground (…)` while `state` or `progress.step` reads in flight (`_checkpoint_in_flight`),
+`finished in foreground (…)` once they read terminal, `stopped in foreground (needs you; …)` on
+the write scheduler's stop. A review fan-out or ask whose checkpoint still reads in flight while
+nobody holds its phase lock heads `ended in foreground without a final state (…)`
+(`status_views._foreground_run_gone`): those foreground runs hold the lock from before their first
+checkpoint write to their exit (`status_views.FOREGROUND_LOCKED_PHASES`), so a free lock (the
+view's probed `lock_held`) says the run ended without writing a terminal state, as a fan-out whose
+every model failed does (exit 3 over `state: models_running`). Text only: the verdict, the exit
+code and `--wait` are unchanged. generate-tasks, implement and the apply phases hold no lock in the
+foreground, so a free lock tells nothing there and their head line keeps `running`.
+
 `--exit-zero` (fix round 7) is the opt-in for a call whose loop never reads the code — each
 core's roster read, and the poll a background-mechanism host composes (Claude Code's *run detached*
 sentence): a view that was read exits `0` and the verdict's word stays on the

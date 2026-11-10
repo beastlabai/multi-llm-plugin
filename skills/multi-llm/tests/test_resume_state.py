@@ -694,6 +694,26 @@ class TestTheReferenceIsRenderedFromTheTable:
         assert render_resume_cases.main(["--check"]) == 1
 
 
+@pytest.mark.parametrize("phase,flags", [("review-plan", ()), ("review-tasks", ()),
+                                         ("code-review", ("--force",))])
+def test_a_checkpoint_that_cannot_be_read_answers_a_fresh_run(tmp_path, phase, flags):
+    """SR-3: a ``--reaggregate`` refuses a checkpoint it cannot read and only a
+    fresh run recovers a damaged one, so the answer is ``rerun``, never the
+    ``reaggregate`` the result files on disk used to earn (no
+    ``models_requested`` could be read, so every one counted as kept)."""
+    plan = _plan(tmp_path)
+    phase_dir = _phase_dir(plan, phase)
+    for spec in MODELS:
+        _result(phase_dir, spec)
+    (phase_dir / ".status.json").write_text('{"state": "models_runn', encoding="utf-8")
+    answer = resume_state.classify(plan, phase)
+    assert (answer.case, answer.action, answer.models, answer.flags) == ("d", "rerun", (), flags)
+    assert "cannot be read" in answer.note
+    assert "run the phase again without --reaggregate" in answer.note
+    assert answer.line().endswith(f"models=- batches=- flags={' '.join(flags) or '-'} "
+                                  "ownership=-")
+
+
 def test_the_three_review_cores_run_the_command():
     for core, mode in (("review-plan", "review-plan"), ("review-tasks", "review-tasks"),
                        ("review-code", "review-code")):

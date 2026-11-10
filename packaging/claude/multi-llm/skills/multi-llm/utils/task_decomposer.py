@@ -949,8 +949,9 @@ def decompose_plan_file(plan_path: Path) -> TaskDecomposer:
     """
     Convenience function to decompose a plan file.
 
-    Parses the task list the plan's ``TASKS_FILE`` marker names, or the plan
-    itself when it carries no marker (``tasks_file.read_task_list``, which
+    Parses the task list the plan's ``TASKS_FILE`` marker names, the default
+    task list without a marker, or the plan itself when it has neither
+    (``tasks_file.read_task_list``, which
     raises rather than parse the prose of a plan whose marker it cannot follow).
 
     Args:

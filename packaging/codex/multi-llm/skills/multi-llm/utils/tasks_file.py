@@ -5,18 +5,20 @@ which ``tasks_marker`` reads (:data:`TASKS_FILE_MARKER_PATTERN`,
 :func:`tasks_marker_spans`, :func:`tasks_marker`, all re-exported here):
 :func:`resolve_tasks_marker` follows it inside the plan's directory, and
 :func:`read_task_list` gives the text a phase parses tasks from.
-find_tasks_file() adds the default location, staleness warnings and file
-validation for review-tasks, apply-task-suggestions and code-review.
+Both fall back to the default location, ``{plan}/tasks/tasks.md``, for a plan
+with no marker (:func:`default_tasks_path`); find_tasks_file() adds staleness
+warnings and file validation for review-tasks, apply-task-suggestions and
+code-review.
 See docs/development/workflows.md ("Task generation").
 """
 
 import os
 import re
 import sys
-from datetime import datetime
 from pathlib import Path
 from typing import NamedTuple, Optional, Sequence, Union
 
+from .clock import parse_iso
 from .output_handler import sanitize_prefix
 from .tasks_marker import (  # noqa: F401 - the marker's reader, re-exported
     TASKS_FILE_MARKER_PATTERN,
@@ -136,21 +138,38 @@ def resolve_tasks_marker(
     return Path(resolved[0])
 
 
+def default_tasks_path(plan_path: Union[str, "os.PathLike[str]"]) -> str:
+    """Where generate-tasks writes a plan's task list when no marker says
+    otherwise: ``{plan_dir}/{sanitized plan name}/tasks/tasks.md``, as a
+    path relative to the plan's directory."""
+    prefix = sanitize_prefix(os.path.basename(os.path.abspath(str(plan_path))))
+    return os.path.join(prefix, "tasks", "tasks.md")
+
+
 def read_task_list(
     plan_path: Union[str, "os.PathLike[str]"], plan_text: Optional[str] = None
 ) -> TaskList:
-    """The task list a phase parses: the file the plan's marker names, or the plan.
+    """The task list a phase parses: the file the plan's marker names, the
+    default task list, or the plan.
 
-    Only a plan with no marker at all is its own task list. A plan whose
-    marker is refused raises :class:`TasksFileRefused`, and one whose marker
-    names no file raises :class:`TasksFileMissing`: parsing the plan instead
-    would turn its prose into tasks.
+    The same resolution :func:`find_tasks_file` makes, so every phase reads
+    one task list: a plan with no marker reads the default task list
+    (:func:`default_tasks_path`, the workflow's own output folder, which no
+    plan text names) when that is a file, and is its own task list only when
+    it is not. A plan whose marker is refused raises
+    :class:`TasksFileRefused`, and one whose marker names no file raises
+    :class:`TasksFileMissing`: parsing the plan instead would turn its prose
+    into tasks.
     """
     if plan_text is None:
         plan_text = Path(plan_path).read_text(encoding="utf-8")
     resolved = resolve_tasks_marker(plan_path, plan_text)
     if resolved is None:
-        return TaskList(plan_text, None)
+        plan_dir = os.path.dirname(os.path.abspath(str(plan_path)))
+        default = os.path.realpath(os.path.join(plan_dir, default_tasks_path(plan_path)))
+        if not os.path.isfile(default):
+            return TaskList(plan_text, None)
+        return TaskList(Path(default).read_text(encoding="utf-8"), Path(default))
     if not resolved.is_file():
         raise TasksFileMissing(resolved, tasks_marker(plan_text) or "")
     return TaskList(resolved.read_text(encoding="utf-8"), resolved)
@@ -183,7 +202,7 @@ def _plan_edited_after_generate_tasks(
         state = StateManager(plan_path_abs, read_only=True)
         completed_at = state.get("phases_completed", {}).get("generate-tasks")
         if completed_at:
-            completed_ts = datetime.fromisoformat(completed_at).timestamp()
+            completed_ts = parse_iso(completed_at).timestamp()
             return plan_mtime > completed_ts + STALENESS_TOLERANCE_S
     except Exception:
         pass  # No usable state record — fall back to the raw mtime comparison.
@@ -238,9 +257,7 @@ def find_tasks_file(plan_path: str) -> str:
 
     # 2. Determine default tasks file location
     # Uses the plan's output directory structure: {plan_dir}/{sanitized_name}/tasks/tasks.md
-    prefix = sanitize_prefix(os.path.basename(plan_path_abs))
-    default_tasks_dir = os.path.join(plan_dir, prefix, "tasks")
-    default_path = os.path.realpath(os.path.join(default_tasks_dir, "tasks.md"))
+    default_path = os.path.realpath(os.path.join(plan_dir, default_tasks_path(plan_path_abs)))
 
     # 3. Resolve which file to use
     tasks_path = None

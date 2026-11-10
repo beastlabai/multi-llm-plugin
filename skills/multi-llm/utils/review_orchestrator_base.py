@@ -359,6 +359,10 @@ def maybe_detach(
             return exc.exit_code
         return None
     if not getattr(args, "detach", False):
+        # The foreground run replaces a damaged checkpoint of a phase whose
+        # checkpoint records no withheld answers (utils/detach.py,
+        # `settle_foreground_checkpoint`; the worker does it in `RunHandle.start`).
+        _detach.settle_foreground_checkpoint(phase_dir, mode=mode, phase=phase)
         return None
 
     record = invocation()

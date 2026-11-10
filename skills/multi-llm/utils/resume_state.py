@@ -125,7 +125,9 @@ CASES: Tuple[Case, ...] = (
         "complete (a) nor stale (e), whatever files are there (checked right "
         "after a: an earlier run replaced the phase's damaged checkpoint, so no "
         "file in the folder counts, validation files included, and a "
-        "`--reaggregate` refuses it)",
+        "`--reaggregate` refuses it); or `.status.json` exists but cannot be read "
+        "(checked right after a too: a `--reaggregate` refuses it, and only a "
+        "fresh run recovers a damaged one)",
         "The fan-out stopped before validation. Compare the files with "
         "`models_requested` in `{plan}/{phase}/.status.json`; a file counts when the "
         "fan-out would keep it (non-empty, a JSON list, and on review-code tied by "
@@ -141,7 +143,11 @@ CASES: Tuple[Case, ...] = (
         "stays the one the kept files were requested under (one `Scope policy "
         "notice:` line says so); a different one typed stops at exit 3 with "
         "`[SCOPE_POLICY_CONFLICT]`. The first answer is `reaggregate`; the second is "
-        "`rerun`, its `models=` listing every requested model.",
+        "`rerun`, its `models=` listing every requested model. Over a checkpoint "
+        "that cannot be read the answer is `rerun` with `models=-`: nothing records "
+        "the selection, so launch with the one the core would make; the fresh run "
+        "recovers a damaged checkpoint, reusing no file in the folder, and a note on "
+        "stderr says what to do when it cannot.",
     ),
     Case(
         "e",
@@ -359,6 +365,16 @@ def _recovered_note(phase_dir: Path, action: str = "rerun") -> str:
             "model runs again. " + tail)
 
 
+def _unreadable_note(phase_dir: Path, phase: str) -> str:
+    """The note of a phase whose ``.status.json`` cannot be read: a
+    ``--reaggregate`` refuses it, so the answer is a fresh run, which
+    recovers a damaged one."""
+    return (f"multi-llm: {status_file.status_path(str(phase_dir))} cannot be read, so "
+            f"a --reaggregate would refuse it and nothing records the models to "
+            f"re-run: launch the phase with the selection the core would make. "
+            f"{status_file.unreadable_checkpoint_advice(str(phase_dir), phase=phase)}")
+
+
 def _with_recovery_note(answer: ResumeState, phase_dir: Path) -> ResumeState:
     """*answer*, with the recovery note while the phase's checkpoint records
     ``RECOVERED_KEY``: a completed or stale phase keeps its case, and the note
@@ -433,7 +449,16 @@ def classify(plan: Path, phase: str) -> ResumeState:
         return _with_recovery_note(ResumeState("e", "run"), phase_dir)
     if completed:
         return _with_recovery_note(ResumeState("a", "report"), phase_dir)
-    status = status_file.read_status(str(phase_dir))
+    try:
+        status = status_file.load_status(
+            str(phase_dir), attempts=status_file.CHECKPOINT_READ_ATTEMPTS) or {}
+    except status_file.CheckpointUnreadable:
+        # A --reaggregate refuses a checkpoint it cannot read, and only a fresh
+        # run recovers a damaged one (docs/development/review-results.md,
+        # "Recovering a damaged one"); nothing in it names the selection.
+        rerun = _rerun(phase, ())
+        return ResumeState(rerun.case, rerun.action, flags=rerun.flags,
+                           note=_unreadable_note(phase_dir, phase))
     rounds = review_round.round_files(phase_dir, status)
     requested = _requested_models(status)
     if result_files.RECOVERED_KEY in status:

@@ -395,18 +395,136 @@ def test_a_checked_answer_supersedes_the_rejection(plan, monkeypatch):
     assert again.calls == []
 
 
-def test_a_launch_over_an_unreadable_checkpoint_stops_before_dispatch(plan, capsys):
+def test_a_launch_over_a_damaged_checkpoint_recovers_it_and_asks_again(plan, capsys):
+    """SR-2: ask recovers a damaged question checkpoint as the review lanes do
+    (it used to stop, with advice that a run of ask never followed): the
+    bytes are kept aside, the fresh checkpoint withholds every model, the
+    earlier answer is set aside unread and the model asked again."""
     d = qdir(plan, "Q")
     d.mkdir(parents=True)
     (d / ".status.json").write_text("{not json", encoding="utf-8")
     answer_of(d, SPEC).write_text("An earlier answer.\n", encoding="utf-8")
     inv = FakeInvoker()
-    assert run_ask(ask_argv(plan, SPEC), inv) == 3
-    assert inv.calls == []
-    assert (d / ".status.json").read_text(encoding="utf-8") == "{not json"
+    inv.configure(SPEC, write_file=True, content="A fresh answer")
+    assert run_ask(ask_argv(plan, SPEC), inv) == 0
+    assert inv.calls == [SPEC]
+    copies = sorted(d.glob(".status.json.unreadable-*"))
+    assert [c.read_text(encoding="utf-8") for c in copies] == ["{not json"]
+    status = read_status(d)
+    assert status[result_files.RECOVERED_KEY]["accepted"] == []
+    assert status["question"] == "Q" and status["models_completed"] == [SPEC]
+    assert Path(f"{answer_of(d, SPEC)}.unchecked").read_text(
+        encoding="utf-8") == "An earlier answer.\n"
+    assert "A fresh answer" in read_answers(d)
+    assert "An earlier answer." not in read_answers(d)
     out = _printed(capsys)
-    assert "could not be read when this ask started" in out
+    assert out.count("[CHECKPOINT_RECOVERED]") == 2
+
+
+@pytest.mark.parametrize("damaged", [b"[]", b"null", b"\xff", b"{not json"],
+                         ids=["list", "null", "not-utf8", "not-json"])
+def test_every_kind_of_damage_reaches_the_recovery(plan, damaged):
+    """Codex F04 review 2: the question-dir resolver and the plan-freshness
+    check read the checkpoint before the recovery runs, and a raw
+    ``json.load(...).get`` raised on a JSON list, ``null`` or bytes that are
+    not UTF-8, so no ask, ``--detach`` included, ever reached the recovery.
+    Both read it through ``status_file.read_status`` now: what cannot be read
+    is metadata they do not have, and the locked recovery decides."""
+    d = qdir(plan, "Q")
+    d.mkdir(parents=True)
+    (d / ".status.json").write_bytes(damaged)
+    assert status_file.checkpoint_damage(str(d)) is not None
+    inv = FakeInvoker()
+    assert run_ask(ask_argv(plan, SPEC), inv) == 0
+    assert inv.calls == [SPEC]
+    assert [c.read_bytes() for c in d.glob(".status.json.unreadable-*")] == [damaged]
+    assert result_files.RECOVERED_KEY in read_status(d)
+
+
+@pytest.mark.parametrize("damaged", [b"[]", b"\xff"], ids=["list", "not-utf8"])
+def test_a_detached_asks_worker_reaches_the_recovery_over_any_damage(plan, monkeypatch,
+                                                                    damaged):
+    from utils import detach
+
+    d = qdir(plan, "Q")
+    d.mkdir(parents=True)
+    (d / ".status.json").write_bytes(damaged)
+    seen = {}
+
+    def boundary(setup):
+        seen["status"] = status_file.load_status(setup.question_dir)
+        raise SystemExit(0)
+
+    monkeypatch.setattr(ask_orchestrator, "_cross_detach_boundary", boundary)
+    with pytest.raises(SystemExit):
+        run_ask(ask_argv(plan, SPEC, extra=("--internal-worker", "--internal-run-id",
+                                            "run-a")), FakeInvoker())
+    assert result_files.RECOVERED_KEY in seen["status"]
+    assert not detach.holds_phase_lock(str(d))
+
+
+def test_the_plan_freshness_warning_still_reads_a_readable_checkpoint(plan, capsys):
+    assert run_ask(ask_argv(plan, SPEC), FakeInvoker()) == 0
+    d = qdir(plan, "Q")
+    status_file.update_status(str(d), {"plan_hash": "an-older-plan"})
+    capsys.readouterr()
+    run_ask(ask_argv(plan, SPEC), FakeInvoker())
+    assert "plan file has changed since these answers were generated" in _printed(capsys)
+
+
+def test_a_launch_over_a_checkpoint_it_cannot_read_stops_before_dispatch(plan, capsys):
+    """Not proven damaged (a directory at the name): nothing is recovered."""
+    d = qdir(plan, "Q")
+    d.mkdir(parents=True)
+    (d / ".status.json").mkdir()
+    answer_of(d, SPEC).write_text("An earlier answer.\n", encoding="utf-8")
+    inv = FakeInvoker()
+    with pytest.raises(SystemExit) as stopped:
+        run_ask(ask_argv(plan, SPEC), inv)
+    assert stopped.value.code == 3
+    assert inv.calls == []
+    assert (d / ".status.json").is_dir() and not list(d.glob(".status.json.unreadable-*"))
+    assert answer_of(d, SPEC).read_text(encoding="utf-8") == "An earlier answer.\n"
+    out = _printed(capsys)
+    assert "could not be read" in out
     assert status_file.unreadable_checkpoint_advice(str(d)) in out
+
+
+def test_a_detached_asks_worker_recovers_before_its_boundary_claims_the_run(plan,
+                                                                          monkeypatch):
+    """The worker takes the question lock before the boundary, so the
+    checkpoint is recovered before ``RunHandle`` claims the run in it (over
+    a damaged one the claim wrote nothing, and the launch waited out its
+    handshake)."""
+    from utils import detach
+
+    d = qdir(plan, "Q")
+    d.mkdir(parents=True)
+    (d / ".status.json").write_text("{not json", encoding="utf-8")
+    seen = {}
+
+    def boundary(setup):
+        seen["locked"] = detach.holds_phase_lock(setup.question_dir)
+        seen["status"] = status_file.load_status(setup.question_dir)
+        raise SystemExit(0)
+
+    monkeypatch.setattr(ask_orchestrator, "_cross_detach_boundary", boundary)
+    with pytest.raises(SystemExit):
+        run_ask(ask_argv(plan, SPEC, extra=("--internal-worker", "--internal-run-id",
+                                            "run-a")), FakeInvoker())
+    assert seen["locked"] is True
+    assert result_files.RECOVERED_KEY in seen["status"]
+    assert seen["status"]["question"] == "Q"
+    assert not detach.holds_phase_lock(str(d))
+
+
+def test_a_recovered_folders_earlier_answer_is_set_aside_before_its_model_is_asked(tmp_path):
+    answer = tmp_path / "answer_x.md"
+    answer.write_text("earlier", encoding="utf-8")
+    withheld = result_files.Withheld(result_files.RECOVERED_KEY, result_files.RECOVERED_REASON)
+    assert ask_orchestrator.set_withheld_answer_aside(SPEC, str(answer), withheld)
+    assert not answer.exists()
+    assert (tmp_path / "answer_x.md.unchecked").read_text(encoding="utf-8") == "earlier"
 
 
 def test_a_launch_whose_checkpoint_cannot_be_read_back_stops(plan, monkeypatch, capsys):

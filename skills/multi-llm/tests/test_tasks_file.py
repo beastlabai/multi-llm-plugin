@@ -165,6 +165,21 @@ class TestReadTaskList:
         assert task_list.path is None
         assert task_list.text == plan.read_text(encoding="utf-8")
 
+    def test_a_plan_with_no_marker_reads_the_default_task_list_when_there_is_one(
+        self, plan_dir
+    ):
+        """P2: the default task list find_tasks_file reads (review-tasks,
+        review-code), never the plan's prose: one task list for every phase."""
+        plan = _plan(plan_dir, "")
+        default = plan_dir / "render" / "tasks" / "tasks.md"
+        default.parent.mkdir(parents=True)
+        default.write_text(TASKS, encoding="utf-8")
+        task_list = read_task_list(plan)
+        assert task_list.text == TASKS
+        assert task_list.path == default.resolve()
+        assert Path(find_tasks_file(str(plan))) == task_list.path
+        assert list(decompose_plan_file(plan).tasks) == ["T001"]
+
     def test_a_missing_task_list_raises_rather_than_reading_the_plan(self, plan_dir):
         plan = _plan(plan_dir, "<!-- TASKS_FILE: gone/tasks.md -->")
         with pytest.raises(TasksFileMissing) as missing:
@@ -354,3 +369,22 @@ class TestTheWriterRewritesTheMarkersReadersFollow:
         content = "# Plan\n<!-- TASKS_FILE: p/../p/tasks/tasks.md -->\n\nBody.\n"
         rewritten = plan_updater.insert_tasks_file_reference(content, "p/tasks/tasks.md")
         assert rewritten == "# Plan\n<!-- TASKS_FILE: p/tasks/tasks.md -->\n\nBody.\n"
+
+
+def test_a_completion_stamp_ending_in_z_is_read_by_the_staleness_check(plan_dir):
+    """P6: the shared stamp parser (``clock.parse_iso``) reads ``z``, which
+    ``datetime.fromisoformat`` refuses: the check then fell back to the
+    mtimes and missed an edit made after generate-tasks."""
+    import json
+    from datetime import datetime, timezone
+
+    from utils.tasks_file import _plan_edited_after_generate_tasks
+
+    plan = _plan(plan_dir, "")
+    folder = plan_dir / "render"
+    folder.mkdir()
+    (folder / "state.json").write_text(json.dumps(
+        {"phases_completed": {"generate-tasks": "2026-01-01T00:00:00z"}}), encoding="utf-8")
+    completed = datetime(2026, 1, 1, tzinfo=timezone.utc).timestamp()
+    assert _plan_edited_after_generate_tasks(str(plan), completed + 100, completed + 100)
+    assert not _plan_edited_after_generate_tasks(str(plan), completed, completed - 100)

@@ -49,7 +49,7 @@ from utils.cli_common import (
     record_notice,
     typed_plan_for,
 )
-from utils.output_handler import get_phase_dir, get_output_dir
+from utils.output_handler import get_phase_dir, get_output_dir, phase_dir_path
 from utils.tasks_file import (
     TasksFileAmbiguous,
     TasksFileMissing,
@@ -898,6 +898,10 @@ def maybe_detach_implement_phase(
     """
     if not (getattr(args, "detach", False)
             or getattr(args, "internal_worker", False)):
+        # The foreground run replaces a damaged checkpoint (utils/detach.py,
+        # `settle_foreground_checkpoint`; the worker does it in `RunHandle.start`).
+        _detach.settle_foreground_checkpoint(
+            str(phase_dir_path(plan_path, "implement")), phase="implement")
         return None
 
     phase_dir = str(get_phase_dir(plan_path, "implement"))
@@ -2880,8 +2884,9 @@ def _advise_on_task_suggestions(run: ImplementRun) -> None:
 def load_task_list(run: ImplementRun) -> Optional[int]:
     """Read the task list, take the pre-implement baselines, and decompose it.
 
-    The task list is the file the plan's TASKS_FILE marker names, or the plan
-    itself only when it carries no marker (the legacy embedded-task format).
+    The task list is the file the plan's TASKS_FILE marker names, the default
+    task list without a marker, or the plan itself only when it has neither
+    (the legacy embedded-task format; ``tasks_file.read_task_list``).
     A marker naming no file, or a path outside the plan's directory, stops
     here: parsing the plan instead would invent tasks from its prose
     (docs/development/workflows.md, "Task generation").

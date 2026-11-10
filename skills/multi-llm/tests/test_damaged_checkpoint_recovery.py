@@ -24,7 +24,12 @@ injected at each recovery step; only the provider call is stubbed. The late
 writers, the registry failures, the refresh race, the FIFOs and the windows
 between a check and a later read are Codex's U90c reviews' scenarios; the ask
 rows run ``ask_orchestrator.main`` with ``test_ask``'s ``FakeInvoker`` over a
-seeded record (ask never recovers one).
+seeded record (ask's own recovery rows are in ``test_ask_withheld_answers``).
+
+Every other phase's checkpoint holds run and progress records only, so the
+run that owns the dir replaces a damaged one at its start: the detached
+worker before it claims its run (``RunHandle.start``), the foreground run at
+its boundary (``detach.settle_foreground_checkpoint``).
 """
 
 from __future__ import annotations
@@ -471,21 +476,294 @@ def test_a_worker_claims_its_run_in_the_recovered_checkpoint(tmp_path):
     assert status_file.read_run(str(phase))["state"] == "done"
 
 
-def test_without_the_recovery_a_worker_claims_nothing_over_a_damaged_checkpoint(tmp_path):
-    """Why the recovery comes before the worker's claim, not in ``start_round``."""
+def test_without_the_recovery_a_worker_refuses_a_damaged_checkpoint_at_once(tmp_path,
+                                                                           monkeypatch):
+    """Why the recovery comes before the worker's claim, not in ``start_round``:
+    over a damaged checkpoint of a phase that withholds answers the claim
+    could write nothing, so the worker stops there, the file untouched, and
+    its launch reports why at once instead of waiting out the handshake."""
     plan = tmp_path / "plan.md"
     plan.write_text("# Plan\n", encoding="utf-8")
     phase = tmp_path / "plan" / "review-plan"
     phase.mkdir(parents=True)
     (phase / ".status.json").write_text("{")
+    monkeypatch.setenv(detach.WORKER_ENV, "1")
     handle = detach.RunHandle(str(phase), run_id="run-x", mode="review-plan",
+                              plan_file=str(plan), detached=False)
+    with pytest.raises(detach.DetachError) as refused:
+        handle.start()
+    assert ".status.json is damaged (not JSON, 1 bytes)" in str(refused.value)
+    assert status_file.unreadable_checkpoint_advice(str(phase)) in str(refused.value)
+    assert (phase / ".status.json").read_text() == "{"
+    assert status_file.read_run(str(phase)) == {}
+    assert not _copies(phase)
+    assert not detach.holds_phase_lock(str(phase))
+    monkeypatch.setattr(detach, "handshake_timeout", lambda: 0.2)
+    with pytest.raises(detach.DetachError) as launch:
+        detach._await_handshake(str(phase), "run-x")
+    assert ".status.json is damaged" in str(launch.value)
+
+
+# ---------------------------------------------------------------------------
+# Every other phase: the run that owns the dir replaces a damaged checkpoint
+# ---------------------------------------------------------------------------
+
+TORN = '{"phase": "generate-tasks", "state": "comp'
+
+
+def _copies(phase) -> List[Path]:
+    """The damaged checkpoint's copies in *phase* (a directory)."""
+    return sorted(p for p in Path(phase).iterdir()
+                  if p.name.startswith(".status.json" + status_file.UNREADABLE_ARCHIVE_INFIX))
+
+
+def _phase_dir(tmp_path, name):
+    plan = tmp_path / "plan.md"
+    plan.write_text("# Plan\n", encoding="utf-8")
+    phase = tmp_path / "plan" / name
+    phase.mkdir(parents=True)
+    return plan, phase
+
+
+def test_replacing_a_damaged_checkpoint_keeps_its_bytes_and_reads_none(tmp_path):
+    _plan, phase = _phase_dir(tmp_path, "generate-tasks")
+    (phase / ".status.json").write_text(TORN)
+    damage = status_file.checkpoint_damage(str(phase))
+    archived = status_file.replace_damaged_checkpoint(str(phase), damage,
+                                                      phase="generate-tasks")
+    assert [Path(archived)] == _copies(phase) and Path(archived).read_text() == TORN
+    status = status_file.load_status(str(phase))
+    assert set(status) == {"phase", "updated_at"} and status["phase"] == "generate-tasks"
+
+
+@pytest.mark.parametrize("phase_name", [*status_file.WITHHELD_RECORD_PHASES, None])
+def test_a_phase_that_withholds_answers_is_never_replaced_whole(tmp_path, phase_name):
+    (tmp_path / ".status.json").write_text("{")
+    damage = status_file.checkpoint_damage(str(tmp_path))
+    with pytest.raises(ValueError):
+        status_file.replace_damaged_checkpoint(str(tmp_path), damage, phase=phase_name)
+    assert (tmp_path / ".status.json").read_text() == "{" and not _copies(tmp_path)
+
+
+def test_bytes_that_changed_after_the_check_are_not_replaced(tmp_path):
+    (tmp_path / ".status.json").write_text("{")
+    damage = status_file.checkpoint_damage(str(tmp_path))
+    (tmp_path / ".status.json").write_text("[")
+    with pytest.raises(OSError):
+        status_file.replace_damaged_checkpoint(str(tmp_path), damage, phase="implement")
+    assert (tmp_path / ".status.json").read_text() == "[" and not _copies(tmp_path)
+
+
+def test_the_withheld_phases_are_the_phases_of_the_review_and_ask_modes():
+    import modes
+
+    review = {m.phase for m in modes.MODES
+              if m.name in ("review-plan", "review-tasks", "review-code",
+                            "review-commits", "ask")}
+    assert set(status_file.WITHHELD_RECORD_PHASES) == review
+
+
+@pytest.mark.parametrize("mode,phase_name", [
+    ("generate-tasks", "generate-tasks"), ("implement", "implement"),
+    ("apply-suggestions", "apply-suggestions"), ("apply-code-fixes", "apply-code-fixes"),
+    ("full", "full"), ("improve-plan", "improve-plan"),
+])
+def test_a_worker_replaces_a_damaged_checkpoint_and_claims_its_run(tmp_path, capsys,
+                                                                  mode, phase_name):
+    """SR-1: a detached run of any other phase claims its run over a damaged
+    checkpoint (it used to claim nothing, and its launch waited out the
+    handshake while the worker ran the phase)."""
+    plan, phase = _phase_dir(tmp_path, phase_name)
+    (phase / ".status.json").write_text(TORN)
+    handle = detach.RunHandle(str(phase), run_id="run-g", mode=mode,
                               plan_file=str(plan), detached=False)
     handle.start()
     try:
-        assert (phase / ".status.json").read_text() == "{"
-        assert status_file.read_run(str(phase)) == {}
+        assert status_file.read_run(str(phase))["run_id"] == "run-g"
+        assert [p.read_text() for p in _copies(phase)] == [TORN]
+        assert status_file.read_status(str(phase))["phase"] == phase_name
     finally:
         handle.finish(0)
+    assert status_file.read_run(str(phase))["state"] == "done"
+    assert ".status.json is damaged (not JSON" in capsys.readouterr().err
+
+
+def test_a_worker_refuses_a_checkpoint_it_cannot_read_at_once(tmp_path, monkeypatch):
+    """Not proven damaged (a directory at the name): left as it is, and the
+    launch is told why instead of waiting out the handshake."""
+    plan, phase = _phase_dir(tmp_path, "generate-tasks")
+    (phase / ".status.json").mkdir()
+    monkeypatch.setenv(detach.WORKER_ENV, "1")
+    handle = detach.RunHandle(str(phase), run_id="run-u", mode="generate-tasks",
+                              plan_file=str(plan), detached=False)
+    with pytest.raises(detach.DetachError) as refused:
+        handle.start()
+    message = str(refused.value)
+    assert "could not be read" in message and "is not a file" in message
+    assert status_file.unreadable_checkpoint_advice(
+        str(phase), phase="generate-tasks") in message
+    assert (phase / ".status.json").is_dir() and not _copies(phase)
+    monkeypatch.setattr(detach, "handshake_timeout", lambda: 0.2)
+    with pytest.raises(detach.DetachError):
+        detach._await_handshake(str(phase), "run-u")
+
+
+def _foreground(**flags):
+    return _args(**flags)
+
+
+def test_a_foreground_run_replaces_a_damaged_checkpoint_at_its_boundary(tmp_path, capsys):
+    plan, phase = _phase_dir(tmp_path, "generate-tasks")
+    (phase / ".status.json").write_text(TORN)
+    assert rob.maybe_detach(args=_foreground(), mode="generate-tasks", phase_dir=str(phase),
+                            plan_file=str(plan), phase="generate-tasks") is None
+    assert [p.read_text() for p in _copies(phase)] == [TORN]
+    status_file.update_status(str(phase), {"state": "complete"})
+    assert status_file.load_status(str(phase))["state"] == "complete"
+    assert "a fresh checkpoint replaced it" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("mode,phase_name", [
+    ("review-plan", "review-plan"), ("review-tasks", "review-tasks"),
+    ("review-code", "code-review"), ("ask", "ask"), ("review-code", None),
+])
+def test_the_foreground_boundary_leaves_a_withheld_phase_to_its_recovery(tmp_path, capsys,
+                                                                        mode, phase_name):
+    plan, phase = _phase_dir(tmp_path, phase_name or "code-review")
+    (phase / ".status.json").write_text("{")
+    assert rob.maybe_detach(args=_foreground(), mode=mode, phase_dir=str(phase),
+                            plan_file=str(plan), phase=phase_name) is None
+    assert (phase / ".status.json").read_text() == "{" and not _copies(phase)
+    assert capsys.readouterr().err == ""
+
+
+#: A detached worker of generate-tasks in a process of its own: it starts its
+#: run over the phase dir and, when it holds the lock and has found the
+#: checkpoint damaged, says so and waits for a line before it replaces it.
+_WORKER = """
+import sys
+from utils import detach
+phase, plan, run_id = sys.argv[1:]
+real = detach._replace_damaged
+def paused(*args, **kwargs):
+    print("WORKER_HAS_LOCK_AND_DAMAGE", flush=True)
+    sys.stdin.readline()
+    return real(*args, **kwargs)
+detach._replace_damaged = paused
+handle = detach.RunHandle(phase, run_id=run_id, mode="generate-tasks", plan_file=plan,
+                          detached=False)
+try:
+    handle.start()
+except detach.DetachError as exc:
+    print("WORKER_REFUSED: " + " ".join(str(exc).split()), flush=True)
+else:
+    print("WORKER_PUBLISHED", flush=True)
+    handle.finish(0)
+"""
+
+
+def _worker(phase, plan, run_id):
+    import subprocess
+
+    return subprocess.Popen(
+        [sys.executable, "-c", _WORKER, str(phase), str(plan), run_id],
+        cwd=str(Path(__file__).resolve().parents[1]), stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+
+def test_the_foreground_holds_the_phase_lock_from_its_decision_to_its_replacement(
+        tmp_path, monkeypatch):
+    """Codex F04 review 1: a worker that starts between the foreground's
+    decision to replace a damaged checkpoint and the replacement must never
+    find the lock free and the damage still there. The probe the foreground
+    used dropped its lock at once: the worker took the lock and found the
+    damage, the foreground replaced the file under it, and the worker refused
+    ("changed after it was found damaged") and never published its run."""
+    plan, phase = _phase_dir(tmp_path, "generate-tasks")
+    (phase / ".status.json").write_text(TORN)
+    seen: List[str] = []
+    children = []
+    real = detach._replace_damaged
+
+    def replace_while_a_worker_starts(*args, **kwargs):
+        child = _worker(phase, plan, "run-early")
+        children.append(child)
+        seen.append(child.stdout.readline().strip())
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(detach, "_replace_damaged", replace_while_a_worker_starts)
+    try:
+        detach.settle_foreground_checkpoint(str(phase), phase="generate-tasks")
+        children[0].communicate("\n", timeout=30)
+        assert seen and seen[0] != "WORKER_HAS_LOCK_AND_DAMAGE", seen
+        assert seen[0].startswith("WORKER_REFUSED: ERROR: another run owns this phase dir")
+        assert [p.read_text() for p in _copies(phase)] == [TORN]
+        assert process_control.lock_is_free(detach.lock_path(str(phase)))
+        later = _worker(phase, plan, "run-later")
+        children.append(later)
+        out, err = later.communicate("\n", timeout=30)
+        assert "WORKER_PUBLISHED" in out, (out, err)
+        assert status_file.read_run(str(phase))["run_id"] == "run-later"
+    finally:
+        for child in children:
+            if child.poll() is None:
+                child.kill()
+                child.wait()
+
+
+def test_the_foreground_leaves_a_damaged_checkpoint_to_the_process_holding_its_lock(
+        tmp_path, capsys):
+    """A worker in another process holds the lock and has found the damage:
+    the foreground leaves the file to it, and the worker publishes its run."""
+    plan, phase = _phase_dir(tmp_path, "generate-tasks")
+    (phase / ".status.json").write_text(TORN)
+    worker = _worker(phase, plan, "run-w")
+    try:
+        assert worker.stdout.readline().strip() == "WORKER_HAS_LOCK_AND_DAMAGE"
+        detach.settle_foreground_checkpoint(str(phase), phase="generate-tasks")
+        assert (phase / ".status.json").read_text() == TORN and not _copies(phase)
+        err = capsys.readouterr().err
+        assert "another process holds" in err and "This run goes on" in err
+        out, _err = worker.communicate("\n", timeout=30)
+        assert "WORKER_PUBLISHED" in out
+        assert [p.read_text() for p in _copies(phase)] == [TORN]
+    finally:
+        if worker.poll() is None:
+            worker.kill()
+            worker.wait()
+
+
+def test_a_foreground_run_goes_on_over_a_checkpoint_it_cannot_read(tmp_path, capsys):
+    plan, phase = _phase_dir(tmp_path, "implement")
+    (phase / ".status.json").mkdir()
+    detach.settle_foreground_checkpoint(str(phase), phase="implement")
+    assert (phase / ".status.json").is_dir()
+    assert "could not be read" in capsys.readouterr().err
+
+
+def test_a_foreground_implement_replaces_a_damaged_checkpoint(tmp_path):
+    import implement_orchestrator
+
+    plan, phase = _phase_dir(tmp_path, "implement")
+    (phase / ".status.json").write_text(TORN)
+    assert implement_orchestrator.maybe_detach_implement_phase(
+        _foreground(), plan_path=plan) is None
+    assert [p.read_text() for p in _copies(phase)] == [TORN]
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["run", "dry-run"])
+def test_a_foreground_apply_phase_replaces_a_damaged_checkpoint_but_not_on_a_dry_run(
+        tmp_path, dry_run):
+    from utils.apply_orchestrator_base import ApplyOrchestratorBase
+
+    plan, phase = _phase_dir(tmp_path, "apply-suggestions")
+    (phase / ".status.json").write_text(TORN)
+    fake = SimpleNamespace(args=_foreground(dry_run=dry_run), out_dir=str(phase.parent),
+                           phase_name="apply-suggestions", confirmation_phase_name=None,
+                           plan_path=str(plan))
+    fake._is_detach_invoker = lambda: ApplyOrchestratorBase._is_detach_invoker(fake)
+    assert ApplyOrchestratorBase.maybe_detach_write_phase(fake) is None
+    assert len(_copies(phase)) == (0 if dry_run else 1)
 
 
 # ---------------------------------------------------------------------------
@@ -1755,18 +2033,20 @@ def test_an_asks_launch_carries_the_recovery_record(ask_plan, capsys):
     question = qdir(ask_plan, "Q")
     assert run_ask(ask_argv(ask_plan, ASKED), FakeInvoker()) == 0
     _ask_recovered(question)
+    earlier = question / f"answer_{rob.sanitize_model_name(ASKED)}.md"
+    earlier_text = earlier.read_text()
     capsys.readouterr()
     asked = FakeInvoker()
-    run_ask(ask_argv(ask_plan, ASKED), asked)
+    assert run_ask(ask_argv(ask_plan, ASKED), asked) == 0
     out = capsys.readouterr().out
-    # The answer on disk is neither reused nor counted, and the record stays.
-    # (Ask's slot sets aside no file a recovery record withholds, so it asks
-    # nothing over it either: ask's own recovery is not wired.)
-    assert f"[SKIP] {ASKED}" not in out and asked.calls == []
+    # The answer on disk is neither reused nor counted: the slot sets it aside
+    # as `.unchecked` and asks the model again, and the record stays.
+    assert f"[SKIP] {ASKED}" not in out and asked.calls == [ASKED]
     assert "whose damaged checkpoint was replaced" in out
+    assert Path(f"{earlier}.unchecked").read_text() == earlier_text
     status = read_status(question)
     assert result_files.RECOVERED_KEY in status
-    assert not status["models_completed"]
+    assert status["models_completed"] == [ASKED]
 
 
 def test_an_asks_closing_scan_counts_no_answer_this_run_did_not_produce(ask_plan, monkeypatch,

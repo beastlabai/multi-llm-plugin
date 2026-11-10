@@ -596,7 +596,8 @@ write.
 (`status_file.load_status`). No `.status.json`, or a readable one without the maps (an older
 one), withholds nothing. One that exists but cannot be opened or parsed, or is not a JSON object,
 may hold either map, so: `update_status` skips its update rather than writing the update alone
-over it (every best-effort merge, a progress write included); the record writers write nothing
+over it (every best-effort merge, a progress write included; only a run's start replaces a damaged
+one whole, below); the record writers write nothing
 and say so; `withheld_models` withholds every model (`WithheldModels.unreadable`), so both resume
 skips re-run, the salvage dispatch and adoption take nothing, and a `--reaggregate` stops at exit
 3 with every file left unread and none renamed (it can only reuse, so it never recovers one);
@@ -614,9 +615,14 @@ the takeover's `--force`, and is not recovered, since the run's own records are 
 checkpoint at its startup and completes with a warning (`review_lane.recover_damaged_checkpoint`).
 It runs in the process that will own the round, under the phase `.lock` its entry took after the
 earlier run's cleanup check (`detach.PhaseRun.take`), and before the boundary: a detached worker
-claims its run identity and heartbeat in the checkpoint (`RunHandle.start`, whose `claim_run`
-over a damaged file writes nothing at all), so the recovery comes before that claim and the
-round's stamp (`start_round`) after it. review-code's partial-completion guard, which runs in
+claims its run identity and heartbeat in the checkpoint (`RunHandle.start`), so the recovery
+comes before that claim and the round's stamp (`start_round`) after it. Over a damaged
+checkpoint of these phases the claim refuses at once, nothing changed, and the launch reports
+that refusal (`detach.record_worker_refusal`) instead of waiting out its handshake. Ask
+recovers its question folder the same way and with the same function
+(`ask_orchestrator._recover_question_checkpoint`, see
+[Ask mode](workflows.md#ask-mode)): the foreground run once it holds the question lock, the
+worker under the lock its launch handed it (`PhaseRun.take`) before its boundary's claim. review-code's partial-completion guard, which runs in
 pre-flight and would read such a checkpoint as recording no round, leaves it to this recovery
 (`_guard_partial_completion`), so a plain run recovers too. In order:
 
@@ -702,6 +708,31 @@ checks passed, or one the operator accepted (`ask_orchestrator.withheld_after_ru
 `open_round` (and ask's `_record_launch`) carries the record across its opening write, and
 nothing removes it: only a folder moved aside starts clean.
 
+**Every other phase replaces a damaged one.** The phases whose checkpoint records withheld answers
+are `status_file.WITHHELD_RECORD_PHASES` (review-plan, review-tasks, `code-review`, ask). Every
+other phase's checkpoint (generate-tasks, implement, the apply phases, the composites' run dirs)
+holds run, progress and display records only, which no later run decides on, so the run that owns
+the dir replaces a damaged one before its first write to it (`status_file.replace_damaged_checkpoint`):
+the damaged bytes copied to `.status.json.unreadable-<stamp>`, then `{"phase": ...}` renamed over
+them in one step, only while they are still the bytes found, under one hold of the checkpoint
+mutex, nothing read from them, and a `WARNING` naming the copy. The detached worker does it in
+`RunHandle.start`, under the phase lock, before `claim_run`, so its launch's handshake finds the
+run (over a damaged file the claim wrote nothing, and the launch waited out its handshake while the
+worker ran the phase). A checkpoint that cannot be read and is not proven damaged (a read that
+fails, a link, a directory at the name) is left as it is, and the worker refuses at once, the
+launch reporting why. The foreground run does it at its detach boundary
+(`detach.settle_foreground_checkpoint`, from `review_orchestrator_base.maybe_detach`,
+`implement_orchestrator.maybe_detach_implement_phase` and the apply base's
+`maybe_detach_write_phase`, never on a `--dry-run`), under the phase lock: taken as a run's entry
+takes it unless this process holds it already, and held from a second look at the file to the
+rename (`_repair_hold`), so a worker that starts meanwhile never finds the damage and then loses
+it to this replacement (it would refuse without publishing its run). When another process holds
+the lock the file is left to that run; the foreground only warns, and goes on, its checkpoint
+writes skipped as before. The
+replacement refuses a phase of `WITHHELD_RECORD_PHASES`, and a phase it cannot name, with
+`ValueError`. The stop's advice for these phases (`unreadable_checkpoint_advice(phase=...)`) says
+to run the phase again, or to move `.status.json` aside alone, which is safe there.
+
 The order is the safety. At every moment a checkpoint refuses the folder: until step 4's rename
 the damaged one is still there, so every reader refuses the folder over it, and an interruption
 or a failure in steps 1 to 4 (the copy, the write, the rename) leaves that refusal; after the
@@ -710,12 +741,14 @@ fresh one was in place, the files beside a missing checkpoint would be read as r
 `--reaggregate` with no recorded models keeps every result file, a rejected answer or a late
 provider's file included (Codex reproduced both on both lanes). Every
 stop gives one advice (`status_file.unreadable_checkpoint_advice`), the same at a round's start,
-its map opening, the round-ownership check, a `--reaggregate`, the last-resort check and the
-recovery's own stops: if the failure has passed, run again; if the file is damaged, run the phase
-again without `--reaggregate` once no run of it is live, and the fresh run recovers it; if the
-file cannot be opened at all, or the recovery stops, move the whole phase folder aside (or delete
-it) and run the phase again. Never move `.status.json` aside alone: the result files left beside
-it would then be read as results, rejected answers among them.
+its map opening, the round-ownership check, a `--reaggregate`, the last-resort check, the
+recovery's own stops and ask's: if the failure has passed, run again; if the file is damaged, run
+the phase again without `--reaggregate` once no run of it is live (a review fan-out, or the same
+ask question), and the fresh run recovers it; if the file cannot be opened at all, or the recovery
+stops, move the whole phase folder aside (or delete it) and run the phase again. Never move
+`.status.json` aside alone: the result files left beside it would then be read as results,
+rejected answers among them. `util resume-state` answers `rerun` (`models=-`) over a checkpoint it
+cannot read, with this advice on stderr, never the `reaggregate` that would refuse it.
 
 **Nothing blocks on the name.** Every read of the checkpoint (`load_status`, `read_status`, the
 damage check) opens it without blocking and reads it only when the descriptor is a regular file

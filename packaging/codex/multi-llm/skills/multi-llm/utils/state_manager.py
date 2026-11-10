@@ -12,11 +12,12 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .clock import parse_local
-from .git_utils import get_branch_name, head_or_empty_tree
+from .git_utils import GitError, get_branch_name, get_project_root_from_dir, head_or_empty_tree
 from .judge_vocab import upgrade_legacy
 from .schema_validator import validate_state_file
 from . import state_file as _state_file
 from . import task_ledger as _task_ledger
+from .unattended import NeedsHuman
 from .output_handler import get_output_dir
 
 logger = logging.getLogger(__name__)
@@ -1760,8 +1761,9 @@ class StateManager:
             # The diff base code review and apply-code-fixes fall back to.
             # Before the first commit it is the empty tree (every file is
             # new), not a refusal: a new state used to raise `GitError` here,
-            # and with it every mode on a plain `git init`.
-            "head_at_start": head_or_empty_tree(),
+            # and with it every mode on a plain `git init`. Outside a
+            # repository there is none to record (`_head_at_start`).
+            "head_at_start": self._head_at_start(),
             "branch_name": get_branch_name() or "unknown",
             "review_phase_completed": False,
             "tracked_files": [],
@@ -1769,6 +1771,29 @@ class StateManager:
             "phases_completed": {},
             "phases_skipped": {},
         }
+
+    def _head_at_start(self) -> str:
+        """The commit a new state starts from (``git_utils.head_or_empty_tree``,
+        run where every git call of the run is: the current directory).
+
+        Outside a git repository this raises ``unattended.NeedsHuman`` (exit 3,
+        its message printed alone) instead of the ``GitError`` traceback: every
+        workflow phase diffs against this commit or records git state, so the
+        run cannot start, and the user only has to make the project a
+        repository. Any other git failure (a broken ref) is raised as it is."""
+        try:
+            return head_or_empty_tree()
+        except GitError:
+            if get_project_root_from_dir() is not None:
+                raise
+            raise NeedsHuman(
+                f"ERROR: {os.getcwd()} is not inside a git repository, so no "
+                f"workflow state could be started for {self.plan_path}: every phase "
+                f"records the commit the run starts from and diffs against it. Run "
+                f"the command from inside the project's repository, or make the "
+                f"project one (`git init`; a first commit is optional), then run it "
+                f"again."
+            ) from None
 
     def _load_or_create(self) -> None:
         """Load existing state or create new one."""
