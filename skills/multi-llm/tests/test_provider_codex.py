@@ -636,6 +636,9 @@ T3_CODEX_CORPUS = (
     ("rows/success.stdout.txt",                    None,                 None),
     ("rows/truncated.stdout.txt",                  None,                 None),
     ("rows/zero-body.stdout.txt",                  None,                 None),
+    # Synthesized beside them (the manifest's `bwrap-unmeasured` row): the
+    # two start-up events of `rate-limit`, nothing else.
+    ("rows/bwrap-unmeasured.stdout.txt",           None,                 None),
 )
 
 

@@ -345,6 +345,15 @@ def git_lookups(monkeypatch):
 BASE_PROVIDER = registry.load_base_config()["default_provider"]
 
 
+def test_a_file_that_is_not_utf8_is_a_parse_error(tmp_path):
+    """One exception type for "does not parse", so the registry's override
+    loader turns it into ``ConfigError`` like any other malformed layer."""
+    path = tmp_path / "latin1.yaml"
+    path.write_bytes("key: caf\xe9\n".encode("latin-1"))
+    with pytest.raises(yaml_io.YAMLError, match="not UTF-8"):
+        yaml_io.load_file(path)
+
+
 @pytest.mark.config_override
 class TestTheConfigCache:
     def test_anchors_in_one_repository_share_one_entry(self, tmp_path, merges, settled):

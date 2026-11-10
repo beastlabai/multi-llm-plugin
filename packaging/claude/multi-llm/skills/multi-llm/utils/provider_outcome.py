@@ -24,17 +24,22 @@ from . import readonly_audit as _readonly_audit_mod
 from . import structured_output
 from .json_extractor import _ANSI_ESCAPE, looks_like_ndjson
 from .providers.base import (
+    CATEGORY_SANDBOX_UNAVAILABLE,
     SANDBOX_RUNG_LANDLOCK,
     SANDBOX_RUNG_PLUGIN_LANDLOCK,
     SANDBOX_RUNG_UNSANDBOXED,
     _matches_marker,
     availability_from_failure,
     exit_zero_failure_category,
+    launch_refusal,
+    sandbox_hint,
     sandbox_rung_id,
 )
 from .providers.result_envelope import is_clean_envelope
 from .redact import redact_text
-from .retry_ladder import STATUS_RUNNER_ERROR, STATUS_TIMEOUT, STATUS_UNPARSEABLE
+from .retry_ladder import (
+    STATUS_RUNNER_ERROR, STATUS_SPAWN_FAILED, STATUS_TIMEOUT, STATUS_UNPARSEABLE,
+)
 
 
 # Error codes for consistent error reporting
@@ -734,6 +739,10 @@ def _adapter_failure_category(
         return False, None
     if category is not None and not isinstance(category, str):
         return False, None
+    if category == STATUS_SPAWN_FAILED:
+        # A shell's `command not found` may be a hook's: the executor's rule
+        # (`base.launch_refusal`), so both lanes stop or retry alike.
+        category, _ = launch_refusal(provider, stdout, stderr, returncode)
     return True, category
 
 
@@ -833,6 +842,21 @@ def _launch_failure(capture: Capture, provider_name: str, model: str) -> Dict[st
             "duration_seconds": capture.duration,
         },
     }
+
+
+def _sandbox_hint_line(provider: Any, stderr: str) -> Optional[str]:
+    """``base.sandbox_hint`` over the stderr the adapter's CLI wrote, redacted.
+
+    A message only, never a verdict: a bubblewrap line that is none of the
+    measured refusals does not stop the slot, but the reader still learns
+    the runner's own sandbox may not have started
+    (docs/development/providers.md#launch-diagnostics).
+    """
+    try:
+        hint = sandbox_hint(provider.launch_diagnostics(stderr or ""))
+    except Exception:  # noqa: BLE001 - diagnostics must not raise
+        return None
+    return _redact(hint) if hint else None
 
 
 def _exit_line(provider: Any, provider_name: str, capture: Capture) -> str:
@@ -1206,6 +1230,14 @@ def outcome_from_capture(
             )
         elif jail_note:
             result["error"] = f"{error_line}{jail_note}"
+        # A bubblewrap line no measured refusal matched keeps its verdict, and
+        # the line still points at `doctor` (`_sandbox_hint_line`), ahead of
+        # the category tag, which ends the line.
+        hint = None if jail_error or category == CATEGORY_SANDBOX_UNAVAILABLE else (
+            _sandbox_hint_line(provider, stderr)
+        )
+        if hint:
+            result["error"] = f"{result['error']} ({hint})"
         # A jail denial replaces the line and decides the slot on its own, so
         # it carries no category tag.
         if category and not jail_error:

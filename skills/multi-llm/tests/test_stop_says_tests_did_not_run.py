@@ -130,7 +130,6 @@ def check_first(tmp_path, monkeypatch):
     monkeypatch.setenv("MOCK_LLM_EDITS_IF_PROMPT_HAS", "Title: Edit: write the release note")
     yield obj
     registry._config = None
-    registry._config_key = None
 
 
 def test_a_stop_after_only_a_check_ran_says_nothing(check_first, capsys):
@@ -199,7 +198,6 @@ def test_a_finished_run_of_a_check_alone_runs_no_verify_command(
         "driver:\n  subagent_runner: codex:gpt-5.5\n"
         "  verify_command: \"touch verify-ran\"\n", encoding="utf-8")
     registry._config = None
-    registry._config_key = None
     monkeypatch.setenv("MOCK_LLM_WRITE_IDS", json.dumps(["T001"]))
     monkeypatch.setenv("MOCK_LLM_WRITE_CHECK_IF_PROMPT_HAS", CHECK_GATE)
     monkeypatch.setenv("MOCK_LLM_WRITE_CHECK", json.dumps(
@@ -210,7 +208,6 @@ def test_a_finished_run_of_a_check_alone_runs_no_verify_command(
         ]) == 0
     finally:
         registry._config = None
-        registry._config_key = None
     captured = capsys.readouterr()
     assert not (repo.root / "verify-ran").exists()
     assert NOT_SET not in captured.out + captured.err

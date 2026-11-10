@@ -576,7 +576,6 @@ class TestImplementsResultLineSaysTheCheckFails:
             out = capsys.readouterr().out
         finally:
             registry._config = None
-            registry._config_key = None
         assert f"{BATCH_CHECK_MARKER} T001: its edits were applied" in out
         notice = parse_result_line(out)["notice"]
         assert notice.startswith(

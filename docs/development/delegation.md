@@ -560,9 +560,18 @@ under its own name. `spawn_failed` (an install or argv refusal, such as omp's un
 name) stops both lanes on a non-zero exit and fails the executor's batch, so it is read only off
 exit 127, stderr (`failure_classifier.STDERR_LAUNCH_FAILURE_MARKERS`: a shell's `command not found`, omp's
 refusals) and an adapter's own refusal shape (vibe's config refusal opening stdout), never off a
-model's answer or a tool's output on stdout. `sandbox_unavailable` fails the batch too, so its
+model's answer or a tool's output on stdout. A shell's phrase there may name a hook's, a wrapper's
+or an MCP server's command rather than the CLI, so both lanes keep it only for a run that made no
+progress: nothing on stdout and nothing else the adapter recognises on stderr
+(`failure_classifier.launch_refusal`, asked by `provider_outcome` and `_classify_failed_run`).
+Otherwise the verdict is the adapter's reading with only those phrases blanked, so a 401 on the
+same line still decides (`None`, one transport retry, unless the rest names a rate limit or the
+like); exit 127, omp's own refusals (`failure_classifier.CLI_REFUSAL_MARKERS`) and an adapter's
+refusal shape stay fatal. `sandbox_unavailable` fails the batch too, so its
 bubblewrap refusals (`failure_classifier.SANDBOX_MARKERS`) are whole measured lines read off stderr alone: an
-answer that explains bubblewrap is not a broken sandbox. Both read only the stderr of an adapter
+answer that explains bubblewrap is not a broken sandbox; any other `bwrap: ` line on a non-zero
+exit is `runner_error`, one transport retry, with a reason that names `multi_llm.py doctor`
+(`attempt_classifier._sandbox_hinted`). Both read only the stderr of an adapter
 whose CLI writes it alone, never one that relays a model's or a tool's words there
 ([launch diagnostics](providers.md#launch-diagnostics)). One verdict stops on the
 fan-out and is retried once by the executor, which does not forward it: `permission_denied` (a 403

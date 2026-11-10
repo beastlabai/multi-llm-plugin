@@ -79,7 +79,6 @@ def orchestrator_repo(tmp_path, monkeypatch):
     config.write_text("driver:\n  subagent_runner: codex:gpt-5.5\n", encoding="utf-8")
     monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(config))
     registry._config = None
-    registry._config_key = None
     executor.reset_version_cache()
     monkeypatch.chdir(root)
 
@@ -93,7 +92,6 @@ def orchestrator_repo(tmp_path, monkeypatch):
     obj.monkeypatch = monkeypatch
     yield obj
     registry._config = None
-    registry._config_key = None
 
 
 #: What a *compliant* runner attests to: an implement task's `expected_ids` is

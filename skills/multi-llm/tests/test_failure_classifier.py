@@ -46,6 +46,8 @@ from utils.retry_ladder import (  # noqa: E402
     STATUS_AUTH_FAILED,
     STATUS_CONTEXT_LENGTH_EXCEEDED,
     STATUS_RATE_LIMITED,
+    STATUS_RUNNER_ERROR,
+    STATUS_SANDBOX_UNAVAILABLE,
     STATUS_SPAWN_FAILED,
     STATUS_TIMEOUT,
 )
@@ -758,7 +760,6 @@ class TestConfigDeclaredProvidersOnThePin:
         )
         monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(path))
         registry._config = None
-        registry._config_key = None
         self._use("hermetic_pure_config_content")
         assert self._detect("stub/stub-model", "agent-readonly") == "config"
         assert ["opencode", "--pure", "debug", "config"] in self.reads
@@ -796,7 +797,6 @@ class TestConfigDeclaredProvidersOnThePin:
             path.write_text("providers:\n  opencode:\n    hermetic: off\n", encoding="utf-8")
             monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(path))
             registry._config = None
-            registry._config_key = None
             profile = "agent-readonly"
         assert self._detect("stub/stub-model", profile) == "config"
 
@@ -1201,4 +1201,176 @@ class TestSandboxMarkers:
 
         assert pbase.classify_streams(
             "", "the plan mentions bwrap: as a sandbox option", exit_code=1
+        ) is None
+
+
+def _capture(stdout, stderr, exit_code=1):
+    from utils.provider_outcome import Capture
+
+    return Capture(stdout=stdout, stderr=stderr, exit_code=exit_code)
+
+
+def _both_lanes(provider_name, capture):
+    from tests.test_provider_fixture_rows import _lane_a_status, _lane_b_status
+
+    return _lane_a_status(provider_name, capture), _lane_b_status(provider_name, capture)
+
+
+#: codex's own events on stdout: the run got past its argv and reached the API.
+_CODEX_PROGRESS = "\n".join([
+    json.dumps({"type": "thread.started", "thread_id": "t"}),
+    json.dumps({"type": "turn.started"}),
+    json.dumps({"type": "error", "message": "stream disconnected before completion"}),
+]) + "\n"
+
+
+class TestAShellRefusalNeedsARunThatMadeNoProgress:
+    """A shell's ``command not found`` on stderr may be a hook's, a wrapper's
+    or an MCP server's, so it stops the slot and fails the executor's batch
+    only for a run that made no progress (``base.launch_refusal``); exit 127,
+    a CLI's own refusal and an adapter's refusal shape stay fatal
+    (docs/development/delegation.md#read-and-analyze-executor)."""
+
+    def test_after_progress_the_run_keeps_its_transport_retry(self):
+        codex = get_provider("codex")
+        capture = _capture(_CODEX_PROGRESS, "bash: line 1: uvx: command not found\n")
+        # The tables still read the phrase; what changed is who acts on it.
+        assert codex.classify_failure(capture.stdout, capture.stderr, 1) == STATUS_SPAWN_FAILED
+        category, read = pbase.launch_refusal(codex, capture.stdout, capture.stderr, 1)
+        assert category is None and read == "bash: line 1: uvx: " + " " * 17 + "\n"
+        assert executor._classify_failed_run(codex, capture, "m") is None
+        lanes = _both_lanes("codex", capture)
+        assert lanes == ("runner_error", "unparseable_result"), lanes
+
+    def test_with_the_line_set_aside_the_rest_of_stderr_decides(self):
+        """No stdout, but stderr names an overload: the rate limit is the
+        verdict, and its quote is cut from the stderr without the shell line."""
+        claude = get_provider("claude-code")
+        capture = _capture("", "sh: 1: jq: command not found\nAPI Error: 529 overloaded\n")
+        verdict = executor._classify_failed_run(claude, capture, "m")
+        assert verdict is not None and verdict[0] == STATUS_RATE_LIMITED, verdict
+        assert "overloaded" in verdict[1] and "command not found" not in verdict[1]
+
+    @pytest.mark.parametrize("diagnosis,verdict", [
+        ("HTTP 401 Unauthorized", STATUS_AUTH_FAILED),
+        ("HTTP 429 Too Many Requests", STATUS_RATE_LIMITED),
+        ("model not found", "invalid_model"),
+    ])
+    def test_a_diagnosis_on_the_shell_line_still_decides(self, diagnosis, verdict):
+        """Only the shell's phrase is read past, never the text beside it: a
+        401, 429 or unknown model on the same line keeps its verdict on both
+        lanes, and the quote keeps the diagnosis (F07 review, point 3)."""
+        codex = get_provider("codex")
+        stderr = f"ERROR: {diagnosis}; hook stderr: jq: command not found\n"
+        capture = _capture('{"type":"thread.started","thread_id":"t"}\n', stderr)
+        category, read = pbase.launch_refusal(codex, capture.stdout, stderr, 1)
+        assert category == verdict
+        assert diagnosis in read and "command not found" not in read
+        assert len(read) == len(stderr)
+        found = executor._classify_failed_run(codex, capture, "m")
+        assert found is not None and found[0] == verdict and diagnosis in found[1]
+        assert _both_lanes("codex", capture)[0] == verdict
+
+    @pytest.mark.parametrize("stderr", [
+        "bash: codex: command not found\n",
+        "bash: /usr/local/bin/codex: cannot execute binary file: Exec format error\n",
+        "'codex' is not recognized as an internal or external command,\n"
+        "operable program or batch file.\n",
+    ])
+    def test_with_no_progress_the_refusal_stays_fatal(self, stderr):
+        codex = get_provider("codex")
+        capture = _capture("", stderr)
+        verdict = executor._classify_failed_run(codex, capture, "m")
+        assert verdict is not None and verdict[0] == STATUS_SPAWN_FAILED, verdict
+        assert _both_lanes("codex", capture) == (STATUS_SPAWN_FAILED,) * 2
+
+    def test_exit_127_stays_fatal_whatever_stdout_holds(self):
+        codex = get_provider("codex")
+        capture = _capture(_CODEX_PROGRESS, "bash: line 1: uvx: command not found\n", 127)
+        assert pbase.launch_refusal(codex, capture.stdout, capture.stderr, 127)[0] == (
+            STATUS_SPAWN_FAILED
+        )
+        assert executor._classify_failed_run(codex, capture, "m")[0] == STATUS_SPAWN_FAILED
+
+    def test_a_clis_own_refusal_stays_fatal_beside_a_shell_line(self):
+        omp = get_provider("omp")
+        stderr = "sh: 1: jq: command not found\nError: Unknown tool in --tools: bogus.\n"
+        capture = _capture('{"type":"session"}\n', stderr, 2)
+        assert executor._classify_failed_run(omp, capture, "m")[0] == STATUS_SPAWN_FAILED
+
+    def test_an_adapters_own_refusal_shape_stays_fatal(self):
+        vibe = get_provider("vibe")
+        stdout = "Error: Invalid configuration (1 error(s)):\n  models: bad\n"
+        capture = _capture(stdout, "sh: 1: jq: command not found\n")
+        assert executor._classify_failed_run(vibe, capture, "m")[0] == STATUS_SPAWN_FAILED
+
+    def test_the_two_tables_split_the_row(self):
+        row = pbase.STDERR_LAUNCH_FAILURE_MARKERS[STATUS_SPAWN_FAILED]
+        assert row == pbase.CLI_REFUSAL_MARKERS + pbase.SHELL_REFUSAL_MARKERS
+        assert not set(pbase.CLI_REFUSAL_MARKERS) & set(pbase.SHELL_REFUSAL_MARKERS)
+
+
+class TestAnUnmeasuredBubblewrapLinePointsAtDoctor:
+    """A bubblewrap line that is none of the measured refusals keeps its
+    verdict and retries, and the failure message still names the sandbox and
+    ``multi_llm.py doctor`` (docs/development/providers.md#launch-diagnostics)."""
+
+    LINES = [
+        "bwrap: Creating new namespace failed: Operation not permitted",
+        "bwrap: Can't mount proc on /newroot/proc: Operation not permitted",
+        "2026-11-10T00:00:00Z ERROR codex_core::exec: "
+        "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted",
+    ]
+
+    @pytest.mark.parametrize("line", LINES)
+    def test_the_hint_quotes_the_line_and_names_doctor(self, line):
+        hint = pbase.sandbox_hint("Reading additional input from stdin...\n" + line + "\n")
+        assert hint is not None and "multi_llm.py doctor" in hint
+        assert "bwrap: " in hint and "Reading additional" not in hint
+
+    @pytest.mark.parametrize("stderr", ["", "Operation not permitted\n", "the wrapper is bwrapper: x"])
+    def test_no_bubblewrap_line_no_hint(self, stderr):
+        assert pbase.sandbox_hint(stderr) is None
+
+    @pytest.mark.parametrize("line", LINES)
+    def test_the_executor_retries_once_and_names_doctor(self, line):
+        codex = get_provider("codex")
+        verdict = executor._classify_failed_run(codex, _capture("", line + "\n"), "m")
+        assert verdict is not None
+        status, reason = verdict
+        assert status == STATUS_RUNNER_ERROR and status not in FATAL_STATUSES
+        assert "multi_llm.py doctor" in reason and "bwrap: " in reason
+
+    @pytest.mark.parametrize("line", LINES)
+    def test_the_fan_out_line_names_doctor(self, line):
+        from utils.provider_outcome import outcome_from_capture
+
+        outcome = outcome_from_capture(
+            get_provider("codex"), _capture("", line + "\n"), provider_name="codex", model="m",
+        )
+        assert "multi_llm.py doctor" in outcome["error"], outcome["error"]
+
+    def test_a_measured_line_stays_fatal_with_one_pointer(self):
+        from utils.provider_outcome import outcome_from_capture
+
+        line = TestSandboxMarkers.BWRAP_LINES[0]
+        codex = get_provider("codex")
+        verdict = executor._classify_failed_run(codex, _capture("", line + "\n"), "m")
+        assert verdict[0] == STATUS_SANDBOX_UNAVAILABLE
+        outcome = outcome_from_capture(
+            codex, _capture("", line + "\n"), provider_name="codex", model="m",
+        )
+        assert outcome["error"].endswith("[sandbox_unavailable]"), outcome["error"]
+
+    def test_a_relaying_adapters_stderr_gives_no_hint(self):
+        """kilocode's stderr also relays a tool's words (``LAUNCH_DIAGNOSTICS``
+        ``none``), so a bubblewrap line there points at nothing."""
+        kilocode = get_provider("kilocode")
+        capture = _capture("", self.LINES[0] + "\n")
+        assert executor._classify_failed_run(kilocode, capture, "m") is None
+
+    def test_an_exit_zero_gives_no_hint(self):
+        codex = get_provider("codex")
+        assert executor._classify_failed_run(
+            codex, _capture("", self.LINES[0] + "\n", 0), "m"
         ) is None

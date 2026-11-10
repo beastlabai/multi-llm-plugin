@@ -9,6 +9,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [Adding a provider adapter](#adding-a-provider-adapter)
 - [The provider base modules](#the-provider-base-modules)
 - [Configuration and runner resolution](#configuration-and-runner-resolution)
+  - [The overall deadline](#the-overall-deadline)
 - [Read-only provider contracts](#read-only-provider-contracts)
 - [Model catalog snapshots](#model-catalog-snapshots)
 - [Provider output channels](#provider-output-channels)
@@ -119,7 +120,11 @@ its **full** contents — including a `providers:` block — over base, identica
 layer (no longer filtered to selection keys). Deep-merge, lists replace, `None`
 skipped. Discovery anchors on the optional `anchor` (plan path threaded from
 `resolve_models`) then CWD. Present-but-invalid explicit
-overrides fail fast (`ConfigError`); `MULTI_LLM_PROVIDERS_CONFIG_PERMISSIVE=1` restores warn-and-skip.
+overrides fail fast (`ConfigError`), a file that is not UTF-8 text included (`yaml_io.load_file`
+raises it as a parse error); `MULTI_LLM_PROVIDERS_CONFIG_PERMISSIVE=1` restores warn-and-skip. A
+merged `providers:` block that is not a mapping (a list, a scalar) is replaced by the shipped one
+with a warning, as a single malformed provider entry gets its base definition back: otherwise every
+per-provider read would fall back to an adapter default that no layer states.
 
 **Config caching.** The merged config is cached per process, one entry per set of layer files
 a load read, keyed on each file's path and stat signature (device, inode, size, mtime, ctime of
@@ -225,6 +230,24 @@ still judges the session's model; with no session model set the warning is exact
 Measured 2026-09-11: a `--quick` review from an opencode session on
 `opencode/nemotron-3-ultra-free` validated on `opencode/big-pickle` because nothing named the session's
 model, which is the question this rung answers.
+
+### The overall deadline
+
+Each slot's budget (its provider's timeout, or the run's `--timeout`) starts once the slot holds
+its provider's `max_concurrent` semaphore and then the global `--max-parallel` one, so it can
+wait behind both, and the two waits add up. Until a slot of provider `p` starts, at every moment
+either the global gate is full or every slot holding `p`'s gate is running, so it starts by
+`(W − W_p) / max_parallel + (W_p − its budget) / p's gate` (`W` sums every slot's budget, `W_p`
+those of `p`'s slots). The fan-out's overall deadline (`concurrency.overall_deadline`, read by
+`review_orchestrator_base.run_models_concurrent`) is the latest such finish, plus one largest
+budget of headroom (kill grace, drain, a launch turn waited for inside the gates) and the launch
+stagger. One slot is `2 × budget + stagger`; kilocode's six default models at `max_concurrent: 2`
+come to 5400 s, and the shipped default model list (eleven slots, `--max-parallel 5`) to 7444 s.
+`tests/test_overall_deadline.py` runs mixed schedules through the real gates on a virtual clock
+and checks every one finishes inside it. The deadline harvests every finished slot before it
+cancels the rest. The executor's batch passes its own budget, one task budget per task, because
+backpressure can narrow a provider to one slot mid-batch (`task_batch`), and
+`run_tasks_concurrent` counts that as one slot.
 
 ## Read-only provider contracts
 
@@ -860,7 +883,11 @@ to `outcome_from_capture`.
   found by a plain regex so no quote or bracket can hide it (a banner ahead of the envelope, an
   answer quoting one), is **ambiguous**: a parse failure, one bounded retry. A stdout with no
   opening goes to the adapter's ordinary extraction, unchanged. A whole envelope without its answer
-  field fails too.
+  field fails too. **The cost:** text ahead of the envelope cannot be told from a model quoting
+  one (an example error envelope behind a line of prose, or in an unfinished fence, would otherwise
+  decide `auth_failed`), so a CLI release, wrapper or runtime that starts printing a banner on
+  stdout breaks that adapter's parse: every slot fails, and the ladder dispatches it once more,
+  until the banner's measured form is added to the rule. No capture shows one today.
 - **One reduction for failure verdicts and their quotes.** The six adapters' `vendor_text` is
   `stdout_shape.diagnostic_streams`, so the classifier on exit 0 and on any other exit, and the executor's
   failure quote, read one text: for an envelope, each signature record as the adapter's
@@ -870,6 +897,16 @@ to `outcome_from_capture`.
   other JSON lines and the trailing text; for a cut or ambiguous stdout, nothing of stdout, so only
   stderr is read, under the adapter's [launch diagnostics](#launch-diagnostics); for a plain stdout
   (a CLI's plain-text refusal), all of it.
+- **kilocode's diagnosis is its painted line.** Its stdout is the answer and its stderr also
+  carries the banner and a tool trace naming what the model read, so its `vendor_text` keeps only
+  the stderr lines that open on its bold-red `Error: ` paint (a reset ahead of it allowed), colour
+  off. An uncoloured run (`NO_COLOR` reaches the child) therefore gives no verdict from its text:
+  its exit alone decides, one bounded retry, until a capture shows how kilocode frames an error
+  without colour, since an uncoloured `Error:` line cannot be told from a tool's output or a
+  multi-line tool argument. The cause OpenRouter's gateway gives, `Provider returned error`, is
+  read from the JSON body on the lines after it as a structured code: `error.code` 429 is
+  `rate_limited`, in a rate limit's place in the tables' order, and the body's message and
+  metadata never reach a table (`KiloCodeProvider.classify_failure`).
 - **One parse result.** Every `parse_output` returns `{"success": True, "data": …}` or
   `{"success": False, "error": …, "raw": …, "data": None}`, adapter keys after those four, built
   through `providers.parse_kit` (`ok`, `fail`, `answer_from_text`, `loads_or_extract`,
@@ -909,7 +946,23 @@ So they are read only from text that a model or a tool cannot write:
 
 - **Anchored lines.** `SANDBOX_MARKERS` is bubblewrap's measured refusals, each anchored at a line
   start on its exact prefix and listed beside the capture it came from. A line that only mentions
-  bubblewrap, or an unmeasured refusal, is no sandbox verdict and keeps its bounded retry.
+  bubblewrap, or an unmeasured refusal, is no sandbox verdict and keeps its verdict and retries,
+  but the failure message still names the sandbox: any `bwrap: ` line on the CLI's stderr (a log
+  prefix ahead of it, another wording) adds `failure_classifier.sandbox_hint`'s sentence pointing
+  at `multi_llm.py doctor`, to the fan-out's error line beside its category tag
+  (`provider_outcome._sandbox_hint_line`) and as the executor's `runner_error` reason, one
+  transport retry (`attempt_classifier._sandbox_hinted`). The preflight probe still decides by exit
+  code.
+- **The CLI's own refusal, or no progress.** `spawn_failed`'s stderr row is two tables.
+  `CLI_REFUSAL_MARKERS` are a CLI's words about its own argv or config (omp's), batch-fatal
+  wherever they appear on its stderr. `SHELL_REFUSAL_MARKERS` (`command not found`,
+  `exec format error`, cmd.exe's `is not recognized`) name whichever command a shell could not
+  run, which may be a hook's, a wrapper's or an MCP server's on the same stderr. The classifier
+  reads both as `spawn_failed`; both lanes keep a shell phrase's verdict only for a run that made
+  no progress, nothing on stdout and nothing else the adapter recognises on stderr, and otherwise
+  take the adapter's reading of the same capture with only those phrases blanked
+  (`failure_classifier.launch_refusal`: a rate limit, or `None` and one transport retry; see
+  [the executor](delegation.md#read-and-analyze-executor)).
 - **stderr, where the CLI wrote it.** Each adapter declares `LAUNCH_DIAGNOSTICS` with the captures
   it rests on. `stderr`: everything there is the CLI's, its launcher's or the OS's own. `none`:
   stderr also relays a model's or a tool's words on lines that cannot be told apart, so neither

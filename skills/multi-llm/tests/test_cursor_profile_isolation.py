@@ -195,7 +195,6 @@ def _write_override(tmp_path, monkeypatch, value):
     )
     monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(override))
     registry._config = None
-    registry._config_key = None
     return override
 
 
@@ -854,7 +853,6 @@ class TestIsolateProfileSwitch:
         )
         monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(override))
         registry._config = None
-        registry._config_key = None
         assert cursor_agent_module.isolate_profile_setting() == cursor_agent_module.ISOLATE_OFF
 
 

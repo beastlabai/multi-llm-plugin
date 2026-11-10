@@ -4540,7 +4540,6 @@ class TestWaitTimeoutResolution:
         override.write_text(f"progress:\n{block}", encoding="utf-8")
         monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(override))
         registry._config = None
-        registry._config_key = None
 
     @staticmethod
     def _resolved(tmp_path, monkeypatch, argv) -> float:
@@ -4783,7 +4782,6 @@ class TestWaitTimeoutResolution:
         )
         monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(override))
         registry._config = None
-        registry._config_key = None
 
         plan = _plan(tmp_path)
         phase = _phase_dir(plan)

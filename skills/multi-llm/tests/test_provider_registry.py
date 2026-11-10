@@ -767,7 +767,6 @@ FIXED_BASE = {
 
 def _reset_cache():
     registry._config = None
-    registry._config_key = None
     # §9.3.b: the process-wide run anchor is set-once and immutable *within* a
     # process, so a test that sets one must not leak it into the next.
     if hasattr(registry, "_RUN_ANCHOR"):
@@ -1244,6 +1243,67 @@ class TestNonMappingProviderGuard:
         assert CONFIG_WARNING_PREFIX in err
         assert "malformed provider 'oldprov'" in err
         assert "dropping it" in err
+
+
+@pytest.mark.config_override
+class TestANonMappingProvidersBlock:
+    """``providers:`` as a list or a scalar replaces the whole base mapping
+    in the merge; the shipped block comes back with a warning, so every
+    per-provider read keeps the value a config without the override gives,
+    never an adapter default no layer states (code-health PD-6)."""
+
+    @pytest.mark.parametrize("block", ["[1, 2]", '"x"', "7"])
+    def test_the_base_block_is_restored(self, reg, monkeypatch, tmp_path, capsys, block):
+        override = _write_yaml(
+            tmp_path / ".multi-llm" / "providers.yaml", f"providers: {block}\n",
+        )
+        _set_project_config(monkeypatch, override)
+        assert load_config()["providers"] == FIXED_BASE["providers"]
+        assert get_provider_timeout("claude-code") == 1800
+        assert get_provider_timeout("cursor-agent") == 1200
+        assert get_provider_max_concurrent("claude-code") == 2
+        err = capsys.readouterr().err
+        assert CONFIG_WARNING_PREFIX in err and "malformed 'providers' block" in err
+
+    def test_the_shipped_timeouts_resolve_as_with_no_override(self, monkeypatch, tmp_path):
+        base_codex = get_provider_timeout("codex")
+        override = _write_yaml(tmp_path / "list.yaml", "providers: [1, 2]\n")
+        monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(override))
+        _reset_cache()
+        assert get_provider_timeout("codex") == base_codex == 1800
+
+
+@pytest.mark.config_override
+class TestANonUtf8Override:
+    """A Latin-1 override is a parse error: ``ConfigError`` naming the file,
+    or under the permissive flag a warning and the layer skipped
+    (code-health PD-5)."""
+
+    def _latin1(self, tmp_path):
+        path = tmp_path / ".multi-llm" / "providers.yaml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes("default_provider: claude-code # caf\xe9\n".encode("latin-1"))
+        return path
+
+    def test_strict_raises_config_error(self, reg, monkeypatch, tmp_path):
+        override = self._latin1(tmp_path)
+        _set_project_config(monkeypatch, override)
+        with pytest.raises(ConfigError) as exc:
+            load_config()
+        assert str(override) in str(exc.value) and "UTF-8" in str(exc.value)
+
+    def test_permissive_warns_and_skips(self, reg, monkeypatch, tmp_path, capsys):
+        _set_project_config(monkeypatch, self._latin1(tmp_path))
+        monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG_PERMISSIVE", "1")
+        _reset_cache()
+        assert load_config()["default_provider"] == "cursor-agent"
+        assert "UTF-8" in capsys.readouterr().err
+
+
+def test_the_cache_has_no_second_key():
+    """The config cache is one entry per set of layer files
+    (``_ConfigCache``); no module-level key sits beside it."""
+    assert "_config_key" not in vars(registry)
 
 
 @pytest.mark.config_override
@@ -3519,7 +3579,6 @@ class TestAnExplicitLayerStillOutranksTheSession:
         path.write_text(body, encoding="utf-8")
         monkeypatch.setattr(registry, "_find_project_config", lambda anchor=None: path)
         registry._config = None
-        registry._config_key = None
         return path
 
     def test_the_project_layer_wins(self, monkeypatch, tmp_path):
@@ -3543,7 +3602,6 @@ class TestAnExplicitLayerStillOutranksTheSession:
         )
         monkeypatch.setenv(registry.ENV_CONFIG_VAR, str(override))
         registry._config = None
-        registry._config_key = None
         assert registry.resolve_subagent_runner("full", host_id="opencode") == (
             "claude-code:sonnet", "env",
         )
@@ -3563,7 +3621,6 @@ class TestAnExplicitLayerStillOutranksTheSession:
             override.write_text(body, encoding="utf-8")
             monkeypatch.setenv(registry.ENV_CONFIG_VAR, str(override))
             registry._config = None
-            registry._config_key = None
         assert registry.resolve_subagent_runner("full", host_id="codex") == (
             "codex:gpt-6-astra:high", layer,
         )

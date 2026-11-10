@@ -294,3 +294,54 @@ rows:
       error_contains: ["error sending request"]
       raw_contains: ["stream disconnected before completion: error sending request"]
       classify_failure: null
+
+  # ----- synthetic: stderr shapes no capture shows yet ---------------------- #
+
+  hook-command-not-found:
+    stdout: rows/stdout-error.stdout.txt
+    stderr: rows/hook-command-not-found.stderr.txt
+    exit_code: 1
+    synthesized: true
+    provenance: >-
+      SYNTHETIC, built 2026-11-10: `stdout-error`'s stdout and stderr as
+      captured, plus one stderr line `bash: line 1: uvx: command not found`,
+      the refusal a shell prints when an MCP server or hook the CLI starts is
+      missing. No capture runs codex with MCP servers or hooks configured.
+    notes: >-
+      The classifier still reads the shell's phrase as `spawn_failed`, but the
+      run made progress (its events on stdout), so both lanes take the adapter's
+      reading with that phrase blanked (`failure_classifier.launch_refusal`):
+      the 500 gloss, `server_error`, one transport retry each, where the
+      batch would otherwise have failed whole.
+    expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
+      salvage: none
+      success: false
+      error_contains: ["experiencing high demand"]
+      raw_contains: ["bash: line 1: uvx: command not found"]
+      classify_failure: "spawn_failed"
+
+  bwrap-unmeasured:
+    stdout: rows/bwrap-unmeasured.stdout.txt
+    stderr: rows/bwrap-unmeasured.stderr.txt
+    exit_code: 1
+    synthesized: true
+    provenance: >-
+      SYNTHETIC, built 2026-11-10: the first two lines of `rate-limit`'s stdout
+      (`thread.started`, `turn.started`) and `stdout-error`'s stderr plus one
+      bubblewrap refusal no capture holds, `bwrap: Creating new namespace
+      failed: Operation not permitted`.
+    notes: >-
+      Not one of `SANDBOX_MARKERS`' measured refusals, so not batch-fatal: the
+      tables read `permission_denied` (the fan-out stops the slot, the
+      deliberate exception), and the executor records `runner_error`, one
+      transport retry, with a reason that names `multi_llm.py doctor`
+      (`attempt_classifier._sandbox_hinted`); the fan-out's error line carries
+      the same pointer.
+    expect:
+      lane_status: {lane_a: permission_denied, lane_b: runner_error}
+      salvage: none
+      success: false
+      error_contains: ["No text events found in output"]
+      raw_contains: ["bwrap: Creating new namespace failed"]
+      classify_failure: "permission_denied"

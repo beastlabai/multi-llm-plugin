@@ -67,7 +67,6 @@ def clinic(tmp_path, monkeypatch):
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
     monkeypatch.chdir(tmp_path)
     registry._config = None
-    registry._config_key = None
     executor.reset_version_cache()
     for name in ("codex", "grok", "muse"):
         resolved = shutil.which(name)
@@ -82,7 +81,6 @@ def clinic(tmp_path, monkeypatch):
     monkeypatch.setattr(llm_client, "invoke_with_provider", no_model_calls)
     yield bin_dir
     registry._config = None
-    registry._config_key = None
 
 
 def _broken_bwrap(monkeypatch):
@@ -1071,7 +1069,6 @@ class TestDoctorConfigOnly:
         )
         monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(path))
         registry._config = None
-        registry._config_key = None
         self.oc.reset_hermetic_state()
         row = doctor._probe_auth(self.provider, 5.0, str(tmp_path), None)
         assert row["state"] == "config-only" and row["ok"] is False

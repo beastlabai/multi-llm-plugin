@@ -362,7 +362,6 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("MOCK_LLM_CALL_LOG", str(log))
     registry._RUN_ANCHOR = None
     registry._config = None
-    registry._config_key = None
     executor.reset_version_cache()
     monkeypatch.chdir(root)
 
@@ -373,7 +372,6 @@ def repo(tmp_path, monkeypatch):
     yield {"root": root, "plan": plan, "log": log}
     registry._RUN_ANCHOR = None
     registry._config = None
-    registry._config_key = None
 
 
 def test_an_implement_batch_that_replied_in_prose_is_not_sent_again(repo, capsys):

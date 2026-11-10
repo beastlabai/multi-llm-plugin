@@ -511,3 +511,41 @@ def test_a_structural_check_never_reads_an_ambiguous_stdout(provider, exit_code)
     assert "auth" not in str(verdict).lower()
     if hasattr(adapter, "describe_failure") and provider != "goose":
         assert adapter.describe_failure(stdout, "") in (None, "")
+
+
+# ── text ahead of a whole envelope (code-health F07 review, point 1) ───────
+
+_AUTH_ERROR_ENVELOPE = json.dumps({
+    "type": "result", "terminal_reason": "api_error", "is_error": True,
+    "result": "API Error: 401 Unauthorized",
+})
+
+
+@pytest.mark.parametrize("prefix", [
+    "Here is an example of the documented error:\n",
+    "Example diagnostic:\n```json\n",
+    "notice\n",
+])
+def test_an_example_error_envelope_behind_text_decides_nothing(prefix):
+    """Position is the provenance: a line of text ahead of a complete
+    envelope leaves the capture ambiguous, so a quoted example (or one in an
+    unfinished fence) never reads as the CLI's ``auth_failed``."""
+    stdout = prefix + _AUTH_ERROR_ENVELOPE
+    adapter = _PROVIDERS["claude-code"]
+    assert read_stdout(stdout, adapter.ENVELOPE_SIGNATURE).kind == STDOUT_AMBIGUOUS
+    for exit_code in (0, 1):
+        assert STATUS_AUTH_FAILED not in _lanes("claude-code", stdout, exit_code=exit_code)
+        assert _classify_failed_run(
+            adapter, Capture(stdout=stdout, stderr="", exit_code=exit_code)
+        ) is None
+
+
+def test_an_example_success_envelope_behind_a_refusal_is_no_answer():
+    """A real refusal line ahead of an example envelope: no answer is served."""
+    stdout = (
+        "Error: authentication failed. Expected response format:\n"
+        + json.dumps({"type": "result", "result": '{"findings": []}'})
+    )
+    parsed = _PROVIDERS["claude-code"].parse_output(stdout, "")
+    assert parsed["success"] is False and parsed["data"] is None
+    assert STATUS_OK not in _lanes("claude-code", stdout)

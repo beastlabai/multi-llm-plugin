@@ -681,7 +681,6 @@ Needs the manual play-through first.
 def chain_repo(tmp_path, monkeypatch):
     yield make_repo(tmp_path, monkeypatch, PLAN_THROUGH_A_MANUAL_TASK)
     registry._config = None
-    registry._config_key = None
 
 
 def _paused(repo, *flags) -> int:
@@ -864,7 +863,6 @@ class TestTwoChecksHoldOneTask:
             assert not get_or_create_state(repo.plan).is_phase_completed("implement")
         finally:
             registry._config = None
-            registry._config_key = None
 
     def test_finalize_computes_the_hold_when_no_reason_says_so(
         self, tmp_path, monkeypatch, capsys,
@@ -891,7 +889,6 @@ class TestTwoChecksHoldOneTask:
             assert "T004 (waits for T003) did not run" in err
         finally:
             registry._config = None
-            registry._config_key = None
 
 
 class TestABlockedRecordIsNotAFailure:

@@ -121,9 +121,6 @@ _MAX_MERGED_CONFIGS = 16
 # tests reset it that way. Every read and fill holds _CONFIG_LOCK, so concurrent
 # first callers share one load instead of each parsing the layers.
 _config: Optional[_ConfigCache] = None
-# Unused since the cache became one entry per set of layer files; kept because
-# resets outside this module still clear it beside _config.
-_config_key: Optional[tuple] = None
 _CONFIG_LOCK = threading.RLock()
 
 #: The built-in base layer, shipped with the skill.
@@ -704,6 +701,19 @@ def _merge_layers(layers: List[Tuple[str, Path]], permissive: bool) -> _ConfigSn
     base_providers = base_config.get("providers")
     base_providers = base_providers if isinstance(base_providers, dict) else {}
     providers = config.get("providers")
+    if "providers" in config and not isinstance(providers, dict):
+        # A non-mapping `providers:` block (a list, a scalar) replaced the whole
+        # base mapping during the merge. Every per-provider read (timeouts,
+        # concurrency, model lists) would fall back to an adapter default no
+        # layer states, so the shipped block is restored, as for one malformed
+        # entry below (docs/development/providers.md#configuration-and-runner-resolution).
+        print(
+            f"{CONFIG_WARNING_PREFIX} ignoring malformed 'providers' block in "
+            f"merged config (expected a mapping, got {type(providers).__name__}) "
+            f"— restoring the base definitions",
+            file=sys.stderr,
+        )
+        providers = config["providers"] = copy.deepcopy(base_providers)
     if isinstance(providers, dict):
         for name in [k for k, v in providers.items() if not isinstance(v, dict)]:
             base_entry = base_providers.get(name)

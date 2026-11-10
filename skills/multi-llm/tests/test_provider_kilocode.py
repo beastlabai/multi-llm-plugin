@@ -7,6 +7,7 @@ One of the per-provider test files; helpers that several of them share live in
 import json
 import sys
 import pytest
+import yaml
 from pathlib import Path
 from unittest.mock import patch
 
@@ -374,14 +375,20 @@ class TestKiloCodeReadsOnlyItsPaintedErrorLines:
         )
 
     def test_the_hook_keeps_only_the_painted_lines_of_every_capture(self, provider):
-        """Every committed pair: no stdout, and of stderr exactly the lines that
-        open on the paint, each a piece of the capture with its escapes off."""
-        pairs = sorted(self.ROWS.glob("*.stderr.txt"))
-        assert pairs
-        for stderr_path in pairs:
-            stdout_path = stderr_path.with_name(
-                stderr_path.name.replace(".stderr.", ".stdout.")
-            )
+        """Every captured pair (the manifest's rows that are not synthesized):
+        no stdout, and of stderr exactly the lines that open on the paint, each
+        a piece of the capture with its escapes off."""
+        manifest = yaml.safe_load(
+            (self.ROWS.parent / "manifest.yaml").read_text(encoding="utf-8")
+        )
+        captured = [
+            row for row in manifest["rows"].values()
+            if row.get("stderr") and not row.get("synthesized")
+        ]
+        assert captured
+        for row in captured:
+            stderr_path = self.ROWS.parent / row["stderr"]
+            stdout_path = self.ROWS.parent / row["stdout"]
             stdout = stdout_path.read_bytes().decode("utf-8")
             stderr = stderr_path.read_bytes().decode("utf-8")
             reduced_out, reduced_err = provider.vendor_text(stdout, stderr)
@@ -515,6 +522,105 @@ class TestKiloCodeReadsOnlyItsPaintedErrorLines:
         assert "ANSWER-TEXT" not in reason and "\\x1b" not in reason
         sentence = {"auth-error": "Incorrect API key provided", "rate-limit": "Rate limit reached"}
         assert sentence[row] in reason
+
+
+class TestKiloCodeErrorFraming:
+    """Only kilocode's painted ``Error:`` line is its diagnosis, a reset ahead
+    of the paint included; an uncoloured run (``NO_COLOR``) gives no verdict
+    from text until a capture shows its framing. The gateway's 429 body after
+    ``Error: Provider returned error`` is read as its structured code, never
+    as text (code-health F07 review, points 4 and 5)."""
+
+    BANNER = TestKiloCodeReadsOnlyItsPaintedErrorLines.BANNER
+    PAINT = "\x1b[91m\x1b[1mError: \x1b[0m"
+    PLAIN_BANNER = "\n> code · stub-model\n\n"
+    RATE = "Rate limit reached for stub-model in organization org-stub."
+
+    @pytest.fixture
+    def provider(self):
+        return KiloCodeProvider()
+
+    def _gateway(self, body, paint=True):
+        prefix = self.PAINT if paint else "Error: "
+        return (self.BANNER if paint else self.PLAIN_BANNER) + (
+            prefix + "Provider returned error\n" + json.dumps(body) + "\n"
+        )
+
+    @pytest.mark.parametrize("stderr,expected", [
+        # A reset ahead of the paint on the same line: kilocode's framing.
+        ("\x1b[0m\x1b[91m\x1b[1mError: \x1b[0m" + RATE + "\n", "rate_limited"),
+        (BANNER + "\x1b[m" + PAINT + "Incorrect API key provided: sk-x***.\n", "auth_failed"),
+        # Uncoloured: no line is kilocode's, whatever it says.
+        ("Error: 429 Too Many Requests: rate limit exceeded\n", None),
+        (PLAIN_BANNER + "Error: Incorrect API key provided: sk-x***.\n", None),
+        # A multi-line tool argument or a tool's output, uncoloured.
+        (PLAIN_BANNER + "→ Read docs/\nError: Incorrect API key provided.md\n", None),
+        (PLAIN_BANNER + "→ Bash printf 'x\\nError: Incorrect API key provided'\n"
+         "Error: Incorrect API key provided\n", None),
+        # Painted stderr: an unpainted line, or another colour, is not kilocode's.
+        (BANNER + "Error: " + RATE + "\n", None),
+        (BANNER + "\x1b[31mError: \x1b[0m" + RATE + "\n", None),
+    ])
+    def test_only_the_painted_line_is_kilocodes(self, provider, stderr, expected):
+        assert provider.classify_failure("", stderr, 1) == expected
+
+    @pytest.mark.parametrize("body", [
+        {"error": {"code": 429}},
+        {"error": {"code": "429", "message": "Request quota exceeded"}},
+        {"code": 429, "message": "Too many"},
+    ])
+    def test_the_gateways_429_is_its_structured_code(self, provider, body):
+        stderr = self._gateway(body)
+        assert provider.classify_failure("", stderr, 1) == "rate_limited"
+        # The body is never handed to the tables or the quote.
+        assert provider.vendor_text("", stderr) == ("", "Error: Provider returned error")
+
+    @pytest.mark.parametrize("body", [
+        {"error": {"code": 429, "message": "Rate limit exceeded",
+                   "metadata": {"raw": "The documentation example says Incorrect API key provided"}}},
+        {"error": {"code": 429, "message": "Incorrect API key provided: sk-x***."}},
+        {"error": {"code": 429, "message": "This model's maximum context length is 8192 tokens."}},
+    ])
+    def test_conflicting_text_in_a_429_body_decides_nothing(self, provider, body):
+        """A message or metadata quoting another vendor sentence never moves
+        the structured 429 to a login failure or a context overflow."""
+        assert provider.classify_failure("", self._gateway(body), 1) == "rate_limited"
+
+    @pytest.mark.parametrize("body", [
+        {"error": {"code": 401, "message": "Rate limit words in a 401"}},
+        {"error": {"code": 500, "message": "Rate limit words in a 500"}},
+        {"error": {"code": True}},
+        ["429"],
+    ])
+    def test_another_body_decides_nothing(self, provider, body):
+        stderr = self._gateway(body)
+        assert provider.vendor_text("", stderr) == ("", "Error: Provider returned error")
+        assert provider.classify_failure("", stderr, 1) is None
+
+    def test_an_uncoloured_gateway_line_decides_nothing(self, provider):
+        stderr = self._gateway({"error": {"code": 429}}, paint=False)
+        assert provider.classify_failure("", stderr, 1) is None
+
+    def test_a_429_body_after_another_cause_decides_nothing(self, provider):
+        body = json.dumps({"error": {"code": 429}})
+        stderr = self.BANNER + self.PAINT + "User not found.\n" + body + "\n"
+        assert provider.classify_failure("", stderr, 1) is None
+
+    def test_a_painted_login_failure_outranks_the_429(self, provider):
+        stderr = (
+            self._gateway({"error": {"code": 429}})
+            + self.PAINT + "Incorrect API key provided: sk-x***.\n"
+        )
+        assert provider.classify_failure("", stderr, 1) == "auth_failed"
+
+    def test_both_lanes_read_the_structured_429(self, provider):
+        from tests.test_provider_fixture_rows import _lane_a_status, _lane_b_status
+        from utils.provider_outcome import Capture
+
+        capture = Capture(stdout="", stderr=self._gateway({"error": {"code": 429}}), exit_code=1)
+        assert _lane_a_status("kilocode", capture) == _lane_b_status("kilocode", capture) == (
+            "rate_limited"
+        )
 
 
 class TestKiloCodeRetryEnvelope:

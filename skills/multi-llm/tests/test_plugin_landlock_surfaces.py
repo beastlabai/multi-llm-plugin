@@ -113,7 +113,6 @@ def jailed(tmp_path, monkeypatch):
     repo.mkdir()
     monkeypatch.chdir(repo)
     registry._config = None
-    registry._config_key = None
     executor.reset_version_cache()
     assert shutil.which("codex") == str(bin_dir / "codex")
     monkeypatch.setattr(
@@ -147,7 +146,6 @@ def jailed(tmp_path, monkeypatch):
     set_wrapper.codex_home = codex_home  # type: ignore[attr-defined]
     yield set_wrapper
     registry._config = None
-    registry._config_key = None
 
 
 def _run(capsys, *argv):

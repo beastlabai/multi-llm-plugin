@@ -487,7 +487,6 @@ class Scratch:
         else:
             self.monkeypatch.delenv("MULTI_LLM_PROVIDERS_CONFIG", raising=False)
         registry._config = None
-        registry._config_key = None
 
     def target(self, mode: str) -> Path:
         return {
@@ -526,7 +525,6 @@ class Scratch:
         if mode == "implement":
             self.complete("apply-suggestions")
         registry._config = None
-        registry._config_key = None
         if hasattr(registry, "_RUN_ANCHOR"):
             registry._RUN_ANCHOR = None
         return multi_llm.main([mode, str(self.plan), "--yes", "--exec-subagents", *extra])
@@ -599,14 +597,12 @@ def own_temp_base(tmp_path, monkeypatch):
 def scratch(tmp_path, monkeypatch):
     yield Scratch(tmp_path, monkeypatch)
     registry._config = None
-    registry._config_key = None
 
 
 @pytest.fixture
 def judged(tmp_path, monkeypatch):
     yield Scratch(tmp_path, monkeypatch, judge=True)
     registry._config = None
-    registry._config_key = None
 
 
 def _in_flight(status: Dict[str, Any]) -> list:
@@ -1472,7 +1468,6 @@ class TestTheRealJailThroughTheScheduler:
         require_landlock()
         yield Scratch(tmp_path, monkeypatch, real_jail=True)
         registry._config = None
-        registry._config_key = None
 
     @pytest.mark.parametrize("mode", REPO_WIDE)
     def test_outside_writes_are_denied_inside_ones_land_and_the_metadata_line_fires(
@@ -1679,7 +1674,6 @@ class TestARootLevelFileLandsOnTheRealJail:
         require_landlock()
         yield Scratch(tmp_path, monkeypatch, real_jail=True)
         registry._config = None
-        registry._config_key = None
 
     def test_a_new_root_file_and_a_subdirectory_edit_both_land(self, jailed, capsys):
         root = jailed.root

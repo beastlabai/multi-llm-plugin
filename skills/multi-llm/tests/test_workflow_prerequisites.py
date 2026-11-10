@@ -1528,7 +1528,6 @@ class _JailHost:
 
     def reset(self):
         self._registry._config = None
-        self._registry._config_key = None
 
     def configure(self, runner=None, fallback=None):
         lines = []

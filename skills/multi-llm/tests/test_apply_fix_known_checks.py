@@ -516,7 +516,6 @@ class TestTheTestsLineNamesWhatTheBatchesReported:
         from utils import provider_registry as registry
 
         monkeypatch.setattr(registry, "_config", None)
-        monkeypatch.setattr(registry, "_config_key", None)
         plan = root / "plans" / "racing.md"
         plan.parent.mkdir(parents=True)
         plan.write_text(TASK_LIST, encoding="utf-8")
@@ -610,7 +609,6 @@ class TestTheTestsLineNamesWhatTheBatchesReported:
         from utils import provider_registry as registry
 
         monkeypatch.setattr(registry, "_config", None)
-        monkeypatch.setattr(registry, "_config_key", None)
         plan = tmp_path / "plans" / "p.md"
         plan.parent.mkdir(parents=True)
         plan.write_text("# P\n", encoding="utf-8")

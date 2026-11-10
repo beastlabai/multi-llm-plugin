@@ -103,7 +103,6 @@ def make_repo(tmp_path, monkeypatch, plan_text: str = PLAN):
     config.write_text("driver:\n  subagent_runner: codex:gpt-5.5\n", encoding="utf-8")
     monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(config))
     registry._config = None
-    registry._config_key = None
     executor.reset_version_cache()
     monkeypatch.chdir(root)
 
@@ -140,7 +139,6 @@ def make_repo(tmp_path, monkeypatch, plan_text: str = PLAN):
 def implement_repo(tmp_path, monkeypatch):
     yield make_repo(tmp_path, monkeypatch)
     registry._config = None
-    registry._config_key = None
 
 
 def _check_fails(repo) -> None:

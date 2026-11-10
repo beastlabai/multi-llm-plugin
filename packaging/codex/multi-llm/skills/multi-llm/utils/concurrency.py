@@ -14,7 +14,7 @@ below the review stack (docs/development/dispatcher.md#import-layers);
 import asyncio
 import os
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from .launch_limiter import LaunchLimiter
 from .provider_registry import (
@@ -85,6 +85,44 @@ def plan_launch_limiter(
     return limiter, overhead
 
 
+def overall_deadline(
+    slot_budgets: Sequence[Tuple[str, float]],
+    max_parallel: int,
+    provider_limits: Mapping[str, Optional[int]],
+    stagger_overhead: float,
+) -> float:
+    """The overall deadline of a gather whose slots queue behind its gates.
+
+    ``slot_budgets`` is one ``(provider, budget)`` per slot. A slot's budget
+    starts once it holds its provider's semaphore (``provider_limits``, ``None``
+    for no limit) and then the global ``max_parallel`` one, so it can wait
+    behind both. Until a slot of provider ``p`` starts, at every moment either
+    the global gate is full or every slot holding ``p``'s gate is running, so it
+    starts by ``(W - W_p) / max_parallel + (W_p - its budget) / p's gate``,
+    where ``W`` sums every slot's budget and ``W_p`` those of ``p``'s slots
+    (the two waits add up; neither covers the other). The deadline is the
+    latest such finish, plus one largest budget of headroom (kill grace,
+    drain, a launch turn waited for inside the gates) and the launch stagger.
+    One slot gives ``2 x budget + stagger``.
+    See docs/development/providers.md#the-overall-deadline.
+    """
+    if not slot_budgets:
+        return stagger_overhead
+    gate = max(1, int(max_parallel or 1))
+    total = sum(budget for _, budget in slot_budgets)
+    largest = max(budget for _, budget in slot_budgets)
+    per_provider: Dict[str, List[float]] = {}
+    for provider, budget in slot_budgets:
+        per_provider.setdefault(provider, []).append(budget)
+    latest = 0.0
+    for provider, budgets in per_provider.items():
+        limit = provider_limits.get(provider)
+        width = gate if limit is None else max(1, min(int(limit), gate))
+        own, last = sum(budgets), max(budgets)
+        latest = max(latest, (total - own) / gate + (own - last) / width + last)
+    return latest + largest + stagger_overhead
+
+
 async def run_tasks_concurrent(
     tasks: List[Dict[str, Any]],
     per_task_coro_factory: Callable[[Dict[str, Any], str, int], Any],
@@ -148,13 +186,15 @@ async def run_tasks_concurrent(
     semaphore = asyncio.Semaphore(max_parallel)
 
     provider_semaphores: Dict[str, asyncio.Semaphore] = {}
+    provider_gates: Dict[str, Optional[int]] = {}
     for spec in set(runners.values()):
         prov, _ = parse_model_spec(spec, anchor=anchor)
-        if prov in provider_semaphores:
+        if prov in provider_gates:
             continue
         limit = (provider_limits or {}).get(
             prov, get_provider_max_concurrent(prov, anchor=anchor)
         )
+        provider_gates[prov] = limit
         if limit is not None:
             provider_semaphores[prov] = asyncio.Semaphore(limit)
 
@@ -194,14 +234,26 @@ async def run_tasks_concurrent(
         for idx, task in enumerate(tasks)
     ]
 
+    # `timeout` is the caller's whole-batch budget (`task_batch` sizes it as one
+    # task budget per task, since backpressure can narrow a provider to one
+    # slot mid-batch), so it counts as one slot; without one, the waits behind
+    # the gates the batch starts with are added up.
     if timeout is not None:
-        base_timeout = timeout
-    else:
-        base_timeout = max(
-            get_provider_timeout(parse_model_spec(spec, anchor=anchor)[0], anchor=anchor)
-            for spec in runners.values()
+        total_timeout = overall_deadline(
+            [("", float(timeout))], 1, {}, stagger_overhead
         )
-    total_timeout = base_timeout * 2 + stagger_overhead
+    else:
+        total_timeout = overall_deadline(
+            [
+                (provider, float(get_provider_timeout(provider, anchor=anchor)))
+                for provider in (
+                    parse_model_spec(spec, anchor=anchor)[0] for spec in runners.values()
+                )
+            ],
+            max_parallel,
+            provider_gates,
+            stagger_overhead,
+        )
 
     try:
         completed = await asyncio.wait_for(

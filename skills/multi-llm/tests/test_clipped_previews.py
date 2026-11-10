@@ -303,7 +303,6 @@ class TestRecords:
         config.write_text("driver:\n  subagent_runner: codex:gpt-5.5\n", encoding="utf-8")
         monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(config))
         monkeypatch.setattr(registry, "_config", None)
-        monkeypatch.setattr(registry, "_config_key", None)
         plan = root / "plans" / "kart.md"
         plan.parent.mkdir(parents=True)
         plan.write_text("# Kart\n", encoding="utf-8")

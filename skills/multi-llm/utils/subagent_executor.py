@@ -495,6 +495,7 @@ _MOVED: Dict[str, Tuple[str, ...]] = {
         "_quote_verdict",
         "_redact_tracking",
         "_reply_text",
+        "_sandbox_hinted",
         "_unlowered_offset",
     ),
     "runner_preflight": (

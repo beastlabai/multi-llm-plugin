@@ -136,7 +136,6 @@ def _use_config(tmp_path, monkeypatch, body: str) -> Path:
     path.write_text(body, encoding="utf-8")
     monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(path))
     registry._config = None
-    registry._config_key = None
     return path
 
 

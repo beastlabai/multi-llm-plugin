@@ -1017,6 +1017,12 @@ def test_a_non_zero_exit_row_gets_the_executors_call(
     )
     assert result["success"] is False
     verdict = adapter.classify_failure(stdout, stderr, exit_code)
+    if verdict == "spawn_failed":
+        # A shell's phrase stands only for a run that made no progress, on both
+        # lanes (`base.launch_refusal`).
+        from utils.providers.base import launch_refusal
+
+        verdict, _ = launch_refusal(adapter, stdout, stderr, exit_code)
     assert result["details"]["failure_category"] == verdict
     if verdict:
         line = str(result["error"])

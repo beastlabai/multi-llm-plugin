@@ -562,7 +562,6 @@ def full_run(tmp_path, monkeypatch):
         for key, value in runner._build_env().items():
             monkeypatch.setenv(key, value)
         registry._config = None
-        registry._config_key = None
         calls: List[str] = []
 
         def run_mode(self, mode_word, extra):
@@ -581,7 +580,6 @@ def full_run(tmp_path, monkeypatch):
 
     yield run
     registry._config = None
-    registry._config_key = None
 
 
 def _complete(plan: Path, *phases: str) -> None:

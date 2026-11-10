@@ -23,7 +23,13 @@ from typing import Any, List, Optional, Tuple
 
 from . import structured_output
 from .json_extractor import describe_syntax_error
-from .providers.base import context_length_message, exit_zero_failure_category, match_streams
+from .providers.base import (
+    context_length_message,
+    exit_zero_failure_category,
+    launch_refusal,
+    match_streams,
+    sandbox_hint,
+)
 from .retry_ladder import (
     STATUS_AUTH_FAILED,
     STATUS_BUDGET_EXHAUSTED,
@@ -466,7 +472,9 @@ def _classify_failed_run(
     a non-zero exit: an install or argv refusal is identical for every sibling,
     and the classifier reads it only off exit 127, stderr and an adapter's own
     refusal shape, never off a model's or a tool's words on stdout
-    (``base.STDERR_LAUNCH_FAILURE_MARKERS``).
+    (``base.STDERR_LAUNCH_FAILURE_MARKERS``). A shell's phrase on stderr may be
+    a hook's or a wrapper's, so it is forwarded only for a run that made no
+    progress (``base.launch_refusal``).
 
     **An exit 0 is classified through** ``base.exit_zero_failure_category``,
     the gate the fan-out reads too: only an adapter that declares
@@ -478,10 +486,15 @@ def _classify_failed_run(
     adapter's ``classify_structural`` ``runner_error`` (opencode's turn ended
     by an auto-rejected permission, §4.2 step 4), with the adapter's own reason
     sentence. It is asked only when the pattern verdict is none of the above.
+    Failing that, a non-zero exit whose stderr carries a bubblewrap line that
+    is none of the measured refusals is ``runner_error`` too, one transport
+    retry, with :func:`~utils.providers.base.sandbox_hint`'s sentence naming
+    ``doctor``.
 
     The forwarded pattern verdicts quote the text that decided them
     (:func:`_quote_verdict`), not ``stderr or stdout``.
     """
+    quote_err = capture.stderr or ""
     if capture.exit_code:
         try:
             classified = provider.classify_failure(
@@ -489,6 +502,10 @@ def _classify_failed_run(
             )
         except Exception:  # noqa: BLE001 - classification must not raise
             return None
+        if classified == STATUS_SPAWN_FAILED:
+            classified, quote_err = launch_refusal(
+                provider, capture.stdout, capture.stderr, capture.exit_code
+            )
     else:
         # An exit 0 that left no answer: stdout is usually the model's own
         # prose, so the verdict comes through the one gate the fan-out reads
@@ -516,6 +533,21 @@ def _classify_failed_run(
         # The provider already consumed its internal step budget. Repeating
         # the same prompt would silently grant a fresh budget to the same run.
         return STATUS_BUDGET_EXHAUSTED, "the provider exhausted its internal step budget"
+    # T2.5: the quote is cut from the VENDOR-reduced capture, around the text
+    # that decided the verdict, and from the stderr the verdict was read from
+    # (a foreign shell's phrase blanked when `launch_refusal` read past it). This
+    # is the one application of `vendor_text` outside `classify_failure` (its
+    # docstring names both), and it is for the quote only: the verdict is
+    # already decided and nothing below moves it. A reduction that raises
+    # quotes the capture as it came.
+    reduced_out, reduced_err = capture.stdout or "", quote_err
+    if getattr(provider, "vendor_text", None) is not None:
+        try:
+            reduced_out, reduced_err = provider.vendor_text(
+                reduced_out, reduced_err
+            )
+        except Exception:  # noqa: BLE001 - the quote must never raise
+            reduced_out, reduced_err = capture.stdout or "", quote_err
     if classified not in (
         STATUS_AUTH_FAILED, STATUS_RATE_LIMITED, STATUS_INVALID_MODEL,
         STATUS_SANDBOX_UNAVAILABLE, STATUS_SPAWN_FAILED,
@@ -530,33 +562,20 @@ def _classify_failed_run(
         # is the adapter's own sentence, so the matched-pattern quote below
         # never applies to it.
         structural = getattr(provider, "classify_structural", None)
-        if structural is None:
-            return None
-        try:
-            found = structural(
-                capture.stdout, capture.stderr, capture.exit_code or 0
-            )
-        except Exception:  # noqa: BLE001 - classification must not raise
-            return None
+        found = None
+        if structural is not None:
+            try:
+                found = structural(
+                    capture.stdout, capture.stderr, capture.exit_code or 0
+                )
+            except Exception:  # noqa: BLE001 - classification must not raise
+                found = None
         if (
             isinstance(found, tuple) and len(found) == 2
             and found[0] == STATUS_RUNNER_ERROR and found[1]
         ):
             return STATUS_RUNNER_ERROR, redact_text(str(found[1]))
-        return None
-    # T2.5: the quote is cut from the VENDOR-reduced capture, around the text
-    # that decided the verdict. This is the one application of `vendor_text`
-    # outside `classify_failure` (its docstring names both), and it is for the
-    # quote only: the verdict above is already decided and nothing below moves
-    # it. A reduction that raises quotes the capture as it came.
-    reduced_out, reduced_err = capture.stdout or "", capture.stderr or ""
-    if getattr(provider, "vendor_text", None) is not None:
-        try:
-            reduced_out, reduced_err = provider.vendor_text(
-                reduced_out, reduced_err
-            )
-        except Exception:  # noqa: BLE001 - the quote must never raise
-            reduced_out, reduced_err = capture.stdout or "", capture.stderr or ""
+        return _sandbox_hinted(provider, capture, classified, reduced_out, reduced_err)
     tail = _quote_verdict(
         provider, reduced_out, reduced_err, capture.exit_code or 0, classified
     )
@@ -603,3 +622,34 @@ def _classify_failed_run(
             f"it and the whole batch fails. Stream tail: {tail!r}"
         )
     return None
+
+
+def _sandbox_hinted(
+    provider: Any, capture: _dispatch_spawn._Capture, classified: Optional[str],
+    reduced_out: str, reduced_err: str,
+) -> Optional[Tuple[str, str]]:
+    """``runner_error`` naming ``doctor`` for a non-zero exit whose stderr
+    carries a bubblewrap line, else ``None``. ``reduced_out``/``reduced_err``
+    are :func:`_classify_failed_run`'s quote text.
+
+    Reached only when no forwarded verdict decided the run, so the line is
+    none of the measured refusals (those are ``sandbox_unavailable``,
+    batch-fatal). The attempt keeps one transport retry, as the parse
+    failure's status would give it, and its message points at the sandbox
+    (docs/development/providers.md#launch-diagnostics).
+    """
+    if not capture.exit_code:
+        return None
+    try:
+        hint = sandbox_hint(provider.launch_diagnostics(capture.stderr or ""))
+    except Exception:  # noqa: BLE001 - a diagnosis must never fail a dispatch
+        return None
+    if hint is None:
+        return None
+    tail = _quote_verdict(
+        provider, reduced_out, reduced_err, capture.exit_code, classified or ""
+    )
+    return STATUS_RUNNER_ERROR, (
+        f"the runner exited with code {capture.exit_code}; {redact_text(hint)}. "
+        f"Stream tail: {tail!r}"
+    )

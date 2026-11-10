@@ -150,10 +150,8 @@ def exec_env(tmp_path, mock_provider, monkeypatch):
     for key, value in env.items():
         monkeypatch.setenv(key, value)
     registry._config = None
-    registry._config_key = None
     yield
     registry._config = None
-    registry._config_key = None
 
 
 # ---------------------------------------------------------------------------

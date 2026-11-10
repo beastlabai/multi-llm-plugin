@@ -129,7 +129,6 @@ class Repo:
         monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(config))
         monkeypatch.setenv("MULTI_LLM_TEST_MODE", "1")
         registry._config = None
-        registry._config_key = None
 
     def task(self, index: int, *, kind: str = "apply_suggestions",
              target: Optional[Path] = None, declared=None, **over):
@@ -198,7 +197,6 @@ def own_temp_base(tmp_path, monkeypatch):
 def repo(tmp_path, monkeypatch):
     yield Repo(tmp_path, monkeypatch)
     registry._config = None
-    registry._config_key = None
 
 
 Step = Callable[[Repo], "tuple"]

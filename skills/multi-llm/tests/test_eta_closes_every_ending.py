@@ -109,7 +109,6 @@ def trailing(tmp_path, monkeypatch):
         {"passed": False, "findings": ["retries must be 3 (found 2)"]}))
     yield obj
     registry._config = None
-    registry._config_key = None
 
 
 @pytest.fixture
@@ -118,7 +117,6 @@ def two_edits(tmp_path, monkeypatch):
     monkeypatch.setenv("MOCK_LLM_WRITE_IDS", json.dumps(["T001", "T002"]))
     yield obj
     registry._config = None
-    registry._config_key = None
 
 
 class TestACheckThatHoldsTheLastTasks:
@@ -170,7 +168,6 @@ class TestTheOtherEndings:
             "driver:\n  subagent_runner: codex:gpt-5.5\n  verify_command: \"false\"\n",
             encoding="utf-8")
         registry._config = None
-        registry._config_key = None
         code, text = _run(two_edits, capsys)
         assert code == 3, text
         lines = _eta_lines(text)

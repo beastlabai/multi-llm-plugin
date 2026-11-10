@@ -3066,7 +3066,6 @@ class TestStructuralModelSpecRefusal:
         )
         monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(config))
         registry._config = None
-        registry._config_key = None
 
         with pytest.raises(executor.RunnerRejected) as excinfo:
             executor.preflight_runner(
@@ -3447,7 +3446,6 @@ class TestDriverConfig:
         path.write_text(textwrap.dedent(body), encoding="utf-8")
         monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(path))
         registry._config = None
-        registry._config_key = None
         return path
 
     def test_base_ships_a_fully_populated_block(self):
@@ -4358,7 +4356,6 @@ def _no_driver_layer(monkeypatch):
     """Leave every explicit config layer silent about `driver.subagent_runner`."""
     monkeypatch.delenv("MULTI_LLM_PROVIDERS_CONFIG", raising=False)
     registry._config = None
-    registry._config_key = None
 
 
 class TestModelCatalogPreflight:
@@ -4566,7 +4563,6 @@ class TestModelCatalogPreflight:
                 registry, "_find_project_config", lambda anchor=None: project
             )
             registry._config = None
-            registry._config_key = None
         elif layer == "host capabilities":
             monkeypatch.setattr(
                 registry, "_find_project_config", lambda anchor=None: None
@@ -5199,7 +5195,6 @@ class TestSandboxUnavailable:
             encoding="utf-8",
         )
         registry._config = None
-        registry._config_key = None
 
     @staticmethod
     def _broken_probe_for(profile):
@@ -5405,7 +5400,6 @@ class TestSandboxUnavailable:
             path.write_text("providers:\n  codex:\n    sandbox_fallback: off\n", encoding="utf-8")
             monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(path))
             registry._config = None
-            registry._config_key = None
         elif leg == "opt-in-off":
             from utils.providers import codex as codex_module
 
@@ -6725,7 +6719,6 @@ class TestHostSinksNeverSeeTheReadonlyChildsConfigContent:
             encoding="utf-8",
         )
         registry._config = None
-        registry._config_key = None
         script = _install_opencode_capture(
             runner_env.bin_dir, _DENIED_STDOUT, _DENIED_STDERR, exit_code=0
         )

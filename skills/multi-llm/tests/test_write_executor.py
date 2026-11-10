@@ -251,7 +251,6 @@ class WriteEnv:
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         self.monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(path))
         registry._config = None
-        registry._config_key = None
         return path
 
     def edits(self, entries, result=None, prose=False) -> None:
@@ -316,7 +315,6 @@ def env(tmp_path, monkeypatch):
     e = WriteEnv(tmp_path, monkeypatch)
     yield e
     registry._config = None
-    registry._config_key = None
 
 
 class FakeState:

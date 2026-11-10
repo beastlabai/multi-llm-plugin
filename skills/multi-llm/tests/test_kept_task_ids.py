@@ -30,7 +30,6 @@ def manual_repo(tmp_path, monkeypatch):
     """The five-task plan with a manual task at the end (T005)."""
     yield make_repo(tmp_path, monkeypatch)
     registry._config = None
-    registry._config_key = None
 
 
 def _resume_line(text: str) -> tuple:

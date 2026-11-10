@@ -383,7 +383,6 @@ def _configure(env, runner="codex:gpt-5.5", *, driver_max, codex_max=None):
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     env.monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(path))
     registry._config = None
-    registry._config_key = None
 
 
 def _parallel_tasks(env, batches=2):

@@ -239,7 +239,8 @@ def _matches_marker(markers: Collection["Pattern[str]"], haystack: str) -> bool:
 #: refusal that reaches us only on stdout is therefore a bounded retry (one
 #: extra dispatch per lane); see docs/development/providers.md#launch-diagnostics.
 #: The haystack is lowercased, so the anchors are multiline and the words
-#: lowercase. An unmeasured bubblewrap line is one transport retry, not fatal.
+#: lowercase. Any other bubblewrap line is no verdict of its own, only
+#: :func:`sandbox_hint`'s pointer at ``doctor`` in the failure message.
 SANDBOX_MARKERS = _markers(
     # Stock Ubuntu 24.04 (`kernel.apparmor_restrict_unprivileged_userns=1`, no
     # AppArmor profile granting /usr/bin/bwrap `userns`), under --unshare-net:
@@ -274,6 +275,37 @@ def sandbox_probe_inconclusive(text: str) -> bool:
     return _matches_marker(SANDBOX_PROBE_INCONCLUSIVE_MARKERS, (text or "").lower())
 
 
+#: A bubblewrap line in any wording: ``bwrap: `` opening a line or a word of
+#: it (behind a log prefix, or a path to the binary). Never a verdict: only
+#: :data:`SANDBOX_MARKERS`' measured refusals fail the batch.
+SANDBOX_HINT_MARKER = re.compile(r"(?im)(?<![\w.-])bwrap: [^\n]*")
+
+#: Longest bubblewrap line :func:`sandbox_hint` quotes.
+_SANDBOX_HINT_CHARS = 200
+
+
+def sandbox_hint(launch_stderr: str) -> Optional[str]:
+    """A sentence pointing at ``multi_llm.py doctor`` when stderr carries a
+    bubblewrap line, else ``None``.
+
+    For the failure message only, never the verdict: a bubblewrap line that
+    is none of :data:`SANDBOX_MARKERS`' measured refusals (another wording, a
+    log prefix ahead of it) keeps whatever the tables decided, and the
+    message still says the runner's own sandbox may not have started.
+    ``launch_stderr`` is the part of stderr the adapter's CLI wrote
+    (:meth:`LLMProvider.launch_diagnostics`). The caller redacts.
+    See docs/development/providers.md#launch-diagnostics.
+    """
+    found = SANDBOX_HINT_MARKER.search(launch_stderr or "")
+    if found is None:
+        return None
+    line = found.group(0).strip()[:_SANDBOX_HINT_CHARS]
+    return (
+        f"stderr carries a bubblewrap line ({line!r}), so the runner's own "
+        f"sandbox may not have started; `multi_llm.py doctor` checks it"
+    )
+
+
 LAUNCH_FAILURE_MARKERS: Tuple[Tuple[str, Tuple["Pattern[str]", ...]], ...] = (
     # These two rows are read on stderr only: :data:`STDERR_LAUNCH_FAILURE_MARKERS`
     # below. They stay here for their place in the order (the sandbox first,
@@ -288,16 +320,52 @@ LAUNCH_FAILURE_MARKERS: Tuple[Tuple[str, Tuple["Pattern[str]", ...]], ...] = (
     )),
 )
 
+#: ``spawn_failed`` phrases a CLI writes about **its own** invocation: a
+#: refused argv or config, read on stderr. Each one is batch-fatal wherever it
+#: appears there. omp 18.2.2, both measured on stderr, both exit 1 at **zero
+#: requests** because the CLI validates its own argv and its config overlay
+#: before it resolves a model: a rejected ``--tools`` name raises
+#: ``CliUsageError``, and a ``--config`` path that does not resolve is
+#: ``error: Config overlay not found: <abs path>`` in 0.13 s. Neither is a
+#: failed *spawn* in the literal sense (the binary ran), but the disposition is
+#: the one this rung exists for: a property of the install, identical for every
+#: sibling slot on that runner, and no retry can fix it. The alternative was
+#: ``None``, which offers a transport retry of a run that cannot change its
+#: mind. omp 18.8.3 (measured 2026-10-08, tests/fixtures/omp/invalid-tool)
+#: refuses a bad ``--tools`` name, exit 2, with ``Error: Unknown tool in
+#: --tools: bogus.`` (``Unknown tools in --tools: a, b.`` for two) opening its
+#: stderr, no Bun trace and no ``CliUsageError`` word, so that row is anchored
+#: at a line start (review 24, pins #5). Lowercase, like every other row here:
+#: :func:`_markers` compiles without ``re.I`` and :func:`classify_streams`
+#: lowercases the haystack first.
+CLI_REFUSAL_MARKERS = _markers(
+    r"\bcliusageerror\b",
+    r"config overlay not found",
+    r"(?m)^error: unknown tools? in --tools\b",
+)
+
+#: ``spawn_failed`` phrases a shell, ``env``, cmd.exe or the kernel writes
+#: about **whichever** command it could not run: the CLI itself, or a hook, a
+#: wrapper or an MCP server the CLI started, whose refusal lands on the same
+#: stderr. :func:`classify_streams` reads them as ``spawn_failed`` like the
+#: rows above; both lanes keep that verdict only when the run made no progress
+#: (:func:`launch_refusal`,
+#: docs/development/delegation.md#read-and-analyze-executor).
+SHELL_REFUSAL_MARKERS = _markers(
+    r"command not found",
+    r"executable file not found",
+    r"\bbinary not found\b",
+    r"not found in \$?path\b",
+    r"is not recognized as an internal or external command",
+    r"cannot execute binary file",
+    r"\bexec format error\b",
+)
+
 #: Launch-failure rows read on **stderr only**, consulted in the place of
 #: :data:`LAUNCH_FAILURE_MARKERS`' row of the same category. A phrase a model's
 #: answer can quote does not belong in the shared haystack: rung 1 fails the
 #: whole batch, and a failed run's stdout is often that answer (a reviewer
-#: reading this repo's own omp fixtures quotes the ``--tools`` refusal). omp
-#: 18.8.3 (measured 2026-10-08, tests/fixtures/omp/invalid-tool) refuses a bad
-#: ``--tools`` name, exit 2, with ``Error: Unknown tool in --tools: bogus.``
-#: (``Unknown tools in --tools: a, b.`` for two) opening its stderr, no Bun
-#: trace and no ``CliUsageError`` word, so that row is anchored at a line start
-#: (review 24, pins #5).
+#: reading this repo's own omp fixtures quotes the ``--tools`` refusal).
 STDERR_LAUNCH_FAILURE_MARKERS: Dict[str, Tuple["Pattern[str]", ...]] = {
     # Batch-fatal like ``spawn_failed`` below, for the same reason
     # (:data:`SANDBOX_MARKERS`).
@@ -311,31 +379,9 @@ STDERR_LAUNCH_FAILURE_MARKERS: Dict[str, Tuple["Pattern[str]", ...]] = {
     # ``env`` and cmd.exe all write their refusal on stderr; exit 127 needs no
     # text at all (:data:`MISSING_BINARY_EXIT_CODE`), and an adapter whose CLI
     # refuses on stdout says so in its own ``classify_failure`` (vibe's
-    # config refusal, read at the start of stdout).
-    STATUS_SPAWN_FAILED: _markers(
-        r"command not found",
-        r"executable file not found",
-        r"\bbinary not found\b",
-        r"not found in \$?path\b",
-        r"is not recognized as an internal or external command",
-        r"cannot execute binary file",
-        r"\bexec format error\b",
-        # omp 18.2.2, both measured on stderr, both exit 1 at **zero requests**
-        # because the CLI validates its own argv and its config overlay before
-        # it resolves a model: a rejected `--tools` name raises
-        # `CliUsageError`, and a `--config` path that does not resolve is
-        # `error: Config overlay not found: <abs path>` in 0.13 s. Neither is a
-        # failed *spawn* in the literal sense — the binary ran — but the
-        # disposition is the one this rung exists for: a property of the
-        # install, identical for every sibling slot on that runner, and no
-        # retry can fix it. The alternative was `None`, which offers a
-        # transport retry of a run that cannot change its mind.
-        # Lowercase, like every other row here: `_markers` compiles without
-        # re.I and `classify_streams` lowercases the haystack first.
-        r"\bcliusageerror\b",
-        r"config overlay not found",
-        r"(?m)^error: unknown tools? in --tools\b",
-    ),
+    # config refusal, read at the start of stdout). The CLI's own refusals
+    # come first, so :func:`match_streams` names one of them when both appear.
+    STATUS_SPAWN_FAILED: CLI_REFUSAL_MARKERS + SHELL_REFUSAL_MARKERS,
 }
 
 #: Where an adapter's launch diagnostics live: the values of
@@ -819,6 +865,61 @@ def exit_zero_failure_category(
     if category == STATUS_SPAWN_FAILED:
         return True, None
     return True, category
+
+
+def launch_refusal(
+    provider: Any, stdout: Optional[str], stderr: Optional[str], exit_code: int
+) -> Tuple[Optional[str], str]:
+    """The verdict on a non-zero exit the adapter read as ``spawn_failed``,
+    as ``(category, the stderr it was read from)``. **Both lanes ask it**
+    (the fan-out's ``provider_outcome``, the executor's ``_classify_failed_run``).
+
+    ``spawn_failed`` stops the slot and fails the executor's batch, so it
+    stands for exit 127, for an adapter's own refusal shape (vibe's config
+    refusal on stdout) and for a CLI's own refusal line
+    (:data:`CLI_REFUSAL_MARKERS`). A shell's phrase
+    (:data:`SHELL_REFUSAL_MARKERS`) names whichever command could not run,
+    which may be a hook's, a wrapper's or an MCP server's on the same stderr;
+    it stands only when the run made no progress: nothing on stdout, and
+    nothing else the adapter recognises on stderr. Otherwise the verdict is
+    the adapter's own reading of the same capture with only the shell
+    phrases blanked (spaces of their length, so a 401 or a 429 on the same
+    line still decides), and ``None`` (one transport retry) when that is
+    nothing. The stderr returned is what the verdict was read from, for its
+    quote. See docs/development/delegation.md#read-and-analyze-executor.
+    """
+    stdout, stderr = stdout or "", stderr or ""
+    if exit_code == MISSING_BINARY_EXIT_CODE:
+        return STATUS_SPAWN_FAILED, stderr
+    # The raw stderr's launch part: `vendor_text` only ever removes from
+    # stderr, so a phrase the verdict read there is here too.
+    try:
+        launch_text = provider.launch_diagnostics(stderr).lower()
+    except Exception:  # noqa: BLE001 - the adapter's verdict stands
+        return STATUS_SPAWN_FAILED, stderr
+    if _matches_marker(CLI_REFUSAL_MARKERS, launch_text):
+        return STATUS_SPAWN_FAILED, stderr
+    if not _matches_marker(SHELL_REFUSAL_MARKERS, launch_text):
+        return STATUS_SPAWN_FAILED, stderr
+    # Blank the phrases, never the text around them. The tables match a
+    # lowered haystack, so the same rows are applied here without case.
+    rest_err = stderr
+    for marker in SHELL_REFUSAL_MARKERS:
+        rest_err = re.compile(marker.pattern, marker.flags | re.IGNORECASE).sub(
+            lambda found: " " * len(found.group(0)), rest_err
+        )
+    if _matches_marker(SHELL_REFUSAL_MARKERS, rest_err.lower()):
+        return STATUS_SPAWN_FAILED, stderr
+    try:
+        rest = provider.classify_failure(stdout, rest_err, exit_code)
+    except Exception:  # noqa: BLE001 - classification must not raise
+        rest = None
+    if rest == STATUS_SPAWN_FAILED or (rest is not None and not isinstance(rest, str)):
+        return STATUS_SPAWN_FAILED, stderr
+    # Anything the CLI wrote on stdout, colour included, is progress.
+    if stdout.strip() or rest is not None:
+        return rest, rest_err
+    return STATUS_SPAWN_FAILED, stderr
 
 
 def context_length_message(model: str) -> str:

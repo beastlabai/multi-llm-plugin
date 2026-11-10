@@ -5914,10 +5914,12 @@ async def run_models_concurrent(
 
     # Per-provider semaphores for concurrency limiting
     provider_semaphores: Dict[str, asyncio.Semaphore] = {}
+    provider_gates: Dict[str, Optional[int]] = {}
     for spec in model_specs:
         prov, _ = parse_model_spec(spec, anchor=anchor)
-        if prov not in provider_semaphores:
+        if prov not in provider_gates:
             limit = get_provider_max_concurrent(prov, anchor=anchor)
+            provider_gates[prov] = limit
             if limit is not None:
                 provider_semaphores[prov] = asyncio.Semaphore(limit)
 
@@ -6005,16 +6007,17 @@ async def run_models_concurrent(
         for idx, spec in enumerate(model_specs)
     ]
 
-    # Calculate total timeout
-    if timeout is not None:
-        base_timeout = timeout
-    else:
-        base_timeout = max(
-            get_provider_timeout(parse_model_spec(spec, anchor=anchor)[0], anchor=anchor)
-            for spec in model_specs
-        )
-
-    total_timeout = base_timeout * 2 + stagger_overhead
+    # The overall deadline outlasts the waits a slot can queue behind both
+    # gates, since each slot's own budget starts only once it holds them
+    # (`concurrency.overall_deadline`).
+    slot_budgets = []
+    for spec in model_specs:
+        prov = parse_model_spec(spec, anchor=anchor)[0]
+        budget = timeout if timeout is not None else get_provider_timeout(prov, anchor=anchor)
+        slot_budgets.append((prov, float(budget)))
+    total_timeout = _concurrency.overall_deadline(
+        slot_budgets, max_parallel, provider_gates, stagger_overhead
+    )
 
     # Created alongside the `gather`, cancelled-and-awaited in the `finally`.
     # At `progress.interval_s: 0` this is a no-op returning `None`: the lines

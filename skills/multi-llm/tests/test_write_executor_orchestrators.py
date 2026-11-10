@@ -202,7 +202,6 @@ class TestImplementOrchestratorWiring:
             f"  verify_command: {verify}\n", encoding="utf-8",
         )
         registry._config = None
-        registry._config_key = None
         repo.monkeypatch.setenv("MOCK_LLM_EDITS", json.dumps([
             {"path": "src/main.py", "mode": "patch", "content": "# edited\n"}
         ]))

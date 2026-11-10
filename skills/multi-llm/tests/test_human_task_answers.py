@@ -66,14 +66,12 @@ def repo_dep(tmp_path, monkeypatch):
     ))
     yield obj
     registry._config = None
-    registry._config_key = None
 
 
 @pytest.fixture
 def repo_nohuman(tmp_path, monkeypatch):
     yield make_repo(tmp_path, monkeypatch, PLAN_NO_HUMAN)
     registry._config = None
-    registry._config_key = None
 
 
 def _summary(repo) -> str:

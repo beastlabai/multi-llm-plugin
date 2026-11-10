@@ -451,7 +451,6 @@ class TestSelectorFidelity:
         from utils import provider_registry
 
         provider_registry._config = None
-        provider_registry._config_key = None
         return path
 
     @pytest.mark.parametrize("selection", [["--quick"], []])

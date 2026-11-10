@@ -361,7 +361,6 @@ class TestClosingADeferredManualTask:
         _check_passes(obj)
         yield obj
         registry._config = None
-        registry._config_key = None
 
     def _finish_with_review(self, repo, capsys):
         from utils.state_manager import get_or_create_state
@@ -453,7 +452,6 @@ Open the page and race.
             capsys.readouterr()
         finally:
             registry._config = None
-            registry._config_key = None
         assert _dispatched_titles(repo) == []
         state = get_or_create_state(repo.plan)
         assert state.get_task_status("T003") == "completed"
@@ -554,4 +552,3 @@ class TestASingleTaskRerunStillReopensImplement:
             assert get_or_create_state(repo.plan).is_phase_started("implement")
         finally:
             registry._config = None
-            registry._config_key = None

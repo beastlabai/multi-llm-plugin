@@ -289,3 +289,54 @@ rows:
       error_contains: ["Empty output"]
       raw_contains: ["Connection reset by server"]
       classify_failure: "connection_error"
+
+  # ----- synthetic: shapes no capture shows yet ----------------------------- #
+
+  rate-limit-no-color:
+    stdout: rows/rate-limit.stdout.txt
+    stderr: rows/rate-limit-no-color.stderr.txt
+    exit_code: 1
+    synthesized: true
+    provenance: >-
+      SYNTHETIC, built 2026-11-10 from `rate-limit`'s own stderr with every ANSI
+      escape removed: kilocode under `NO_COLOR` (child_env passes it to the
+      child), had 7.8.27 honoured it, which was not measured. stdout is
+      `rate-limit`'s, zero bytes.
+    notes: >-
+      Uncoloured, kilocode's own `Error:` line cannot be told from a tool's
+      output or a multi-line tool argument, so `vendor_text` keeps no line
+      (`kilocode._error_lines` reads only the paint) and the run is classified
+      by its exit alone: no verdict, one bounded retry on each lane, until a
+      capture shows how kilocode frames an error without colour.
+    expect:
+      lane_status: {lane_a: runner_error, lane_b: runner_error}
+      salvage: none
+      success: false
+      error_contains: ["Empty output"]
+      raw_contains: ["\nError: Rate limit reached for stub-model"]
+      classify_failure: null
+
+  provider-error-429-body:
+    stdout: rows/rate-limit.stdout.txt
+    stderr: rows/provider-error-429-body.stderr.txt
+    exit_code: 1
+    synthesized: true
+    provenance: >-
+      SYNTHETIC, built 2026-11-10: `rate-limit`'s banner lines as captured, then
+      the painted `Error: ` with OpenRouter's wrapper sentence `Provider
+      returned error` as the cause and the gateway's JSON body on the next line
+      (`{"error":{"message":"Rate limit exceeded: free-models-per-min. ","code":429,…}}`),
+      the shape the code-health review constructed for an upstream 429 through
+      the `openrouter/` backend. stdout is `rate-limit`'s, zero bytes.
+    notes: >-
+      The sentence alone names no cause; the body's structured code does. A
+      painted `Provider returned error` followed by a body whose code is 429
+      reads `rate_limited` (`KiloCodeProvider.classify_failure`), and nothing in
+      the body's message or metadata reaches a text table.
+    expect:
+      lane_status: {lane_a: rate_limited, lane_b: rate_limited}
+      salvage: none
+      success: false
+      error_contains: ["Empty output"]
+      raw_contains: ['"code":429']
+      classify_failure: "rate_limited"

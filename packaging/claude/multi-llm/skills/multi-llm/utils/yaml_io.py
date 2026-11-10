@@ -117,9 +117,10 @@ def load_file(path: PathLike) -> Any:
     :data:`SETTLE_S` seconds is parsed on every call.
 
     Returns a deep copy, never the cached object. Raises ``OSError`` when the
-    file cannot be opened and :data:`YAMLError` when it does not parse; neither
-    outcome is cached. The file is read as UTF-8 text, the way every caller
-    read it before this module existed.
+    file cannot be opened and :data:`YAMLError` when it does not parse,
+    including a file that is not UTF-8 text; neither outcome is cached. The
+    file is read as UTF-8 text, the way every caller read it before this
+    module existed.
     """
     resolved = os.path.realpath(path)
     with open(path, "r", encoding="utf-8") as handle:
@@ -132,7 +133,11 @@ def load_file(path: PathLike) -> Any:
         # and ends after SETTLE_S may still have seen the bytes a same-size
         # rewrite in that tick replaced.
         settled = is_settled(signature)
-        document = yaml.load(handle, Loader=SAFE_LOADER)
+        try:
+            document = yaml.load(handle, Loader=SAFE_LOADER)
+        except UnicodeDecodeError as exc:
+            # A caller handles one parse error, whatever stopped the parse.
+            raise YAMLError(f"not UTF-8 text ({exc})") from exc
         unchanged = _signature(resolved, os.fstat(handle.fileno())) == signature
     if not (settled and unchanged):
         return document

@@ -81,7 +81,6 @@ def test_mixed_runners_protect_evidence_before_jailed_dispatch(repo, monkeypatch
         config = repo.tmp_path / "driver-config.yaml"
         config.write_text(config.read_text() + "  max_concurrent_write_subagents: 2\n")
         registry._config = None
-        registry._config_key = None
     scheduler = repo.scheduler(tasks, kind="implement", write_target=None, finalize=False)
     if parallel:
         monkeypatch.setattr(scheduler, "write_ceiling", lambda: 2)

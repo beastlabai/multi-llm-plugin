@@ -242,7 +242,6 @@ class TestIsCommitBrief:
         _write(repo / ".multi-llm" / "providers.yaml",
                "code_review:\n  commit_reviews_dir: reviews/commits\n")
         registry._config = None
-        registry._config_key = None
         assert is_commit_brief(_write(repo / "reviews" / "commits" / f"{SLUG}.md", "# x\n"))
         assert not is_commit_brief(_write(repo / FOLDER / f"{SLUG}.md", "# x\n"))
 

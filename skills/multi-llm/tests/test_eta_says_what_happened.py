@@ -111,7 +111,6 @@ def three_edits(tmp_path, monkeypatch):
     monkeypatch.setenv("MOCK_LLM_WRITE_IDS", json.dumps(["T001", "T002", "T003"]))
     yield obj
     registry._config = None
-    registry._config_key = None
 
 
 @pytest.fixture
@@ -120,7 +119,6 @@ def with_manual(tmp_path, monkeypatch):
     monkeypatch.setenv("MOCK_LLM_WRITE_IDS", json.dumps(["T001", "T002", "T004"]))
     yield obj
     registry._config = None
-    registry._config_key = None
 
 
 def _time_out(monkeypatch, task_id: str, *, edit: bool) -> None:
@@ -500,7 +498,6 @@ class TestManualTasksAreNotComplete:
             ), err
         finally:
             registry._config = None
-            registry._config_key = None
 
     def test_a_run_with_nothing_set_aside_still_says_all_tasks_complete(self):
         state = {"metrics": {}}

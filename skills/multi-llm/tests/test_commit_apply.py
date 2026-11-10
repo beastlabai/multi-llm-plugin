@@ -815,11 +815,9 @@ def write_rig(ranged, monkeypatch, tmp_path):
     monkeypatch.setenv("MOCK_LLM_PLUGIN", str(plugin))
     monkeypatch.setenv("COMMIT_APPLY_CALLS", str(calls))
     registry._config = None
-    registry._config_key = None
     executor.reset_version_cache()
     yield ranged, calls
     registry._config = None
-    registry._config_key = None
 
 
 def _dispatched(calls: Path) -> List[List[str]]:
@@ -1309,7 +1307,6 @@ class TestSelectReview:
         _write(repo / ".multi-llm" / "providers.yaml",
                "code_review:\n  commit_reviews_dir: reviews/commits\n")
         registry._config = None
-        registry._config_key = None
         _complete(repo, s[1], s[4], "2026-10-26T12:00:00")  # plans/commit-reviews
         configured = _complete(repo, s[3], s[4], "2026-10-26T09:00:00",
                                folder="reviews/commits")

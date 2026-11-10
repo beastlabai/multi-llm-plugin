@@ -32,7 +32,6 @@ def native_repo(tmp_path, monkeypatch):
     obj = make_repo(tmp_path, monkeypatch, PLAN_WITH_CODE_DEPENDENT)
     yield obj
     registry._config = None
-    registry._config_key = None
 
 
 def _emit(capsys, *flags: str, yes: bool = True):

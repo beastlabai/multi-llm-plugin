@@ -99,7 +99,6 @@ def _use_config(tmp_path, monkeypatch, body: str) -> None:
     path.write_text(body, encoding="utf-8")
     monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(path))
     registry._config = None
-    registry._config_key = None
 
 
 def _child_env(provider, model: str, profile: str) -> dict:

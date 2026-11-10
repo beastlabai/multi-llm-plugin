@@ -72,7 +72,6 @@ def runner_env(tmp_path, monkeypatch):
             path.write_text("\n".join(lines) + "\n", encoding="utf-8")
             monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(path))
             registry._config = None
-            registry._config_key = None
             self.config_path = path
             return path
 
@@ -83,7 +82,6 @@ def runner_env(tmp_path, monkeypatch):
     env.bin_dir = bin_dir
     yield env
     registry._config = None
-    registry._config_key = None
 
 
 def _inputs(phase_dir: Path):

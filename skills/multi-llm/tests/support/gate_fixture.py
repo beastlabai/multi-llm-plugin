@@ -93,7 +93,6 @@ PRINT = "Edit: print the build stamp"
 def _policy(repo, text: str) -> None:
     (repo.tmp_path / "driver.yaml").write_text(text, encoding="utf-8")
     registry._config = None
-    registry._config_key = None
 
 
 @pytest.fixture
@@ -105,7 +104,6 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("MOCK_LLM_WRITE_CHECK_IF_PROMPT_HAS", CHECK_GATE)
     yield obj
     registry._config = None
-    registry._config_key = None
 
 
 def _check(repo, *, passed: bool, reply_status=None) -> None:

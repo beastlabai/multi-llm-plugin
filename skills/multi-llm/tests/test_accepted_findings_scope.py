@@ -285,7 +285,6 @@ def scope_repo(tmp_path, monkeypatch):
     monkeypatch.setenv("MOCK_LLM_WRITE_CHECK_IF_PROMPT_HAS", CHECK_GATE)
     yield obj
     registry._config = None
-    registry._config_key = None
 
 
 def _every_edit_reports(repo, findings) -> None:

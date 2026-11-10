@@ -292,8 +292,8 @@ def _isolate_provider_config(request, monkeypatch):
       * unsets ``MULTI_LLM_PROVIDERS_CONFIG`` / ``MULTI_LLM_PROVIDERS_CONFIG_PERMISSIVE``,
       * forces project-local discovery to return ``None`` (deterministic;
         independent of where pytest is launched),
-      * resets ``registry._config`` / ``registry._config_key`` before and after so
-        cache state never leaks between tests.
+      * resets ``registry._config`` before and after so cache state never
+        leaks between tests.
 
     Tests that exercise override behavior add ``@pytest.mark.config_override`` and
     set up their own discovery/env within the test body.
@@ -306,8 +306,6 @@ def _isolate_provider_config(request, monkeypatch):
 
     def _reset_cache():
         registry._config = None
-        if hasattr(registry, "_config_key"):
-            registry._config_key = None
         # §9.3.b: the process-wide run anchor is set-once and immutable within a
         # process. A test that drives an orchestrator pre-flight pins one; the
         # next test's plan is a different path, which would (correctly) raise.

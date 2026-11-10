@@ -89,7 +89,6 @@ def _repo(tmp_path, monkeypatch, plan: str, policy: str):
 def _fresh_config():
     yield
     registry._config = None
-    registry._config_key = None
 
 
 def _stop(repo, capsys, *flags) -> tuple:

@@ -1,12 +1,19 @@
 """Kilo Code CLI provider implementation."""
+import json
 import re
 import shutil
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..json_extractor import _ANSI_ESCAPE
 from .base import (
+    CATEGORY_CONNECTION_ERROR,
+    CATEGORY_INVALID_MODEL,
+    CATEGORY_SERVER_ERROR,
     LAUNCH_DIAGNOSTICS_NONE,
     REASONING_LADDER,
+    STATUS_RATE_LIMITED,
+    STATUS_RUNNER_ERROR,
+    STATUS_TIMEOUT,
     InternalRetryEnvelope,
     LLMProvider,
     ReasoningLadder,
@@ -112,18 +119,77 @@ def _strip_ansi(text: str) -> str:
 #: tests/fixtures/kilocode/manifest.yaml (7.8.27) prints it, the 401, 429 and 500
 #: rows included, and nothing else on stderr opens with it: the run banner and
 #: the tool trace (``ESC[0m→ ESC[0mRead <the file it opened>``, the
-#: ``multi-assistant`` row) open on a bare reset. :meth:`KiloCodeProvider.vendor_text`
-#: reads only the lines that open with it.
+#: ``multi-assistant`` row) open on a bare reset. :func:`_error_lines` reads
+#: the lines that open with it (behind any resets) when stderr is painted.
 _PAINTED_ERROR = "\x1b[91m\x1b[1mError: \x1b[0m"
 
+#: Resets ahead of the paint on the same line (``ESC[0m``, ``ESC[m``): the
+#: same framing.
+_LEADING_RESETS = re.compile(r"(?:\x1b\[0?m)*")
 
-def _painted_error_lines(stderr: str) -> str:
-    """The stderr lines that open with :data:`_PAINTED_ERROR`, colour off."""
+#: The cause OpenRouter's gateway gives for an upstream refusal, with the
+#: refusal's JSON body on the lines after it.
+_PROVIDER_RETURNED_ERROR = "Error: Provider returned error"
+
+#: Most lines a refusal's JSON body after ``Provider returned error`` may span.
+_BODY_MAX_LINES = 64
+
+
+def _own_error_line(line: str) -> bool:
+    """Whether *line* opens on :data:`_PAINTED_ERROR`, behind any resets."""
+    return line.startswith(_PAINTED_ERROR, _LEADING_RESETS.match(line).end())
+
+
+def _error_lines(stderr: str) -> str:
+    """The stderr lines kilocode paints as its own ``Error:``, colour off.
+
+    A reset ahead of the paint is the same framing; an unpainted line (a
+    tool's output, a wrapped continuation, any line of an uncoloured run) is
+    not kilocode's, and the banner (``> code``) and the tool trace (``→``)
+    never open so.
+    """
     return "\n".join(
-        _strip_ansi(line)
-        for line in (stderr or "").split("\n")
-        if line.startswith(_PAINTED_ERROR)
+        _strip_ansi(line) for line in (stderr or "").split("\n") if _own_error_line(line)
     )
+
+
+def _body_error_code(lines: List[str], start: int) -> Optional[str]:
+    """The ``error.code`` (or top-level ``code``) of the JSON object opening
+    ``lines[start]``, within :data:`_BODY_MAX_LINES`; ``None`` without one."""
+    rest = _strip_ansi("\n".join(lines[start:start + _BODY_MAX_LINES]))
+    opening = rest.lstrip(" \t\r\n")
+    if not opening.startswith("{"):
+        return None
+    try:
+        body, _ = json.JSONDecoder().raw_decode(rest, len(rest) - len(opening))
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(body, dict):
+        return None
+    error = body.get("error") if isinstance(body.get("error"), dict) else body
+    code = error.get("code")
+    return None if isinstance(code, bool) or code is None else str(code).strip()
+
+
+def _gateway_rate_limited(stderr: str) -> bool:
+    """Whether a painted ``Error: Provider returned error`` is followed by a
+    JSON body whose code is 429. Read as the structured code only: nothing
+    in the body (its message, its metadata) reaches a text table."""
+    lines = (stderr or "").split("\n")
+    return any(
+        _own_error_line(line)
+        and _strip_ansi(line).rstrip() == _PROVIDER_RETURNED_ERROR
+        and _body_error_code(lines, index + 1) == "429"
+        for index, line in enumerate(lines)
+    )
+
+
+#: The verdicts the tables rank below a rate limit, which kilocode's
+#: structured 429 outranks (:meth:`KiloCodeProvider.classify_failure`).
+_BELOW_RATE_LIMIT = frozenset({
+    None, STATUS_TIMEOUT, STATUS_RUNNER_ERROR, CATEGORY_CONNECTION_ERROR,
+    CATEGORY_INVALID_MODEL, CATEGORY_SERVER_ERROR,
+})
 
 
 def _one_line(text: str) -> str:
@@ -275,27 +341,45 @@ class KiloCodeProvider(LLMProvider):
 
     def vendor_text(self, stdout: str, stderr: str) -> Tuple[str, str]:
         """What kilocode itself reported: none of stdout, and only the stderr
-        lines it paints as its own ``Error:``, colour off.
+        lines it paints as its own ``Error:``, colour off (:func:`_error_lines`).
 
         stdout is the model's answer and nothing else (:attr:`answer_framing`),
         so a failed run's partial answer quoting ``Incorrect API key provided``
         or a rate limit is dropped whole. stderr also carries the run banner and
         the tool trace, which names what the model chose to read or run
         (``→ Read docs/<any name>.md``), so a line is kept only when it opens on
-        :data:`_PAINTED_ERROR`, the framing of every captured failure. The paint
-        comes off the kept line because its reset sits flush against the cause's
-        first word, where a pattern's left word boundary
-        (:func:`~.failure_classifier.stream_pattern`) cannot see one. Anything
-        else, a wrapped cause's continuation line included, gives no verdict:
-        text nobody can attribute is one bounded retry, never a stop.
+        :data:`_PAINTED_ERROR`, the framing of every captured failure (a reset
+        ahead of it allowed). The paint comes off the kept line because its
+        reset sits flush against the cause's first word, where a pattern's left
+        word boundary (:func:`~.failure_classifier.stream_pattern`) cannot see
+        one. Anything else, a wrapped cause's continuation line and every line
+        of an uncoloured run included, gives no verdict: text nobody can
+        attribute is one bounded retry, never a stop.
 
         It feeds the classification and its quote (the base docstring names the
         two appliers), never the stored streams or :meth:`describe_failure`.
         """
         try:
-            return "", _painted_error_lines(stderr)
+            return "", _error_lines(stderr)
         except Exception:  # noqa: BLE001 - a failed reduction returns its input
             return stdout, stderr
+
+    def classify_failure(
+        self, stdout: str, stderr: str, exit_code: int = 0
+    ) -> Optional[str]:
+        """The base rule over :meth:`vendor_text`, then the gateway's 429.
+
+        ``Error: Provider returned error`` names no cause; the JSON body on
+        the lines after it does, as a structured code. A painted one with
+        code 429 is ``rate_limited``, in a rate limit's place in the tables'
+        order (a context overflow or a login notice still wins). The body's
+        message and metadata never reach a table, so nothing quoted in them
+        decides (docs/development/providers.md#reading-a-capture).
+        """
+        verdict = super().classify_failure(stdout, stderr, exit_code)
+        if verdict in _BELOW_RATE_LIMIT and _gateway_rate_limited(stderr):
+            return STATUS_RATE_LIMITED
+        return verdict
 
     def is_available(self) -> bool:
         return any(shutil.which(name) is not None for name in BINARY_NAMES)

@@ -513,7 +513,6 @@ class TestCopilotHasNoConfigurableTokenLimits:
         monkeypatch.setattr(registry, "_find_project_config", lambda anchor=None: None)
         monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(override))
         registry._config = None
-        registry._config_key = None
         return registry
 
     def test_the_key_really_does_reach_the_merged_provider_block(
