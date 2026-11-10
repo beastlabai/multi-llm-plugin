@@ -772,11 +772,15 @@ def test_the_fan_out_view_is_invoke_with_file_outputs(
     monkeypatch.setattr(llm_client, "_run_provider_cli", spawn)
     monkeypatch.setattr(llm_client, "_resolve_executable", lambda name: ([name], False))
     monkeypatch.setattr(llm_client, "provider_dispatch_context", no_dispatch_context)
-    monkeypatch.setattr(adapter, "is_available", lambda: True)
-    monkeypatch.setattr(
-        adapter, "build_command_for_transport", lambda *a, **k: (["/bin/true"], None)
+    # Through the instance __dict__, whose undo deletes the key: the registry's
+    # adapters are process-wide, and undoing an instance setattr leaves the
+    # original bound method on the instance, shadowing a later test's
+    # class-level patch of the same method.
+    monkeypatch.setitem(vars(adapter), "is_available", lambda: True)
+    monkeypatch.setitem(
+        vars(adapter), "build_command_for_transport", lambda *a, **k: (["/bin/true"], None)
     )
-    monkeypatch.setattr(adapter, "resolve_env", lambda *a, **k: {})
+    monkeypatch.setitem(vars(adapter), "resolve_env", lambda *a, **k: {})
     result = llm_client.invoke_with_file_output(
         prompt_template="hi {output_json_path}", model_spec=f"{provider}:m",
         prompt_context={}, output_dir=tmp_path, phase="review-plan", timeout=30,
