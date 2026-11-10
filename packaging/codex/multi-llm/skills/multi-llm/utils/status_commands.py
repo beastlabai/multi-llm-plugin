@@ -134,6 +134,7 @@ def user_speller(
     or consumes (``next_phase.commit_view_for``).
     """
 
+    # Imported here to keep run_status, which loads this module, light.
     from . import next_phase
 
     try:
@@ -155,6 +156,7 @@ def user_speller(
             return None
         view = next_phase.spelled_view(resolved.name, brief)
         if view is not None:
+            # Imported here to keep run_status, which loads this module, light.
             from .commit_spelling import strip_fronted_flags
 
             tokens = strip_fronted_flags(tokens)
@@ -213,11 +215,13 @@ def _retry_command(
     range) and none of the flags a front door synthesises or consumes, in
     *args* or in the replayed *flags*. A plan's run, and a direct
     ``--head-ref`` run, keep the command byte for byte."""
+    # Imported here to keep run_status, which loads this module, light.
     from . import next_phase
 
     view = next_phase.commit_view_for(mode, str(plan_path))
     if view is None:
         return cli_common.retry_command(mode, str(plan_path), *args, flags=flags)
+    # Imported here to keep run_status, which loads this module, light.
     from .commit_spelling import strip_fronted_flags
 
     return cli_common.retry_command(
@@ -315,6 +319,7 @@ def _composite_resume_tokens(mode: str, replay_flags: Any) -> List[str]:
     ``--context-plan``): the front door refuses
     the first three, and the brief inherits the rest.
     """
+    # Imported here to keep run_status, which loads this module, light.
     from . import improve_workflow
 
     recorded = replay_flags if isinstance(replay_flags, list) else None
@@ -322,6 +327,7 @@ def _composite_resume_tokens(mode: str, replay_flags: Any) -> List[str]:
         tokens = improve_workflow.recorded_continuation(mode, recorded)
         row = cli_common._modes().resolve(mode)
         if row is not None and cli_common._modes().POS_REVS in tuple(row.positionals):
+            # Imported here to keep run_status, which loads this module, light.
             from .commit_spelling import strip_fronted_flags
 
             tokens = strip_fronted_flags(tokens)
@@ -347,6 +353,7 @@ def _manual_gate_answers(
     try:
         if workflow is None:
             workflow = status_views._workflow_payload(plan_path)
+        # Imported here to keep run_status, which loads this module, light.
         from . import next_phase
 
         return next_phase._resume_flags(workflow.get("phases") or {}, _IMPLEMENT_PHASE)[1:]
@@ -357,6 +364,7 @@ def _manual_gate_answers(
 
 def _stale_review_of(phase_name: str, workflow: Dict[str, Any]) -> Optional[str]:
     """The phase name of *phase_name*'s prerequisite review when it is stale too."""
+    # Imported here to keep run_status, which loads this module, light.
     import check_workflow_prerequisites as prereq  # type: ignore
     for review in prereq.PHASE_PREREQUISITES.get(phase_name, ()):
         if ((workflow.get("phases") or {}).get(review) or {}).get("stale"):
@@ -462,6 +470,7 @@ def _stop_resume_why(view: Dict[str, Any]) -> Optional[str]:
     """The write run's stop's ``resume_why``, from its mirror,
     under ``next_phase.stop_resume_why_on_record``'s rule: one plain line of
     a sane length, since a jailed batch can write the folder it lives in."""
+    # Imported here to keep run_status, which loads this module, light.
     from .next_phase import recorded_why
 
     progress = view.get("progress") or {}
@@ -503,6 +512,7 @@ def _reason_explanation(reason_code: Optional[str]) -> Optional[str]:
     if not reason_code:
         return None
     try:
+        # Imported here to keep run_status, which loads this module, light.
         from .runner_selection import _REASON_EXPLANATION
     except Exception as exc:  # pragma: no cover - a broken install still prints the code
         note_swallowed("status: reason explanation import", exc)
@@ -777,6 +787,7 @@ def render_runner_text(
     prevent.
     """
     try:
+        # Imported here to keep run_status, which loads this module, light.
         from .provider_registry import resolve_subagent_runner
 
         invoking_host = host_capabilities.resolve_host_id(sys.argv[1:], explicit=host_id)

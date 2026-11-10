@@ -107,6 +107,7 @@ def manual_close_note(
     (:func:`_recorded_route`), for a reader that names none.
     """
 
+    # Imported here to keep run_status, which loads this module, light.
     from . import next_phase
 
     # The manual tasks themselves, never a code task skipped with one
@@ -181,6 +182,7 @@ def _workflow_trailer_lines(
             f"  ({' / '.join(pending_optional)} optional, not run)"
             if pending_optional else ""
         )
+        # Imported here to keep run_status, which loads this module, light.
         from .next_phase import gate_resume_suggested
 
         gate = gate_resume_suggested(payload)
@@ -209,6 +211,7 @@ def _workflow_trailer_lines(
     manual = (payload.get("phases", {}).get("implement") or {}).get("manual_tasks")
     manual_line: Optional[str] = None
     if isinstance(manual, list) and manual:
+        # Imported here to keep run_status, which loads this module, light.
         from .next_phase import ManualTask
 
         # One rendering with the `[MANUAL_TASK]` line: a task skipped with a
@@ -698,6 +701,7 @@ def _write_result_notice(views: Sequence[Dict[str, Any]]) -> Optional[str]:
 def _write_result_notice_parts(views: Sequence[Dict[str, Any]]) -> List[str]:
     """:func:`_write_result_notice`'s parts, unjoined (a stop's
     poll leaves out a part its `error` already says)."""
+    # Imported here to keep run_status, which loads this module, light.
     from .check_records import batch_check_summary
     parts: List[str] = []
     for view in views:

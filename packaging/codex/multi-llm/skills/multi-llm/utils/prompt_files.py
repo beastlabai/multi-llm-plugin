@@ -435,6 +435,7 @@ class _WindowsFiles:  # pragma: no cover - Windows
     _FILE_DISPOSITION_INFO = 4
 
     def __init__(self) -> None:
+        # ctypes loads only on the platform path that calls it.
         import ctypes
         from ctypes import wintypes
 

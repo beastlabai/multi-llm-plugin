@@ -97,6 +97,7 @@ def names_a_commit_brief(word: str) -> bool:
     """
     if not word.endswith(COMMIT_BRIEF_SUFFIX):
         return False
+    # Imported here to keep multi_llm, which loads this module, light.
     from utils import commit_paths
 
     if os.path.isfile(word):
@@ -113,6 +114,7 @@ def root_holding(path: str) -> Optional[str]:
     if not relative_paths([path]):
         return None
     try:
+        # Imported here to keep multi_llm, which loads this module, light.
         from utils.git_utils import pin_repo_root
 
         root, problem = pin_repo_root(os.getcwd())

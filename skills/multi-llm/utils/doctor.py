@@ -187,6 +187,7 @@ def _run(
     or did not finish inside ``timeout``. ``env`` of ``None`` inherits."""
     if timeout <= 0:
         return None
+    # Imported here to keep doctor light.
     from .llm_client import _resolve_executable
 
     launcher, _ = _resolve_executable(argv[0])
@@ -223,6 +224,7 @@ def _bwrap_self_test(timeout: float) -> Tuple[str, str]:
 def _version_cache_key(provider: Any, argv: Sequence[str]) -> Optional[Dict[str, Any]]:
     """The cache key for one ``version_cmd``: the resolved launcher's file
     identity (``utils/cli_version_cache.fingerprint``), or ``None``."""
+    # Imported here to keep doctor light.
     from .llm_client import _resolve_executable
 
     try:
@@ -251,6 +253,7 @@ def _probe_version(
 ) -> Dict[str, Any]:
     """The version row. With a ``cache``, a hit skips the spawn; the floor
     verdict is always taken live from the (cached or read) string."""
+    # Imported here to keep doctor light.
     from .providers.base import version_verdict
 
     argv = list(getattr(provider, "version_cmd", ()) or ())
@@ -313,6 +316,7 @@ def _auth_probe_env(
     is False only in the latter case, where :data:`AUTH_SCOPE_NOTE` would be
     untrue."""
     try:
+        # Imported here to keep doctor light.
         from .providers.base import PROFILE_AGENT_READONLY
         from .dispatch_spawn import dispatch_child_env
 
@@ -430,6 +434,7 @@ def _sandbox_fallback_for(
     The row never names a rung the probe did not return: without a verdict
     there is no rung, whatever the key says.
     """
+    # Imported here to keep doctor light.
     from .providers.base import PROFILE_GENERATE
     from .sandbox_walk import sandbox_fallback_rung
 
@@ -453,6 +458,7 @@ def _sandbox_fallback_for(
 
 def _declared_rung(provider: Any, name: str) -> Optional[Any]:
     """The adapter's declared read-only rung called ``name``, or ``None``."""
+    # Imported here to keep doctor light.
     from .providers.base import PROFILE_GENERATE
 
     hook = getattr(provider, "sandbox_fallback_rungs", None)
@@ -524,6 +530,7 @@ def _run_verdict(
     cache key"). ``walk=False`` runs the profile's own probe and no rung.
     Each keyword is passed only where the walk takes it, so a stand-in walk
     with an older signature still answers."""
+    # Imported here to keep doctor light.
     from . import sandbox_walk
 
     verdict_fn = sandbox_walk.sandbox_verdict
@@ -545,6 +552,7 @@ def _skip_switch() -> Tuple[Optional[str], Optional[str]]:
     Every other mode refuses to start on a bad value (``multi_llm.py``);
     doctor reports it on the rung's row instead of dying, since it is where a
     user looks when something is wrong."""
+    # Imported here to keep doctor light.
     from .providers.base import skip_rung_requested
 
     try:
@@ -558,6 +566,7 @@ def _incidental_rung(provider: Any, profile: Optional[str] = None) -> Optional[A
     Landlock jail) in the adapter's ladder for ``profile`` — the read-only
     ``generate`` ladder by default, or ``agent-write``'s (step 3's opt-in) —
     or ``None``."""
+    # Imported here to keep doctor light.
     from .providers.base import PROFILE_GENERATE, rung_is_incidental
 
     hook = getattr(provider, "sandbox_fallback_rungs", None)
@@ -575,6 +584,7 @@ def _incidental_rung(provider: Any, profile: Optional[str] = None) -> Optional[A
 
 def _probe_request(cwd: Optional[str]) -> Any:
     """Doctor's own read-only jail request: the probe's repo root, no scope."""
+    # Imported here to keep doctor light.
     from .providers.base import JailRequest
 
     return JailRequest(repo_root=os.path.realpath(cwd or os.getcwd()), kind=DOCTOR_PROBE_KIND)
@@ -591,6 +601,7 @@ def _base_allow_list(cwd: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
     directory is gone once the row is printed.
     """
 
+    # Imported here to keep doctor light.
     from . import landlock_dispatch as jail
 
     request = _probe_request(cwd)
@@ -629,6 +640,7 @@ def _incidental_row(
     ``installed``/``newer_than_measured`` are filled in by :func:`collect`,
     which has the version row.
     """
+    # Imported here to keep doctor light.
     from .providers.base import SKIP_RUNG_ENV, WALK_OUTCOME_SKIPPED_BY_SWITCH
 
     name = rung_decl.name
@@ -684,6 +696,7 @@ def _agent_write_row(
     ``refused-by-policy`` under ``contained``; ``no-rung`` without step 3's
     opt-in.
     """
+    # Imported here to keep doctor light.
     from .providers.base import (
         PROFILE_AGENT_WRITE, SANDBOX_FALLBACK_AUTO, SANDBOX_FALLBACK_OFF,
         WRITE_SCOPE_REPO_WIDE, WRITE_SCOPES_ON_RUNG,
@@ -755,6 +768,7 @@ def _probe_fallback(
     (the executor's own rule, the same a run takes). Its row
     (``plugin_landlock``) and the ``agent_write`` row are built from this walk.
     """
+    # Imported here to keep doctor light.
     from .providers.base import PROFILE_GENERATE
     from .sandbox_walk import (
         RUNG_ABSENT,
@@ -851,6 +865,7 @@ def _probe_sandbox(provider: Any, timeout: float, cwd: Optional[str]) -> Dict[st
     ``timeout`` is the whole job's budget: every probe here gets only what is
     left of it, recomputed before each.
     """
+    # Imported here to keep doctor light.
     from .providers.base import PROFILE_AGENT_WRITE, SANDBOX_FALLBACK_OFF
 
     deadline = time.monotonic() + max(timeout, 0.0)
@@ -905,6 +920,7 @@ def _flag_measured_through(sandbox: Dict[str, Any], version: Optional[str]) -> N
     ``LANDLOCK_RUNG.removed_at``'s does, :func:`_flag_removed_mismatch`).
     Render-only: a newer codex is named as the likely cause of a jail denial,
     never refused."""
+    # Imported here to keep doctor light.
     from .providers.base import version_tuple
 
     rung = sandbox.get("plugin_landlock")
@@ -925,6 +941,7 @@ def _flag_removed_mismatch(sandbox: Dict[str, Any], version: Optional[str]) -> N
     the rung shows up. Sets ``fallback_version`` and
     ``fallback_removed_mismatch`` on the row; rendered by
     :func:`_fallback_note`."""
+    # Imported here to keep doctor light.
     from .providers.base import SandboxRung, rung_removed_for_version
 
     removed = list(sandbox.get("fallback_removed_at") or ())
@@ -971,6 +988,7 @@ def _fallback_note(provider_name: str, sandbox: Dict[str, Any]) -> str:
     measured because the report's budget ran out (``rung unprobed``), which
     must never read as either.
     """
+    # Imported here to keep doctor light.
     from .providers.base import SANDBOX_FALLBACK_CONTAINED, SANDBOX_FALLBACK_OFF
 
     policy = sandbox.get("fallback") or ""
@@ -1150,6 +1168,7 @@ def _agent_write_text(
     batch may write, the rung's grade and its open network, F5's clause, and
     restates the verdict rule: BROKEN and exit 3 because codex's own sandbox
     cannot start, whatever the write rung serves."""
+    # Imported here to keep doctor light.
     from .providers.base import SANDBOX_FALLBACK_AUTO
 
     verdict = (
@@ -1219,9 +1238,11 @@ def _toml_module() -> Any:
     else ``None`` — the runtime dependency surface is ``pyyaml`` alone, so on
     Python 3.10 under ``uv run --no-dev`` there is usually no parser at all."""
     try:
+        # tomllib is 3.11+; on 3.10 the handler below falls back to tomli.
         import tomllib as _toml  # type: ignore[import-not-found]
     except ImportError:  # pragma: no cover - Python 3.10
         try:
+            # The 3.10 fallback for tomllib, when tomli is installed.
             import tomli as _toml  # type: ignore[import-not-found,no-redef]
         except ImportError:
             return None
@@ -1340,6 +1361,7 @@ def collect(
 
     Version reads go through doctor's own cache (``utils/cli_version_cache``)
     unless ``fresh``; a fresh run still writes what it read back to it."""
+    # Imported here to keep doctor light.
     from . import host_capabilities as caps
     from .provider_registry import get_provider, load_config
 
@@ -1467,6 +1489,7 @@ def _jail_serves_here(sandbox: Dict[str, Any]) -> bool:
     passed under ``auto`` (the only policy that reaches it). A rung that is
     absent, failed, skipped by the switch or never probed leaves the repair
     as the primary guidance."""
+    # Imported here to keep doctor light.
     from .providers.base import SANDBOX_FALLBACK_AUTO
 
     return (
@@ -1477,6 +1500,7 @@ def _jail_serves_here(sandbox: Dict[str, Any]) -> bool:
 
 
 def _probe_cwd(anchor: Optional[str]) -> Optional[str]:
+    # Imported here to keep doctor light.
     from .sandbox_walk import _probe_cwd as executor_probe_cwd
 
     return executor_probe_cwd(anchor)
@@ -1486,6 +1510,7 @@ def _sandbox_fallback_brief(sandbox: Dict[str, Any]) -> str:
     """What the next run does with a BROKEN runner sandbox, in one clause for
     the compact report: the key in force, the rung the read-only walk took and
     the ``agent-write`` row's status. ``""`` when no fallback rides the row."""
+    # Imported here to keep doctor light.
     from .providers.base import SANDBOX_FALLBACK_OFF
 
     policy = sandbox.get("fallback") or ""

@@ -57,6 +57,7 @@ def load_finalize_tracking():
     ``None`` keeps a batch record from failing on a census it cannot run.
     """
     try:
+        # `tracking` reaches this module through the write scheduler: a load-time cycle.
         from . import tracking
     except ImportError:  # pragma: no cover - a module of this package
         return None

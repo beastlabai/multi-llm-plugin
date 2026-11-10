@@ -399,6 +399,7 @@ def _taken_over(claim: Claim, recorded: Optional[str], doing: str) -> RoundTaken
 
 
 def _unreadable(claim: Claim, doing: str) -> RoundTakenOver:
+    # Imported here to keep resume_state, which loads this module, light.
     from .unattended import fail_closed
 
     return RoundTakenOver(fail_closed(

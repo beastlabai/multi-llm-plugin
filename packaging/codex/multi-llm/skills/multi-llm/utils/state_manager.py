@@ -1462,6 +1462,7 @@ def _merge_metric_list(phase: str, was: Any, own: Any, file: Any) -> Any:
     a second record of one event collapses into the file's. A list that does
     not have that shape is this manager's.
     """
+    # Imported here to keep full_workflow_orchestrator, which loads this module, light.
     from . import metrics as _metrics
 
     before = [] if was is _ABSENT else was
@@ -1861,6 +1862,7 @@ class StateManager:
         The native writers' shared lock covers both comparison and replacement
         so a completion cannot land between them and then be overwritten.
         """
+        # Imported here to keep full_workflow_orchestrator, which loads this module, light.
         from .metrics import state_file_lock
 
         try:
@@ -1966,6 +1968,7 @@ class StateManager:
             raise RuntimeError(
                 f"read-only StateManager for {self.plan_path} cannot save"
             )
+        # Imported here to keep full_workflow_orchestrator, which loads this module, light.
         from .metrics import state_file_lock
 
         candidate = dict(self.state)
@@ -2094,6 +2097,7 @@ class StateManager:
         this object rather than through ``metrics.py``'s own reader/writer is
         what stops the two racing on ``state.json`` — see :meth:`reload`.
         """
+        # Imported here to keep full_workflow_orchestrator, which loads this module, light.
         from . import metrics as _metrics
 
         _metrics.start_phase_in_state(self.state, phase, int(total_batches))
@@ -2109,6 +2113,7 @@ class StateManager:
         already hands back its own, so the scheduler can route it to the phase
         log the rest of that run's ETA lines went to (F7).
         """
+        # Imported here to keep full_workflow_orchestrator, which loads this module, light.
         from . import metrics as _metrics
 
         started = phase in (self.state.get("metrics_progress") or {})
@@ -2129,6 +2134,7 @@ class StateManager:
         clears them), journaled: a replacement that repeats the recorded
         tasks, or clears tasks this manager never saw, is still this
         manager's write."""
+        # Imported here to keep full_workflow_orchestrator, which loads this module, light.
         from . import metrics as _metrics
 
         _metrics.set_left_out_in_state(self.state, phase, tasks)
@@ -2137,6 +2143,7 @@ class StateManager:
     def set_metrics_set_aside(self, phase: str, tasks: Mapping[str, str]) -> None:
         """Replace *phase*'s set-aside tasks (``metrics.SET_ASIDE_KEY``;
         ``{}`` clears them), journaled as :meth:`set_metrics_left_out` is."""
+        # Imported here to keep full_workflow_orchestrator, which loads this module, light.
         from . import metrics as _metrics
 
         _metrics.set_set_aside_in_state(self.state, phase, tasks)
@@ -2159,6 +2166,7 @@ class StateManager:
         The in-memory twin of ``metrics.record_metric``; returns the rendered
         ``[ETA]`` line (or None) for the caller to place, and prints nothing.
         """
+        # Imported here to keep full_workflow_orchestrator, which loads this module, light.
         from . import metrics as _metrics
 
         return _metrics.record_metric_in_state(self.state, phase, label, **kwargs)
@@ -2870,6 +2878,7 @@ class StateManager:
             raise RuntimeError(
                 f"read-only StateManager for {self.plan_path} cannot record commit_range"
             )
+        # Imported here to keep full_workflow_orchestrator, which loads this module, light.
         from .metrics import state_file_lock
 
         # The lock lives beside the file; a folder that does not exist yet has

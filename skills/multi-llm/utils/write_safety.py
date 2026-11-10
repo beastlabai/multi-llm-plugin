@@ -2928,6 +2928,7 @@ def _fchflags() -> Optional[Callable[[int, int], None]]:
     if not hasattr(os, "chflags"):
         return None
     try:
+        # ctypes loads only on the platform path that calls it.
         import ctypes
         import ctypes.util
 
@@ -3325,6 +3326,7 @@ class _HeldCopyCalls:  # pragma: no cover - Windows
     _EPOCH = 116444736000000000
 
     def __init__(self) -> None:
+        # ctypes loads only on the platform path that calls it.
         import ctypes
         from ctypes import wintypes
 

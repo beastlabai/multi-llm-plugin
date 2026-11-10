@@ -245,6 +245,7 @@ def scope_blocker_reason(state: StateManager, phase: str) -> Optional[str]:
     ``review-plan`` blocked — the prerequisite of the very apply that must
     run again to clear the blocker.
     """
+    # Imported here to keep full_workflow_orchestrator, which loads this module, light.
     from utils import scope_apply
 
     if phase not in APPLY_BATCH_ID_PATTERNS:
@@ -984,6 +985,7 @@ def repo_wide_sandbox_warning(
     refused.)
     """
     try:
+        # Imported here to keep full_workflow_orchestrator, which loads this module, light.
         from utils import host_capabilities
         from utils.provider_registry import resolve_subagent_runner
         from utils.sandbox_walk import repo_wide_write_refusal
@@ -1384,6 +1386,7 @@ def _scope_notices(
     phases that build on it refuse (:func:`scope_blocker_reason`). Nothing is
     added for a round with no scope record, so a default status is as it
     was."""
+    # Imported here to keep full_workflow_orchestrator, which loads this module, light.
     from utils import scope_apply
 
     for phase in APPLY_BATCH_ID_PATTERNS:
@@ -1474,6 +1477,7 @@ def main(argv=None) -> int:
 
         plan_dir = get_output_dir(plan_path)
         state = StateManager(plan_path, read_only=True)
+        # Imported here to keep full_workflow_orchestrator, which loads this module, light.
         from utils import host_capabilities
         result = get_workflow_status(
             state, plan_path, plan_dir,

@@ -341,8 +341,10 @@ def _workflow_payload(
     sandbox warning resolves the subagent runner for it, and the servers
     declare their host only there (adversarial review, 2026-10-02).
     """
+    # Imported here to keep run_status, which loads this module, light.
     from .state_manager import StateManager
 
+    # Imported here to keep run_status, which loads this module, light.
     import check_workflow_prerequisites as prereq  # type: ignore
 
     # A poll: read-only, so it never rewrites the file a run is writing.
@@ -359,6 +361,7 @@ def _document_word(plan_path: Path) -> str:
     'plan'"), through the one owner of the word, ``commit_paths.document_label``.
     Read-only; an unreadable state is a plan."""
     try:
+        # Imported here to keep run_status, which loads this module, light.
         from .commit_paths import document_label, read_commit_range
 
         return document_label({"commit_range": read_commit_range(plan_path)})

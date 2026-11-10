@@ -1753,8 +1753,11 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     From the skill directory: ``uv run --project . -- python -m utils.subagent_prompts``
     """
+    # Imported here: the prompt generators' module imports only json and typing at the top
+    # (tests/test_subagent_prompts.py TestGeneratorsArePure).
     import pathlib
 
+    # Imported here for the same reason.
     from .stream_bootstrap import bootstrap_streams
     bootstrap_streams()
 

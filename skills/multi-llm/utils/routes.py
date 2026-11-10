@@ -212,6 +212,7 @@ def resolve_route(
                 file=stream,
             )
         if skill_root is None:
+            # Imported here to keep next_phase, which loads this module, light.
             from . import cli_common
 
             skill_root = cli_common._SKILL_DIR

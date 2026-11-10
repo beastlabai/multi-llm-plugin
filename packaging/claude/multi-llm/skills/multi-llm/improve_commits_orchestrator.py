@@ -41,6 +41,7 @@ MODE = "improve-commits"
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    # Imported here to keep improve_commits_orchestrator light.
     from utils import commit_front_door
 
     return commit_front_door.parse_args(MODE, argv)
@@ -48,6 +49,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     bootstrap_streams()
+    # Imported here to keep improve_commits_orchestrator light.
     from utils import commit_front_door
 
     tokens = list(sys.argv[1:] if argv is None else argv)

@@ -71,6 +71,7 @@ def state_implement_view(
     run` printed "no run recorded for phase implement" after it, since the
     native leg leaves nothing else that view reads.
     """
+    # Imported here to keep run_status, which loads this module, light.
     from .state_manager import StateManager
 
     implement_dir = phase_dir_path(plan_path, _IMPLEMENT_PHASE)
@@ -124,6 +125,7 @@ def state_implement_view(
         resumable and not in_progress_since and native_run_stopped(record, statuses))
     gate_flags: List[str] = []
     if resumable:
+        # Imported here to keep run_status, which loads this module, light.
         from .stop_answers import native_resume_why, native_stop_answers
 
         stop_answers = native_stop_answers(record)
@@ -201,6 +203,7 @@ def native_still_runnable(
     is not manual, not held by a check's findings and not after a failed
     task. ``[]`` when nothing waits for an answer, or the record cannot be
     read."""
+    # Imported here to keep run_status, which loads this module, light.
     from .stop_answers import _native_stop_facts
 
     try:
@@ -230,6 +233,7 @@ def _native_manual_gate(
     next-command`` gives them — the answers being the
     user's decline of each such task — else
     ``([], None, [])``."""
+    # Imported here to keep run_status, which loads this module, light.
     from . import next_phase
 
     try:
@@ -289,6 +293,7 @@ def native_run_stopped(
     between the emit and the host's records never read as a stop. Advisory:
     an unreadable record is not a stop.
     """
+    # Imported here to keep run_status, which loads this module, light.
     from .stop_answers import _native_stop_facts
 
     try:
@@ -770,7 +775,9 @@ def state_apply_views(
     workflow order;
     *only* limits it to one phase (``--phase``). Read-only.
     """
+    # Imported here to keep status_native light.
     from .metrics import _current_run_id
+    # Imported here to keep run_status, which loads this module, light.
     from .state_manager import StateManager
 
     listed = {
@@ -986,6 +993,7 @@ def _native_apply_not_applied(
     written (``emitted_at``; an earlier part's failure is handed out again
     by the resume that wrote it), each with the reason its record gave: a
     failed batch alone read "0/4 items applied" and named nothing."""
+    # Imported here to keep run_status, which loads this module, light.
     from .state_manager import _parse_completion_time
 
     try:
@@ -1114,6 +1122,7 @@ def _native_single_target(tasks: Sequence[Any], directory: Path) -> Optional[str
     """The one file every batch of *tasks* declares, from the root of the
     repository holding *directory* (the ``.git`` holder above it, walked;
     as given when it lies outside), else ``None``."""
+    # Imported here to keep run_status, which loads this module, light.
     from .git_utils import find_git_entry_root
     from .subagent_tasks import declared_file_set
 
@@ -1142,6 +1151,7 @@ def _native_apply_batch_checks(record: Dict[str, Any], directory: Path) -> List[
     check failed (``known_checks.earlier_batch_check_failures`` over the
     phase's ``write_tasks.json``); ``[]`` when either cannot be read."""
     try:
+        # Imported here to keep run_status, which loads this module, light.
         from .known_checks import earlier_batch_check_failures
 
         document = json.loads((directory / _WRITE_TASKS).read_text(encoding="utf-8"))
@@ -1220,6 +1230,7 @@ def implement_task_tally(plan_path: Path) -> Optional[Dict[str, Any]]:
     task in exactly one bucket; ``None`` without a decomposition on record.
     Read-only.
     """
+    # Imported here to keep run_status, which loads this module, light.
     from .state_manager import StateManager
 
     try:

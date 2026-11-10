@@ -349,6 +349,7 @@ def unlanded_on_record(phase_dir: str, state: Any) -> List[str]:
     (``subagent_tasks.implement_output_name``) carries that verdict. A
     check task (``verification_only``) is never one. Read-only, never fatal.
     """
+    # Imported here to keep check_records light.
     from .subagent_tasks import implement_output_name
     try:
         statuses = dict(state.get("task_status") or {})

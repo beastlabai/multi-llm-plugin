@@ -68,6 +68,8 @@ def commit_guard_of(state: Any, kind: Optional[str] = None) -> Optional[Dict[str
 
 def load_commit_apply() -> Any:
     """``utils.commit_apply``, imported only once a guard exists."""
+    # Imported at call time on purpose: tests stand a fake `utils.commit_apply` in `sys.modules` and
+    # reach it only through this call.
     from . import commit_apply
     return commit_apply
 

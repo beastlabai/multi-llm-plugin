@@ -374,6 +374,7 @@ def resolve_uv() -> str:
     ``.exe`` entries that are the whole Windows story were missing from it. The
     error text is rendered from the same tuple for the same reason.
     """
+    # Imported here to keep run_sweep, which loads this module, light.
     from .unattended import UV_CANDIDATES, find_uv
 
     found = find_uv()
@@ -479,6 +480,7 @@ def build_child_command(
             f"skill dir ({base}); using the running one.",
             file=sys.stderr,
         )
+    # Imported here to keep run_sweep, which loads this module, light.
     from .unattended import uv_run_args
 
     return [
@@ -537,6 +539,7 @@ def _spec_binary(spec: str, anchor: Optional[str] = None) -> Optional[str]:
     cannot say is not evidence of absence.
     """
     try:
+        # Imported here to keep run_status, which loads this module, light.
         from .provider_registry import get_provider, parse_model_spec
     except Exception as exc:  # pragma: no cover - import guard
         note_swallowed("detach: provider binary import", exc)
@@ -581,6 +584,7 @@ def configured_runner_specs(anchor: Optional[str] = None) -> List[str]:
     are binaries the run may need.
     """
     try:
+        # Imported here to keep run_status, which loads this module, light.
         from .provider_registry import get_subagent_runner
     except Exception as exc:  # pragma: no cover - import guard
         note_swallowed("detach: subagent runner import", exc)
@@ -962,6 +966,7 @@ def _retire_driven_phase_maps(
         return 0
     if not driven:
         return 0
+    # Imported here to keep run_sweep, which loads this module, light.
     from . import progress_tracker
 
     swept = 0
@@ -1414,6 +1419,7 @@ def _close_out(
             # record two lines up, and a table reading `failed: cancelled` under
             # `run.error: heartbeat_timeout` tells the two halves of one
             # checkpoint two different stories about the same ending.
+            # Imported here to keep run_sweep, which loads this module, light.
             from . import progress_tracker
 
             progress_tracker.retire_live_entries(phase_dir, reason=reason)
@@ -1533,6 +1539,7 @@ def abort_run(phase_dir: str, *, force: bool = False) -> Dict[str, Any]:
             # `checkpoint_lock` as the record above, as in `RunHandle.finish`: the
             # retirement compares no run id, so a successor that claimed the dir in
             # a gap here would have its freshly seeded rows marked `cancelled`.
+            # Imported here to keep run_sweep, which loads this module, light.
             from . import progress_tracker
 
             progress_tracker.retire_live_entries(phase_dir)
@@ -1825,6 +1832,7 @@ def _takes_over(args: Any) -> bool:
     §2.1), and the stage records which it was."""
     force = bool(getattr(args, "force", False))
     if force and getattr(args, "commit_stage", None):
+        # Imported here to keep run_status, which loads this module, light.
         from .commit_paths import stage_takes_over
 
         force = stage_takes_over(getattr(args, "commit_stage", None))
@@ -2600,6 +2608,7 @@ def _tool_route(host: Optional[str]) -> Optional[str]:
     Advisory: anything unreadable records nothing."""
 
     try:
+        # Imported here to keep run_status, which loads this module, light.
         from . import host_capabilities, routes
 
         modes = routes._skill_module("modes")
@@ -3098,6 +3107,7 @@ def _restore_codex_trust() -> None:
     module was imported at :meth:`RunHandle.start`, so this is a
     ``sys.modules`` hit, never an import under a signal. Never raises."""
     try:
+        # Imported here to keep run_status, which loads this module, light.
         from . import codex_trust
 
         codex_trust.restore_all()
@@ -3732,6 +3742,7 @@ def _launch_roster(
     with on the other side of the fork.
     """
     try:
+        # Imported here to keep run_sweep, which loads this module, light.
         from . import progress_tracker
 
         return progress_tracker.roster_line_for_specs(

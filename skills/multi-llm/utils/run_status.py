@@ -353,6 +353,7 @@ def _plan_spelling(
     ``next_phase.recorded_plan_spelling`` passes it (a tool route polls with
     the absolute path); anything else is the plan as this call received it.
     """
+    # Imported here to keep run_status light.
     from . import next_phase
 
     pinned = _pinned_view(args, views)
@@ -372,6 +373,7 @@ def _recorded_route(
     24): a poll pinned to one run takes that run's record (:func:`_run_route`),
     anything else the newest run of the reader's host under the plan
     (``next_phase.recorded_route``). ``None`` when none is on record."""
+    # Imported here to keep run_status light.
     from . import next_phase
 
     host = _reader_host(args)
@@ -637,6 +639,7 @@ def status_plan_value(value: str) -> str:
     """
     if os.path.exists(value):
         return value
+    # Imported here to keep run_status light.
     from . import commit_paths, commit_range
 
     try:
@@ -695,6 +698,7 @@ def _commit_fixes_view(
     try:
         if _resolve_phase(args.phase) not in _COMMIT_FIXES_PHASES:
             return None
+        # Imported here to keep run_status light.
         from .commit_apply import fixes_from_state
 
         state_file = output_dir_path(plan_path) / "state.json"
@@ -954,6 +958,7 @@ def _terminal_trailer(facts: StatusFacts, answer: StatusAnswer) -> None:
         workflow, prefix="", close_note=close_note,
         suggested=answer.exit_code == EXIT_OK,
     )
+    # Imported here to keep run_status light.
     from .next_phase import gate_resume_closes_the_manual_tasks
 
     told = trailer
@@ -1297,6 +1302,7 @@ def _emit_user_next_step(
     ends on (plans/improve-plan-and-improve-code.md §2.6), and from
     ``suggested_next`` for ``full``.
     """
+    # Imported here to keep run_status light.
     from . import next_phase
 
     run = view.get("run") or {}
@@ -1331,6 +1337,7 @@ def _read_by_a_tool_route(args: argparse.Namespace) -> bool:
     reader, from the environment the servers set; never a run's recorded
     route, which a shell reads too) is a tool route (fix round 26)."""
 
+    # Imported here to keep run_status light.
     from . import next_phase
 
     try:
@@ -1445,6 +1452,7 @@ def _resolve_wait_timeout(args: argparse.Namespace, plan_path: Path) -> float:
     ``.inf`` for ``poll_s`` **precisely** to prevent "a ``--wait`` that never
     returns", and the CLI path was undoing that one layer up (F7, 2026-09-20).
     """
+    # Imported here to keep run_status light.
     from .provider_registry import ConfigError, get_progress_poll
 
     explicit = args.timeout is not None

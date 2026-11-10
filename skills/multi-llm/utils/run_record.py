@@ -14,9 +14,11 @@ itself is read here, ``run_record._ACTIVE``, and a test patches it here
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional
 
 from . import status_file
+from .clock import parse_local
 
 if TYPE_CHECKING:  # pragma: no cover - annotations only
     from .detach import RunHandle
@@ -46,8 +48,6 @@ def _elapsed_since(stamp: Any, now: Optional[float] = None) -> Optional[float]:
     honest elapsed: an aware stamp is converted to this machine's local wall
     clock, the same clock the naive stamps are already on.
     """
-    from datetime import datetime
-
     when = _parse_stamp(stamp)
     if when is None:
         return None
@@ -71,8 +71,6 @@ def _parse_stamp(stamp: Any) -> Optional[Any]:
     normalisation F4 was about. Same failure modes, same answer: anything that
     does not parse is ``None``, never a raise.
     """
-    from .clock import parse_local
-
     if not stamp:
         return None
     try:

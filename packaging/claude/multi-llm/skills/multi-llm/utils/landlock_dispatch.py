@@ -40,6 +40,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import sys
@@ -67,11 +68,19 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         WRITE_SCOPES,
         version_newer,
     )
+    from .providers.codex import (
+        CANARY_ENV_PYTHON,
+        CANARY_ENV_SEEDED,
+        CANARY_ENV_WORKDIR,
+        CANARY_ENV_WRITE_DIR,
+        CANARY_ENV_WRITE_FILE,
+    )
     from . import process_control
     from . import landlock_exec
     from .atomic_io import atomic_write_bytes
     from . import git_utils as _git_utils
     from . import codex_trust as _codex_trust
+    from . import redact as _redact
 except ImportError:  # pragma: no cover - direct-script import shim
     from utils.providers.base import (  # type: ignore[no-redef]
         CODEX_HOME_CHECK_MARKER,
@@ -91,11 +100,19 @@ except ImportError:  # pragma: no cover - direct-script import shim
         WRITE_SCOPES,
         version_newer,
     )
+    from utils.providers.codex import (  # type: ignore[no-redef]
+        CANARY_ENV_PYTHON,
+        CANARY_ENV_SEEDED,
+        CANARY_ENV_WORKDIR,
+        CANARY_ENV_WRITE_DIR,
+        CANARY_ENV_WRITE_FILE,
+    )
     from utils import process_control  # type: ignore[no-redef]
     from utils import landlock_exec  # type: ignore[no-redef]
     from utils.atomic_io import atomic_write_bytes  # type: ignore[no-redef]
     from utils import git_utils as _git_utils  # type: ignore[no-redef]
     from utils import codex_trust as _codex_trust  # type: ignore[no-redef]
+    from utils import redact as _redact  # type: ignore[no-redef]
 
 # ---------------------------------------------------------------------------
 # The wrapper and its launch
@@ -254,6 +271,8 @@ def default_tasks_dir(plan_file: str, tasks_file: str) -> Optional[str]:
     tasks file.
     """
     try:
+        # Imported here: llm_client loads this module, and doctor's version probe
+        # loads llm_client; neither needs output_handler or the mode table it brings.
         from .output_handler import sanitize_prefix
     except ImportError:  # pragma: no cover - direct-script import shim
         from utils.output_handler import sanitize_prefix  # type: ignore[no-redef]
@@ -489,7 +508,6 @@ def repo_wide_env_redirects(context: JailContext) -> Dict[str, str]:
     ``TMPDIR`` by itself. ``~/.cargo`` and ``~/.cache/go-build`` were not
     measured (no such project) and stay denied.
     """
-    import shlex
     base = context.tmpdir
     return {
         "UV_CACHE_DIR": os.path.join(base, "uv-cache"),
@@ -913,11 +931,7 @@ def redacted_excerpt(text: Optional[str], limit: Optional[int] = EXCERPT_CHARS) 
     runs before the cut: a cut inside a token leaves a fragment no pattern
     matches (``redact.redact_text``).
     """
-    try:  # pragma: no cover - import shim mirrors the rest of utils/
-        from .redact import redact_text
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.redact import redact_text
-    redacted = redact_text(text or "")
+    redacted = _redact.redact_text(text or "")
     return redacted if limit is None else redacted[:limit]
 
 
@@ -1847,7 +1861,8 @@ def home_snapshot(codex_home: Optional[str], run_cwds: Sequence[str] = ()) -> Op
 
 def _toml_names(text: str) -> Dict[str, Any]:
     try:
-        import tomllib  # Python 3.11+
+        # tomllib is 3.11+; on 3.10 a config change reads "(unparsed change)".
+        import tomllib
     except ImportError:  # pragma: no cover - 3.10 fallback
         return {}
     try:
@@ -1977,6 +1992,8 @@ def _write_change_list(lines: Sequence[str]) -> Optional[str]:
     never written through), and the directory keeps the newest
     :data:`HOME_CHANGE_LIST_KEEP` lists."""
     try:
+        # Imported here: llm_client loads this module, and doctor's version probe
+        # loads llm_client; neither needs output_handler or the mode table it brings.
         from .output_handler import state_home
     except ImportError:  # pragma: no cover - direct-script import shim
         from utils.output_handler import state_home  # type: ignore[no-redef]
@@ -2221,12 +2238,6 @@ def canary_env(context: JailContext) -> Dict[str, str]:
     negative controls live outside the repository (:func:`rung_probe` moves
     the canary's workdir there, since the root grant makes ``.multi-llm/tmp``
     writable). Empty for a read-only probe."""
-    try:
-        from .providers.codex import CANARY_ENV_WRITE_DIR, CANARY_ENV_WRITE_FILE
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.providers.codex import (  # type: ignore[no-redef]
-            CANARY_ENV_WRITE_DIR, CANARY_ENV_WRITE_FILE,
-        )
     if context.write_scope == WRITE_SCOPE_REPO_WIDE:
         return {}
     if not context.write_scope or not context.target:
@@ -2267,12 +2278,6 @@ def rung_probe(
     the canary as ``$MULTI_LLM_CANARY_WORKDIR`` and removed afterwards; the
     positive control stays the ``$TMPDIR`` write.
     """
-    try:
-        from .providers.codex import CANARY_ENV_PYTHON, CANARY_ENV_SEEDED, CANARY_ENV_WORKDIR
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.providers.codex import (  # type: ignore[no-redef]
-            CANARY_ENV_PYTHON, CANARY_ENV_SEEDED, CANARY_ENV_WORKDIR,
-        )
     base_env = dict(os.environ if env is None else env)
     outside: Optional[str] = None
     if request.write_scope == WRITE_SCOPE_REPO_WIDE:

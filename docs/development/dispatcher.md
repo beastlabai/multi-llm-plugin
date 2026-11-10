@@ -518,7 +518,10 @@ neither the provider stack nor YAML. What a short-lived command loads when it *r
 a stopped composite's `status --view run` (which imports `improve_workflow` to spell the
 continuation) and each commit front door's `--help` load no project module beyond their set in
 `READER_PATHS`, so the review engine, the write path's reporting and the range and brief modules
-stay inside the functions that use them. A module every load imports at the top (not under a
+stay inside the functions that use them. The reason is a comment on the import's line or directly
+above it (adjacent imports share one; an import opening a `try` body or an `except` handler may
+use that header's comment), and `test_every_function_level_import_says_why` fails on an import
+inside a function that has none. A module every load imports at the top (not under a
 run-time `if`, a `try` that handles exceptions, or `if TYPE_CHECKING:`) is not imported again
 inside a function, anywhere in the skill (`test_no_skill_module_imports_a_module_twice`). When a test
 patches a name on its owner (`monkeypatch.setattr(subagent_tasks, "prompt_budget_utf16", ...)`), a

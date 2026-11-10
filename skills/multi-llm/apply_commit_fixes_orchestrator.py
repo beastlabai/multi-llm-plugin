@@ -40,6 +40,7 @@ MODE = "apply-commit-fixes"
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    # Imported here to keep apply_commit_fixes_orchestrator light.
     from utils import commit_front_door
 
     return commit_front_door.parse_args(MODE, argv)
@@ -47,6 +48,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     bootstrap_streams()
+    # Imported here to keep apply_commit_fixes_orchestrator light.
     from utils import commit_front_door
 
     return commit_front_door.front_door(

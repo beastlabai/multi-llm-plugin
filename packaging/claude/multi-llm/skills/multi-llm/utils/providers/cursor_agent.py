@@ -985,6 +985,7 @@ def redact_probe_output(text: str) -> str:
     if not text:
         return ""
     try:
+        # Imported late on purpose; a failure drops the text (see the docstring).
         from ..redact import redact_text
     except Exception:  # pragma: no cover - a diagnostic never leaks on failure
         return "<redacted:probe-output>"

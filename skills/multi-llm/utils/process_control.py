@@ -175,6 +175,7 @@ def _ps_start_time(pid: int) -> Optional[str]:
 
 def _windows_start_time(pid: int) -> Optional[str]:  # pragma: no cover - Windows
     try:
+        # ctypes loads only on the platform path that calls it.
         import ctypes
         from ctypes import wintypes
 
@@ -247,6 +248,7 @@ def _windows_liveness(pid: int) -> str:  # pragma: no cover - Windows
     is death; any other failure, of it or of ``GetExitCodeProcess``, is
     unknown."""
     try:
+        # ctypes loads only on the platform path that calls it.
         import ctypes
 
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -269,6 +271,7 @@ def _windows_liveness(pid: int) -> str:  # pragma: no cover - Windows
 
 def _windows_alive(pid: int) -> bool:  # pragma: no cover - Windows
     try:
+        # ctypes loads only on the platform path that calls it.
         import ctypes
 
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -357,12 +360,14 @@ def _take_fd_lock(fd: int) -> None:
     (ownership and mutex) are built out of it, so a Windows fix is one edit.
     """
     if IS_WINDOWS:  # pragma: no cover - Windows
+        # Windows only.
         import msvcrt
 
         os.lseek(fd, _WINDOWS_LOCK_OFFSET, os.SEEK_SET)
         msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
         os.lseek(fd, 0, os.SEEK_SET)
         return
+    # POSIX only.
     import fcntl
 
     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -371,6 +376,7 @@ def _take_fd_lock(fd: int) -> None:
 def _drop_fd_lock(fd: int) -> None:
     """Release the exclusive OS lock on *fd*."""
     if IS_WINDOWS:  # pragma: no cover - Windows
+        # Windows only.
         import msvcrt
 
         os.lseek(fd, _WINDOWS_LOCK_OFFSET, os.SEEK_SET)
@@ -379,6 +385,7 @@ def _drop_fd_lock(fd: int) -> None:
         except OSError:
             pass
         return
+    # POSIX only.
     import fcntl
 
     fcntl.flock(fd, fcntl.LOCK_UN)
@@ -387,6 +394,7 @@ def _drop_fd_lock(fd: int) -> None:
 def descriptor_owning_handle(handle: int) -> int:  # pragma: no cover - Windows
     """Windows: wrap the Win32 file *handle* in a non-inheritable C runtime
     descriptor that owns it (closing the descriptor closes the handle)."""
+    # Windows only.
     import msvcrt
 
     return msvcrt.open_osfhandle(handle, os.O_NOINHERIT)
@@ -394,6 +402,7 @@ def descriptor_owning_handle(handle: int) -> int:  # pragma: no cover - Windows
 
 def handle_of_descriptor(fd: int) -> int:  # pragma: no cover - Windows
     """Windows: the Win32 handle behind C runtime descriptor *fd*."""
+    # Windows only.
     import msvcrt
 
     return msvcrt.get_osfhandle(fd)
@@ -513,6 +522,7 @@ class PhaseLock:
         numbered 3 or above, so a child's stdio set-up cannot clobber it, and
         close-on-exec until the spawn clears that for the one child it hands
         it to. The caller closes it once the spawn is done."""
+        # POSIX only.
         import fcntl
 
         assert self._fd is not None
@@ -1278,6 +1288,7 @@ def _syscall_pidfds() -> Optional[Tuple[Callable[[int], int], Callable[..., Any]
     if _sigaction_abi() is None:
         return None
     try:
+        # ctypes loads only on the platform path that calls it.
         import ctypes
 
         call = ctypes.CDLL(None, use_errno=True).syscall
@@ -1971,6 +1982,7 @@ def _sigchld_action() -> Optional[Tuple[int, int]]:
         return None
     try:
         if not _SIGACTION:
+            # ctypes loads only on the platform path that calls it.
             import ctypes
 
             words = 1024 // (8 * ctypes.sizeof(ctypes.c_ulong))
@@ -2360,6 +2372,7 @@ class _JobApi:  # pragma: no cover - Windows
     _PROCESS_QUERY = 0x1000
 
     def __init__(self) -> None:
+        # ctypes loads only on the platform path that calls it.
         import ctypes
         from ctypes import wintypes
 
@@ -2917,6 +2930,7 @@ def kill_run_tree(run_id: Any, pid: int, **kwargs: Any) -> str:
 def _send_ctrl_break(pid: int) -> None:  # pragma: no cover - Windows
     """``CTRL_BREAK_EVENT`` to the console process group *pid* leads."""
     try:
+        # ctypes loads only on the platform path that calls it.
         import ctypes
 
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -5009,6 +5023,7 @@ def enter_detached_worker(log_path: Optional[str], run_id: Optional[str] = None)
             # First, so a job the worker creates itself holds the reaper's.
             _hold_run_job(run_id)
         _assign_own_job_object()
+    # Imported here to keep resume_state, which loads this module, light.
     from .stream_bootstrap import bootstrap_streams
 
     bootstrap_streams()
@@ -5018,6 +5033,7 @@ def enter_detached_worker(log_path: Optional[str], run_id: Optional[str] = None)
 def _assign_own_job_object() -> None:  # pragma: no cover - Windows
     """Best-effort Job Object with KILL_ON_JOB_CLOSE around this process."""
     try:
+        # ctypes loads only on the platform path that calls it.
         import ctypes
         from ctypes import wintypes
     except ImportError:

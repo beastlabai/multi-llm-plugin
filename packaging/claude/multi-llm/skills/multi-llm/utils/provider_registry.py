@@ -1386,6 +1386,7 @@ def _host_capabilities():
     imports ``cli_common`` (which imports this module's siblings) and because most
     invocations never need the yaml parse at all.
     """
+    # Imported here for the reasons the docstring gives.
     from . import host_capabilities
     return host_capabilities
 

@@ -177,6 +177,7 @@ def _plan_edited_after_generate_tasks(
     (no state.json, or the tasks file predates the generate-tasks map).
     """
     try:
+        # Imported here to keep batch_reply, which loads this module, light.
         from .state_manager import StateManager
 
         state = StateManager(plan_path_abs, read_only=True)

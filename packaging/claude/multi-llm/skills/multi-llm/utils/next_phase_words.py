@@ -28,6 +28,7 @@ def brief_view(
     """``commit_spelling.commit_view`` of the plan's ``state.json`` (*plan_path*,
     else *plan_arg* made absolute), the brief spelled as *plan_arg*; ``None``
     for a plan's run, a direct ``--head-ref`` run, or a state it cannot read."""
+    # Imported here to keep next_phase, which loads this module, light.
     from .commit_spelling import commit_view
 
     try:
@@ -49,6 +50,7 @@ def spelled_view(mode_word: str, view: Optional["CommitView"]) -> Optional["Comm
     """
     if view is None:
         return None
+    # Imported here to keep next_phase, which loads this module, light.
     from .commit_spelling import spell_mode
 
     modes = _skill_module("modes")
@@ -81,6 +83,7 @@ def commit_mode_word(mode_word: str, view: Optional["CommitView"]) -> str:
     ``spell_mode``), aliases resolved first; unchanged without a view."""
     if view is None:
         return str(mode_word)
+    # Imported here to keep next_phase, which loads this module, light.
     from .commit_spelling import spell_mode
 
     row = _skill_module("modes").resolve(str(mode_word))
@@ -94,6 +97,7 @@ def commit_spelled_args(
     wraps: the hook's ``spell_args`` (the pinned range, or the brief path on
     a root range, and none of the flags a front door synthesises or
     consumes), each token through :func:`quote_plan_arg`."""
+    # Imported here to keep next_phase, which loads this module, light.
     from .commit_spelling import spell_args
 
     word, rest = spell_args(commit_mode_word(mode_word, view), None, flags, view)

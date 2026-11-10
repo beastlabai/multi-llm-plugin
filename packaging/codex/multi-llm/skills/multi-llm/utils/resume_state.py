@@ -223,6 +223,7 @@ def _state_facts(plan: Path, phase: str) -> Tuple[bool, bool]:
     """
     if not (output_dir_path(plan) / "state.json").is_file():
         return False, False
+    # Imported here to keep resume_state light.
     from .state_manager import StateManager
 
     try:
@@ -270,6 +271,7 @@ def _has_result_files(phase_dir: Path, phase: str) -> bool:
     """Whether per-model result files are on disk: review-code's
     partial-completion guard's reader there, the round's reader elsewhere."""
     if phase == "code-review":
+        # Imported here to keep resume_state light.
         import code_review_orchestrator as review_code
 
         return bool(review_code.leftover_model_results(phase_dir))
@@ -373,6 +375,7 @@ def _recorded_scope(phase_dir: Path) -> Optional[str]:
     """The scope id of the review set on disk, the one a ``--reaggregate``
     reports and an unchanged change's fan-out recomputes; ``None`` when the
     ``review-scope.md`` + ``diff/`` pair is missing or incomplete."""
+    # Imported here to keep resume_state light.
     from .git_utils import load_review_scope
 
     header = load_review_scope(phase_dir)
@@ -392,6 +395,7 @@ def _kept_on_rerun(phase_dir: Path, phase: str, spec: str) -> bool:
     """
     stem = sanitize_model_name(spec)
     if phase == "code-review":
+        # Imported here to keep resume_state light.
         import code_review_orchestrator as review_code
 
         scope_id = _recorded_scope(phase_dir)

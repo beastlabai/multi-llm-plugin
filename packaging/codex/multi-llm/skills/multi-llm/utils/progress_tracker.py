@@ -463,6 +463,7 @@ def entry_queued_s(
     if entry.get("ended_at"):
         return _stored_duration(entry.get("queued_s"))
 
+    # Imported here to keep progress_tracker light.
     from . import run_record
 
     if awaits_first_dispatch(entry):
@@ -503,6 +504,7 @@ def entry_stagger_remaining_s(
     if not isinstance(entry, Mapping) or _entry_state(entry) != STATE_STAGGERING:
         return None
 
+    # Imported here to keep progress_tracker light.
     from . import run_record
 
     when = run_record._parse_stamp(entry.get("stagger_until"))
@@ -819,6 +821,7 @@ def budget_for_spec(
     if timeout is not None:
         return _seconds(timeout)
     try:
+        # Imported here to keep run_status, which loads this module, light.
         from .provider_registry import get_provider_timeout, parse_model_spec
 
         provider, _model = parse_model_spec(spec, anchor=anchor)
@@ -961,6 +964,7 @@ class FanoutProgress:
         self.anchor = anchor
         self.timeout = timeout
         if interval_s is None:
+            # Imported here to keep run_status, which loads this module, light.
             from .provider_registry import get_progress_interval
 
             interval_s = get_progress_interval(anchor=anchor)
@@ -1517,6 +1521,7 @@ class FanoutProgress:
         """
         done, succeeded, total = self.counts()
         try:
+            # Imported here to keep progress_tracker light.
             from . import run_record
 
             run_record.report_progress(
@@ -1686,6 +1691,7 @@ class PhaseProgress:
         self.phase_dir = str(phase_dir)
         self.anchor = anchor
         if interval_s is None:
+            # Imported here to keep run_status, which loads this module, light.
             from .provider_registry import get_progress_interval
 
             interval_s = get_progress_interval(anchor=anchor)

@@ -460,6 +460,7 @@ def workflow_file_entries(plan_path, *, root, output_dirs=()) -> list:
 
 def _mode_phase_names() -> tuple:
     """``modes.phase_names()``."""
+    # Imported here to keep run_status, which loads this module, light.
     import modes  # type: ignore
     return tuple(modes.phase_names())
 

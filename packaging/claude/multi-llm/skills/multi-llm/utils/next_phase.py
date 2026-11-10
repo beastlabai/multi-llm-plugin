@@ -473,6 +473,7 @@ def recorded_route(
     folder is writable by every jailed batch. Read-only; ``None`` when
     nothing is on record or it cannot be read.
     """
+    # Imported here to keep next_phase light.
     from .output_handler import PHASE_DIR_NAMES, output_dir_path, phase_dir_path
     from .status_file import read_status
 
@@ -547,6 +548,7 @@ def _pinned_brief(text: str) -> Optional[str]:
     (``commit_paths.brief_for_pinned``, no git call beyond the root), or
     ``None`` for other text or outside a repository."""
     try:
+        # Imported here to keep next_phase light.
         from .commit_paths import brief_for_pinned
 
         brief = brief_for_pinned(str(text))
@@ -574,6 +576,7 @@ def commit_reports_why(
 ) -> str:
     """:data:`COMMIT_REPORTS_WHY` naming the brief's ``code-review/report.md``
     and ``report.html``, each as the front door names the brief."""
+    # Imported here to keep next_phase light.
     from .output_handler import phase_dir_path
 
     source = Path(os.path.abspath(str(plan_arg if plan_path is None else plan_path)))
@@ -592,6 +595,7 @@ def _workflow_payload(plan_path: Path, host_id: str) -> Dict[str, Any]:
     *host_id* is the emitter's host: the early sandbox warning on the payload
     resolves the subagent runner for it (adversarial review, 2026-10-02).
     """
+    # Imported here to keep next_phase light.
     from .output_handler import output_dir_path
     from .state_manager import StateManager
 
@@ -895,6 +899,7 @@ def _rerun_resumes(phase_status: Mapping[str, Any]) -> bool:
     dispatch, a prerequisite gate, a schema the CLI rejects — is fixed by
     what the phase's own message names, and a command here would only repeat it.
     """
+    # Imported here to keep next_phase light.
     from .retry_ladder import RERUN_FUTILE_STATUSES
 
     if phase_status.get("state") != SUBAGENTS_FAILED_STATE:
@@ -922,6 +927,7 @@ def _prerequisites_unmet(plan_path: Path, phase: str) -> bool:
     (``collect_missing`` over a read-only ``StateManager``), so it writes
     nothing; a skip already recorded satisfies it, as it does the gate.
     """
+    # Imported here to keep next_phase light.
     from .output_handler import output_dir_path
     from .state_manager import StateManager
 
@@ -992,6 +998,7 @@ def resume_command(
     mode = modes.resolve(fronted_mode_word(mode_word))
     if mode is None or not mode.is_workflow_phase or not mode.phase:
         return None
+    # Imported here to keep next_phase light.
     from .subagent_tasks import PHASE_BY_WRITE_KIND
 
     template = _host_capabilities().next_command_template(host_id, route)
@@ -999,6 +1006,7 @@ def resume_command(
     if mode.phase in RERUN_RESUME_PHASES:
         source = Path(os.path.abspath(str(plan_arg if plan_path is None else plan_path)))
         if phase_status is None:
+            # Imported here to keep next_phase light.
             from .output_handler import phase_dir_path
             from .status_file import read_status
 
@@ -1228,6 +1236,7 @@ def implement_answers(
         return ()
     if not isinstance(state, dict):
         return ()
+    # Imported here to keep next_phase light.
     from .stop_answers import native_stop_answers
 
     steps: List[AnswersStep] = []
@@ -1278,6 +1287,7 @@ def implement_resume_why(
     ``state.json`` as recorded, and the implement folder for the executor's
     check stamps), or ``None``."""
 
+    # Imported here to keep next_phase light.
     from .output_handler import phase_dir_path
 
     source = os.path.abspath(str(plan_arg if plan_path is None else plan_path))
@@ -1287,6 +1297,7 @@ def implement_resume_why(
         return None
     if not isinstance(state, dict):
         return None
+    # Imported here to keep next_phase light.
     from .stop_answers import native_resume_why
 
     return native_resume_why(
@@ -1315,6 +1326,7 @@ def lookup_failure_line(exc: BaseException) -> str:
 
 def _state_file(plan_path: Union[str, Path]) -> Path:
     """Where ``StateManager`` keeps *plan_path*'s ``state.json`` (computed only)."""
+    # Imported here to keep next_phase light.
     from .output_handler import output_dir_path
 
     return output_dir_path(Path(plan_path).resolve()) / "state.json"
@@ -1364,6 +1376,7 @@ def emit_answer(
     workflow read would create the plan's output dir for a run that recorded
     nothing.
     """
+    # Imported here to keep next_phase light.
     from . import cli_common
 
     err = sys.stderr if stderr is None else stderr
@@ -1419,6 +1432,7 @@ def emit_answer(
             # The native
             # stop's line saying nothing ran the repository's tests, which
             # the executor stop prints itself.
+            # Imported here to keep next_phase light.
             from .verification_lines import native_stop_unverified_line
 
             tests = native_stop_unverified_line(
@@ -1484,6 +1498,7 @@ def _blocked_step(mode_word: str, plan_path: Union[str, Path]) -> str:
     mode = _composite_of(mode_word)
     if mode is None:
         return mode_word
+    # Imported here to keep next_phase light.
     from . import improve_workflow
 
     args = improve_workflow.parse_args(mode.name, ["--plan-file", str(plan_path)])
@@ -1506,6 +1521,7 @@ def _composite_continuation(mode_word: str, plan_path: Union[str, Path]) -> List
     rejects, and ``ValueError`` for a token one printed line cannot carry: the
     folder is writable by every jailed batch, and both are a failed lookup.
     """
+    # Imported here to keep next_phase light.
     from . import improve_workflow
     from .output_handler import phase_dir_path
     from .status_file import read_run
@@ -1559,6 +1575,7 @@ def emit_resume(
     is asked as the phase it fronts, and the command, ``mode``, ``flags``
     and section are spelled back as the commit mode with the pinned range.
     """
+    # Imported here to keep next_phase light.
     from . import cli_common
 
     err = sys.stderr if stderr is None else stderr
@@ -1574,6 +1591,7 @@ def emit_resume(
         # Read once here only for a phase whose resume reads it (an implement's resume
         # also carries a manual task's answer);
         # generate-tasks' plain re-invoke reads its own status file.
+        # Imported here to keep next_phase light.
         from .subagent_tasks import PHASE_BY_WRITE_KIND
 
         resumed = _skill_module("modes").resolve(mode_word)
@@ -1624,6 +1642,7 @@ def emit_resume(
         # no answers, why or stop lines; the flags are the command's own, so
         # a tool route's first option is this very command.
         if view is not None:
+            # Imported here to keep next_phase light.
             from .commit_spelling import strip_fronted_flags
 
             continuation = strip_fronted_flags(continuation)
@@ -1718,6 +1737,7 @@ def stop_answers_on_record(
     ``why`` that passes :func:`recorded_why`. Any other entry is dropped,
     never relayed.
     """
+    # Imported here to keep next_phase light.
     from .output_handler import phase_dir_path
     from .status_file import read_status
 
@@ -1764,6 +1784,7 @@ def stop_headlines_on_record(
     the lines back only while those flags are the plugin's shape and the
     section's resume, *section_flags*, is that very resume.
     """
+    # Imported here to keep next_phase light.
     from . import cli_common
     from .output_handler import phase_dir_path
     from .status_file import read_status
@@ -1828,6 +1849,7 @@ def stop_resume_why_on_record(
     The run's output folder is writable by every jailed batch, so the value
     is relayed only when it is one plain line of at most
     :data:`MAX_RECORDED_WHY_CHARS` characters."""
+    # Imported here to keep next_phase light.
     from .output_handler import phase_dir_path
     from .status_file import read_status
 
@@ -1924,6 +1946,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     a composite whose every step is on record prints the ``[ALREADY_COMPLETE]``
     line and exits 2.
     """
+    # Imported here: next_phase does not otherwise load argparse.
     import argparse
 
     modes = _skill_module("modes")

@@ -605,6 +605,7 @@ def drop_non_record_entries(
 
 def _normalize_member_scope(records: List[Dict[str, Any]]) -> None:
     """Normalize the reviewer scope fields of ``records`` in place (see above)."""
+    # Imported here to keep check_reply, which loads this module, light.
     from .scope_policy import has_scope_fields, normalize_scope_fields
     for record in records:
         if has_scope_fields(record):

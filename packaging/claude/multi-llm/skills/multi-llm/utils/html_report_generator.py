@@ -1998,6 +1998,7 @@ def _fill_template_slots(template: str, report_data: Mapping[str, Any]) -> str:
     (``Plan:``, the three apply commands, no PR-template help); a commit
     review gets ``Commit brief:`` and its own apply command, from the payload
     the generator stored, so a regenerated report says the same."""
+    # Imported here: `util report` does not otherwise load html.
     import html as _html
 
     template = inline_shared_slots(template)

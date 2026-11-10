@@ -202,6 +202,7 @@ def _brief_api():
     Imported at call time: the brief writer lands beside this module, and
     the dispatcher imports this module for :func:`is_commit_brief` alone.
     """
+    # Imported here: a commit front door's `--help` loads only its base modules.
     from . import commit_brief
 
     return commit_brief
@@ -439,6 +440,7 @@ def _capture_parser(parse: Callable[[List[str]], Any]) -> argparse.ArgumentParse
 def _fronted_parser(mode: str) -> argparse.ArgumentParser:
     """The parser of the phase *mode* fronts (the composite's for improve-commits)."""
     if mode == "improve-commits":
+        # Imported here: a commit front door's `--help` loads only its base modules.
         from . import improve_workflow
 
         return improve_workflow.build_parser(mode)
@@ -447,6 +449,7 @@ def _fronted_parser(mode: str) -> argparse.ArgumentParser:
         import code_review_orchestrator as target
 
         return _capture_parser(target.parse_args)
+    # A load-time cycle, as for review-commits above.
     import apply_code_fixes_orchestrator as target
 
     return _capture_parser(target.ApplyCodeFixesOrchestrator.parse_args)
@@ -509,6 +512,7 @@ def _swallowed_by_models(values: Sequence[str]) -> List[str]:
     """The ``--models`` values that are really a range: a run of values the pure phrase matcher recognizes
     (``last 2 commits``), else every value holding ``..``, ``~``, ``^`` or
     ``@{`` (or a bare ``-N``). No model id has those shapes."""
+    # Imported here: a commit front door's `--help` loads only its base modules.
     from .commit_range import looks_like_range_word, match_phrase
 
     texts = [str(value) for value in values]
@@ -655,6 +659,7 @@ def _from_brief(path: Path, shown: str, root: Path) -> _Resolution:
     back into a root range, whose one pinned spelling is the brief path
     (review fix 3, A5). A slug that resolves to no range keeps
     ``[COMMIT_REVIEW_NOT_FOUND]``."""
+    # Imported here: a commit front door's `--help` loads only its base modules.
     from .commit_range import CommitRange, RangeError, resolve_recorded, resolve_slug
 
     record = read_commit_range(path)
@@ -676,6 +681,7 @@ def _from_brief(path: Path, shown: str, root: Path) -> _Resolution:
 
 def _from_text(text: str, mode: str, root: Path, cwd: str) -> _Resolution:
     """Step 1 for typed words, with the markdown-path messages."""
+    # Imported here: a commit front door's `--help` loads only its base modules.
     from .commit_range import RANGE_BAD_REF, RANGE_UNRECOGNIZED, RangeError, resolve_range
 
     word = " ".join(text.split())
@@ -719,6 +725,7 @@ def _from_text(text: str, mode: str, root: Path, cwd: str) -> _Resolution:
 
 def _refuse_unborn(root: Path) -> None:
     """The unborn ``HEAD`` (exit 2), before a no-argument apply's lookup."""
+    # Imported here: a commit front door's `--help` loads only its base modules.
     from .commit_range import NOTHING_TO_REVIEW, RangeError
 
     _out, _err, code = run_git("rev-parse", "--verify", "--quiet", "HEAD^{commit}",
@@ -735,6 +742,7 @@ def _refuse_unborn(root: Path) -> None:
 def _resolve(mode: str, typed: _Typed, root: Path, cwd: str) -> _Resolution:
     """Step 1: the range from the brief path, the typed words, or (a
     no-argument apply) the review on record."""
+    # Imported here: a commit front door's `--help` loads only its base modules.
     from .commit_range import resolve_range
 
     if typed.brief_arg is not None:
@@ -747,6 +755,7 @@ def _resolve(mode: str, typed: _Typed, root: Path, cwd: str) -> _Resolution:
         return _from_text(text, mode, root, cwd)
     if mode == "apply-commit-fixes":
         _refuse_unborn(root)
+        # Imported here: a commit front door's `--help` loads only its base modules.
         from . import commit_apply
 
         selection = commit_apply.select_review(cwd=str(root))
@@ -769,6 +778,7 @@ def _block_view(cr: Any, record: Optional[Mapping[str, Any]]) -> Any:
     note this resolution adds."""
     if record is None:
         return cr
+    # Imported here: a commit front door's `--help` loads only its base modules.
     from .commit_range import Window
 
     window = record.get("window")
@@ -816,6 +826,7 @@ def _typed_scope(typed: _Typed, root: Path) -> Optional[List[str]]:
 def _review_scope(cr: Any, typed: _Typed, root: Path) -> List[str]:
     """``git diff --name-only <diff_base> <head>`` minus every commit review's
     own files, narrowed by the typed scope."""
+    # Imported here: a commit front door's `--help` loads only its base modules.
     from .commit_range import diff_base
 
     out, err, code = run_git_for_paths(
@@ -1036,6 +1047,7 @@ def _owner_of(mode: str, brief: Path, *, reattaching: bool = False) -> Any:
     what the composite's preflight asks: its run dir and both step dirs. The
     phase doors ask about their one dir: a live ``run`` record or a held lock.
     """
+    # Imported here: a commit front door's `--help` loads only its base modules.
     from . import improve_workflow
 
     if mode == "improve-commits":
@@ -1064,6 +1076,7 @@ def _take_lock(mode: str, door: str, brief: Path) -> Any:
     """The door's lock, taken non-blocking with the composite step lock's
     retry (a ``status`` poll probes every lock by taking it); a refusal is
     the live-run exit 3."""
+    # Imported here: a commit front door's `--help` loads only its base modules.
     from . import detach, improve_workflow
 
     phase, directory = _lock_dir(mode, brief)
@@ -1271,6 +1284,7 @@ def _record_state(brief: Path, fields: Mapping[str, Any], refresh_plan_hash: boo
     replaces one that does not parse. That replacement drops every
     record the earlier round left, while the apply door refuses the same
     file loudly, so it is said in one ``[STATE_REPLACED]`` line."""
+    # Imported here: a commit front door's `--help` loads only its base modules.
     from .state_manager import StateManager
 
     manager = StateManager(brief)
@@ -1293,6 +1307,7 @@ def _clear_review_completion(brief: Path) -> None:
     A ``state.json`` that does not parse holds no completion to pop, and is
     left for step 6: replacing it here would leave that write nothing to say
     ``[STATE_REPLACED]`` about."""
+    # Imported here: a commit front door's `--help` loads only its base modules.
     from .state_manager import StateManager
 
     if _unparseable_state(output_dir_for_brief(brief) / "state.json"):
@@ -1385,6 +1400,7 @@ def hand_worker_the_stage_applier(argv: Optional[Sequence[str]] = None) -> None:
     ``apply_code_fixes_orchestrator``, ``improve_commits_orchestrator``). Any
     other process is handed nothing.
     """
+    # Imported here: a commit front door's `--help` loads only its base modules.
     from .detach import register_commit_stage_applier
 
     tokens = sys.argv[1:] if argv is None else argv
@@ -1440,6 +1456,7 @@ def _refuse_before_step1(mode: str, typed: _Typed, detaching: bool) -> None:
 
             raise _stop(f"ERROR: {review_code.FILES_FROM_STDIN_DETACHED}", _EXIT_ERROR)
         return
+    # Imported here: a commit front door's `--help` loads only its base modules.
     from . import improve_workflow
 
     if typed.flag("interactive"):
@@ -1457,6 +1474,7 @@ def prepare(mode: str, argv: Sequence[str], *, util: bool = False) -> Prepared:
     """
     if mode not in COMMIT_MODES:
         raise ValueError(f"not a commit mode: {mode!r}")
+    # Imported here: a commit front door's `--help` loads only its base modules.
     from .commit_range import RangeError
 
     door = _door_word(mode, util)
@@ -1471,6 +1489,7 @@ def prepare(mode: str, argv: Sequence[str], *, util: bool = False) -> Prepared:
 
 
 def _prepare(mode: str, argv: List[str], *, util: bool, door: str) -> Prepared:
+    # Imported here: a commit front door's `--help` loads only its base modules.
     from .commit_range import diff_base, measure_range, render_commit_block, render_drift_line
     from .commit_range import result_payload
 
@@ -1524,6 +1543,7 @@ def _prepare(mode: str, argv: List[str], *, util: bool, door: str) -> Prepared:
     record_commit_range_result(payload)
 
     if mode == "apply-commit-fixes" and resolution.selected is None and brief is not None:
+        # Imported here: a commit front door's `--help` loads only its base modules.
         from . import commit_apply
 
         commit_apply.require_completed_review(brief, pinned=cr.pinned or _shown_path(brief), cwd=str(root))
@@ -1563,6 +1583,7 @@ def _prepare(mode: str, argv: List[str], *, util: bool, door: str) -> Prepared:
             if owner is not None:
                 raise _stop(_owner_refusal(door, owner), _EXIT_NEEDS_HUMAN)
             if reattaching:
+                # Imported here: a commit front door's `--help` loads only its base modules.
                 from . import improve_workflow
 
                 reattach = improve_workflow._inspect(  # noqa: SLF001
@@ -1712,9 +1733,11 @@ def _call_fronted(mode: str, argv: Sequence[str]) -> int:
 
         return _call_main(target.main, argv)
     if mode == "apply-commit-fixes":
+        # A load-time cycle, as for review-commits above.
         import apply_code_fixes_orchestrator as target
 
         return _call_main(target.main, argv)
+    # Imported here: a commit front door's `--help` loads only its base modules.
     from . import improve_workflow
 
     return int(improve_workflow.entry_point(mode, list(argv)) or 0)
@@ -1752,6 +1775,7 @@ def _improve_worker(argv: Sequence[str]) -> int:
     <base> --head-ref <head>``; the composite's worker branch takes the run
     dir's lock and applies the stage.
     """
+    # Imported here: a commit front door's `--help` loads only its base modules.
     from .commit_range import RangeError, diff_base, resolve_range, resolve_recorded
 
     mode = "improve-commits"
@@ -1782,6 +1806,7 @@ def _improve_worker(argv: Sequence[str]) -> int:
     except (RangeError, CommitReviewError) as exc:
         print(exc.message, file=sys.stderr)
         return exc.exit_code
+    # Imported here: a commit front door's `--help` loads only its base modules.
     from . import improve_workflow
 
     called = forwarded + ([STAGE_FLAG, stage] if stage else []) + [
@@ -1822,6 +1847,7 @@ def front_door(mode: str, argv: Sequence[str]) -> int:
         # them) are in place, so no child reads a record ahead of its inputs.
         record_invocation(record_mode, recorded)
         if mode == "improve-commits" and prep.lock is not None:
+            # Imported here: a commit front door's `--help` loads only its base modules.
             from . import improve_workflow
 
             with improve_workflow.holding(_lock_dir(mode, prep.brief)[1], prep.lock):
@@ -1852,6 +1878,7 @@ def commit_brief_main(argv: Optional[Sequence[str]] = None) -> int:
     if flag_present(tokens, "--help", "-h"):
         parse_args("commit-brief", ["--help"])
         return _EXIT_OK
+    # Imported here: a commit front door's `--help` loads only its base modules.
     from .positionals import revs_flags, split_positionals
 
     words, flags = split_positionals(tokens, mode_table.resolve(_UTIL_MODE))

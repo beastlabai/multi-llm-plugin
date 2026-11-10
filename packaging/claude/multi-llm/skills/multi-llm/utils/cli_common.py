@@ -389,6 +389,7 @@ def modes_table():
 
 def _modes():
     """The top-level ``modes`` table."""
+    # Imported here to keep doctor, which loads this module, light.
     import modes  # type: ignore
     return modes
 
@@ -698,6 +699,7 @@ def add_scope_policy_argument(parser: Any, *, role: str = "review") -> argparse.
     ``unattended.validate_decision_flags`` (D6 rows 15 and 16), never
     argparse's exit 2.
     """
+    # Imported here to keep doctor, which loads this module, light.
     from .scope_policy import DEST, FLAG, POLICIES
 
     action = parser.add_argument(
@@ -1355,6 +1357,7 @@ def typed_plan_for(plan: Union[str, Path]) -> str:
     """
     typed = invocation_plan_arg()
     if typed:
+        # Imported here to keep doctor, which loads this module, light.
         from .routes import recorded_plan_spelling
 
         spelling = recorded_plan_spelling(typed, str(plan))
@@ -1743,6 +1746,7 @@ def retry_shape(
     success count nor ``report.ok`` decides anything here: both are equally
     consistent with a dead model id and a rate limit.
     """
+    # Imported here to keep doctor, which loads this module, light.
     from .retry_ladder import FATAL_STATUSES
 
     if not artifacts_ok:
@@ -1782,6 +1786,7 @@ def repair_sentence(
     when the caller supplies it); otherwise the fatal statuses present are
     named, with their counts when known. Takes values, never paths.
     """
+    # Imported here to keep doctor, which loads this module, light.
     from .retry_ladder import FATAL_STATUSES
 
     if reason_code:

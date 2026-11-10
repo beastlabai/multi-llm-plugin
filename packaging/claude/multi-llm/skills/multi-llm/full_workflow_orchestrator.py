@@ -650,6 +650,7 @@ class FullWorkflow:
         dispatch, validation, the in-process ``update_plan_tasks`` and the
         ``TASKS_FILE`` verification — is the standalone mode's code, unchanged.
         """
+        # Imported here to keep full_workflow_orchestrator light.
         import generate_tasks_orchestrator as generate_tasks
 
         child = argparse.Namespace(**vars(self.args))
@@ -799,6 +800,7 @@ class FullWorkflow:
         # phase's own function (never a second spelling of that path) and only
         # once its git-root precondition holds, so the probe cannot exit for it.
         try:
+            # Imported here: this driver loads a phase's orchestrator only when it runs that phase.
             import implement_orchestrator
 
             if not implement_orchestrator.get_project_root(str(self.plan_path)):
@@ -929,6 +931,7 @@ class FullWorkflow:
         """
         recorded = self._recorded(step.phase)
         if recorded == "completed":
+            # Imported here to keep full_workflow_orchestrator light.
             from utils import scope_apply
 
             # The run's choice (typed, or this workflow's live record), so the
@@ -967,6 +970,7 @@ class FullWorkflow:
         the plan, and none of the flags its front door synthesises or
         consumes. Every other run keeps ``dispatcher_command`` byte for byte.
         """
+        # Imported here to keep full_workflow_orchestrator light.
         from utils import next_phase_words
         from utils.commit_spelling import spell_command
 
@@ -995,6 +999,7 @@ class FullWorkflow:
         if plan.startswith("-") or (
                 os.path.realpath(plan) != os.path.realpath(str(self.plan_path))):
             return command
+        # Imported here to keep full_workflow_orchestrator light.
         from utils import next_phase_words
         from utils.commit_spelling import spell_command
 
@@ -1112,6 +1117,7 @@ class FullWorkflow:
         process and recorded its artifacts on the line, so the whole list
         goes. A no-op in the foreground.
         """
+        # Imported here to keep full_workflow_orchestrator light.
         from utils import detach
 
         ctx = active_result()
@@ -1124,6 +1130,7 @@ class FullWorkflow:
         """``Plan``, or ``Commit brief`` when the plan's ``state.json``
         records a ``commit_range`` (``commit_paths.document_label``)."""
         try:
+            # Imported here to keep full_workflow_orchestrator light.
             from utils.commit_paths import document_label, read_commit_range
 
             return document_label(
@@ -1150,6 +1157,7 @@ class FullWorkflow:
     def _print_metrics(self) -> None:
         """Combined resource usage, when the run recorded any."""
         try:
+            # Imported here to keep full_workflow_orchestrator light.
             from utils import metrics
 
             state_file = self.plan_dir / "state.json"
@@ -1184,6 +1192,7 @@ def consolidation_skip_reason(plan_dir: Union[str, Path]) -> Optional[str]:
 
 def _consolidation_recommended(plan_dir: Union[str, Path]) -> bool:
     """The same threshold ``review_plan_orchestrator`` prints its marker on."""
+    # Imported here to keep full_workflow_orchestrator light.
     from utils.consolidation import CONSOLIDATION_RECOMMENDED_THRESHOLD
 
     entries = _validation_entries(Path(plan_dir) / "review-plan" / "validation.json")
@@ -1234,6 +1243,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # The detach boundary: after pre-flight (plan readable, flags parsed, run dir
     # created) and before the first phase runs, so a bad flag fails on the
     # caller's terminal with no child and no log.
+    # Imported here to keep full_workflow_orchestrator light.
     from utils.review_orchestrator_base import maybe_detach
 
     detached = maybe_detach(

@@ -438,6 +438,7 @@ def _task_list_commands(
     if text is None:
         return []
     try:
+        # Imported at call time: `batch_reply` and `check_records` load this module and stay light.
         from .task_decomposer import TaskDecomposer
         tasks = list(TaskDecomposer().parse_plan(text))
     except Exception:  # noqa: BLE001 - a task list that cannot be parsed names none
@@ -482,6 +483,7 @@ def known_check_commands(
     plan = Path(str(plan_text)) if plan_text else None
     found: List[Tuple[str, str]] = []
     try:
+        # Imported at call time: `batch_reply` and `check_records` load this module and stay light.
         from .provider_registry import get_verify_command
         verify = get_verify_command(anchor=str(plan) if plan else None)
     except Exception:  # noqa: BLE001 - no config read is no configured check
@@ -492,6 +494,8 @@ def known_check_commands(
     root = repo_root
     if root is None and plan is not None:
         try:
+            # Imported at call time: `batch_reply` and `check_records` load this module and stay
+            # light.
             from .write_safety import resolve_repo_root
             root = resolve_repo_root(str(plan))
         except Exception:  # noqa: BLE001 - no root is no declared test command

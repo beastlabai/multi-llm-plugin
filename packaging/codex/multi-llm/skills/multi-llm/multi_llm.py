@@ -460,6 +460,7 @@ def _question_flags(question: str, cleanup: List[Path]) -> List[str]:
 
 def _host_capabilities():
     """Import the capability reader lazily (one yaml parse, only when needed)."""
+    # Imported here to keep multi_llm light.
     from utils import host_capabilities
 
     return host_capabilities
@@ -613,9 +614,11 @@ def _call_target(target: Callable[[Sequence[str]], int], argv: Sequence[str]) ->
     stops its fan-out's CLIs from inside the cancellation, before ``asyncio.run``
     joins the worker threads waiting on them (decision 11.9).
     """
+    # Imported here: multi_llm does not otherwise load asyncio.
     import asyncio
 
     if inspect.iscoroutinefunction(target):
+        # Imported here to keep multi_llm light.
         from utils import process_control
 
         result = asyncio.run(
@@ -634,6 +637,7 @@ def _validate_skip_rung(mode_name: str) -> None:
     the bad value on its ``plugin-landlock`` row instead of dying on it."""
     if mode_name == "doctor":
         return
+    # Imported here to keep multi_llm light.
     from utils.providers.base import skip_rung_requested
 
     try:
@@ -904,6 +908,7 @@ def _run_from_repository_root(
         return
     try:
         cwd = os.getcwd()
+        # Imported here to keep multi_llm light.
         from utils.git_utils import pin_repo_root
 
         root, problem = pin_repo_root(cwd)
@@ -1116,6 +1121,7 @@ def _core_file_root() -> str:
     """The repository root the core file goes under (the cwd outside one)."""
     cwd = os.getcwd()
     try:
+        # Imported here to keep multi_llm light.
         from utils.git_utils import pin_repo_root
 
         root, problem = pin_repo_root(cwd)
@@ -1133,6 +1139,7 @@ def _write_core_file(mode_name: str, text: str) -> str:
     previous complete file or the new one. Raises ``OSError``.
     """
 
+    # Imported here to keep multi_llm light.
     from utils import prompt_files
 
     data = text.encode("utf-8")
@@ -1515,6 +1522,7 @@ _VERB_HEADING = "## Capability verbs — how this host answers each one"
 
 def _verb_section(host_id: str) -> str:
     """The three resolved verb sentences, as the section a shim used to carry."""
+    # Imported here to keep multi_llm light.
     from utils import host_capabilities as caps
 
     return (
@@ -1697,6 +1705,7 @@ def _sweep_live_clis_on_interrupt() -> None:
     interrupt's own exit and result line must still happen.
     """
     try:
+        # Imported here to keep multi_llm light.
         from utils import process_control
     except Exception as exc:  # noqa: BLE001 - see above
         print(f"[INTERRUPT_SWEEP] failed: {exc}", file=sys.stderr)
@@ -1705,6 +1714,7 @@ def _sweep_live_clis_on_interrupt() -> None:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    # Imported here to keep multi_llm light.
     from utils import process_control
 
     # The CLI's process, and the detached worker's: SIGCHLD at its default, so
@@ -1712,11 +1722,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     process_control.restore_sigchld_default()
     argv = list(sys.argv[1:] if argv is None else argv)
     if _WORKER_FLAG in argv:
+        # Imported here to keep multi_llm light.
         from utils.detach import prepare_worker_output
 
         prepare_worker_output()
         # A commit front door's stage, applied once the worker owns its dir:
         # the applier sits above `detach`, so it is handed in here.
+        # Imported here to keep multi_llm light.
         from utils.commit_front_door import hand_worker_the_stage_applier
 
         hand_worker_the_stage_applier(argv)
@@ -1778,6 +1790,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         try:
             _emit_user_next_step(ctx, exit_code)
         except Exception as exc:  # noqa: BLE001 - advisory, never the exit code
+            # Imported here to keep multi_llm light.
             from utils.next_phase import lookup_failure_line
 
             print(lookup_failure_line(exc), file=sys.stderr)
@@ -1808,6 +1821,7 @@ def _write_phases() -> "frozenset":
     From the executor's own table (``subagent_tasks.PHASE_BY_WRITE_KIND``, the
     mode/``state.json`` spelling), never a hand-kept list.
     """
+    # Imported here to keep multi_llm light.
     from utils.subagent_tasks import PHASE_BY_WRITE_KIND
 
     return frozenset(PHASE_BY_WRITE_KIND.values())
@@ -1885,6 +1899,7 @@ def _emit_user_next_step(ctx: ResultContext, exit_code: int) -> None:
     plan_arg, plan_path = _typed_plan(argv)
     if not plan_arg:
         return
+    # Imported here to keep multi_llm light.
     from utils import next_phase
 
     as_json = flag_value(argv, "--output-format") == "json"
@@ -1933,6 +1948,7 @@ def _brief_for_pinned(text: str) -> Optional[str]:
     (``commit_paths.brief_for_pinned``: by name, no git call beyond the
     root), absolute, or ``None`` for any other text or outside a repository."""
     try:
+        # Imported here to keep multi_llm light.
         from utils.commit_paths import brief_for_pinned
 
         brief = brief_for_pinned(str(text))
@@ -1985,6 +2001,7 @@ def _continuation_target(command: str) -> Optional[Tuple["mode_table.Mode", str]
 
 
 def _continued_phase_dir(mode: "mode_table.Mode", plan: str) -> Path:
+    # Imported here to keep multi_llm light.
     from utils.output_handler import phase_dir_path
 
     return phase_dir_path(Path(os.path.abspath(plan)), str(mode.phase))
@@ -2016,6 +2033,7 @@ def _remember_plan_spelling(ctx: ResultContext) -> None:
     phase_dir = _continued_phase_dir(mode, plan)
     if not phase_dir.is_dir():
         return
+    # Imported here to keep multi_llm light.
     from utils import status_file
 
     status_file.update_status(str(phase_dir), {"plan_arg": str(typed)})
@@ -2046,6 +2064,7 @@ def _continued_plan_arg(
     plan = flag_value(argv, "--plan-file")
     if not plan:
         return None
+    # Imported here to keep multi_llm light.
     from utils import next_phase, status_file
 
     status = status_file.read_status(str(_continued_phase_dir(mode, plan)))
@@ -2069,6 +2088,7 @@ def _raise_on_sigterm(signum, frame):  # pragma: no cover - exercised in a subpr
     cutting short the config restore and the result line it exists to run.
     Nothing is printed here: a handler can land inside a buffered write.
     """
+    # Imported here: multi_llm does not otherwise load signal.
     import signal
 
     try:
@@ -2090,6 +2110,7 @@ def _install_foreground_sigterm():
     when nothing was installed.
     """
     try:
+        # Imported here: multi_llm does not otherwise load signal or threading.
         import signal
         import threading
 
@@ -2109,6 +2130,7 @@ def _uninstall_foreground_sigterm(previous) -> None:
     if previous is None:
         return
     try:
+        # Imported here: multi_llm does not otherwise load signal.
         import signal
 
         if signal.getsignal(signal.SIGTERM) is _raise_on_sigterm:
@@ -2121,6 +2143,7 @@ def _restore_codex_trust() -> None:
     """Remove the codex trust entries this run's children added (plan I12).
     Never raises: close-out must never mask the run's result."""
     try:
+        # Imported here to keep multi_llm light.
         from utils import codex_trust
     except Exception:  # noqa: BLE001 - see above
         return

@@ -8,10 +8,13 @@ because something else loaded first shows up.
 """
 
 import ast
+import io
 import json
 import os
+import re
 import subprocess
 import sys
+import tokenize
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from pathlib import Path
@@ -318,6 +321,167 @@ def test_the_repeat_guard_counts_only_imports_every_load_runs(tmp_path, source, 
     an ``if TYPE_CHECKING:`` body under any alias) is no dependency a lazy import
     repeats; the runtime ``else`` of ``if TYPE_CHECKING:`` is one."""
     assert _repeats_in(tmp_path, source) == repeated
+
+
+# ---------------------------------------------------------------------------
+# Every function-level import says why it is not at the top.
+# ---------------------------------------------------------------------------
+
+#: A lint or type-checker directive alone is no reason: ``type: ignore[...]``,
+#: ``noqa`` with its codes, ``pragma: no cover``. Text after one (``pragma: no
+#: cover - Windows``) is.
+_DIRECTIVE = re.compile(
+    r"^((?i:type:\s*ignore)(\[[^\]]*\])?"
+    r"|(?i:noqa)(:\s*[A-Z]+[0-9]+(\s*,\s*[A-Z]+[0-9]+)*)?"
+    r"|(?i:pragma:\s*no\s*cover))[\s:—-]*"
+)
+
+
+def _says_why(comment: Optional[str]) -> bool:
+    """Whether *comment* (a ``#`` token) holds words beyond its directives."""
+    if not comment:
+        return False
+    text = comment.lstrip("#").strip()
+    while True:
+        match = _DIRECTIVE.match(text)
+        if not match or not match.group(0):
+            break
+        # Directives may follow one another, each behind its own ``#``.
+        text = text[match.end():].lstrip("#").strip()
+    return any(ch.isalpha() for ch in text)
+
+
+def _unexplained_function_imports(path: Path) -> List[Tuple[int, str]]:
+    """``(line, statement)`` of each import inside a function with no reason
+    comment beside it.
+
+    A reason is a comment that says more than a lint directive, found on the
+    statement's own lines, or on the line directly above it. Adjacent imports
+    in one block share the comment above the first of them. An import that
+    opens a ``try`` body or an ``except`` handler may take its reason from that
+    header's own comment, and the first statement of a ``try`` body from the
+    line above the ``try``. A blank line ends the search.
+    """
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    lines = source.splitlines()
+    comments = {
+        token.start[0]: token.string
+        for token in tokenize.generate_tokens(io.StringIO(source).readline)
+        if token.type == tokenize.COMMENT
+    }
+
+    def comment_line(number: int) -> bool:
+        return (1 <= number <= len(lines) and lines[number - 1].lstrip().startswith("#")
+                and _says_why(comments.get(number)))
+
+    missing: List[Tuple[int, str]] = []
+
+    def check(body: List[ast.stmt], header: Optional[ast.AST]) -> None:
+        for index, node in enumerate(body):
+            if not isinstance(node, (ast.Import, ast.ImportFrom)):
+                continue
+            if any(_says_why(comments.get(n)) for n in range(node.lineno, node.end_lineno + 1)):
+                continue
+            first = index
+            while (first > 0 and isinstance(body[first - 1], (ast.Import, ast.ImportFrom))
+                   and body[first - 1].end_lineno == body[first].lineno - 1):
+                first -= 1
+            above = body[first].lineno - 1
+            if comment_line(above):
+                continue
+            if first == 0 and header is not None and header.lineno <= above:
+                # The header may span lines (a parenthesised ``except``); its
+                # reason may sit on any of them.
+                if any(_says_why(comments.get(n)) for n in range(header.lineno, above + 1)):
+                    continue
+                if (header.lineno == above and isinstance(header, _TRY_NODES)
+                        and comment_line(header.lineno - 1)):
+                    continue
+            missing.append((node.lineno, ast.unparse(node)))
+
+    def visit(node: ast.AST, in_function: bool) -> None:
+        for field in ("body", "orelse", "finalbody"):
+            body = getattr(node, field, None)
+            if isinstance(body, list) and body and isinstance(body[0], ast.stmt):
+                if in_function:
+                    check(body, node if field == "body" and isinstance(node, _TRY_NODES) else None)
+                for child in body:
+                    visit(child, in_function or isinstance(
+                        child, (ast.FunctionDef, ast.AsyncFunctionDef)))
+        for handler in getattr(node, "handlers", None) or []:
+            if in_function:
+                check(handler.body, handler)
+            for child in handler.body:
+                visit(child, in_function or isinstance(
+                    child, (ast.FunctionDef, ast.AsyncFunctionDef)))
+        for case in getattr(node, "cases", None) or []:
+            if in_function:
+                check(case.body, None)
+            for child in case.body:
+                visit(child, in_function or isinstance(
+                    child, (ast.FunctionDef, ast.AsyncFunctionDef)))
+
+    visit(tree, False)
+    return sorted(missing)
+
+
+def test_every_function_level_import_says_why():
+    """An import inside a function carries its reason beside it: a load-time
+    cycle, an optional or platform dependency, a light module kept light, a
+    contract a test pins (docs/development/dispatcher.md#import-safety). A new
+    lazy import without one fails here; move it to the top, or say why not."""
+    missing = [
+        f"{path.relative_to(SKILL_ROOT)}:{line} {statement}"
+        for path, _package in _skill_sources()
+        for line, statement in _unexplained_function_imports(path)
+    ]
+    assert missing == [], (
+        "a function-level import without a reason comment beside it:\n" + "\n".join(missing))
+
+
+@pytest.mark.parametrize("source, flagged", [
+    pytest.param("import json\n\ndef f():\n    import os\n", [4], id="bare"),
+    pytest.param("try:\n    import json\nexcept ImportError:\n    def f():\n        import os\n",
+                 [5], id="def-inside-module-handler"),
+    pytest.param("match 1:\n    case 1:\n        def f():\n            import os\n",
+                 [4], id="def-inside-module-case"),
+    pytest.param("def f():\n    import os  # type: ignore[import-not-found] # noqa: F401\n",
+                 [2], id="combined-directives-alone"),
+    pytest.param("def f():\n    import os  # noqa: F401 # pragma: no cover - Windows only\n",
+                 [], id="combined-directives-then-reason"),
+    pytest.param("def f():\n    try:\n        pass\n    except (ImportError,\n"
+                 "            ValueError):  # Optional dependency fallback.\n        import os\n",
+                 [], id="multiline-except-header"),
+    pytest.param("def f():\n    # A load-time cycle.\n    import os\n", [], id="comment-above"),
+    pytest.param("def f():\n    import os  # Python 3.11+\n", [], id="trailing"),
+    pytest.param("def f():\n    # Both kept light.\n    import os\n    import sys\n", [],
+                 id="group-shares-the-comment"),
+    pytest.param("def f():\n    # Kept light.\n\n    import os\n", [4], id="blank-line-ends-it"),
+    pytest.param("def f():\n    import os  # noqa: F401\n", [2], id="directive-only"),
+    pytest.param("def f():\n    # type: ignore[import]\n    import os\n", [3],
+                 id="directive-above"),
+    pytest.param("def f():\n    import os  # pragma: no cover - Windows only\n", [],
+                 id="directive-then-words"),
+    pytest.param("def f():\n    try:  # POSIX only.\n        import fcntl\n"
+                 "    except ImportError:\n        pass\n", [], id="try-header"),
+    pytest.param("def f():\n    # tomllib is 3.11+.\n    try:\n        import tomllib\n"
+                 "    except ImportError:  # 3.10 falls back to tomli\n        import tomli\n",
+                 [], id="above-try-and-except-header"),
+    pytest.param("def f():\n    x = 1  # not about the import\n    import os\n", [3],
+                 id="code-comment-above"),
+    pytest.param("def f():\n    if x:  # Windows\n        import msvcrt\n", [3],
+                 id="if-header-is-no-reason"),
+    pytest.param("class A:\n    def f(self):\n        def g():\n            import os\n"
+                 "        return g\n", [4], id="nested"),
+    pytest.param("try:\n    import tomllib\nexcept ImportError:\n    tomllib = None\n", [],
+                 id="module-level-is-not-checked"),
+])
+def test_the_reason_guard_finds_what_it_should(tmp_path, source, flagged):
+    """The rule the guard applies, on small modules."""
+    module = tmp_path / "fixture_module.py"
+    module.write_text(source, encoding="utf-8")
+    assert [line for line, _ in _unexplained_function_imports(module)] == flagged
 
 
 # ---------------------------------------------------------------------------

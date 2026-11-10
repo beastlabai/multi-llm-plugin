@@ -69,6 +69,7 @@ def resolve_project_root(anchor: Optional[str] = None) -> str:
     """
     anchor = str(anchor) if anchor else os.getcwd()
     try:
+        # Imported here to keep run_status, which loads this module, light.
         from .git_utils import get_project_root, get_project_root_from_dir
 
         if os.path.isdir(anchor):

@@ -142,6 +142,7 @@ def phase_mode(command: str) -> Optional[str]:
     ``None`` (a ``util`` or ``status`` call, a ``--help`` or dry-run preview,
     or no dispatcher at all). With several calls chained, the last
     long-running one."""
+    # Imported here to keep wakeup_check light.
     from .cli_common import modes_table
     modes = modes_table()
     found: Optional[str] = None

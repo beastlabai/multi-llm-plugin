@@ -183,6 +183,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parser.parse_args(argv)
 
     try:
+        # Imported here to keep check_reply light.
         from utils.subagent_tasks import tasks_of
         with open(args.tasks_file, "r", encoding="utf-8") as handle:
             document = json.load(handle)

@@ -1724,6 +1724,8 @@ class CodexProvider(LLMProvider):
         repo's ``AGENTS.md``), so it is not used.
         """
         try:
+            # Imported here: the adapters load on a commit front door's `--help` path; codex_trust
+            # stays off it.
             from .. import codex_trust
             env = dict(os.environ)
             try:

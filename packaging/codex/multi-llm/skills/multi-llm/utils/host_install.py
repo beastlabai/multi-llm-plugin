@@ -1071,6 +1071,7 @@ def configured_runner(
     The layer is reported alongside the spec because "I set it and nothing
     changed" is otherwise a support question (D3o).
     """
+    # Imported here to keep host_install light.
     from .provider_registry import resolve_subagent_runner
     anchor = str(project_root) if project_root is not None else None
     # The resolver reports the layer it actually took, so the middle rung is named
@@ -1117,6 +1118,7 @@ def probe_runner(spec: str, *, anchor: Optional[str] = None) -> Dict[str, str]:
         "auth": "unknown", "version": "unknown", "problem": "", "metadata": "",
     }
     try:
+        # Imported here to keep host_install light.
         from .providers.base import PROFILE_AGENT_READONLY
         from .task_outcome import RunnerRejected
         from .runner_preflight import (
@@ -1165,6 +1167,7 @@ def _runner_state(provider: str, facts: Dict[str, str]) -> str:
     Anything unresolvable is ``""`` — a diagnostic never fails a ``--check``.
     """
     try:
+        # Imported here to keep host_install light.
         from .provider_registry import get_provider
         adapter = get_provider(provider)
         if adapter is None:
@@ -1292,6 +1295,7 @@ def runner_available(provider: str) -> bool:
     second probe that could disagree with ``--init``.
     """
     try:
+        # Imported here to keep host_install light.
         from .provider_registry import get_provider
         adapter = get_provider(provider)
     except Exception:  # pragma: no cover - a config error is not a check failure

@@ -40,6 +40,7 @@ MODE = "review-commits"
 
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
+    # Imported here to keep review_commits_orchestrator light.
     from utils import commit_front_door
 
     return commit_front_door.parse_args(MODE, argv)
@@ -47,6 +48,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     bootstrap_streams()
+    # Imported here to keep review_commits_orchestrator light.
     from utils import commit_front_door
 
     return commit_front_door.front_door(

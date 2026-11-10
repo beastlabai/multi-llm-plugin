@@ -1289,6 +1289,8 @@ def _sweep_dead_index_copies(git_dir: str) -> None:
     effort: a directory that cannot be listed, or a file that cannot be
     removed, changes nothing about the run.
     """
+    # Imported here: the git family imports only the standard library while it initialises
+    # (tests/test_git_utils_moved_names.py).
     from .process_control import process_alive
     try:
         names = os.listdir(git_dir)

@@ -235,6 +235,7 @@ def review_phase_for(apply_step: str) -> str:
     ``code-review``); this one lookup is how neither mistake is made. Kept here
     rather than in ``state_manager``, which ``write_batch_scheduler`` imports.
     """
+    # Imported here: `status` and `util next-command` import this module and need none of it.
     from .write_resume import REVIEW_PHASE_BY_WRITE_KIND
 
     phase = mode_table.phase_for(apply_step)
@@ -2020,6 +2021,7 @@ class ImproveWorkflow(fwo.FullWorkflow):
         and this report is also what a finished run's exit 2 prints, which
         writes nothing.
         """
+        # Imported here: `status` and `util next-command` import this module and need none of it.
         from .batch_ledger import BatchLedger, touched_files
 
         ledger = BatchLedger(apply_dir)
@@ -2113,6 +2115,7 @@ def entry_point(mode: str, argv: Optional[Sequence[str]] = None) -> int:
         args, mode, records=read.get("records"), checked=checked
     )
 
+    # Imported here: `status` and `util next-command` import this module and need none of it.
     from .review_orchestrator_base import maybe_detach
 
     detached = maybe_detach(

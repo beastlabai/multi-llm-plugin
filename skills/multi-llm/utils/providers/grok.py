@@ -55,9 +55,11 @@ def _overlay_dict(text: str, toml: bool) -> Optional[Dict[str, Any]]:
     """``text`` parsed as one JSON (or TOML) object, else ``None``."""
     if toml:
         try:
+            # tomllib is 3.11+; on 3.10 the handler below falls back to tomli.
             import tomllib as _toml  # type: ignore[import-not-found]
         except ImportError:  # pragma: no cover - Python 3.10
             try:
+                # The 3.10 fallback for tomllib, when tomli is installed.
                 import tomli as _toml  # type: ignore[import-not-found,no-redef]
             except ImportError:
                 return None
