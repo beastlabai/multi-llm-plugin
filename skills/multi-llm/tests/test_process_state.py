@@ -113,6 +113,12 @@ NOT_REGISTERED: Dict[str, str] = {
         "the run whose worker teardown began: launches stay refused until exit",
     "utils.process_control._PIDFDS":
         "the lazily bound pidfd API, fixed for the process",
+    "utils.process_control._SIGCHLD_RESET":
+        "whether this process's entry reset SIGCHLD, which clears SA_NOCLDWAIT: "
+        "a fact about the process for its life, never a cache",
+    "utils.process_control._RECORD_UNHELD":
+        "the run whose phase dir cannot hold its launch record: its launches "
+        "start unrecorded until record_cli_identities names a run again",
     "utils.review_round._BOUND": "the round each running dispatch thread is bound to",
     "utils.state_file._HELD_STATE_LOCKS": "state-file locks this process holds",
     "utils.status_file._HELD_MUTEXES": "interprocess mutexes this process holds",

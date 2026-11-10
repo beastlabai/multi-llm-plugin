@@ -607,14 +607,21 @@ class _Host:
     *generation*), and a signal through it reaches that process or fails. Their
     numbers are never real descriptors: the host closes them itself. Without
     (the default) the kill is the one by number.
+
+    A process's session is its group's number unless *sessions* maps its pid
+    to another (``setsid`` makes it its own pid, as the kernel does). A group
+    lies inside one session, so a scenario that puts a stranger's process in a
+    group a run's process is in must give it that run's session: only a group
+    made again under a recycled number can hold a stranger.
     """
 
     OWN_PGID = 9999
 
     def __init__(self, procs, *, deaf=(), fast_path=True, owned=(), unkillable=(),
-                 pidfd=False):
+                 pidfd=False, sessions=None):
         self.now = 0.0
         self.procs = dict(procs)
+        self.sessions = dict(sessions or {})
         self.deaf = set(deaf)
         self.owned = set(owned)
         self.unkillable = set(unkillable)
@@ -675,6 +682,7 @@ class _Host:
         """*pid* leaves its group for a session and group of its own."""
         def action():
             self.procs[pid] = (pid, self.procs[pid][1])
+            self.sessions[pid] = pid
         return action
 
     # The pidfd calls.
@@ -757,6 +765,14 @@ class _Host:
         if sig:
             self._deliver(members, sig, f"group {pgid}")
 
+    def getsid(self, pid):
+        self._tick()
+        if pid == 0:
+            return self.OWN_PGID
+        if pid not in self.procs:
+            raise ProcessLookupError(pid)
+        return self.sessions.get(pid, self.procs[pid][0])
+
     def getpgid(self, pid):
         self._tick()
         if pid == 0:
@@ -790,8 +806,8 @@ class _Host:
         self._tick()
         return {
             pid: process_control._ProcRow(
-                pid, os.getpid() if pid in self.owned else 1, pgid, pgid, start,
-                self._state(pid))
+                pid, os.getpid() if pid in self.owned else 1, pgid,
+                self.sessions.get(pid, pgid), start, self._state(pid))
             for pid, (pgid, start) in self.procs.items()
         }
 
@@ -805,6 +821,7 @@ class _Host:
             kill = staticmethod(self.kill)
             killpg = staticmethod(self.killpg)
             getpgid = staticmethod(self.getpgid)
+            getsid = staticmethod(self.getsid)
 
             def __getattr__(self, name):
                 return getattr(real_os, name)
@@ -843,6 +860,9 @@ class _Host:
                                 raising=name not in ("_linux_row", "_pidfd_api"))
         # Linux answers an owned child's exit with waitid, /proc or not.
         monkeypatch.setattr(process_control, "_waitid", self.waitid)
+        # No SIGCHLD reset of this process stands in for an unread disposition
+        # unless a scenario says so.
+        monkeypatch.setattr(process_control, "_SIGCHLD_RESET", [], raising=False)
         return self
 
 

@@ -385,7 +385,8 @@ Object of its own before it runs, and their timeout ends that job. The Lane A CL
 group of its own, so a terminal Ctrl-C still reaches it; its job travels into `live_cli_registry`,
 and the timeout, an interrupt, a stop from outside (`130`/`143`, or `STATUS_CONTROL_C_EXIT`) and
 the registry's sweep each end it right after the CLI's own `TerminateProcess`. A CLI that exits on
-its own leaves its job alone, as a POSIX CLI's groups are left alone. A detached run's job has a
+its own leaves its job alone, as a POSIX CLI's groups are left alone, unless something it started
+still holds its pipes ("A runner that exits while something it started holds its pipe", below). A detached run's job has a
 name, `Local\multi-llm-run-<run_id>`: the launcher spawns the worker into it suspended
 (`spawn_detached_run`) and the worker holds a handle for life (`enter_detached_worker(...,
 run_id=)`), because a job's name lasts only while a handle to it is open. The kills by recorded
@@ -414,9 +415,10 @@ That holds only under a lifecycle contract, and the caller keeps it, not the kil
 - children become zombies: SIGCHLD is neither `SIG_IGN` nor flagged `SA_NOCLDWAIT`, either of
   which has the kernel reap every child at its exit. Every process entry (`multi_llm.main`, which
   the detached worker runs too, `process_control.enter_detached_worker`, and each orchestrator run
-  as its own `__main__`) sets SIGCHLD back to `SIG_DFL` when it inherited `SIG_IGN`, which an
-  `exec` keeps (`process_control.restore_sigchld_default`); `subprocess` needs that anyway, since
-  under `SIG_IGN` every `Popen` reads its child's exit as 0.
+  as its own `__main__`) sets SIGCHLD to `SIG_DFL` through `signal.signal`, which clears an
+  inherited `SIG_IGN` (an `exec` keeps it) and an `SA_NOCLDWAIT` set before it
+  (`process_control.restore_sigchld_default`; "Zombie retention by construction" below);
+  `subprocess` needs that anyway, since under `SIG_IGN` every `Popen` reads its child's exit as 0.
 
 `tests/test_no_child_reaper.py` fails any plugin source (`skills/multi-llm/`, `packaging/`) that
 reaps an unnamed child or sets SIGCHLD's disposition, bar `signal.signal` back to `SIG_DFL`: by
@@ -468,7 +470,7 @@ read off disk) is known only by number, and `kill_tree` treats it by its identit
 | Platform | Kill of an owned child |
 |----------|------------------------|
 | Linux, glibc or musl, x86_64, i386 or aarch64 programs | the owned kill |
-| Linux, any other C library (Bionic, uClibc), a static program, or another ABI (32-bit Arm even on an aarch64 kernel, x32, MIPS, RISC-V, PowerPC, s390x, …) | by number; with Python's own pidfd calls the identity kill, where the executor's timeout kill dates its child (below) and an undated one is `unresolved` and gets nothing |
+| Linux, any other C library (Bionic, uClibc), a static program, or another ABI (32-bit Arm even on an aarch64 kernel, x32, MIPS, RISC-V, PowerPC, s390x, …) | the owned kill once the process reset SIGCHLD itself (below); without that reset, with Python's own pidfd calls, nothing is signalled (`unresolved`); without pidfd calls, by number |
 | macOS, FreeBSD and the other BSDs, glibc on another kernel | by number |
 | Windows | its Job Object (`kill_tree`'s Windows path) |
 
@@ -479,13 +481,63 @@ pessimistic, never aimed at a number the proof does not cover. The executor's ti
 confirms the exit itself (`process_control.own_child_stopped`): the child has exited (its zombie,
 by `waitid(…, WNOWAIT)`, else its `Popen`'s own `poll`) and its group runs nothing, and only then
 is that `survived` its `killed`. With pidfds (the identity kill below) the zombie counts as
-exited, as everywhere else a process is known by its pidfd; there a child whose anchor cannot be
-read (an ABI `_sigaction_abi` does not name) is not held through it. The executor's timeout kill
-dates its runner instead (`process_control.dated_own_child`): the start time from the child's
-`/proc` row, read while that row names this process as its parent and the `Popen` has no exit
-status, so the pid is still reserved and the row is the child's; the kill holds it by that, no
-ABI needed. A child whose ownership cannot be established (another parent, already reaped,
-SIGCHLD known ignored, no row) goes undated: nothing is sent, and the verdict is `unresolved`.
+exited, as everywhere else a process is known by its pidfd.
+
+**Zombie retention by construction** (`process_control.restore_sigchld_default`). The C library's
+half of the proof only answers one question: does the kernel keep this process's children as
+zombies? Every process entry (the dispatcher, the detached worker, each orchestrator run as
+`__main__`) answers it itself, from the main thread, by setting SIGCHLD to `SIG_DFL` through
+`signal.signal` (unless a handler, Python's or native, is installed). CPython's `PyOS_setsig`
+installs a fresh `sigaction` whose only flag is `SA_ONSTACK`, so the reset clears an inherited
+`SIG_IGN` and an `SA_NOCLDWAIT` a native library set before it: measured 2026-11-10 on CPython
+3.12 and 3.14 with `SA_NOCLDWAIT` set natively first (the flag gone, a child's zombie kept again;
+`tests/test_signal_identity_posix.py` keeps the measurement). An `exec` already
+clears `SA_NOCLDWAIT` (Linux keeps only `SIG_IGN` across it), so what the reset meets is a
+handler set in this process before the entry ran. Once the reset is made
+(`_SIGCHLD_RESET`), retention is known on Linux whatever the ABI, as long as Python holds no
+`SIG_IGN` (a handler set later through the `signal` module goes through the same call), and
+the owned kill above runs there too: the group signal through the zombie-held leader. Where the
+flags can be read (an ABI `_sigaction_abi` names) the reading still decides. Where the reset
+could not be made (not the main thread, a handler in place) and the flags cannot be
+read, nothing establishes retention: an owned child is not held (`_hold_owned`), nothing is sent,
+and the verdict is `unresolved`, never a signal by number. The residual: a native library that
+sets `SA_NOCLDWAIT` after the entry's reset is not seen where the flags cannot be read.
+
+**A runner that exits while something it started holds its pipe.** A provider CLI can exit while
+a process it started and did not wait for (a language server, a watcher, a backgrounded build)
+still holds its inherited stdout or stderr. Both lanes read the CLI through
+`process_capture.PipeCapture`, whose wait ends with the CLI plus a drain of `DRAIN_S` (5 s). A
+pipe still held after that is the lane's to stop, before the dispatch returns, exactly as its
+timeout stops the run: the executor runs its timeout kill on the runner's group
+(`dispatch_spawn._stop_held_group`, `_kill_timed_out`; Windows terminates the runner's Job
+Object), Lane A its timeout sweep of the CLI's snapshotted descendants (`llm_client.
+_stop_and_note`). The capture keeps the CLI unreaped until then where `waitid(…, WNOWAIT)` can
+watch its exit (POSIX): its zombie reserves its pid, and with it the number of the group it leads,
+as at a timeout. A runner already reaped (no such `waitid`) gets no signal by number.
+
+Then the capture watches the pipes once more (`still_held`):
+
+- the stop confirmed and the pipes let go: everything of the run that held them was stopped before
+  the checks that follow (the write lane's per-task audit, the fan-out's `SlotGuard.finish`), and
+  the dispatch goes on with the runner's own answer and exit code. The executor's batch row says
+  so in its `reason` (`dispatch_spawn.pipe_held_note`); Lane A's result carries it in
+  `details["pipe_held"]` and the provider log, and the attempt's read-only audit is not clean,
+  because that process's writes are not in the CLI's stream;
+- a pipe still held after the stop, or a stop that could not be confirmed: a process outside the
+  run's group (Lane A: outside what the sweep reached) holds the runner's output, or may, and may
+  still run. The dispatch ends as the timeout it was at the base, where that process held the pipe
+  until the deadline: the executor's capture is `timed_out` with the kill's verdict
+  (`_record_held_pipe`; `unresolved` when the group was stopped but the pipe stayed held), Lane A
+  raises the deadline's `TimeoutExpired`. The timeout's own handling follows, its words, its
+  retry, and for a write batch that moved bytes its partial application and resume. Its message
+  adds what holds the output and how to look for it (`pgrep -l -s <runner pid>` for one still in
+  the runner's session, `ps -eo pid,ppid,pgid,sid,lstart,args` for one in a session of its own);
+  a `WARNING` says so, the private home the runner was lent is kept, and a detached executor run
+  records `run.cleanup` `incomplete`.
+
+The residual, as at the base: a process that leaves the run's group and closes its pipes (or
+never held them) is beyond the supervisor's reach. Nothing waits on it, and nothing here can find
+it; only a cgroup around the run could.
 
 **A target known only by number.** Every other POSIX kill: `kill_tree` without an owned child
 (`status --abort`, the dead-run close-out, `util runs --sweep`, the failed-handshake teardown, the
@@ -507,8 +559,23 @@ identified before it, each by its pid and start time, and each through a pidfd v
 
 - **What is signalled.** The target pid with its recorded start time, and the *members* the caller
   recorded the same way: for a detached run, every process its worker started (below); for the
-  Lane A sweep, the CLI's snapshotted descendants. Nothing else, and never a group: a process that
-  is in the target's group but was not recorded gets no signal, however it got there.
+  Lane A sweep, the CLI's snapshotted descendants. And, in `kill_tree`, the processes nobody
+  recorded in a group the kill reads whose session a held process proves the run's (next point).
+  Never a group by its number: any other process found in a group gets no signal, however it got
+  there.
+- **A held process proves its session** (`_hold_session_members`). A session is never joined: a
+  process is in one by being forked inside it, and leaves it only for a session of its own. So
+  every process in a session descends from its creator, and a session's number stays taken while
+  any process is in it, alive or a zombie. A held process (the target or a recorded member, each
+  verified by its start time) seen in a session before the scan and again after it was in it the
+  whole time, so the number named that session throughout, and whatever the scan found in it is
+  the run's, never a stranger's group made again under a recycled number. Each such process in a
+  group the kill reads is held like a member (pidfd, start time, the row's session read again) and
+  signalled through its pidfd; one found while its session's anchor left the session is let go.
+  Never this process's own session. This is what stops the real binary behind a recorded launcher
+  that does not forward SIGTERM, and a provider CLI's tool children, once the worker is gone,
+  wherever a recorded process of theirs still runs. A group with no held process in its session (a
+  dead worker whose recorded CLIs are gone too) is only read, as before.
 - **A Lane A snapshot adopts only under a verified root.** The CLI's children are walked from its
   pid, so only while its row, in the same scan, has the start time the CLI was registered with
   (`LiveCliRegistry.snapshot_for`, `refresh`). `returncode is None` alone proves nothing once the
@@ -521,7 +588,8 @@ identified before it, each by its pid and start time, and each through a pidfd v
   process. A target with no recorded start time is held only through the owned child that anchors
   its pid (`_hold_owned`: the `Popen` this process holds for it, under the anchor of "An owned
   child's kill", read before the pidfd opens and again after), which needs an ABI whose SIGCHLD
-  disposition can be read (`_sigaction_abi`); a dated target needs none. With neither, the target gets nothing, its
+  disposition can be read (`_sigaction_abi`) or was reset by this process ("Zombie retention by
+  construction" above); a dated target needs none. With neither, the target gets nothing, its
   recorded members are still held by their own identities, and the verdict is `unresolved` (`gone`
   when no process has the pid at all). That covers the callers that had none: `status --abort
   --force` keeps the recorded start time (it overrides a probe that could not read it; an identity
@@ -582,12 +650,24 @@ that descriptor with `O_NOFOLLOW` (`O_CREAT|O_APPEND` to write; an identity line
 and must be a regular file of this user's with one link. Both opens are `O_NONBLOCK`, so a FIFO or
 device in the record's place is refused by that check instead of waited on; the descriptor is made
 blocking again once it passed. A symlink or hard link to another run's record, a FIFO, or a file
-another user planted, is refused: a launch then does not start, and a read is incomplete. Every line carries the
+another user planted, is refused: a launch then does not start, and a read is incomplete. A phase
+dir that cannot be held (a symlink, not a directory, another user's: root in a container working
+in a phase dir an earlier host run made) is no reason to refuse a launch, since the record is a
+later kill's proof and never the CLI's containment: one `WARNING`, and the run's launches start
+unrecorded from then on (`_PhaseDirNotHeld`). Every reader opens the record under the same rule,
+so it reads incomplete there, and an abort or close-out reports its cleanup unconfirmed rather
+than done. (A phase dir later replaced by a directory this user owns, without a record, would read
+as "nothing was started"; so would a record deleted by anything that can write the phase dir. A
+record outside the plan's output folder is the fix for both.) Every line carries the
 run id (`"run"`); a reader ignores a line of another run (a warning on stderr names how many) and
-reads a line that names no run as a torn one.
+reads a line that names no run as a torn one. An identity (`cli`) line names a process only as
+the answer to its own intent written before it, once: an identity with no earlier intent, or a
+second one for an intent, names nothing and makes the record incomplete. That does not stop
+whatever can write the phase dir from forging an intent too, but a single appended line no longer
+names a process for the next abort to signal.
 
 - an intent that cannot be written refuses the launch (`LaunchRefused`, an `OSError`; nothing
-  started);
+  started), unless the phase dir itself cannot be held (above);
 - an intent with no identity (the worker died between the spawn and the second line, or the line
   could not be written), a short write (ended by a newline so later lines stay whole), a line that
   does not parse, a file that cannot be read: the record is incomplete, and the kill's verdict
@@ -631,11 +711,12 @@ launch already past its intent still writes its identity for the abort's reread.
 
 What it does not prove, and what the verdict says then:
 
-- Every process nobody recorded is outside it and gets no signal: a tool child of a provider CLI,
-  a process forked during the kill, everything left in a crashed worker's group when its record
-  names nothing alive. Anything of those still running in a group the kill reads makes the verdict
-  `unresolved`; one that moved to a group the kill never learned of is not seen at all. Before
-  this, the kill by number signalled the whole group and reached them.
+- A process nobody recorded is signalled only where a held process proves its session (above):
+  a tool child of a provider CLI whose CLI still runs, the binary behind a recorded launcher. One
+  forked during the kill, one whose row cannot be dated, and everything left in a crashed worker's
+  group when its record names nothing alive get no signal. Anything of those still running in a
+  group the kill reads makes the verdict `unresolved`; one that moved to a group the kill never
+  learned of is not seen at all. The kill by number signalled the whole group and reached them.
 - A group whose number was made again by an unrelated program, and that a held process of the
   target's joined, reads the same way: `unresolved`, a false alarm, never a signal.
 - Two processes given the same pid within one `/proc` clock tick have the same start time; a

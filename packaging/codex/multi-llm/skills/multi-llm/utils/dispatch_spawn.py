@@ -212,6 +212,18 @@ class _Capture:
     #: Set only with ``timed_out``: the adapter's stdout watch asked for the
     #: stop, and this is its reason (``process_capture.StreamStopped``).
     stream_stop: Optional[str] = None
+    #: The runner exited while a process it started still held its output
+    #: pipe, and its process group was stopped as at a timeout before the
+    #: dispatch returned (:func:`_stop_held_group`); ``pipe_held_verdict`` is
+    #: that kill's verdict, ``unresolved`` when a pipe was still held after it.
+    #: With both confirmed the dispatch goes on with the runner's answer and
+    #: :func:`pipe_held_note` words it for the batch report; otherwise it is
+    #: ended as a timeout, and ``held_pipe_note`` is what the timeout's
+    #: failure adds to its words (docs/development/runtime.md, "A runner that
+    #: exits while something it started holds its pipe").
+    pipe_held: bool = False
+    pipe_held_verdict: Optional[str] = None
+    held_pipe_note: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -726,9 +738,14 @@ def _spawn_in_context(
             # The adapter's stdout watch, if it declares one, ends the wait
             # early; the stop below is the timeout's own
             # (docs/development/providers.md#a-cli-that-loops).
+            # A pipe still held once the runner exited is what the runner left
+            # running: its group is stopped as at a timeout before this
+            # dispatch returns, so the write lane's checks after it see every
+            # write it made (docs/development/runtime.md#process-primitives).
             streams = process_capture.PipeCapture(
                 proc, max_bytes=_task_result.MAX_STREAM_BYTES, grace_s=TIMEOUT_DRAIN_S,
                 watch=process_capture.provider_watch(provider),
+                on_held=lambda _held: _stop_held_group(proc, pgid, job),
             )
             stdout, stderr = streams.communicate(input=stdin_text, timeout=timeout)
             capture.duration = time.time() - start
@@ -736,6 +753,8 @@ def _spawn_in_context(
             capture.stderr = _decode(stderr)
             capture.exit_code = proc.returncode
             capture.capped_streams = streams.capped
+            if streams.held_stopped:
+                _record_held_pipe(capture, proc, pgid, streams)
         except subprocess.TimeoutExpired as exc:
             capture.kill_verdict = _kill_timed_out(proc, pgid, job)
             capture.kill_pid = proc.pid
@@ -858,6 +877,7 @@ def _read_jailed_outcome(
 
 def _kill_timed_out(
     proc: Any, pgid: Optional[int], job: Optional["process_control.TreeJob"] = None,
+    *, what: str = "the timed-out runner",
 ) -> Optional[str]:
     """SIGTERM → SIGKILL the child *and its group*, through the one facade.
     Returns ``kill_tree``'s verdict; ``None`` when the kill raised (the child
@@ -867,28 +887,24 @@ def _kill_timed_out(
     still holding open, unreaped until :func:`_drain_after_kill` collects it,
     so no other process can take its pid. *proc* goes along as ``child``: it
     anchors its pid and group through the kill where the owned kill runs
-    (Linux, glibc or musl; see ``kill_tree``), which counts its zombie as
-    exited. Where the kill goes by identity it is also dated: its start time,
-    read while its row names this process as its parent
-    (``process_control.dated_own_child``), so the kill by identity holds it
-    without the ``sigaction`` ABI the anchor needs; a child whose ownership
-    cannot be established goes undated, and is not signalled. Elsewhere
-    ``start_time=None`` requests the kill by number's unverified kill, and a
-    ``survived`` that is only the child's own zombie is confirmed by its exit
-    (``process_control.own_child_stopped``).
+    (Linux, wherever this process's children are known to become zombies; see
+    ``kill_tree``), which counts its zombie as exited. Where the kill goes by
+    identity and that is not known, the child is not signalled
+    (``unresolved``). Elsewhere ``start_time=None`` requests the kill by
+    number's unverified kill, and a ``survived`` that is only the child's own
+    zombie is confirmed by its exit (``process_control.own_child_stopped``).
 
     Only ``killed`` and ``gone`` confirm the runner stopped. Any other outcome
     (``process_control.unconfirmed_kill``) gets a warning naming the pid, and a detached
     run's record keeps it for a later abort or sweep
     (``detach.note_left_running``). *job* is the child's Windows Job Object,
-    the group's stand-in there (``None`` elsewhere).
+    the group's stand-in there (``None`` elsewhere). *what* names the runner
+    in that warning.
     """
     try:
-        start_time = (process_control.dated_own_child(proc)
-                      if process_control.signals_by_identity() else None)
         verdict: Optional[str] = process_control.kill_tree(
             proc.pid,
-            start_time=start_time,
+            start_time=None,
             pgid=pgid,
             escalate_after_s=TIMEOUT_KILL_GRACE_S,
             poll_interval_s=0.05,
@@ -904,22 +920,118 @@ def _kill_timed_out(
                 proc.kill()
             except OSError:
                 pass
-    reason = process_control.unconfirmed_kill(verdict)
-    # A private home lent to the runner outlives a stop that is not confirmed.
-    process_control.note_stop(proc, reason is None)
-    if reason is not None:
-        print(
-            f"WARNING: the timed-out runner pid {proc.pid} (process group "
-            f"{pgid if pgid is not None else '?'}) could not be confirmed stopped "
-            f"(kill verdict {verdict}): {reason}, so it may still be running. "
-            "Check it by hand; a detached run keeps it in its record for "
-            "status --abort.",
-            file=sys.stderr,
-        )
-        detach = sys.modules.get(f"{__package__}.detach") if __package__ else None
-        if detach is not None:
-            detach.note_left_running(proc.pid, pgid, verdict)
+    _note_runner_stop(proc, pgid, verdict, what)
     return verdict
+
+
+def _note_runner_stop(proc: Any, pgid: Optional[int], verdict: Optional[str],
+                      what: str) -> None:
+    """What every stop of a runner's tree records: whether it was confirmed,
+    for the private home lent to the runner (which outlives a stop that is
+    not), and for one that is not a ``WARNING`` naming the pid and group and,
+    in a detached worker, ``run.cleanup`` ``incomplete``
+    (``detach.note_left_running``). *what* names the runner in the warning."""
+    reason = process_control.unconfirmed_kill(verdict)
+    process_control.note_stop(proc, reason is None)
+    if reason is None:
+        return
+    print(
+        f"WARNING: {what} pid {proc.pid} (process group "
+        f"{pgid if pgid is not None else '?'}) could not be confirmed stopped "
+        f"(kill verdict {verdict}): {reason}, so it may still be running. "
+        "Check it by hand; a detached run keeps it in its record for "
+        "status --abort.",
+        file=sys.stderr,
+    )
+    detach = sys.modules.get(f"{__package__}.detach") if __package__ else None
+    if detach is not None:
+        detach.note_left_running(proc.pid, pgid, verdict)
+
+
+#: How a pipe holder's stop names the runner in its warning.
+_HELD_WHAT = "what was left holding the output of the exited runner"
+
+
+def _stop_held_group(
+    proc: Any, pgid: Optional[int], job: Optional["process_control.TreeJob"] = None,
+) -> Optional[str]:
+    """Stop the group of a runner that exited on its own while something it
+    started still held its output (``process_capture.PipeCapture``'s
+    ``on_held``), exactly as its timeout does, before the dispatch returns to
+    the write lane's checks; the kill's verdict.
+
+    The runner is still unreaped here wherever its exit could be watched
+    without reaping it (POSIX with ``waitid``): its zombie reserves its pid,
+    and with it the number of the group it leads, so this is the timeout's
+    own kill (:func:`_kill_timed_out`) on the same anchor. On Windows the
+    runner's Job Object is the tree, and terminating it needs no pid.
+    Anywhere else the runner has been reaped already: its group's number may
+    name another group by now, so nothing is signalled, and the verdict is
+    ``unresolved``.
+    """
+    if process_control.IS_WINDOWS:  # pragma: no cover - Windows
+        verdict: Optional[str] = (
+            "killed" if job is not None and job.terminate() else "unresolved")
+    elif getattr(proc, "returncode", None) is not None:
+        verdict = "unresolved"
+    else:
+        return _kill_timed_out(proc, pgid, job, what=_HELD_WHAT)
+    _note_runner_stop(proc, pgid, verdict, _HELD_WHAT)
+    return verdict
+
+
+def _record_held_pipe(capture: _Capture, proc: Any, pgid: Optional[int],
+                      streams: "process_capture.PipeCapture") -> None:
+    """What the dispatch becomes once :func:`_stop_held_group` ran.
+
+    The group stopped and the pipes let go: the dispatch goes on with the
+    runner's own answer and exit code, and ``pipe_held`` words it for the
+    batch report. Otherwise (a pipe still held after the stop, so a process
+    outside the run's group holds it; or a stop that could not be confirmed)
+    the dispatch ends as the timeout it was at the base, when that process
+    held the pipe until the deadline: ``timed_out``, the kill's verdict, and
+    the words that say what holds the output and how to look for it
+    (``held_pipe_note``). The timeout's own handling follows, its retry and
+    its partial application of a batch that moved bytes included."""
+    verdict = streams.held_stop if isinstance(streams.held_stop, str) else None
+    if streams.still_held and process_control.unconfirmed_kill(verdict) is None:
+        # The group is gone, yet its output is still held: by a process
+        # outside it, which may still run.
+        verdict = "unresolved"
+        _note_runner_stop(proc, pgid, verdict, _HELD_WHAT)
+    capture.pipe_held = True
+    capture.pipe_held_verdict = verdict
+    if process_control.unconfirmed_kill(verdict) is None:
+        return
+    held = " and ".join(sorted(streams.still_held))
+    group = pgid if pgid else proc.pid
+    capture.held_pipe_note = (
+        f"the runner exited (code {capture.exit_code}) while a process it started "
+        f"held its output, so its process group was stopped as at a timeout"
+        + (f", but its {held} was still held after that: a process outside the run's "
+           f"process group holds it and may still be running"
+           if held else f", which could not be confirmed (kill verdict {verdict})")
+        + f"; the dispatch was ended as a timeout. Look for it with: pgrep -l -s "
+        f"{group} (one still in the runner's session), or ps -eo "
+        f"pid,ppid,pgid,sid,lstart,args (one in a session of its own has init or the "
+        f"user's service manager as its parent and started during this run)"
+    )
+    capture.timed_out = True
+    capture.exit_code = None
+    capture.kill_verdict = verdict
+    capture.kill_pid = proc.pid
+
+
+def pipe_held_note(capture: Any) -> Optional[str]:
+    """The batch report's words for a runner that exited while a process it
+    started still held its output, whose group was then stopped and the
+    output let go (``_Capture.pipe_held``, the dispatch not ended as a
+    timeout), or ``None``."""
+    if not getattr(capture, "pipe_held", False) or getattr(capture, "timed_out", False):
+        return None
+    return ("the runner exited while a process it started still held its output; "
+            "its process group was stopped before the task's checks (kill verdict "
+            f"{getattr(capture, 'pipe_held_verdict', None)})")
 
 
 def _drain_after_kill(

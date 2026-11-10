@@ -89,6 +89,12 @@ class Capture:
     #: deadline, asked for the stop, and this is its reason
     #: (``process_capture.StreamStopped``); ``None`` for a deadline kill.
     stream_stop: Optional[str] = None
+    #: The CLI exited while a process it started still held its output, and
+    #: what the deadline's sweep then did (``llm_client._held_pipe_record``),
+    #: or ``""``; with ``timed_out``, why the call was ended as a timeout.
+    #: Lands on ``details["pipe_held"]``, and the attempt's read-only audit is
+    #: not clean: that process's writes are not in the CLI's stream.
+    pipe_held: str = ""
 
 
 #: The jail's read-back for one child that ran (``llm_client._jail_after_child``
@@ -598,7 +604,7 @@ _READONLY_AUDIT_KEY = _readonly_audit_mod.DETAILS_KEY
 
 def _readonly_audit(
     provider: Any, stdout: Optional[str], sandbox_fallback: Any = None,
-    *, complete: bool = True,
+    *, complete: bool = True, pipe_held: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """The adapter's read-only verdict on this attempt's **full** stdout, compact.
 
@@ -621,7 +627,10 @@ def _readonly_audit(
 
     ``complete=False`` says the capture cut stdout at its bound
     (``process_capture``): the audit cannot see the whole stream, so the
-    verdict is not clean whatever the kept head shows.
+    verdict is not clean whatever the kept head shows. *pipe_held* says a
+    process the CLI started outlived it holding its output
+    (``Capture.pipe_held``): what that process did is not in the stream, so
+    the verdict is not clean either.
     """
     if sandbox_rung_id(sandbox_fallback) not in (
         SANDBOX_RUNG_UNSANDBOXED, *_INCIDENTAL_RUNG_IDS,
@@ -633,6 +642,11 @@ def _readonly_audit(
     if not complete:
         return _readonly_audit_mod.AuditVerdict(
             False, "stdout passed the capture bound; the audit saw only its head",
+        ).to_dict()
+    if pipe_held:
+        return _readonly_audit_mod.AuditVerdict(
+            False, "a process the CLI started outlived it holding its output; "
+            "the audit saw the CLI's stream, not what that process did",
         ).to_dict()
     try:
         verdict = hook(stdout or "")
@@ -703,6 +717,11 @@ FAILURE_CATEGORY_KEY = "failure_category"
 #: (``Capture.stream_stop``, opencode's ``provider loop``); absent otherwise
 #: (docs/development/providers.md#a-cli-that-loops).
 STREAM_STOP_KEY = "stream_stop"
+
+#: ``details`` key: the CLI exited while a process it started still held its
+#: output, and what the sweep of that process did (``Capture.pipe_held``);
+#: absent otherwise (docs/development/runtime.md#process-primitives).
+PIPE_HELD_KEY = "pipe_held"
 
 
 def rejected_answer_category(
@@ -1057,6 +1076,10 @@ def outcome_from_capture(
             )
         else:
             error_line = f"{provider_name} timed out after {timeout}s"
+        if capture.pipe_held:
+            # The CLI exited, but what held its output could not be confirmed
+            # stopped: the timeout it was at the base, saying why.
+            error_line = f"{error_line}: {capture.pipe_held}"
         details: Dict[str, Any] = {
             "provider": provider_name,
             "model": model,
@@ -1160,9 +1183,12 @@ def outcome_from_capture(
     # never clean (`process_capture`).
     audit = _readonly_audit(
         provider, stdout, sandbox_fallback, complete="stdout" not in capped,
+        pipe_held=bool(capture.pipe_held),
     )
     if audit is not None:
         details[_READONLY_AUDIT_KEY] = audit
+    if capture.pipe_held:
+        details[PIPE_HELD_KEY] = capture.pipe_held
     _note_stream_cap(details, capped)
     if classified:
         details[FAILURE_CATEGORY_KEY] = category

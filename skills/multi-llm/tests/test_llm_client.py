@@ -5224,31 +5224,75 @@ class TestAStoppedLaneACliTakesItsTreeWithIt:
 # pipe, and each stream is kept to a bound. Real processes throughout.
 # =========================================================================== #
 
+def _alive(pid):
+    """Is *pid* still running (a zombie is not)?"""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as handle:
+            return handle.read().rsplit(b")", 1)[-1].split()[0] != b"Z"
+    except OSError:
+        pass
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return not os.path.exists("/proc/self/stat")
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell scripts")
 class TestLaneACaptureEndsWithTheCliAndIsBounded:
     MODEL_SPEC = "pi:stub/stub-model"
 
+    @pytest.mark.parametrize("own_session", [False, True], ids=["inherited", "setsid"])
     def test_a_cli_that_exits_with_a_held_pipe_returns_its_answer_promptly(
-        self, tmp_path, monkeypatch
+        self, tmp_path, monkeypatch, own_session
     ):
         """The CLI prints its answer and exits 0 while a process it started
         keeps stdout open: the call returns once the CLI is gone (plus the
-        drain), with the answer and the real exit code, not at the deadline,
-        and stops nothing — a CLI that exits on its own leaves what it started
-        running."""
+        drain), with the answer and the real exit code, not at the deadline.
+        SP-1: what the CLI left is swept exactly as at the deadline before
+        the call returns. A holder the sweep reaches (here one the registry
+        snapshotted) is stopped and the answer stands; one it does not reach
+        (a session of its own, started too late for the snapshot) keeps the
+        pipe, so the call ends as the deadline's ``TimeoutExpired``, as at the
+        base, saying so, and nothing outside the sweep is signalled."""
         import signal as _signal
 
         from utils import process_control
 
         monkeypatch.setattr(llm_client, "LANE_A_DRAIN_S", 1.0)
         marker = tmp_path / "holder.pid"
-        script = (
-            'echo "[{\\"answer\\":1}]"; '
-            f'sleep 30 & echo $! > "{marker}"; exit 0'
-        )
+        if own_session:
+            script = (
+                'echo "[{\\"answer\\":1}]"; '
+                f'setsid sleep 30 & echo $! > "{marker}"; exit 0'
+            )
+        else:
+            # Alive long enough for the registry to snapshot the holder.
+            script = (
+                'echo "[{\\"answer\\":1}]"; '
+                f'sleep 30 & echo $! > "{marker}"; sleep 1.5; exit 0'
+            )
         holder = None
         try:
             started = time.monotonic()
+            if own_session:
+                with pytest.raises(subprocess.TimeoutExpired) as caught:
+                    llm_client._run_provider_cli(
+                        ["sh", "-c", script], capture_output=True, text=True,
+                        encoding="utf-8", errors="replace", timeout=60,
+                        stdin=subprocess.DEVNULL,
+                    )
+                holder = int(marker.read_text(encoding="utf-8").strip())
+                assert time.monotonic() - started < 10
+                assert caught.value.stdout == '[{"answer":1}]\n'
+                assert "a process the sweep did not reach holds it" in caught.value.held_pipe
+                assert "ended as a timeout" in caught.value.held_pipe
+                assert caught.value.stream_stop is None
+                assert len(process_control.live_cli_registry) == 0
+                assert _alive(holder), "a process outside the sweep was signalled"
+                return
             completed = llm_client._run_provider_cli(
                 ["sh", "-c", script], capture_output=True, text=True,
                 encoding="utf-8", errors="replace", timeout=60,
@@ -5256,12 +5300,16 @@ class TestLaneACaptureEndsWithTheCliAndIsBounded:
             )
             elapsed = time.monotonic() - started
             holder = int(marker.read_text(encoding="utf-8").strip())
-            assert elapsed < 6, f"{elapsed:.1f}s: the call waited on the held pipe"
+            assert elapsed < 8, f"{elapsed:.1f}s: the call waited on the held pipe"
             assert completed.returncode == 0
             assert completed.stdout == '[{"answer":1}]\n'
             assert completed.capped_streams == frozenset()
             assert len(process_control.live_cli_registry) == 0
-            os.kill(holder, 0)  # still running: nothing was stopped for it
+            assert "swept before the slot's checks" in completed.pipe_held
+            gone_by = time.monotonic() + 5
+            while time.monotonic() < gone_by and _alive(holder):
+                time.sleep(0.05)
+            assert not _alive(holder), "the pipe's holder outlived the call"
         finally:
             if holder is not None:
                 try:

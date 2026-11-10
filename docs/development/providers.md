@@ -742,12 +742,17 @@ teardown. The capture only replaces what `Popen.communicate` did with the CLI's 
   the CLI has exited, what it left unread is not sent (a background child holding stdin unread
   cannot keep a finished CLI waiting to the deadline). The output pipes then get at most
   `process_capture.DRAIN_S` (5 s; `LANE_A_DRAIN_S` and the executor's `TIMEOUT_DRAIN_S` are this
-  value) to reach end of file. Past that the capture prints `[PIPE_HELD]` and returns what the CLI
-  wrote with its real exit code. A timeout still raises `TimeoutExpired` with the output so far,
-  and the lane's post-stop drain collects the rest.
-- **Nothing is stopped or cut off for a survivor.** A held pipe is never closed under its writer,
-  which would end it with `SIGPIPE`/`EPIPE`: its drain keeps reading and drops what it reads until
-  the last writer closes it. A CLI that exits on its own leaves what it started running.
+  value) to reach end of file. Past that the capture prints `[PIPE_HELD]`, hands the lane's stop
+  what still holds a pipe, and returns what the CLI wrote with its real exit code. A timeout still
+  raises `TimeoutExpired` with the output so far, and the lane's post-stop drain collects the rest.
+- **A held pipe's holder is stopped before the dispatch returns.** Each lane passes an `on_held`
+  stop, called while the CLI is still unreaped: the run is stopped exactly as at a timeout, so what
+  the CLI left running in it cannot write after the lane's checks. A pipe still held after that
+  ends the dispatch as that timeout ([process primitives](runtime.md#process-primitives), "A
+  runner that exits while something it started holds its pipe").
+- **Nothing is cut off for a survivor.** A held pipe is never closed under its writer, which would
+  end it with `SIGPIPE`/`EPIPE`: its drain keeps reading and drops what it reads until the last
+  writer closes it.
 - **A closed capture is let go.** The drain and feed threads hold only their pipe, an end-of-file
   flag and, until `close()`, the buffer they fill; never the capture or the `Popen`. A survivor
   that holds a pipe for hours keeps a drain thread and its descriptors, not the call's buffers.

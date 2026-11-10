@@ -158,6 +158,193 @@ def test_an_exit_with_a_held_pipe_returns_after_the_grace_with_the_answer(
             os.kill(holder, signal.SIGKILL)
 
 
+def _holder_cli(marker, *, own_session=False):
+    """A CLI that prints its answer and exits 0 while a ``sleep`` it started
+    keeps its stdout and stderr open; the sleep's pid goes to *marker*."""
+    start = "setsid sleep 30" if own_session else "sleep 30"
+    return subprocess.Popen(
+        ["sh", "-c", f'echo "[{{\\"answer\\":1}}]"; {start} & echo $! > "{marker}"; exit 0'],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+        text=True, encoding="utf-8", errors="replace", start_new_session=True,
+    )
+
+
+@POSIX_ONLY
+@DRAINS
+def test_a_held_pipe_is_handed_to_the_lanes_stop_while_the_cli_is_unreaped(
+    selectable, tmp_path, capsys
+):
+    """SP-1: with ``on_held`` the capture calls the lane's stop once the grace
+    passed with a pipe held, before the dispatch returns, and keeps the CLI
+    unreaped until then (its zombie still holds its pid and its group's
+    number for the stop). The answer and the real exit code are kept."""
+    marker = tmp_path / "holder.pid"
+    proc = _holder_cli(marker)
+    seen = {}
+
+    def stop(held):
+        seen["capture"] = held
+        seen["returncode"] = proc.returncode
+        seen["zombie"] = os.waitid(
+            os.P_PID, proc.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+        seen["holder"] = int(marker.read_text(encoding="utf-8").strip())
+        os.killpg(proc.pid, signal.SIGKILL)
+        return "stopped"
+
+    capture = _capture(proc, selectable, grace_s=0.5, on_held=stop)
+    try:
+        out, err = capture.communicate(timeout=60)
+        assert out == '[{"answer":1}]\n' and err == ""
+        assert proc.returncode == 0, "reaped after the stop, with its own exit"
+        assert seen["capture"] is capture and seen["returncode"] is None
+        assert seen["zombie"], "the stop ran on a reaped CLI"
+        assert capture.pipe_held and capture.held_stopped
+        assert capture.held_stop == "stopped"
+        assert capture.still_held == frozenset()
+        assert _wait_for(lambda: not _pid_alive(seen["holder"]))
+        assert "stopped what it left running" in capsys.readouterr().err
+    finally:
+        capture.close()
+        _stop_group(proc)
+
+
+@POSIX_ONLY
+@DRAINS
+def test_a_holder_the_lanes_stop_does_not_reach_is_named(selectable, tmp_path, capsys):
+    """The pipes are watched once the stop returned: one still held is held
+    by a process the stop did not reach, and the capture names it."""
+    marker = tmp_path / "holder.pid"
+    proc = _holder_cli(marker)
+    holder = None
+    capture = _capture(proc, selectable, grace_s=0.3, on_held=lambda _held: "missed")
+    try:
+        out, _err = capture.communicate(timeout=60)
+        holder = int(marker.read_text(encoding="utf-8").strip())
+        assert out == '[{"answer":1}]\n' and proc.returncode == 0
+        assert capture.held_stop == "missed"
+        assert capture.still_held == frozenset({"stdout", "stderr"})
+        assert _pid_alive(holder)
+        assert "still held by a process that stop did not reach" in capsys.readouterr().err
+    finally:
+        capture.close()
+        _stop_group(proc)
+
+
+@POSIX_ONLY
+def test_the_lanes_stop_runs_once_and_never_on_a_clean_exit(tmp_path):
+    """No held pipe, no stop; and a call after a timeout (the lane's own stop
+    is under way) never calls it either."""
+    calls = []
+    clean = _spawn("print('answer')")
+    capture = _capture(clean, True, on_held=calls.append)
+    try:
+        assert capture.communicate(timeout=30) == ("answer\n", "")
+        assert clean.returncode == 0 and not capture.pipe_held
+    finally:
+        capture.close()
+    slow = _spawn("import time; print('x', flush=True); time.sleep(30)",
+                  start_new_session=True)
+    capture = _capture(slow, True, grace_s=0.3, on_held=calls.append)
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            capture.communicate(timeout=0.5)
+        os.killpg(slow.pid, signal.SIGKILL)
+        capture.communicate(timeout=5)
+    finally:
+        capture.close()
+    assert calls == []
+
+
+#: A helper in a session of its own: holds the CLI's output for *hold* seconds,
+#: closes it, then writes *late* a second later (the residual: beyond reach).
+_CLOSING_HELPER = (
+    "import os, sys, time; time.sleep(float(sys.argv[2])); os.close(1); os.close(2); "
+    "time.sleep(1); open(sys.argv[1], 'w').write('late')"
+)
+
+
+@POSIX_ONLY
+@pytest.mark.parametrize("lane", ["executor", "lane-a"])
+def test_a_helper_that_leaves_the_group_and_closes_its_pipes_is_never_signalled(
+    tmp_path, monkeypatch, lane
+):
+    """Codex re-check 3 (``closes_pipe.py``), under the coordinator's design:
+    a helper outside the run's group keeps the output past the grace, then
+    closes it. The run's own group is stopped, the pipe is let go, and the
+    dispatch goes on with the answer; the helper, outside the run's group, is
+    never signalled, and its late write lands: the residual the doc names
+    (beyond the supervisor's reach, as at the base)."""
+    from utils import dispatch_spawn
+    from utils.providers.codex import CodexProvider
+
+    late = tmp_path / "late"
+    script = (f"setsid {sys.executable} -c {_shell_quote(_CLOSING_HELPER)} "
+              f"{_shell_quote(str(late))} 0.75 & echo answer; exit 0")
+    if lane == "executor":
+        provider = CodexProvider()
+        monkeypatch.setattr(type(provider), "build_agent_command_for_transport",
+                            lambda self, *a, **k: (["sh", "-c", script], None))
+        monkeypatch.setattr(dispatch_spawn, "TIMEOUT_DRAIN_S", 0.5)
+        monkeypatch.setattr(dispatch_spawn, "TIMEOUT_KILL_GRACE_S", 0.1)
+        capture = dispatch_spawn._spawn_in_context(
+            provider=provider, model="m", prompt="p", profile="agent-write",
+            transport="argv", timeout=30, cwd=str(tmp_path))
+        assert not capture.timed_out and capture.exit_code == 0
+        assert capture.stdout == "answer\n" and capture.pipe_held
+    else:
+        monkeypatch.setattr(llm_client, "LANE_A_DRAIN_S", 0.5)
+        monkeypatch.setattr(llm_client, "LANE_A_TERMINATE_GRACE_S", 0.1)
+        completed = llm_client._run_provider_cli(
+            ["sh", "-c", script], capture_output=True, text=True, timeout=30,
+            stdin=subprocess.DEVNULL)
+        assert completed.returncode == 0 and completed.stdout == "answer\n"
+        assert "swept before the slot's checks" in completed.pipe_held
+    assert _wait_for(late.exists, timeout=10), "the helper outside the group was stopped"
+
+
+def _shell_quote(text):
+    import shlex
+
+    return shlex.quote(text)
+
+
+@POSIX_ONLY
+def test_an_unrelated_reader_of_the_pipe_is_never_signalled(tmp_path):
+    """Codex re-check 2 (``fd_reuse.py``), under the coordinator's design: a
+    process outside the run (here this one's own fork) holds the pipe's read
+    end, then reuses its number for a writable file. Nothing reads other
+    processes' descriptors any more: the held pipe's stop is the run's group
+    only, so the reader is never signalled, and the survivor in the group is."""
+    from utils import dispatch_spawn
+
+    marker = tmp_path / "holder.pid"
+    proc = _holder_cli(marker)
+    read_fd = proc.stdout.fileno()
+    reader = os.fork()
+    if reader == 0:  # pragma: no cover - the forked reader
+        try:
+            null = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(null, read_fd)
+            time.sleep(15)
+        finally:
+            os._exit(0)
+    capture = _capture(proc, True, grace_s=0.3,
+                       on_held=lambda _held: dispatch_spawn._stop_held_group(proc, proc.pid))
+    try:
+        out, _err = capture.communicate(timeout=30)
+        holder = int(marker.read_text(encoding="utf-8").strip())
+        assert out == '[{"answer":1}]\n' and proc.returncode == 0
+        assert capture.held_stopped and capture.held_stop == "killed"
+        assert capture.still_held == frozenset()
+        assert _wait_for(lambda: not _pid_alive(holder)), "the survivor in the group ran on"
+        assert os.waitpid(reader, os.WNOHANG) == (0, 0), "the unrelated reader was signalled"
+    finally:
+        capture.close()
+        _kill(reader)
+        os.waitpid(reader, 0)
+        _stop_group(proc)
+
+
 @POSIX_ONLY
 @DRAINS
 def test_a_timeout_carries_the_output_so_far_and_a_second_call_collects_it(selectable):

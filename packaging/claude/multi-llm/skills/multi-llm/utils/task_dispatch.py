@@ -1093,6 +1093,12 @@ def read_attempt(
         status, error = STATUS_REJECTED, denied_line
     else:
         status, error = _attempt_classifier._classify_pre_parse(capture)
+        held = getattr(capture, "held_pipe_note", None)
+        if status == STATUS_TIMEOUT and held:
+            # A runner that exited while something outside its group held its
+            # output ends as the timeout it was at the base, saying so
+            # (dispatch_spawn._record_held_pipe).
+            error = f"{error}. {held}"
     if state.repair_baseline is not None:
         moved = _moved_during_repair(
             hooks.tree_fingerprint, hook_context("tree_fingerprint", plan, outcome),
@@ -1348,6 +1354,7 @@ def finish_ok(
             "result", plan, outcome, state=state, reading=reading,
         ))
         if not outcome.ok:
+            _note_held_pipe(outcome, capture)
             return outcome
     if capture.exit_code not in (0, None):
         # Exit code is evidence, never the verdict: for a read
@@ -1360,7 +1367,18 @@ def finish_ok(
             f"schema-valid result; stderr tail: "
             f"{_failure_capture._tail(capture.stderr, 2000)!r}"
         )
+    _note_held_pipe(outcome, capture)
     return outcome
+
+
+def _note_held_pipe(outcome: _task_outcome.TaskOutcome, capture: Any) -> None:
+    """The runner's own answer stands once what it left holding its output
+    was stopped with its group before the checks; the row says so
+    (``dispatch_spawn.pipe_held_note``;
+    docs/development/runtime.md#process-primitives)."""
+    held = _dispatch_spawn.pipe_held_note(capture)
+    if held:
+        outcome.reason = f"{outcome.reason}; {held}" if outcome.reason else held
 
 
 def check_moved_before_retry(

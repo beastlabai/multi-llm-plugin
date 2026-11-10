@@ -281,20 +281,16 @@ class TestAHostThatLeftMidCall:
 
         # The host leaves: its tool server aborts the run it claimed. Where
         # the identity kill runs, the blocked dispatch's CLI (a session of its
-        # own) is stopped by the identity the worker recorded; the `sleep` it
-        # started was never recorded, so it is reported, not signalled, and
-        # the abort says so (docs/development/runtime.md, "A target known only
-        # by number"). Elsewhere the kill is the one by number, as before.
+        # own) is stopped by the identity the worker recorded, and the `sleep`
+        # it started, never recorded, by its own identity: the CLI, held and
+        # still in that session, proves the session the run's (SP-3;
+        # docs/development/runtime.md, "A target known only by number").
+        # Elsewhere the kill is the one by number, as before.
         run_id = status_file.read_run(str(phase_dir))["run_id"]
-        identity_kill = process_control.signals_by_identity()
         try:
             code = run_status.main(["--plan-file", str(repo.plan), "--abort"])
             out = capsys.readouterr().out
-            if identity_kill:
-                assert code == 3 and "INCOMPLETE" in out, out
-                assert status_file.read_run(str(phase_dir))["cleanup"]["state"] == "incomplete"
-            else:
-                assert code == 0, out
+            assert code == 0 and "INCOMPLETE" not in out, out
         finally:
             for member in process_control.read_cli_record(str(phase_dir), run_id).members:
                 if member.pgid == member.pid:  # the test's own blocked `sleep`

@@ -185,6 +185,42 @@ class TestHomeRendering:
             f"open '{other}' failed: Permission denied; open '~' failed"
         )
 
+    @pytest.mark.parametrize("raw, shown", [
+        # SP-6: a home that ends a token it does not start renders as before.
+        ("failed: 'HOME=/home/u'", "failed: 'HOME=~'"),
+        ("error writing '--cd=/home/u': EACCES", "error writing '--cd=~': EACCES"),
+        ("PATH=/usr/bin:/home/u/bin", "PATH=/usr/bin:~/bin"),
+        ('open("/home/u") failed', 'open("~") failed'),
+        ("EACCES /home/u: denied", "EACCES ~: denied"),
+        ("cd /home/u/.codex/x", "cd ~/.codex/x"),
+        # A path that merely contains the home is another folder.
+        ("EACCES /mnt/backup/home/u/.codex/x", "EACCES /mnt/backup/home/u/.codex/x"),
+        ("open '/mnt/backup/home/u' failed", "open '/mnt/backup/home/u' failed"),
+        ("ls //home/u", "ls //home/u"),
+        # So is one whose name only starts with it.
+        ("/home/u2/x /home/u.bak /home/u-old", "/home/u2/x /home/u.bak /home/u-old"),
+    ])
+    def test_the_home_renders_only_where_it_starts_a_path(self, monkeypatch, raw, shown):
+        monkeypatch.setenv("HOME", "/home/u")
+        assert landlock_dispatch.render_home_text(raw) == shown
+
+    @pytest.mark.parametrize("escape", ["\n", "\t", "\r", '"'])
+    def test_an_escaped_boundary_in_a_cli_event_hides_the_home(self, monkeypatch, escape):
+        """Codex review 5 (F03): a CLI's JSON event quotes its tool output
+        escaped, so the character before a path can be the ``n`` of ``\\n``.
+        That escape is a boundary like a real one, on the whole line as the
+        user sees it (``jail_denied_text``), while a backup copy of the home
+        inside the same escaped text keeps its head."""
+        monkeypatch.setenv("HOME", "/home/u")
+        hidden = json.dumps({"error": f"Permission denied{escape}/home/u/.cache/item"})
+        backup = json.dumps({"error": f"Permission denied{escape}/mnt/backup/home/u/x"})
+        for lane in (_executor, _fanout):
+            line = lane({"where": "stderr", "class": "probable", "line": hidden})
+            assert "/home/u/.cache/item" not in line, line
+            assert "~/.cache/item" in line, line
+            kept = lane({"where": "stderr", "class": "probable", "line": backup})
+            assert "/mnt/backup/home/u/x" in kept, kept
+
     def test_the_fanout_line_renders_a_quoted_home(self):
         home = os.path.expanduser("~")
         if home in ("~", os.sep):

@@ -24,7 +24,15 @@ The rules:
   is fed on a thread of its own and is not part of the wait: once the CLI has
   exited, what it did not read is not sent. A process the CLI started and did
   not wait for can hold an inherited pipe open for ever; after the grace the
-  capture returns what the CLI wrote, with a ``[PIPE_HELD]`` line.
+  capture keeps what was read, with a ``[PIPE_HELD]`` line.
+* **A held pipe is the lane's to stop.** A lane that passes ``on_held`` has it
+  called once, after the grace, when a pipe is still held: the lane stops the
+  run's own processes as its timeout does before the call returns. Until then
+  the CLI is left unreaped where ``waitid`` can watch its exit without
+  reaping it (POSIX), so its pid and the group it leads still name its tree
+  for that stop, as at a timeout (docs/development/runtime.md#process-primitives).
+  :attr:`PipeCapture.still_held` names the pipes still held once the stop
+  returned: held by a process outside what the stop reached.
 * **Stdin fails as communicate fails.** The input is checked and encoded in
   the caller's thread before any feed starts, so an input the stream cannot
   take raises there. A feed ignores what ``communicate`` ignores (a reader
@@ -34,10 +42,11 @@ The rules:
   capture, and a feed takes it one chunk at a time: when the CLI exits the
   capture drops what is left, so a write stuck on a pipe nobody reads holds
   one chunk, never the prompt.
-* **Nothing is stopped or cut off for a survivor.** A pipe still held after the
-  grace is never closed under its writer (which would end it with ``SIGPIPE``
-  or ``EPIPE``): its drain keeps reading and drops what it reads until the last
-  writer closes it. A CLI that exits on its own leaves what it started running.
+* **Nothing is cut off for a survivor.** A pipe still held after the grace is
+  never closed under its writer (which would end it with ``SIGPIPE`` or
+  ``EPIPE``): its drain keeps reading and drops what it reads until the last
+  writer closes it. The capture itself stops nothing; only a lane's
+  ``on_held`` does.
 * **A closed capture is let go.** After :meth:`PipeCapture.close` a drain
   still running holds only its pipe and an end-of-file flag, never the capture,
   its buffers or the ``Popen``, so a caller that drops the capture frees them
@@ -110,6 +119,20 @@ _POLL_S = 0.2
 #: A pipe closing as the CLI exits needs a moment to deliver its last bytes and
 #: its end of file, even when the caller's deadline has nearly run out.
 _MIN_GRACE_S = 0.2
+
+#: How long a held pipe gets to reach end of file once the lane's ``on_held``
+#: stop returned. That stop waits until what it signalled is gone, and a dead
+#: process's descriptors are already closed, so a pipe still held past this is
+#: held by a process the stop did not reach.
+_AFTER_STOP_S = 1.0
+
+#: ``os.waitid`` where the platform has it: asked with ``WNOWAIT`` it says
+#: whether a child exited without reaping it.
+_waitid = getattr(os, "waitid", None)
+
+#: The longest sleep between two looks at a CLI's exit while it is kept
+#: unreaped (``Popen.wait``'s own ceiling when it polls).
+_EXIT_POLL_S = 0.05
 
 _STREAMS = ("stdout", "stderr")
 
@@ -466,6 +489,16 @@ class PipeCapture:
     *watch* (a :data:`StreamWatch`, or ``None``) is fed every stdout chunk the
     drain reads; once it returns a reason, :meth:`communicate` raises
     :class:`StreamStopped` and :attr:`stream_stop` keeps the reason.
+
+    *on_held* (a callable taking this capture, or ``None``) is the lane's stop
+    for what the CLI left holding a pipe: called at most once, by the first
+    :meth:`communicate` that sees the CLI exit, when a pipe is still held after
+    the grace. What it returns
+    is kept as :attr:`held_stop`; an exception it raises leaves
+    :attr:`held_stop` ``None`` and is not passed on. With it given, that call
+    keeps the CLI unreaped until the stop has returned wherever ``waitid`` can
+    watch the exit (POSIX, a real child), and reaps it before returning.
+    Without it nothing is stopped, as before.
     """
 
     def __init__(
@@ -476,11 +509,22 @@ class PipeCapture:
         grace_s: float = DRAIN_S,
         selectable: Optional[bool] = None,
         watch: Optional[StreamWatch] = None,
+        on_held: Optional[Callable[["PipeCapture"], Any]] = None,
     ) -> None:
         self.proc = proc
         self.max_bytes = max_bytes
         self.grace_s = grace_s
         self.pipe_held = False
+        #: What *on_held* returned, ``None`` when it was not called or raised.
+        self.held_stop: Any = None
+        #: Whether *on_held* was called (a held pipe, after the grace).
+        self.held_stopped = False
+        #: The pipes still held once *on_held* returned: their holder is
+        #: outside what the lane's stop reached. Empty when it let go of them,
+        #: or when there was no stop.
+        self.still_held: FrozenSet[str] = frozenset()
+        self._on_held = on_held
+        self._called = False
         self._selectable = (os.name != "nt") if selectable is None else selectable
         self._outlets: Dict[str, _Outlet] = {}
         self._sinks: Dict[str, _Sink] = {}
@@ -569,9 +613,14 @@ class PipeCapture:
         if self._passthrough:
             return self.proc.communicate(input=input, timeout=timeout)
         started = time.monotonic()
+        # The lane's stop belongs to the first call only: a later one collects
+        # what is left after the lane's own stop (a timeout, a failed feed).
+        hook, self._on_held = self._on_held, None
+        unreaped = hook is not None and not self._called and self._can_hold_unreaped()
+        self._called = True
         self._send(input)
         try:
-            out, err = self._wait(timeout)
+            out, err = self._wait(timeout, unreaped=unreaped)
         except subprocess.TimeoutExpired as exc:
             self._timed_out = True
             output = self._text("stdout", exc.output)
@@ -600,7 +649,7 @@ class PipeCapture:
         else:
             grace = max(min(self.grace_s, timeout - (time.monotonic() - started)),
                         _MIN_GRACE_S)
-        self._settle(grace)
+        self._settle(grace, hook, unreaped)
         self._announce_caps()
         return self._text("stdout", out), self._text("stderr", err)
 
@@ -619,23 +668,25 @@ class PipeCapture:
         for outlet in self._outlets.values():
             outlet.detach()
 
-    def _wait(self, timeout: Optional[float]) -> Tuple[Any, Any]:
+    def _wait(self, timeout: Optional[float], *, unreaped: bool = False) -> Tuple[Any, Any]:
         """``proc.communicate(timeout=timeout)``, in slices of
         :data:`WATCH_POLL_S` while a watch is live, so a stop the watch asks
         for ends the wait within one slice. The first wait only: once a call
         has timed out (the lane is stopping the CLI), the watch has no say.
+        *unreaped* waits for the exit without reaping the CLI
+        (:meth:`_wait_exit`).
 
-        A CLI that has already exited when the stop would be acted on is reaped
-        and returns as it ended: its exit decides, not the watch's verdict on
-        steps it went on to finish (docs/development/providers.md#a-cli-that-loops).
+        A CLI that has already exited when the stop would be acted on returns
+        as it ended: its exit decides, not the watch's verdict on steps it went
+        on to finish (docs/development/providers.md#a-cli-that-loops).
         """
         tripwire = self._tripwire
         if tripwire is None or self._timed_out:
-            return self.proc.communicate(timeout=timeout)
+            return self._wait_exit(timeout, unreaped)
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
-            # `poll()` reaps an exited CLI, so the slice below returns at once.
-            if tripwire.tripped.is_set() and self.proc.poll() is None:
+            # An exited CLI makes the slice below return at once.
+            if tripwire.tripped.is_set() and not self._exited(unreaped):
                 self._stream_stop = tripwire.reason or "the stream watch asked for a stop"
                 self._announce_stop(timeout)
                 raise StreamStopped(getattr(self.proc, "args", None), timeout,
@@ -644,12 +695,79 @@ class PipeCapture:
             if deadline is not None:
                 step = max(0.0, min(step, deadline - time.monotonic()))
             try:
-                return self.proc.communicate(timeout=step)
+                return self._wait_exit(step, unreaped)
             except subprocess.TimeoutExpired as exc:
                 if deadline is not None and time.monotonic() >= deadline:
                     raise subprocess.TimeoutExpired(
                         exc.cmd, timeout, output=exc.output, stderr=exc.stderr,
                     ) from None
+
+    def _can_hold_unreaped(self) -> bool:
+        """Can the CLI's exit be watched without reaping it? A real child of
+        this process on POSIX, with ``waitid``, whose pipes this capture all
+        took (``communicate`` would otherwise still read one)."""
+        proc = self.proc
+        pid = getattr(proc, "pid", None)
+        return (
+            os.name != "nt" and _waitid is not None
+            and isinstance(pid, int) and pid > 0
+            and getattr(proc, "returncode", 0) is None
+            and all(getattr(proc, name, None) is None for name in ("stdin",) + _STREAMS)
+        )
+
+    def _unreaped_exit(self) -> Optional[bool]:
+        """Has the CLI exited, asked without reaping it (``WNOWAIT``)? ``None``
+        when that cannot be asked: no longer an unreaped child of this process
+        (reaped elsewhere), or the call failed."""
+        pid = getattr(self.proc, "pid", None)
+        if _waitid is None or getattr(self.proc, "returncode", 0) is not None:
+            return None
+        try:
+            return _waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+        except (OSError, TypeError, ValueError):
+            return None
+
+    def _exited(self, unreaped: bool) -> bool:
+        """Has the CLI exited? Read without reaping it under *unreaped*,
+        else through ``poll()``, which reaps it."""
+        if unreaped:
+            state = self._unreaped_exit()
+            if state is not None:
+                return state
+        return self.proc.poll() is not None
+
+    def _wait_exit(self, timeout: Optional[float], unreaped: bool) -> Tuple[Any, Any]:
+        """``proc.communicate(timeout=timeout)``; under *unreaped* the same
+        wait, with no pipes left for ``communicate`` to read, but leaving the
+        CLI's zombie unreaped for :meth:`_settle` (``None`` for both streams,
+        which this capture drains). Falls back to ``communicate`` once the
+        exit can no longer be watched that way."""
+        if not unreaped:
+            return self.proc.communicate(timeout=timeout)
+        deadline = None if timeout is None else time.monotonic() + timeout
+        delay = 0.0005
+        while True:
+            state = self._unreaped_exit()
+            if state is None:
+                rest = None if deadline is None else max(0.0, deadline - time.monotonic())
+                return self.proc.communicate(timeout=rest)
+            if state:
+                return None, None
+            now = time.monotonic()
+            if deadline is not None and now >= deadline:
+                raise subprocess.TimeoutExpired(getattr(self.proc, "args", None), timeout)
+            delay = min(delay * 2, _EXIT_POLL_S)
+            if deadline is not None:
+                delay = min(delay, deadline - now)
+            time.sleep(max(0.0, delay))
+
+    def _reap(self, unreaped: bool) -> None:
+        """Reap a CLI :meth:`_wait_exit` left unreaped (it has exited, so this
+        returns at once; the lane's stop may have reaped it already), through
+        ``communicate``, which with no pipes left is the wait as everywhere
+        else in this capture."""
+        if unreaped and getattr(self.proc, "returncode", 0) is None:
+            self.proc.communicate()
 
     def _announce_stop(self, timeout: Optional[float]) -> None:
         deadline = f"its {timeout}s deadline" if timeout else "an exit it will not make"
@@ -691,26 +809,47 @@ class PipeCapture:
             _close(stream)
             raise
 
-    def _settle(self, grace: float) -> None:
+    def _settle(self, grace: float, hook: Optional[Callable[["PipeCapture"], Any]] = None,
+                unreaped: bool = False) -> None:
         """Wait up to *grace* for every output pipe's end of file; past it, the
-        pipe is held by something the CLI started, and the capture lets go."""
+        pipe is held by something the CLI started: the capture lets go of what
+        arrives, and the lane's *hook* stops what the CLI left running while
+        the CLI, *unreaped*, still anchors its pid and group. Then the CLI is
+        reaped. Anything raised here (an interrupt) leaves it unreaped for the
+        lane's own stop, whose second call reaps it."""
         deadline = time.monotonic() + grace
-        held = []
-        for name, outlet in self._outlets.items():
-            if not outlet.eof.wait(max(0.0, deadline - time.monotonic())):
-                held.append(name)
+        held = [name for name, outlet in self._outlets.items()
+                if not outlet.eof.wait(max(0.0, deadline - time.monotonic()))]
         if not held:
+            self._reap(unreaped)
             return
         self.pipe_held = True
         self.close()
+        if hook is not None:
+            self.held_stopped = True
+            try:
+                self.held_stop = hook(self)
+            except Exception:  # noqa: BLE001 - the lane's stop reports its own failure
+                self.held_stop = None
+            until = time.monotonic() + min(self.grace_s, _AFTER_STOP_S)
+            self.still_held = frozenset(
+                name for name in held
+                if not self._outlets[name].eof.wait(max(0.0, until - time.monotonic())))
+        self._reap(unreaped)
         pid = getattr(self.proc, "pid", None)
-        print(
-            f"[PIPE_HELD] pid {pid} exited (code {getattr(self.proc, 'returncode', None)}) "
-            f"while a process it started still held its {' and '.join(held)} open; "
-            f"returning what was read after a {grace:.1f}s drain. Nothing was "
-            f"stopped for it: the pipe is still read, and what arrives is dropped.",
-            file=sys.stderr, flush=True,
-        )
+        pipes = " and ".join(held)
+        line = (f"[PIPE_HELD] pid {pid} exited (code {getattr(self.proc, 'returncode', None)}) "
+                f"while a process it started still held its {pipes} open; kept what was "
+                f"read after a {grace:.1f}s drain, and what arrives later is dropped. ")
+        if hook is None:
+            line += "Nothing was stopped for it: the pipe is still read."
+        elif self.still_held:
+            line += (f"The lane stopped what it left running, but its "
+                     f"{' and '.join(sorted(self.still_held))} is still held by a "
+                     f"process that stop did not reach.")
+        else:
+            line += "The lane stopped what it left running, and the pipe was let go."
+        print(line, file=sys.stderr, flush=True)
 
     def _announce_caps(self) -> None:
         for name in sorted(self.capped - self._announced):

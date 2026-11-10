@@ -848,16 +848,30 @@ def render_home(path: Optional[str]) -> str:
 
 
 def render_home_text(text: Optional[str]) -> str:
-    """``text`` with every ``$HOME`` shown as ``~`` where it starts a path
-    (``$HOME/…``) or is quoted whole (``'$HOME'``), so a line quoting the
-    child's output can be pasted into an issue as it is. :func:`render_home`
+    """``text`` with every ``$HOME`` shown as ``~`` where it is a path of its
+    own or starts one (``$HOME/…``, ``'$HOME'``, ``HOME=$HOME``,
+    ``--cd=$HOME``), so a line quoting the child's output can be pasted into
+    an issue as it is. Only where no path character comes before it (as for
+    an absolute path the jail's lines name), an escaped newline, tab, return
+    or quote counting as none, and none after it but a separator:
+    a backup copy of the home under another folder (``<folder>$HOME/x``) and
+    ``$HOME2`` are other folders and stay as they are. :func:`render_home`
     renders one path."""
     home = os.path.expanduser("~")
     if not text or not home or home in ("~", os.sep):
         return text or ""
-    # The quoted case needs the opening quote too, or a path that merely ends
-    # in $HOME (a backup copy of the home folder) would lose its head (U37c review).
-    return text.replace(home + os.sep, "~" + os.sep).replace(f"'{home}'", "'~'")
+    return _home_pattern(home).sub("~", text)
+
+
+def _home_pattern(home: str) -> "re.Pattern[str]":
+    """*home* where it starts a path: after a JSON or shell escape that stands
+    for a boundary (``\\n``, ``\\t``, ``\\r``, ``\\"``: a CLI's event text
+    quotes its tool output escaped), or with no path character before it;
+    and after it a separator, the end, or anything that cannot continue a
+    name."""
+    return re.compile(
+        r'(?:(?<=\\[ntr"])|(?<![\w.\-/\\~]))'
+        + re.escape(home.rstrip("/\\") or home) + r"(?![\w.\-~])")
 
 
 def render_allow_list(entries: Iterable[AllowEntry]) -> str:

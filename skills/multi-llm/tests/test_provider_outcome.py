@@ -191,3 +191,42 @@ def test_the_log_writer_runs_once_unless_an_exit_0_is_deferred(capture, defer, l
 
     assert seen == [(capture, result)] * logged
     assert ("_deferred_log" in result["details"]) is (defer and logged == 0)
+
+
+def test_a_pipe_held_attempt_is_recorded_and_never_audited_clean():
+    """SP-1, Lane A: a CLI that exited while a process it started still held
+    its output is not a silently clean slot. What the sweep did lands on
+    ``details["pipe_held"]``, and on the rungs the read-only audit serves its
+    verdict is not clean, so the slot's porcelain check cannot excuse a change
+    that process made (its writes are not in the CLI's stream)."""
+    import json
+
+    stream = "\n".join(json.dumps(event) for event in (
+        {"type": "thread.started", "thread_id": "t"},
+        {"type": "turn.started"},
+        {"type": "item.completed", "item": {
+            "id": "i0", "type": "agent_message", "text": "[]"}},
+        {"type": "turn.completed", "usage": {}},
+    ))
+    note = "the CLI exited while ...; swept before the slot's checks: cli exited"
+    plain = outcome_from_capture(
+        _PROVIDERS["codex"], Capture(stdout=stream, exit_code=0),
+        provider_name="codex", model="m", sandbox_fallback="unsandboxed",
+    )
+    assert plain["details"]["readonly_audit"]["clean"] is True
+    assert provider_outcome.PIPE_HELD_KEY not in plain["details"]
+    held = outcome_from_capture(
+        _PROVIDERS["codex"], Capture(stdout=stream, exit_code=0, pipe_held=note),
+        provider_name="codex", model="m", sandbox_fallback="unsandboxed",
+    )
+    assert held["success"] is True, "the CLI's own answer stands"
+    assert held["details"][provider_outcome.PIPE_HELD_KEY] == note
+    audit = held["details"]["readonly_audit"]
+    assert audit["clean"] is False and "outlived it holding its output" in audit["reason"]
+    # A default run carries no audit either way, but still the record.
+    default = outcome_from_capture(
+        _PROVIDERS["codex"], Capture(stdout=stream, exit_code=0, pipe_held=note),
+        provider_name="codex", model="m",
+    )
+    assert "readonly_audit" not in default["details"]
+    assert default["details"][provider_outcome.PIPE_HELD_KEY] == note

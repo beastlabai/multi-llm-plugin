@@ -139,9 +139,14 @@ class TestAProcessThatLeavesAndRejoinsARecycledGroup:
     @staticmethod
     def _leave_and_rejoin(host, monkeypatch):
         fired = []
+        # The anchor stays in its session throughout; the unrelated new group
+        # is in a session of its own (made by its leader), as a group made
+        # again under a recycled number always is.
+        strangers = {_GROUP, _BYSTANDER}
 
         def rows():
-            return {pid: process_control._ProcRow(pid, 1, pgid, _SESSION, start, "S")
+            return {pid: process_control._ProcRow(
+                        pid, 1, pgid, _GROUP if pid in strangers else _SESSION, start, "S")
                     for pid, (pgid, start) in host.procs.items()}
 
         def scan():
@@ -399,14 +404,22 @@ class TestOnlyIdentifiedProcessesAreSignalled:
             (f"pidfd {_MEMBER}", "SIGKILL")]
         assert host.open_pidfds == set()
 
-    def test_a_member_nobody_recorded_is_reported_not_signalled(self, monkeypatch, pidfd):
+    def test_a_member_nobody_recorded_is_stopped_in_the_runs_session(
+        self, monkeypatch, pidfd
+    ):
+        """SP-3: the held worker is in the session the member is in, before
+        the scan and after it, so the member is the run's (a session is never
+        joined from outside): it is held by its own start time and stopped,
+        through its pidfd, never through the group's number."""
         host = _Host({_WORKER: (_GROUP, "worker"), _MEMBER: (_GROUP, "member")},
                      deaf=[_MEMBER], pidfd=pidfd).install(monkeypatch)
         verdict = _kill(_WORKER, start_time="worker", pgid=_GROUP)
         if pidfd:
-            assert verdict == "unresolved"
-            assert _signals(host) == [(f"pidfd {_WORKER}", "SIGTERM")]
-            assert _MEMBER in host.procs
+            assert verdict == "killed"
+            assert _signals(host) == [
+                (f"pidfd {_WORKER}", "SIGTERM"), (f"pidfd {_MEMBER}", "SIGTERM"),
+                (f"pidfd {_MEMBER}", "SIGKILL")]
+            assert host.procs == {} and host.open_pidfds == set()
         else:
             # By number, as it always was: the group's SIGTERM, then the
             # leader alone decides; what ignored the SIGTERM runs on.
@@ -429,9 +442,10 @@ class TestOnlyIdentifiedProcessesAreSignalled:
 
     def test_what_exits_while_the_groups_are_read_is_waited_for(self, monkeypatch):
         """An unrecorded child the member's own SIGTERM handler stops on its
-        way out: the read waits, within the confirmation window, for it."""
+        way out: the read waits, within the confirmation window, for it. Its
+        row cannot be dated, so the kill cannot hold it (SP-3)."""
         child = 4105
-        host = _Host({_WORKER: (_GROUP, "worker"), child: (_GROUP, "child")},
+        host = _Host({_WORKER: (_GROUP, "worker"), child: (_GROUP, None)},
                      deaf=[child], pidfd=True)
         host.after_term = [(0.5, host.exit(child))]
         host.install(monkeypatch)
@@ -514,16 +528,77 @@ class TestARecordedClisOwnGroup:
     """An executor CLI runs in a session of its own, so its tool children are
     in its group, not the worker's."""
 
-    def test_its_unrecorded_child_there_is_reported_not_signalled(self, monkeypatch):
+    def test_its_unrecorded_child_there_is_stopped_through_its_session(self, monkeypatch):
+        """SP-3: the recorded CLI, held, is in the session its tool child is
+        in: the tool is the run's, and is stopped by its own identity."""
         tool = _BYSTANDER
         host = _Host({_MEMBER: (_MEMBER, "cli"), tool: (_MEMBER, "tool")},
                      deaf=[_MEMBER, tool], pidfd=True).install(monkeypatch)
         verdict = _kill(_WORKER, start_time="worker", pgid=_GROUP,
                         members=[_cli(_MEMBER, "cli")])
-        assert verdict == "unresolved"
+        assert verdict == "killed"
         assert _MEMBER not in host.procs, "the recorded CLI was not stopped"
+        assert tool not in host.procs, "its tool child was left running"
+        assert (f"pidfd {tool}", "SIGKILL") in _signals(host)
+        assert not [how for how, _sig in _signals(host) if how.startswith("group")]
+
+    def test_its_undatable_child_there_is_reported_not_signalled(self, monkeypatch):
+        """What the kill cannot hold by a start time is never signalled."""
+        tool = _BYSTANDER
+        host = _Host({_MEMBER: (_MEMBER, "cli"), tool: (_MEMBER, None)},
+                     deaf=[_MEMBER, tool], pidfd=True).install(monkeypatch)
+        verdict = _kill(_WORKER, start_time="worker", pgid=_GROUP,
+                        members=[_cli(_MEMBER, "cli")])
+        assert verdict == "unresolved"
+        assert _MEMBER not in host.procs and tool in host.procs
+        assert all(entry[1] != f"pidfd {tool}" for entry in host.sent)
+
+    def test_a_process_in_a_read_group_of_another_session_is_not_signalled(
+        self, monkeypatch
+    ):
+        """The recorded CLI is gone and its group's number, read because no
+        process has that pid, now names a stranger's group in a session of its
+        own: the held worker proves its own session only, so the stranger's
+        child is reported, never signalled."""
+        host = _Host({_WORKER: (_GROUP, "worker"), _BYSTANDER: (_MEMBER, "their-child")},
+                     deaf=[_WORKER], pidfd=True, sessions={_BYSTANDER: _ELSEWHERE})
+        host.bystanders.add(_BYSTANDER)
+        host.install(monkeypatch)
+        verdict = _kill(_WORKER, start_time="worker", pgid=_GROUP,
+                        members=[_cli(_MEMBER, "cli", _MEMBER)])
+        assert _outcome(host, verdict) == (
+            "unresolved", [(f"pidfd {_WORKER}", "SIGTERM"), (f"pidfd {_WORKER}", "SIGKILL")],
+            [])
+        assert _BYSTANDER in host.procs and host.open_pidfds == set()
+
+    def test_an_anchor_that_leaves_its_session_during_the_scan_proves_nothing(
+        self, monkeypatch
+    ):
+        """The session must hold its anchor before the scan and after it: an
+        anchor that left it meanwhile (``setsid``) no longer proves what the
+        scan found there, which is let go unsignalled."""
+        tool = _BYSTANDER
+        # The worker is gone; its recorded CLI (no group leader) and a tool
+        # nobody recorded are in its group and session.
+        host = _Host({_MEMBER: (_GROUP, "cli"), tool: (_GROUP, "tool")},
+                     deaf=[_MEMBER, tool], pidfd=True).install(monkeypatch)
+        real = process_control._linux_process_table
+        moved = []
+
+        def scan():
+            table = real()
+            if not moved and host.open_pidfds:
+                moved.append(True)
+                host.setsid(_MEMBER)()
+            return table
+
+        monkeypatch.setattr(process_control, "_linux_process_table", scan)
+        verdict = _kill(_WORKER, start_time="worker", pgid=_GROUP,
+                        members=[_cli(_MEMBER, "cli", _GROUP)])
+        assert moved and verdict == "unresolved"
         assert tool in host.procs
         assert all(entry[1] != f"pidfd {tool}" for entry in host.sent)
+        assert host.open_pidfds == set()
 
     def test_read_by_its_recorded_number_once_the_cli_is_gone(self, monkeypatch):
         tool = _BYSTANDER
@@ -684,6 +759,59 @@ def _read(path, run_id=_RUN):
 
 def _lines(path):
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+class TestAnIdentityAnswersItsOwnIntent:
+    """SP-5: a ``cli`` line names a process only as the answer to a ``launch``
+    intent written before it, once. Anything else in the record (a line
+    appended by whatever can write the plan's output folder) names nothing,
+    and the record no longer reads complete, so the kill says ``unresolved``
+    rather than signalling it."""
+
+    @staticmethod
+    def _parse(*lines):
+        raw = "".join(json.dumps(dict(line, run="A")) + "\n" for line in lines)
+        return process_control._parse_record(raw.encode("utf-8"), "A")
+
+    def test_a_cli_line_with_no_intent_names_nothing(self):
+        record = self._parse({"cli": "forged", "pid": _BYSTANDER, "start": "victim"})
+        assert record == process_control.CliRecord([], False)
+
+    def test_an_identity_before_its_intent_names_nothing(self):
+        record = self._parse(
+            {"cli": "1.1", "pid": _BYSTANDER, "start": "victim"}, {"launch": "1.1"})
+        assert record.members == [] and not record.complete
+
+    def test_a_second_identity_for_one_intent_names_only_the_first(self):
+        record = self._parse(
+            {"launch": "1.1"},
+            {"cli": "1.1", "pid": _MEMBER, "start": "member", "pgid": _GROUP},
+            {"cli": "1.1", "pid": _BYSTANDER, "start": "victim"})
+        assert record.members == [process_control.Descendant(_MEMBER, _GROUP, None, "member")]
+        assert not record.complete
+
+    def test_an_honest_record_is_unchanged(self):
+        record = self._parse(
+            {"launch": "1.1"}, {"launch": "1.2"},
+            {"cli": "1.2", "pid": _BYSTANDER, "start": "b"},
+            {"cli": "1.1", "pid": _MEMBER, "start": "member", "pgid": _GROUP})
+        assert record.complete
+        assert [member.pid for member in record.members] == [_BYSTANDER, _MEMBER]
+
+    @records_here
+    def test_a_forged_line_gets_its_process_no_signal(self, tmp_path, monkeypatch):
+        phase = tmp_path / "review-plan"
+        phase.mkdir()
+        path = Path(detach.cli_record_path(str(phase), "A"))
+        path.write_text(json.dumps({"run": "A", "cli": "forged", "pid": _BYSTANDER,
+                                    "start": "victim"}) + "\n", encoding="utf-8")
+        os.chmod(path, 0o600)
+        record = process_control.read_cli_record(str(phase), "A")
+        host = _Host({_BYSTANDER: (_BYSTANDER, "victim")}, pidfd=True).install(monkeypatch)
+        host.bystanders.add(_BYSTANDER)
+        verdict = _kill(0, start_time=None, pgid=None, members=record.members,
+                        members_complete=record.complete)
+        assert _outcome(host, verdict) == ("unresolved", [], [])
 
 
 class TestTheLaunchRecord:
@@ -1197,7 +1325,8 @@ class TestAnUndatedTargetIsNeverSignalled:
         assert host.open_pidfds == set()
 
     def test_its_recorded_members_are_still_stopped(self, monkeypatch):
-        host = _Host({_WORKER: (_GROUP, "stranger"), _MEMBER: (_GROUP, "member")},
+        # The pid's new holder is a stranger: in a group and session of its own.
+        host = _Host({_WORKER: (_ELSEWHERE, "stranger"), _MEMBER: (_GROUP, "member")},
                      pidfd=True).install(monkeypatch)
         host.bystanders.add(_WORKER)
         verdict = _kill(_WORKER, start_time=None, pgid=_GROUP,
@@ -1463,6 +1592,69 @@ class TestARecordIsItsRunsAlone:
 # ---------------------------------------------------------------------------
 # Round 3, point 3: a launch racing an abort
 # ---------------------------------------------------------------------------
+
+
+class TestAPhaseDirThatCannotHoldTheRecord:
+    """SP-4: a phase dir that cannot be held as the run's own (a symlink,
+    another user's) is no reason to refuse a launch: the record is a later
+    kill's proof, not the CLI's containment. One warning, the launch starts
+    unrecorded, and every reader reads the record incomplete, so no abort or
+    close-out can call the cleanup done."""
+
+    @staticmethod
+    def _launch(phase_dir, monkeypatch, times=2):
+        monkeypatch.setattr(process_control, "_CLI_RECORD", [])
+        process_control.record_cli_identities(str(phase_dir), "A")
+        spawned = []
+
+        class _Child:
+            pid = 4321
+
+        monkeypatch.setattr(process_control.subprocess, "Popen",
+                            lambda *args, **kwargs: spawned.append(args) or _Child())
+        try:
+            for _ in range(times):
+                process_control.popen_tree(["sleep", "30"])
+        finally:
+            process_control.record_cli_identities(None)
+        return spawned
+
+    @records_here
+    def test_a_symlinked_phase_dir_starts_the_child_unrecorded(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        real = tmp_path / "real"
+        real.mkdir()
+        link = tmp_path / "review-plan"
+        link.symlink_to(real, target_is_directory=True)
+        assert len(self._launch(link, monkeypatch)) == 2
+        err = capsys.readouterr().err
+        assert err.count("WARNING: run A's phase dir cannot hold its record") == 1
+        assert "starting them unrecorded" in err
+        assert list(real.iterdir()) == [], "a record was written through the link"
+        assert process_control.read_cli_record(str(link), "A") == (
+            process_control.CliRecord([], False))
+        assert not process_control.close_launch_gate(str(link), "A").complete
+
+    @records_here
+    def test_another_users_phase_dir_starts_the_child_unrecorded(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        phase = tmp_path / "review-plan"
+        phase.mkdir()
+        owner = os.geteuid()
+        monkeypatch.setattr(process_control.os, "geteuid", lambda: owner + 1)
+        assert len(self._launch(phase, monkeypatch)) == 2
+        assert "is not a directory this user owns" in capsys.readouterr().err
+        assert list(phase.iterdir()) == []
+        assert process_control.read_cli_record(str(phase), "A") == (
+            process_control.CliRecord([], False))
+
+    @records_here
+    def test_a_missing_phase_dir_still_refuses(self, tmp_path, monkeypatch):
+        """No phase dir reads as a closed gate: nothing may start there."""
+        with pytest.raises(process_control.LaunchRefused, match="nothing was started"):
+            self._launch(tmp_path / "gone", monkeypatch, times=1)
 
 
 class TestALaunchRacingAnAbort:
@@ -1781,17 +1973,54 @@ class TestNativePidfdsNeedNoSigactionAbi:
         assert host.hit_bystanders() == [], _outcome(host, verdict)
         assert not [how for how, _sig in _signals(host) if how.startswith("group")]
 
-    def test_an_undated_owned_child_there_is_unresolved_and_gets_nothing(
-        self, monkeypatch
-    ):
-        """Its anchor reads SIGCHLD's disposition, which needs the ABI."""
-        host = _Host({_RUNNER: (_RUNNER, "leader")}, owned=[_RUNNER], pidfd=True)
+    def test_after_the_reset_an_undated_owned_child_gets_the_owned_kill(self, monkeypatch):
+        """SP-2 (coordinator's design): the flags cannot be read without the
+        ABI, but this process reset SIGCHLD itself, so its children are known
+        to become zombies: the owned kill runs, its group signalled through the
+        zombie-held leader, a tool child that ignores SIGTERM included."""
+        host = _Host({_RUNNER: (_RUNNER, "leader"), _MEMBER: (_RUNNER, "tool")},
+                     owned=[_RUNNER], deaf=[_MEMBER], pidfd=True)
         host.install(monkeypatch)
         monkeypatch.setattr(process_control, "_SIGACTION_ABI", [None])
         monkeypatch.setattr(process_control, "_sigchld_action", lambda: None)
+        monkeypatch.setattr(process_control, "_SIGCHLD_RESET", [True])
+        child = types.SimpleNamespace(pid=_RUNNER, returncode=None)
+        verdict = _kill(_RUNNER, start_time=None, pgid=_RUNNER, child=child)
+        assert _outcome(host, verdict) == (
+            "killed", [(f"group {_RUNNER}", "SIGTERM"), (f"group {_RUNNER}", "SIGKILL")], [])
+        assert _MEMBER not in host.procs and _RUNNER in host.zombies
+
+    def test_without_the_reset_an_undated_owned_child_gets_nothing(self, monkeypatch):
+        """No reset made (not the main thread, a Python handler in place) and
+        no flags to read: nothing proves the child's zombie is kept, so
+        neither it nor its group is signalled, by number or otherwise."""
+        host = _Host({_RUNNER: (_RUNNER, "leader"), _MEMBER: (_RUNNER, "tool")},
+                     owned=[_RUNNER], deaf=[_MEMBER], pidfd=True)
+        host.install(monkeypatch)
+        monkeypatch.setattr(process_control, "_SIGACTION_ABI", [None])
+        monkeypatch.setattr(process_control, "_sigchld_action", lambda: None)
+        monkeypatch.setattr(process_control, "_SIGCHLD_RESET", [])
         child = types.SimpleNamespace(pid=_RUNNER, returncode=None)
         verdict = _kill(_RUNNER, start_time=None, pgid=_RUNNER, child=child)
         assert (verdict, host.sent) == ("unresolved", [])
+        assert host.open_pidfds == set()
+
+    def test_a_reaped_child_whose_pid_a_sibling_took_gets_nothing(self, monkeypatch):
+        """Codex re-check 1 (``reused_child.py``): the child was reaped behind
+        its ``Popen`` (``SA_NOCLDWAIT`` with no reset to clear it) and a
+        sibling launch of this process took its pid. Nothing is signalled:
+        no group by number, no process by a row read now."""
+        host = _Host({_RUNNER: (_RUNNER, "original")}, owned=[_RUNNER], pidfd=True)
+        host.install(monkeypatch)
+        monkeypatch.setattr(process_control, "_sigchld_action", lambda: None)
+        monkeypatch.setattr(process_control, "_SIGCHLD_RESET", [])
+        child = types.SimpleNamespace(pid=_RUNNER, returncode=None)
+        host.reap(_RUNNER)()
+        host.spawn(_RUNNER, _RUNNER, "unrelated-sibling")()
+        host.owned.add(_RUNNER)
+        verdict = _kill(_RUNNER, start_time=None, pgid=_RUNNER, child=child)
+        assert host.hit_bystanders() == [] and host.sent == []
+        assert verdict == "unresolved"
 
 
 # ---------------------------------------------------------------------------
@@ -2280,15 +2509,18 @@ class TestRealProcesses:
         finally:
             _kill_quietly(worker, member)
 
-    def test_an_unrecorded_member_is_left_and_reported(self):
+    def test_an_unrecorded_member_in_the_runs_session_is_stopped(self):
+        """SP-3 with real processes: the held worker proves its session, so
+        the member nobody recorded there is stopped by its identity."""
         group, worker, member = _orphan(_A_WORKERS_GROUP)
         try:
+            assert os.getsid(member) == os.getsid(worker) != os.getsid(0)
             verdict = process_control.kill_tree(
                 worker, start_time=process_control.process_start_time(worker),
                 pgid=group, escalate_after_s=0.2, poll_interval_s=0.05)
-            assert verdict == "unresolved"
+            assert verdict == "killed"
             assert _gone(worker)
-            assert _running(member), "an unrecorded member was signalled"
+            assert _gone(member), "an unrecorded member of the run's session was left"
         finally:
             _kill_quietly(worker, member)
 
@@ -2418,6 +2650,48 @@ print("after", "SIG_DFL" if signal.getsignal(signal.SIGCHLD) == signal.SIG_DFL
 """
 
 
+#: Sets SA_NOCLDWAIT natively, then runs the entry's reset and an owned kill
+#: under a pinned unnamed ABI; prints what it saw as key=value words.
+_NOCLDWAIT_PROBE = """\
+import ctypes, os, signal, subprocess, sys, time
+sys.path.insert(0, {skill!r})
+from utils import process_control as pc
+words = 1024 // (8 * ctypes.sizeof(ctypes.c_ulong))
+class SA(ctypes.Structure):
+    _fields_ = [("handler", ctypes.c_void_p), ("mask", ctypes.c_ulong * words),
+                ("flags", ctypes.c_int), ("restorer", ctypes.c_void_p)]
+libc = ctypes.CDLL(None, use_errno=True)
+libc.sigaction.argtypes = [ctypes.c_int, ctypes.POINTER(SA), ctypes.POINTER(SA)]
+def flagged():
+    old = SA(); libc.sigaction(int(signal.SIGCHLD), None, ctypes.byref(old))
+    return bool(old.flags & 2)
+def zombie_kept():
+    p = subprocess.Popen(["true"]); time.sleep(0.3)
+    try:
+        kept = os.waitid(os.P_PID, p.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+    except ChildProcessError:
+        kept = False
+    p.wait()
+    return kept
+new = SA(); new.flags = 2
+assert libc.sigaction(int(signal.SIGCHLD), ctypes.byref(new), None) == 0
+print("before_flag=%s before_zombie=%s python_sees_default=%s" % (
+    flagged(), zombie_kept(), signal.getsignal(signal.SIGCHLD) == signal.SIG_DFL))
+pc.restore_sigchld_default()
+print("after_flag=%s after_zombie=%s" % (flagged(), zombie_kept()))
+pc._SIGACTION_ABI[:] = [None]
+print("known=%s" % pc._children_become_zombies())
+child = subprocess.Popen(["sh", "-c", "sleep 300 & sleep 300; wait"], start_new_session=True)
+time.sleep(0.3)
+verdict = pc.kill_tree(child.pid, start_time=None, pgid=child.pid, escalate_after_s=1.0,
+                       poll_interval_s=0.05, child=child)
+child.wait()
+left = [r for r in (pc._linux_process_table() or dict()).values()
+        if r.pgid == child.pid and r.state != "Z"]
+print("verdict=%s left=%d" % (verdict, len(left)))
+"""
+
+
 class TestAProcessEntryRestoresSigchld:
     """Under an inherited ``SIG_IGN`` the kernel reaps every child at once, so
     a ``Popen`` with no exit status no longer reserves its pid."""
@@ -2460,14 +2734,56 @@ class TestAProcessEntryRestoresSigchld:
         assert "restore_sigchld_default" in calls(ast.parse(source).body)
 
     @pytest.mark.parametrize("inherited, reset", [
-        (signal.SIG_IGN, True), (signal.SIG_DFL, False), (lambda *_a: None, False)])
-    def test_only_an_ignored_sigchld_is_changed(self, monkeypatch, inherited, reset):
+        (signal.SIG_IGN, True), (signal.SIG_DFL, True), (lambda *_a: None, False),
+        (None, False)], ids=["ignored", "default", "python-handler", "native-handler"])
+    def test_sigchld_is_reset_unless_a_handler_is_installed(
+        self, monkeypatch, inherited, reset
+    ):
+        """SP-2: the reset is made whatever Python reports (its ``SIG_DFL``
+        never shows an ``SA_NOCLDWAIT``), and recorded; someone's handler,
+        Python's or a native one, is left alone and nothing is claimed."""
         changed = []
+        monkeypatch.setattr(process_control, "_SIGCHLD_RESET", [])
         monkeypatch.setattr(process_control.signal, "getsignal", lambda _s: inherited)
         monkeypatch.setattr(process_control.signal, "signal",
                             lambda signum, handler: changed.append((signum, handler)))
         process_control.restore_sigchld_default()
         assert changed == ([(signal.SIGCHLD, signal.SIG_DFL)] if reset else [])
+        assert process_control._SIGCHLD_RESET == ([True] if reset else [])
+
+    def test_a_reset_that_cannot_be_made_claims_nothing(self, monkeypatch):
+        """Off the main thread ``signal.signal`` raises: nothing is reset, and
+        retention stays unknown where the flags cannot be read."""
+        monkeypatch.setattr(process_control, "_SIGCHLD_RESET", [])
+        monkeypatch.setattr(process_control, "_sigchld_action", lambda: None)
+        import threading
+
+        done = threading.Thread(target=process_control.restore_sigchld_default)
+        done.start()
+        done.join()
+        assert process_control._SIGCHLD_RESET == []
+        assert process_control._children_become_zombies() is None
+
+    @pytest.mark.skipif(
+        process_control._sigaction_abi() != "glibc" or os.uname().machine != "x86_64",
+        reason="sets SA_NOCLDWAIT through x86_64 glibc's struct sigaction")
+    def test_the_reset_clears_a_native_sa_nocldwait(self, tmp_path):
+        """Measured, in a process of its own (``SA_NOCLDWAIT`` would reap this
+        one's children): a native library sets ``SA_NOCLDWAIT``, Python still
+        reports ``SIG_DFL``; the entry's reset clears the flag, a child's
+        zombie is kept again, and with the flags unreadable (an unnamed ABI)
+        retention is known and the group is stopped through its leader."""
+        script = tmp_path / "probe.py"
+        script.write_text(_NOCLDWAIT_PROBE.format(skill=str(_SKILL_DIR)), encoding="utf-8")
+        result = subprocess.run([sys.executable, str(script)], capture_output=True,
+                                text=True, timeout=60)
+        assert result.returncode == 0, result.stdout + result.stderr
+        lines = dict(line.split("=", 1) for line in result.stdout.split() if "=" in line)
+        assert lines == {
+            "before_flag": "True", "before_zombie": "False", "python_sees_default": "True",
+            "after_flag": "False", "after_zombie": "True", "known": "True",
+            "verdict": "killed", "left": "0",
+        }, result.stdout + result.stderr
 
 
 #: A Lane A CLI's pid, auto-reaped and taken by another process, and that
@@ -2505,6 +2821,32 @@ class TestALaneARootIsVerifiedBeforeItsChildrenAreAdopted:
     """``returncode is None`` proves nothing once the kernel reaps children
     itself: the snapshot adopts a root's children only when the root's row
     has the start time it was registered with."""
+
+    def test_an_exited_root_keeps_the_snapshot_taken_while_it_ran(self, monkeypatch):
+        """F03: once the CLI exits (unreaped, a zombie) its children belong
+        to another parent, so a walk under it finds none; a refresh then must
+        not wipe what the snapshot named while it ran, which is what its
+        stop (the deadline's, a held pipe's) sweeps."""
+        host = _Host({_CLI_PID: (_GROUP, "cli"), _FOREIGN_CHILD: (_GROUP, "child")},
+                     owned=[_CLI_PID], pidfd=True).install(monkeypatch)
+
+        def table(*_args):
+            rows = host.table()
+            if _CLI_PID not in host.zombies:
+                rows[_FOREIGN_CHILD] = rows[_FOREIGN_CHILD]._replace(ppid=_CLI_PID)
+            return rows
+
+        monkeypatch.setattr(process_control, "_process_table", table)
+        proc = types.SimpleNamespace(pid=_CLI_PID, returncode=None)
+        registry = process_control.LiveCliRegistry()
+        registry._entries[id(proc)] = process_control.LiveCli(_CLI_PID, "cli", proc)
+        registry.refresh()
+        assert [e.pid for e in registry._entries[id(proc)].snapshot] == [_FOREIGN_CHILD]
+        host.exit(_CLI_PID)()
+        assert _CLI_PID in host.zombies
+        registry.refresh()
+        assert [e.pid for e in registry._entries[id(proc)].snapshot] == [_FOREIGN_CHILD]
+        assert [e.pid for e in registry.snapshot_for(proc)] == [_FOREIGN_CHILD]
 
     def test_a_replacement_s_child_is_not_adopted_and_gets_nothing(
         self, monkeypatch, pidfd
@@ -2573,7 +2915,9 @@ def _moved_group(tmp_path, monkeypatch, *, tool_exits_in_second_kill=False):
         # The CLI, not its group's leader, moves to the tool's group, in the
         # same session; during the teardown it is another process's.
         host.procs[_MOVED_CLI] = (_TOOL, "cli")
-        host.procs[_TOOL] = (_TOOL, "tool")
+        # A tool whose row cannot be dated: no kill can hold it (SP-3), so
+        # the first kill reads it running there unidentified.
+        host.procs[_TOOL] = (_TOOL, None)
         host.owned.clear()
         plain = host.table
 
@@ -2689,37 +3033,45 @@ class TestWhatAKillOwesIsClearedOnlyByAReCheck:
 # ---------------------------------------------------------------------------
 
 
-class TestTheExecutorDatesItsOwnChild:
-    """Without a ``sigaction`` ABI the anchor cannot be read; the child's
-    start time, read while its row names this process as its parent, holds it
-    for the kill by identity instead."""
+def _group_rows(pgid):
+    """The live (non-zombie) processes of group *pgid*, from ``/proc``."""
+    table = process_control._linux_process_table() or {}
+    return [row.pid for row in table.values() if row.pgid == pgid and row.state != "Z"]
 
-    def test_an_unnamed_abi_kills_its_own_child(self, monkeypatch, capsys):
+
+class TestTheExecutorUnderAnUnnamedAbi:
+    """Without a ``sigaction`` ABI the flags cannot be read; the process's own
+    SIGCHLD reset establishes zombie retention instead (coordinator's design,
+    replacing the dated child): the owned kill after it, nothing without it."""
+
+    def test_after_the_reset_it_kills_its_own_child_and_group(self, monkeypatch, capsys):
         from utils import subagent_executor as executor
 
         host = _Host({_RUNNER: (_RUNNER, "provider")}, owned=[_RUNNER], pidfd=True)
         host.install(monkeypatch)
         monkeypatch.setattr(process_control, "_sigchld_action", lambda: None)
+        monkeypatch.setattr(process_control, "_SIGCHLD_RESET", [True])
         proc = types.SimpleNamespace(pid=_RUNNER, returncode=None)
-        assert process_control.dated_own_child(proc) == "provider"
         assert executor._kill_timed_out(proc, _RUNNER) == "killed"
-        assert (f"pidfd {_RUNNER}", "SIGTERM") in _signals(host)
+        assert (f"group {_RUNNER}", "SIGTERM") in _signals(host)
         assert _RUNNER in host.zombies and "WARNING" not in capsys.readouterr().err
 
-    @pytest.mark.parametrize("case", ["another-parent", "reaped", "sigchld-ignored"])
-    def test_ownership_not_established_sends_nothing(self, monkeypatch, capsys, case):
+    @pytest.mark.parametrize("case", ["no-reset", "another-parent", "reaped",
+                                      "sigchld-ignored"])
+    def test_retention_not_established_sends_nothing(self, monkeypatch, capsys, case):
         from utils import subagent_executor as executor
 
         host = _Host({_RUNNER: (_RUNNER, "provider")},
                      owned=[] if case == "another-parent" else [_RUNNER], pidfd=True)
         host.install(monkeypatch)
         monkeypatch.setattr(process_control, "_sigchld_action", lambda: None)
+        monkeypatch.setattr(process_control, "_SIGCHLD_RESET",
+                            [] if case == "no-reset" else [True])
         if case == "sigchld-ignored":
             monkeypatch.setattr(process_control.signal, "getsignal",
                                 lambda _s: signal.SIG_IGN)
         proc = types.SimpleNamespace(pid=_RUNNER,
                                      returncode=0 if case == "reaped" else None)
-        assert process_control.dated_own_child(proc) is None
         verdict = executor._kill_timed_out(proc, _RUNNER)
         if case == "reaped":
             # Its exit status is had: the child is gone, whatever has the pid.
@@ -2731,12 +3083,52 @@ class TestTheExecutorDatesItsOwnChild:
 
     @on_linux_with_proc
     @identity_kill_here
+    @pytest.mark.parametrize("reset", [True, False], ids=["after-reset", "no-reset"])
+    def test_a_real_group_under_an_unnamed_abi(self, monkeypatch, reset):
+        """SP-2 with real processes, the executor's and the verify command's
+        call alike (``start_time=None``, the ``Popen`` as *child*): after the
+        reset the whole group (the shell and the two ``sleep``s it started) is
+        stopped through the zombie-held leader; without it nothing is sent."""
+        api = process_control._pidfd_api()
+        monkeypatch.setattr(process_control, "_PIDFDS", [api])
+        monkeypatch.setattr(process_control, "_SIGACTION_ABI", [None])
+        monkeypatch.setattr(process_control, "_SIGCHLD_RESET", [True] if reset else [])
+        assert process_control._sigchld_action() is None
+        child = subprocess.Popen(["sh", "-c", "sleep 300 & sleep 300; wait"],
+                                 **process_control.new_process_group_kwargs())
+        pgid = child.pid
+        try:
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and len(_group_rows(pgid)) < 3:
+                time.sleep(0.05)
+            verdict = process_control.kill_tree(
+                child.pid, start_time=None, pgid=pgid, escalate_after_s=1.0,
+                poll_interval_s=0.05, child=child)
+            if reset:
+                assert verdict == "killed"
+                assert child.wait(timeout=5) == -signal.SIGTERM
+                assert _group_rows(pgid) == [], "a group member outlived the kill"
+            else:
+                assert verdict == "unresolved"
+                assert child.poll() is None and len(_group_rows(pgid)) == 3
+        finally:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except OSError:
+                pass
+            if child.poll() is None:
+                child.kill()
+            child.wait()
+
+    @on_linux_with_proc
+    @identity_kill_here
     def test_a_real_harmless_child_under_an_unnamed_abi(self, monkeypatch):
         from utils import subagent_executor as executor
 
         api = process_control._pidfd_api()
         monkeypatch.setattr(process_control, "_PIDFDS", [api])
         monkeypatch.setattr(process_control, "_SIGACTION_ABI", [None])
+        monkeypatch.setattr(process_control, "_SIGCHLD_RESET", [True])
         assert process_control._sigchld_action() is None
         child = subprocess.Popen(["sleep", "30"],
                                  **process_control.new_process_group_kwargs())

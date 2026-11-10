@@ -8,6 +8,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -841,7 +842,15 @@ def _run_provider_cli(
     exits (plus a drain of :data:`LANE_A_DRAIN_S` at most), not when the last
     process holding an inherited pipe closes it. The streams that passed the
     bound ride out as ``capped_streams`` on the ``CompletedProcess`` and on the
-    ``TimeoutExpired``.
+    ``TimeoutExpired``. A pipe still held once the CLI exited is held by what
+    it left running: before this call returns, that is swept exactly as on
+    the deadline (:func:`_stop_and_note`). A sweep that is confirmed and lets
+    go of the pipes leaves the CLI's answer standing, and what it did rides
+    out as ``pipe_held`` (:func:`_held_pipe_record`; ``""`` when no pipe was
+    held); otherwise a process the sweep did not reach still holds the
+    output, or may, and the call ends as the deadline's ``TimeoutExpired``,
+    as it did when that process held the pipe until the deadline, with the
+    words saying so as ``held_pipe``.
 
     *stream_watch* (the adapter's ``stream_watch()``, passed only when it
     declares one) watches stdout as it arrives; when it asks for a stop, the
@@ -863,7 +872,8 @@ def _run_provider_cli(
     either: a job does not change who a terminal Ctrl-C reaches, a new group
     would. The job travels with the CLI into the registry, so a sweep ends it
     too, and is closed (never a kill) once the CLI is no longer waited on; a CLI
-    that exits on its own leaves whatever it started running, as on POSIX.
+    that exits on its own leaves whatever it started running, as on POSIX,
+    unless it still holds the CLI's pipes (above).
     """
     if capture_output:
         popen_kwargs["stdout"] = subprocess.PIPE
@@ -872,12 +882,18 @@ def _run_provider_cli(
         popen_kwargs["stdin"] = subprocess.PIPE
     proc, job = process_control.popen_tree(cmd, **popen_kwargs)
     streams: Optional[process_capture.PipeCapture] = None
+    held_sweep = ""
     try:
         with process_control.live_cli_registry.tracking(proc, job):
             try:
+                # A pipe still held once the CLI exited is what it left
+                # running: swept as on the deadline before this call returns,
+                # so the slot's write check after it sees every write it made
+                # (docs/development/runtime.md#process-primitives).
                 streams = process_capture.PipeCapture(
                     proc, max_bytes=LANE_A_MAX_STREAM_BYTES, grace_s=LANE_A_DRAIN_S,
                     watch=stream_watch,
+                    on_held=lambda _held: _stop_and_note(proc, job),
                 )
                 stdout, stderr = streams.communicate(input=input, timeout=timeout)
             except subprocess.TimeoutExpired as exc:
@@ -893,7 +909,18 @@ def _run_provider_cli(
             except BaseException:
                 _stop_and_note(proc, job)
                 raise
-            if _stopped_from_outside(proc.returncode):
+            if streams.held_stopped:
+                held_sweep, confirmed = _held_pipe_record(proc, streams)
+                if not confirmed:
+                    expired = subprocess.TimeoutExpired(
+                        proc.args, timeout, output=stdout, stderr=stderr
+                    )
+                    expired.tree_sweep = streams.held_stop
+                    expired.capped_streams = streams.capped
+                    expired.stream_stop = None
+                    expired.held_pipe = held_sweep
+                    raise expired
+            elif _stopped_from_outside(proc.returncode):
                 # Dead already, and its detached children may not be: only the
                 # registry's snapshot still links them to this slot (on Windows,
                 # its job).
@@ -910,7 +937,47 @@ def _run_provider_cli(
                 job.close()
     completed = subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
     completed.capped_streams = streams.capped
+    completed.pipe_held = held_sweep
     return completed
+
+
+def _held_pipe_record(
+    proc: "subprocess.Popen[Any]", streams: process_capture.PipeCapture,
+) -> Tuple[str, bool]:
+    """What the deadline's sweep did once the CLI exited while a process it
+    started still held its output (the capture's ``on_held``,
+    :func:`_stop_and_note`), and whether it confirmed the stop: the sweep
+    confirmed every group it met (:func:`_sweep_confirmed`) and the pipes
+    were let go. Confirmed, the text is the slot's record
+    (``Capture.pipe_held``). Not confirmed, it is the words the call's
+    timeout carries: a pipe still held is held by a process the sweep did not
+    reach, which may still run (the private home it was lent is kept,
+    ``process_control.note_stop``), and how to look for it; a ``WARNING``
+    says so too. Never raises."""
+    sweep = streams.held_stop
+    try:
+        line = sweep.describe() if sweep is not None else "the sweep failed"
+        confirmed = _sweep_confirmed(sweep)
+    except Exception:  # noqa: BLE001 - a record never fails the slot
+        line, confirmed = "the sweep could not be read", False
+    held = " and ".join(sorted(streams.still_held))
+    if not held and confirmed:
+        return ("the CLI exited while a process it started still held its output; "
+                f"swept before the slot's checks: {line}"), True
+    process_control.note_stop(proc, False)
+    text = (
+        f"the CLI exited (code {proc.returncode}) while a process it started held "
+        f"its output, so what it started was swept as at a timeout ({line})"
+        + (f", but its {held} was still held after that: a process the sweep did "
+           f"not reach holds it and may still be running" if held
+           else ", which could not be confirmed")
+        + "; the call was ended as a timeout. Look for it with: ps -eo "
+        "pid,ppid,pgid,sid,lstart,args (one in a session of its own has init or the "
+        "user's service manager as its parent and started during this run)"
+    )
+    print(f"WARNING: pid {getattr(proc, 'pid', None)}: {text}.", file=sys.stderr,
+          flush=True)
+    return text, False
 
 
 def _capped_streams(outcome: Any) -> FrozenSet[str]:
@@ -1734,6 +1801,7 @@ def _run_dispatch(prepared: PreparedDispatch) -> Capture:
             ),
             **({"stream_watch": watch} if watch is not None else {}),
         )
+    held = getattr(completed, "pipe_held", "")
     return Capture(
         stdout=completed.stdout,
         stderr=completed.stderr,
@@ -1741,6 +1809,7 @@ def _run_dispatch(prepared: PreparedDispatch) -> Capture:
         duration=time.time() - prepared.start_time,
         capped_streams=_capped_streams(completed),
         stream_bound=LANE_A_MAX_STREAM_BYTES,
+        pipe_held=held if isinstance(held, str) else "",
     )
 
 
@@ -1761,6 +1830,7 @@ def _timed_out_capture(expired: subprocess.TimeoutExpired, start_time: float) ->
     the deadline, asked for the stop."""
     duration = time.time() - start_time
     stop = getattr(expired, "stream_stop", None)
+    held = getattr(expired, "held_pipe", "")
     return Capture(
         stdout=_decoded_partial(expired.stdout),
         stderr=_decoded_partial(expired.stderr),
@@ -1770,6 +1840,7 @@ def _timed_out_capture(expired: subprocess.TimeoutExpired, start_time: float) ->
         stream_bound=LANE_A_MAX_STREAM_BYTES,
         tree_sweep=_describe_tree_sweep(expired),
         stream_stop=stop if isinstance(stop, str) and stop else None,
+        pipe_held=held if isinstance(held, str) else "",
     )
 
 
@@ -1800,6 +1871,10 @@ def _log_outcome(
         returncode, error = capture.exit_code, result["error"]
     else:
         returncode, error = capture.exit_code, result.get("error")
+    if capture.pipe_held and not capture.timed_out:
+        # What the sweep of the CLI's pipe holders did, beside how it ended
+        # (a timeout's error line names it already).
+        error = f"{error}; {capture.pipe_held}" if error else capture.pipe_held
     _save_log(
         log_file=log_file, model=model, prompt=prompt, stdout=capture.stdout,
         stderr=capture.stderr, returncode=returncode,

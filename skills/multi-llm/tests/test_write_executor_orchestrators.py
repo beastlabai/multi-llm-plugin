@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -55,6 +56,15 @@ def __getattr__(name):
     if name == "repo":
         return orchestrator_repo
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def _alive(pid):
+    """Is *pid* still running (a zombie is not)?"""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as handle:
+            return handle.read().rsplit(b")", 1)[-1].split()[0] != b"Z"
+    except OSError:
+        return False
 
 
 class TestImplementOrchestratorWiring:
@@ -102,6 +112,91 @@ class TestImplementOrchestratorWiring:
         report = json.loads((phase_dir / "write_batch_report.json").read_text())
         assert report["finalized"] is True
         assert report["exit"] == 0
+
+    @pytest.mark.skipif(sys.platform != "linux", reason="a POSIX wrapper; setsid")
+    def test_a_held_pipe_outside_the_runs_group_stops_as_a_timeout_that_moved_bytes(
+        self, repo, capsys
+    ):
+        """F03 (coordinator's design): T001's runner applies its edit and
+        exits 0, but a helper it started in a session of its own keeps its
+        output open, so the run's group is stopped and the pipe stays held.
+        The batch ends exactly as a runner that applied its edit and ran past
+        its time limit: the same status, the same stop and the same resume
+        answer, never sent again by itself, and the helper never signalled."""
+        from utils import dispatch_spawn, status_file
+        from utils.providers.codex import CodexProvider
+
+        _seed_generate_tasks(repo)
+        # A 4 s slot: codex's declared 25 s retry envelope would refuse it.
+        repo.monkeypatch.setattr(CodexProvider, "internal_retries", None)
+        repo.monkeypatch.setenv("MOCK_LLM_EDITS", json.dumps([
+            {"path": "src/main.py", "mode": "patch", "content": "# edited\n"}
+        ]))
+        repo.monkeypatch.setenv("MOCK_LLM_WRITE_IDS", IMPLEMENT_WRITE_IDS)
+        repo.monkeypatch.setattr(dispatch_spawn, "TIMEOUT_DRAIN_S", 0.5)
+        tmp = repo.tmp_path
+        (tmp / "driver.yaml").write_text(
+            "driver:\n  subagent_runner: codex:gpt-5.5\n  subagent_timeout_s: 4\n",
+            encoding="utf-8")
+        real = tmp / "real-bin"
+        real.mkdir()
+        codex = tmp / "bin" / "codex"
+        (real / "codex").symlink_to(codex.resolve())
+        holders = tmp / "holders"
+
+        def run(body):
+            registry._config = None
+            registry._config_key = None
+            codex.unlink()
+            codex.write_text(
+                "#!/bin/sh\n"
+                'case " $* " in\n'
+                f'  *" exec "*)\n{body}\n    ;;\n'
+                "esac\n"
+                f'exec "{real / "codex"}" "$@"\n',
+                encoding="utf-8",
+            )
+            codex.chmod(0o755)
+            code = implement_orchestrator.main([
+                "--plan-file", str(repo.plan), "--yes", "--exec-subagents",
+            ])
+            captured = capsys.readouterr()
+            out = captured.out + captured.err
+            phase_dir = _phase_dir(repo)
+            report = json.loads((phase_dir / "subagent_batch_report.json").read_text())
+            rows = {row["task_id"]: row for row in report["tasks"]}
+            stop = status_file.read_status(str(phase_dir))["progress"]["write_subagents"]["stop"]
+            way = out[out.index("To go on:"):out.index("Audit log:")]
+            facts = {
+                "code": code, "status": rows["T001"]["status"],
+                "attempts": rows["T001"]["attempt_count"], "rows": sorted(rows),
+                "kind": stop.get("kind"), "answers": stop.get("answers"),
+                "resume_why": stop.get("resume_why"), "way_forward": way,
+            }
+            return facts, rows["T001"].get("reason") or ""
+
+        pids = []
+        try:
+            held, held_reason = run(
+                f'    setsid sleep 30 &\n    echo $! >> "{holders}"\n'
+                f'    "{real / "codex"}" "$@"\n    exit $?')
+            pids = [int(line) for line in holders.read_text(encoding="utf-8").split()]
+            assert all(_alive(pid) for pid in pids), "the outside holder was signalled"
+            # Back to the tree before the run, for the same batch to time out.
+            shutil.rmtree(_phase_dir(repo))
+            subprocess.run(["git", "checkout", "-q", "--", "."], cwd=repo.root, check=True)
+            timed, _reason = run(f'    "{real / "codex"}" "$@"\n    sleep 30\n    exit 0')
+        finally:
+            for pid in pids:
+                try:
+                    os.kill(pid, 9)
+                except OSError:
+                    pass
+        assert held == timed
+        assert held["code"] == 3 and held["status"] == "partial_application"
+        assert held["attempts"] == 1 and held["rows"] == ["T001"]
+        assert "a process outside the run's process group holds it" in held_reason
+        assert "pgrep -l -s" in held_reason
 
     def test_a_stopped_batch_still_seeds_pending_for_every_undispatched_task(
         self, repo

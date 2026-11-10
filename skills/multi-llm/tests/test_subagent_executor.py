@@ -684,11 +684,12 @@ class TestFailureLadder:
     def test_a_runner_that_exits_while_a_grandchild_holds_its_pipe_returns_its_result(
         self, tmp_path, runner_env, monkeypatch
     ):
-        """PROV-4: the runner prints its result and exits 0, and a process it
-        started keeps the inherited stdout open. The dispatch returns with the
-        result once the runner is gone (plus the drain), never at the deadline,
-        and stops nothing: a runner that exits on its own leaves what it
-        started running."""
+        """PROV-4 and SP-1: the runner prints its result and exits 0, and a
+        process it started keeps the inherited stdout open. The dispatch
+        returns with the result once the runner is gone (plus the drain),
+        never at the deadline; what the runner left holding its pipe is
+        stopped before the dispatch returns to the checks, and the row says
+        so."""
         if os.name == "nt":  # pragma: no cover - a POSIX shell wrapper
             pytest.skip("the wrapper is a POSIX shell script")
         runner_env.use("codex:gpt-5.5")
@@ -710,10 +711,88 @@ class TestFailureLadder:
             assert outcome.status == executor.STATUS_OK, outcome.reason
             assert (tmp_path / "validation_batch_0.json").exists()
             assert elapsed < 15, f"{elapsed:.1f}s: the dispatch waited on the held pipe"
-            assert _pid_alive(holder), "a normal exit must not stop what the runner started"
+            # Its new parent reaps it: give that a moment, never the dispatch.
+            gone_by = time.time() + 5
+            while time.time() < gone_by and _pid_alive(holder):
+                time.sleep(0.05)
+            assert not _pid_alive(holder), "the pipe's holder outlived the dispatch"
+            assert "its process group was stopped before the task's checks" in (
+                outcome.reason or "")
+            assert "(kill verdict killed)" in outcome.reason
         finally:
             if holder is not None and _pid_alive(holder):
                 os.kill(holder, signal.SIGKILL)
+
+    def test_a_holder_outside_the_runs_group_ends_the_dispatch_as_a_timeout(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """F03 (coordinator's design): the runner answers and exits 0, but a
+        helper it started in a session of its own keeps its output open. The
+        run's group is stopped as at a timeout, the pipe stays held, so the
+        dispatch ends as the timeout it was at the base, saying what holds the
+        output and how to look for it; the helper, outside the run's group,
+        is never signalled."""
+        if os.name == "nt":  # pragma: no cover - a POSIX shell wrapper
+            pytest.skip("the wrapper is a POSIX shell script")
+        runner_env.use("codex:gpt-5.5")
+        runner_env.echo("validation")
+        holder = tmp_path / "holder.pid"
+        self._wrap_codex(runner_env, f"""\
+            setsid sleep 30 &
+            echo $! >> "{holder}"
+            "$real" "$@"
+            exit $?
+            """)
+        monkeypatch.setattr(dispatch_spawn, "TIMEOUT_DRAIN_S", 0.5)
+        pids = []
+        try:
+            outcome = self._dispatch(tmp_path, runner_env, timeout=60, retries=0)
+            pids = [int(line) for line in holder.read_text(encoding="utf-8").split()]
+            assert outcome.status == executor.STATUS_TIMEOUT, outcome.reason
+            assert len(outcome.attempts) == 1
+            reason = outcome.reason or ""
+            assert "a process outside the run's process group holds it" in reason
+            assert "ended as a timeout" in reason and "pgrep -l -s" in reason
+            assert all(_pid_alive(pid) for pid in pids), "the outside holder was signalled"
+        finally:
+            for pid in pids:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+
+    def test_a_survivor_cannot_write_after_a_write_dispatch_returned(
+        self, tmp_path, monkeypatch
+    ):
+        """SP-1, the write lane's case: an ``agent-write`` runner prints its
+        result and exits 0 while a helper it started (inheriting its stdio)
+        writes into the working tree two seconds later. The dispatch keeps the
+        runner's own answer and exit code, and stops the helper before it
+        returns, so the per-task checks that follow see every write it made:
+        none lands afterwards."""
+        if os.name == "nt":  # pragma: no cover - a POSIX shell script
+            pytest.skip("POSIX shell")
+        from utils.providers.codex import CodexProvider
+
+        provider = CodexProvider()
+        late = tmp_path / "late_write.txt"
+        script = (f'(sleep 2; echo late > "{late}") & '
+                  "echo '{\"status\":\"done\"}'; exit 0")
+        monkeypatch.setattr(type(provider), "build_agent_command_for_transport",
+                            lambda self, *a, **k: (["bash", "-c", script], None))
+        monkeypatch.setattr(dispatch_spawn, "TIMEOUT_DRAIN_S", 0.5)
+        started = time.monotonic()
+        capture = executor._spawn_in_context(
+            provider=provider, model="gpt-5.5", prompt="p", profile=PROFILE_AGENT_WRITE,
+            transport="argv", timeout=30, cwd=str(tmp_path))
+        elapsed = time.monotonic() - started
+        assert elapsed < 2, f"{elapsed:.1f}s: the dispatch waited on the helper"
+        assert capture.exit_code == 0 and not capture.timed_out
+        assert capture.stdout == '{"status":"done"}\n'
+        assert capture.pipe_held and capture.pipe_held_verdict == "killed"
+        assert "stopped before the task's checks" in dispatch_spawn.pipe_held_note(capture)
+        time.sleep(3)
+        assert not late.exists(), "the helper wrote after the dispatch returned"
 
     def test_a_stdout_past_the_capture_bound_is_refused_at_rung_5(
         self, tmp_path, runner_env, monkeypatch, capsys
