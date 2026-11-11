@@ -394,7 +394,13 @@ pid (`status --abort`, the dead-run close-out, `util runs --sweep`) open it by n
 if a live recorded pid is in it, and kill through it (`kill_run_tree`); the failed-handshake
 teardown uses the launcher's own handle. `taskkill /T` is left for a child that got no job and for
 a run whose job cannot be opened or trusted (another logon session, a worker that never held it,
-a squatted name). The one other `ctypes` user on Windows is `utils/prompt_files.py`, which
+a squatted name). A `CTRL_BREAK_EVENT` goes only to a child `popen_tree` started with
+`new_process_group_kwargs()`, passed as the `child` of its own `kill_tree` (the timed-out runner
+and verify command). `GenerateConsoleCtrlEvent` sends the event to every process on the caller's
+console when the number is not a group there, and a recorded pid never is one: `DETACHED_PROCESS`
+leaves the worker no console, and the pid it records is the real interpreter's, a child of the
+venv's `python.exe` launcher or uv's trampoline. So every kill by recorded pid goes straight to
+the job, or `taskkill /T`, with no grace (2026-11-12). The one other `ctypes` user on Windows is `utils/prompt_files.py`, which
 removes prompt files through handles it holds open; that is filesystem work, not process control.
 It is the façade `plans/windows-macos-portability.md` owns; per that plan's sequencing rule this work typed it
 first, so its signatures are a cross-plan interface. A test fails any other runtime module that

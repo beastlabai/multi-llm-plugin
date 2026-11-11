@@ -70,6 +70,7 @@ import subprocess
 import sys
 import threading
 import time
+import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import (
@@ -873,7 +874,10 @@ def new_process_group_kwargs() -> Dict[str, Any]:
     back into the caller's own group. Windows: ``CREATE_NEW_PROCESS_GROUP``,
     which is what makes the child a valid ``CTRL_BREAK_EVENT`` target; it does
     **not** break the child out of the worker's Job Object (D4d), so job
-    teardown still covers the tree.
+    teardown still covers the tree. Only a child spawned through
+    :func:`popen_tree` with these kwargs is ever sent that break, and only as
+    the ``child`` its own ``Popen`` is passed to :func:`kill_tree`
+    (:func:`_leads_console_group`).
     """
     if IS_WINDOWS:  # pragma: no cover - Windows
         return {
@@ -984,6 +988,22 @@ def kill_tree(
     has one too, by name: :func:`kill_run_tree` opens it and passes it here
     (2026-10-25). Without one (a run whose job could not be opened, a child
     spawned without a job) the escalation is ``taskkill /T`` as before.
+
+    The graceful phase there is a ``CTRL_BREAK_EVENT``, and it is sent only to
+    a group this process is known to have made on its own console: *child* is
+    a ``Popen`` :func:`popen_tree` started with ``CREATE_NEW_PROCESS_GROUP``
+    (and no flag that leaves the console), it is not yet reaped, and *pid* is
+    its pid (:func:`_leads_console_group`). Every other target, a pid read off
+    disk above all, gets no break and no grace: its job, or ``taskkill /T``,
+    is the whole kill. ``GenerateConsoleCtrlEvent`` takes any number, and one
+    that is not the id of a process group on the caller's console reaches
+    every process attached to that console. A detached worker's recorded pid
+    is never one: ``DETACHED_PROCESS`` gives the worker no console, and the
+    pid it records is the real interpreter's, a child of the venv's
+    ``python.exe`` launcher or of uv's trampoline, which leads the group. So
+    the break an abort used to send the worker never reached it, and reached
+    instead whatever shared the aborter's console: the host CLI that ran
+    ``status --abort``, or the test run that called it (2026-11-12).
     """
     if not pid and not pgid and not members and members_complete:
         # Nothing recorded to probe or signal, but a job still names a tree: a
@@ -1056,7 +1076,7 @@ def _kill_by_number(
             job.terminate()
         return "gone"
     if IS_WINDOWS:  # pragma: no cover - Windows
-        return _windows_kill_tree(pid, escalate_after_s, job)
+        return _windows_kill_tree(pid, escalate_after_s, job, child)
     return _posix_kill_tree(pid, escalate_after_s, poll_interval_s, pgid=pgid)
 
 
@@ -2702,11 +2722,13 @@ def popen_tree(args: Any, **kwargs: Any) -> Tuple[Any, Optional[TreeJob]]:
     :func:`child_ledger`.
     """
     token = _record_launch()
+    flags = kwargs.get("creationflags")
     try:
         proc, job = _popen_tree(args, kwargs)
     except BaseException:
         _record_failed(token)
         raise
+    _note_console_group(proc, flags)
     _record_spawned(token, proc)
     for ledger in _open_ledgers():
         ledger.add(proc)
@@ -3028,8 +3050,66 @@ def kill_run_tree(run_id: Any, pid: int, **kwargs: Any) -> str:
         job.close()
 
 
+#: ``CreateProcess`` flags (WinBase.h). The first makes the child a console
+#: process group of its own, whose id is its pid; each of the others leaves it
+#: no place on its parent's console (none at all, a new one, a hidden new one),
+#: so a break sent on the parent's console cannot reach its group.
+_CREATE_NEW_PROCESS_GROUP = 0x00000200
+_LEAVES_THE_CONSOLE = (
+    0x00000008      # DETACHED_PROCESS
+    | 0x00000010    # CREATE_NEW_CONSOLE
+    | 0x08000000    # CREATE_NO_WINDOW
+)
+
+#: The ``Popen`` objects :func:`popen_tree` started as the leader of a console
+#: process group on this process's console (:func:`_note_console_group`): the
+#: only targets a ``CTRL_BREAK_EVENT`` is ever sent to. Weak, so a child let go
+#: of leaves the set with its object.
+_CONSOLE_GROUP_LEADERS: "weakref.WeakSet[Any]" = weakref.WeakSet()
+
+
+def _note_console_group(proc: Any, creationflags: Any) -> None:
+    """Remember *proc* as a console group leader when *creationflags* made it
+    one on this console. Never raises: a test double that cannot be weakly
+    referenced is simply not remembered, and so never sent a break."""
+    try:
+        flags = int(creationflags or 0)
+    except (TypeError, ValueError):
+        return
+    if not flags & _CREATE_NEW_PROCESS_GROUP or flags & _LEAVES_THE_CONSOLE:
+        return
+    try:
+        _CONSOLE_GROUP_LEADERS.add(proc)
+    except TypeError:
+        pass
+
+
+def _leads_console_group(child: Any, pid: int) -> bool:
+    """May a ``CTRL_BREAK_EVENT`` go to *pid*? Only when it is the pid of
+    *child*, a ``Popen`` :func:`popen_tree` started as a console group leader
+    (:data:`_CONSOLE_GROUP_LEADERS`) and that is not yet reaped.
+
+    ``GenerateConsoleCtrlEvent`` checks nothing: an id that is not a process
+    group on the caller's console sends the event to every process attached
+    to it, the caller and its host included. Held unreaped, the child keeps
+    its pid from being recycled (``Popen`` holds its process handle), and the
+    group it leads is the one it was created with. Only a definite yes counts.
+    """
+    if child is None or not pid:
+        return False
+    try:
+        if child not in _CONSOLE_GROUP_LEADERS:
+            return False
+        return int(child.pid) == int(pid) and child.returncode is None
+    except Exception:  # noqa: BLE001 - not a Popen this module made
+        return False
+
+
 def _send_ctrl_break(pid: int) -> None:  # pragma: no cover - Windows
-    """``CTRL_BREAK_EVENT`` to the console process group *pid* leads."""
+    """``CTRL_BREAK_EVENT`` to the console process group *pid* leads.
+
+    Called only once :func:`_leads_console_group` said yes: any other number
+    reaches every process on this console (:func:`kill_tree`)."""
     try:
         # ctypes loads only on the platform path that calls it.
         import ctypes
@@ -3043,17 +3123,23 @@ def _send_ctrl_break(pid: int) -> None:  # pragma: no cover - Windows
 
 def _windows_kill_tree(
     pid: int, escalate_after_s: float, job: Optional[TreeJob] = None,
+    child: Optional[Any] = None,
 ) -> str:  # pragma: no cover
-    _send_ctrl_break(pid)
-    deadline = time.time() + max(escalate_after_s, 0.0)
-    while time.time() < deadline:
-        if not process_alive(pid):
-            # The leader took the break; the job takes what it left running,
-            # which is only ever its own tree.
-            if job is not None:
-                job.terminate()
-            return "killed"
-        time.sleep(0.1)
+    """Windows' kill by number: a break and its grace for a group this
+    process made (:func:`_leads_console_group`), then the job, or
+    ``taskkill /T`` without one. Any other target goes straight to the job:
+    no break can be aimed at it, so a grace would only be a wait."""
+    if _leads_console_group(child, pid):
+        _send_ctrl_break(pid)
+        deadline = time.time() + max(escalate_after_s, 0.0)
+        while time.time() < deadline:
+            if not process_alive(pid):
+                # The leader took the break; the job takes what it left running,
+                # which is only ever its own tree.
+                if job is not None:
+                    job.terminate()
+                return "killed"
+            time.sleep(0.1)
     # A group-less kill would strand the provider CLIs, so escalate to the whole
     # child tree.
     end_tree(pid, job)

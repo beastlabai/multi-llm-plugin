@@ -80,6 +80,10 @@ NOT_REGISTERED: Dict[str, str] = {
         "leftovers; a test that wants a sweep replaces it, so a reset per "
         "test would only sweep /tmp again",
     "utils.llm_client._LIVE_CHILDREN": "live fan-out children",
+    "utils.process_control._CONSOLE_GROUP_LEADERS":
+        "live children this process started as console group leaders; weak, "
+        "so each leaves with its Popen, and a reset would only make a live "
+        "child's timeout kill skip its break",
     "utils.process_control._JOB_API":
         "the lazily bound Windows job API, fixed for the process",
     "utils.process_control._RUN_JOB_HANDLES": "open handles on the worker's run job",

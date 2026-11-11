@@ -565,31 +565,23 @@ class TestOpenRunJob:
 
 
 class TestKillRunTree:
-    def test_the_escalation_ends_the_job_never_taskkill(self, windows, monkeypatch):
-        """The leader ignores the break; the escalation is the job's."""
+    def test_the_job_is_the_whole_kill_never_taskkill(self, windows, monkeypatch):
+        """The recorded pid is never sent a break, so there is no grace to wait
+        out: the job ends the tree at once (``kill_tree``, 2026-11-12)."""
         leader = Leader()
         windows.existing(NAME, 4242)
         windows.on_terminate = leader.end
         monkeypatch.setattr(process_control, "process_alive", leader.process_alive)
         monkeypatch.setattr(process_control, "probe", lambda *_a: process_control.ALIVE)
+        started = time.monotonic()
         verdict = process_control.kill_run_tree(
-            RUN_ID, 4242, start_time="t0", escalate_after_s=0.1, poll_interval_s=0.01)
+            RUN_ID, 4242, start_time="t0", escalate_after_s=30.0, poll_interval_s=0.01)
         assert verdict == "killed"
-        assert windows.breaks == [4242], "the graceful break still comes first"
+        assert time.monotonic() - started < 10.0, "no grace without a break"
+        assert windows.breaks == [], "a pid read off disk leads no group on this console"
         assert windows.taskkills == []
         assert windows.names()[-2:] == ["terminate", "close"]
         assert windows.terminated == [NAME]
-
-    def test_a_leader_that_took_the_break_still_has_its_tree_ended(
-        self, windows, monkeypatch
-    ):
-        leader = Leader()
-        windows.existing(NAME, 4242)
-        monkeypatch.setattr(process_control, "process_alive", leader.process_alive)
-        monkeypatch.setattr(process_control, "probe", lambda *_a: process_control.ALIVE)
-        monkeypatch.setattr(process_control, "_send_ctrl_break", leader.end)
-        assert process_control.kill_run_tree(RUN_ID, 4242, start_time="t0") == "killed"
-        assert windows.terminated == [NAME] and windows.taskkills == []
 
     @pytest.mark.parametrize("why", ["pid-not-in-job", "job-cannot-open"])
     def test_without_a_trusted_job_it_is_taskkill_as_before(
@@ -672,11 +664,12 @@ class TestTheKillSites:
         _record(phase, plan)
         leader = Leader()
         windows.existing(NAME, 4242)
+        windows.on_terminate = leader.end
         monkeypatch.setattr(process_control, "process_alive", leader.process_alive)
         monkeypatch.setattr(process_control, "probe", lambda *_a: process_control.ALIVE)
-        monkeypatch.setattr(process_control, "_send_ctrl_break", leader.end)
         result = detach.abort_run(str(phase))
         assert result["result"] == "aborted"
+        assert windows.breaks == []
         assert ("open_named", NAME, JOB_OBJECT_TERMINATE | JOB_OBJECT_QUERY) in windows.calls
         assert ("in_job", "process:4242", 101) in windows.calls
         assert windows.terminated == [NAME] and windows.taskkills == []
@@ -693,9 +686,12 @@ class TestTheKillSites:
         leader = Leader()
         monkeypatch.setattr(process_control, "process_alive", leader.process_alive)
         monkeypatch.setattr(process_control, "probe", lambda *_a: process_control.ALIVE)
-        monkeypatch.setattr(process_control, "_send_ctrl_break", leader.end)
+        monkeypatch.setattr(process_control, "taskkill_tree",
+                            lambda pid, timeout=30.0: (windows.taskkills.append(pid),
+                                                       leader.end()))
         assert detach.abort_run(str(phase))["result"] == "aborted"
         assert windows.names() == ["open_named"] and windows.terminated == []
+        assert windows.taskkills == [4242] and windows.breaks == []
 
     def test_a_close_out_ends_what_a_dead_leader_left_in_its_job(
         self, windows, host_locks, run_dirs, monkeypatch
@@ -723,10 +719,11 @@ class TestTheKillSites:
         os.utime(old, (eight_days, eight_days))
         leader = Leader()
         windows.existing(NAME, 4242)
+        windows.on_terminate = leader.end
         monkeypatch.setattr(process_control, "process_alive", leader.process_alive)
         monkeypatch.setattr(process_control, "probe", lambda *_a: process_control.ALIVE)
-        monkeypatch.setattr(process_control, "_send_ctrl_break", leader.end)
         [row] = run_sweep.sweep(str(root))
+        assert windows.breaks == []
         assert (row["run_id"], row["action"]) == (RUN_ID, "killed")
         assert windows.terminated == [NAME] and windows.taskkills == []
         assert ("close", 101) in windows.calls
@@ -763,11 +760,14 @@ class TestTheKillSites:
         """The real ``spawn_detached_run``, on the stand-ins: the worker never
         publishes, so the launcher kills the job it started it in, and lets go."""
         leader = Leader()
+        windows.on_terminate = leader.end
         monkeypatch.setattr(process_control, "process_alive", leader.process_alive)
         monkeypatch.setattr(process_control, "probe", lambda *_a: process_control.UNKNOWN)
-        monkeypatch.setattr(process_control, "_send_ctrl_break", leader.end)
         with pytest.raises(detach.DetachError, match="never published"):
             launch_ready()
+        # DETACHED_PROCESS left the worker no console, so no break can reach
+        # its group: none is sent, and the job is the whole kill.
+        assert windows.breaks == []
         # The preflight's own `git` probes reach the recorder too; the worker
         # is the spawn that carries the run id.
         [proc] = [p for p in SpawnRecorder.spawned if "--internal-run-id" in p.args]
@@ -959,11 +959,14 @@ def _reap(job, identities):  # pragma: no cover - Windows cleanup
 
 @pytest.fixture
 def no_real_break(monkeypatch):
-    """The stand-in has no console, and the test's own console group is not
-    the stand-in's business: the graceful break is recorded, never sent."""
+    """No kill of a detached run sends a break: the stand-in has no console,
+    and a number that leads no group on the test's own console would reach
+    every process attached to it (``kill_tree``). One would be recorded,
+    never sent, and the row fails on it."""
     breaks = []
     monkeypatch.setattr(process_control, "_send_ctrl_break", breaks.append)
-    return breaks
+    yield breaks
+    assert breaks == [], "a detached run's kill sent a break"
 
 
 @WINDOWS_ONLY

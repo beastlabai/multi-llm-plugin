@@ -4399,8 +4399,9 @@ class TestWindowsSeam:
         )
         assert pid == 4242
         kwargs = recorded["kwargs"]
-        # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: no console, own group, so
-        # GenerateConsoleCtrlEvent is deliverable as the abort path.
+        # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP: no console, own group. With
+        # no console no console event reaches it, so its abort is its job (or
+        # taskkill), never a break (`process_control.kill_tree`).
         assert kwargs["creationflags"] == 0x00000008 | 0x00000200
         assert kwargs["close_fds"] is True
         assert kwargs["stdin"] is process_control.subprocess.DEVNULL
@@ -4458,8 +4459,8 @@ class TestWindowsSeam:
         assert "after the boundary \u2014 on the log" in text
         assert "stderr after the boundary" in text
 
-    def test_windows_abort_escalates_to_taskkill_of_the_whole_tree(self,
-                                                                  monkeypatch):
+    def test_windows_abort_is_taskkill_of_the_whole_tree_and_no_break(self,
+                                                                     monkeypatch):
         runs = []
         breaks = []
         alive = iter([True, True, False])
@@ -4472,6 +4473,7 @@ class TestWindowsSeam:
         # pid that leads no console group reached every process on the console
         # (pytest, its xdist workers and the step's PowerShell, which then
         # entered its debugger and failed the job; parallel leg, 2026-11-11).
+        # A pid with no `Popen` of this process behind it is now sent none.
         monkeypatch.setattr(process_control, "_send_ctrl_break", breaks.append)
         monkeypatch.setattr(
             process_control.subprocess, "run",
@@ -4479,7 +4481,7 @@ class TestWindowsSeam:
         )
         verdict = process_control.kill_tree(4242, escalate_after_s=0.0)
         assert verdict == "killed"
-        assert breaks == [4242], "the group gets its break before the escalation"
+        assert breaks == [], "a pid read off disk leads no group on this console"
         assert runs and runs[0] == ["taskkill", "/PID", "4242", "/T", "/F"], runs
 
     def test_windows_lock_leaves_the_holder_payload_readable(self):

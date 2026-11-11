@@ -1631,11 +1631,13 @@ class TestForceNeverBreaksALiveLock:
 
         plan = tmp_path / "p.md"
         plan.write_text("# Plan\n", encoding="utf-8")
-        # A group of its own, as a real detached worker has: on Windows the abort
-        # is a CTRL_BREAK_EVENT to the holder's console group, and
-        # `start_new_session` is POSIX-only, so a holder spawned with it alone
-        # shared this process's group and the break reached pytest and the CI
-        # step's PowerShell (first hosted Windows run, 2026-11-11).
+        # A group of its own, as a real detached worker has (`start_new_session`
+        # is POSIX-only). On Windows the abort used to send a CTRL_BREAK_EVENT
+        # to the pid the holder recorded, the venv launcher's child, which leads
+        # no group: it reached every process on the console, pytest and the CI
+        # step's PowerShell included (first hosted Windows runs, 2026-11-11). A
+        # recorded pid now gets no break: taskkill ends the holder there, so it
+        # exits with taskkill's code, not through its abort path.
         holder = subprocess.Popen(
             [sys.executable, "-c", _STOPPABLE_RUN, str(SKILL_ROOT), str(tmp_path),
              "run-stop-0001", str(plan)],
@@ -1653,7 +1655,8 @@ class TestForceNeverBreaksALiveLock:
             inode = _inode(lock_file)
             run = self._launch_take(tmp_path, force=True)
             try:
-                assert holder.wait(timeout=30) == 3, "stopped through its abort path"
+                assert holder.wait(timeout=30) == (1 if os.name == "nt" else 3), (
+                    "stopped through its abort path (by taskkill on Windows)")
                 assert _inode(lock_file) == inode, "the lock file is never unlinked"
                 label = process_control.read_lock_holder(str(lock_file))
                 assert label["pid"] == os.getpid()

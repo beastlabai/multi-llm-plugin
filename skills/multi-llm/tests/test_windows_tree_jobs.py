@@ -235,11 +235,8 @@ class TestEndTree:
         self.breaks = []
         monkeypatch.setattr(process_control, "_send_ctrl_break", self.breaks.append)
 
-    def test_kill_tree_escalates_to_the_job_on_windows(self, monkeypatch):
-        """``_windows_kill_tree``: the break, the grace, then the job, not taskkill."""
-        monkeypatch.setattr(process_control, "IS_WINDOWS", True)
+    def _job_that_ends_the_leader(self, monkeypatch):
         api = FakeJobApi()
-        job = process_control.TreeJob(api, 101)
         alive = {"leader": True}
 
         def terminate(handle, code):
@@ -248,15 +245,81 @@ class TestEndTree:
             return True
 
         api.terminate = terminate
+        monkeypatch.setattr(process_control, "IS_WINDOWS", True)
         monkeypatch.setattr(process_control, "process_alive", lambda pid: alive["leader"])
         monkeypatch.setattr(process_control, "probe", lambda pid, start: process_control.UNKNOWN)
         monkeypatch.setattr(process_control, "taskkill_tree",
                             lambda *a, **k: pytest.fail("the job was there to kill"))
+        return api, process_control.TreeJob(api, 101)
+
+    def test_a_group_this_process_made_gets_the_break_first(self, monkeypatch):
+        """``_windows_kill_tree``: the break, the grace, then the job, not taskkill."""
+        api, job = self._job_that_ends_the_leader(monkeypatch)
+        child = _Weakly(pid=4242, returncode=None)
+        monkeypatch.setattr(process_control, "_CONSOLE_GROUP_LEADERS",
+                            process_control.weakref.WeakSet())
+        process_control._note_console_group(child, CREATE_NEW_PROCESS_GROUP)
         verdict = process_control.kill_tree(
-            4242, start_time=None, escalate_after_s=0.2, job=job)
+            4242, start_time=None, escalate_after_s=0.2, job=job, child=child)
         assert verdict == "killed"
         assert self.breaks == [4242], "the graceful break comes first"
         assert api.names() == ["terminate"]
+
+    @pytest.mark.parametrize("why", [
+        "recorded-pid", "no-group-flag", "detached", "new-console", "no-window",
+        "reaped", "another-pid",
+    ])
+    def test_nothing_else_is_ever_sent_a_break(self, monkeypatch, why):
+        """A number that is not a group on this console reaches every process
+        attached to it, so only a group this process made gets a break; every
+        other target goes to its job at once, with no grace to wait out."""
+        api, job = self._job_that_ends_the_leader(monkeypatch)
+        monkeypatch.setattr(process_control, "_CONSOLE_GROUP_LEADERS",
+                            process_control.weakref.WeakSet())
+        flags = {
+            "no-group-flag": 0,
+            "detached": CREATE_NEW_PROCESS_GROUP | 0x00000008,
+            "new-console": CREATE_NEW_PROCESS_GROUP | 0x00000010,
+            "no-window": CREATE_NEW_PROCESS_GROUP | 0x08000000,
+        }.get(why, CREATE_NEW_PROCESS_GROUP)
+        child = _Weakly(pid=4242, returncode=None)
+        process_control._note_console_group(child, flags)
+        if why == "reaped":
+            child.returncode = 0
+        if why == "another-pid":
+            child.pid = 4343
+        started = time.monotonic()
+        verdict = process_control.kill_tree(
+            4242, start_time=None, escalate_after_s=30.0, job=job,
+            child=None if why == "recorded-pid" else child)
+        assert verdict == "killed"
+        assert self.breaks == []
+        assert api.names() == ["terminate"]
+        assert time.monotonic() - started < 10.0, "no grace without a break"
+
+    def test_a_double_that_cannot_be_remembered_is_never_a_leader(self):
+        process_control._note_console_group(object(), CREATE_NEW_PROCESS_GROUP)
+        assert not process_control._leads_console_group(object(), 4242)
+        assert not process_control._leads_console_group(None, 4242)
+
+    def test_popen_tree_remembers_only_a_group_on_this_console(self, monkeypatch):
+        spawned = []
+
+        def popen(args, **kwargs):
+            proc = _Weakly(pid=4242 + len(spawned), returncode=None)
+            spawned.append(proc)
+            return proc
+
+        monkeypatch.setattr(process_control, "_CONSOLE_GROUP_LEADERS",
+                            process_control.weakref.WeakSet())
+        monkeypatch.setattr(process_control.subprocess, "Popen", popen)
+        leader, _ = process_control.popen_tree(["x"], creationflags=CREATE_NEW_PROCESS_GROUP)
+        plain, _ = process_control.popen_tree(["x"])
+        detached, _ = process_control.popen_tree(
+            ["x"], creationflags=CREATE_NEW_PROCESS_GROUP | 0x00000008)
+        assert process_control._leads_console_group(leader, leader.pid)
+        assert not process_control._leads_console_group(plain, plain.pid)
+        assert not process_control._leads_console_group(detached, detached.pid)
 
     def test_a_leader_that_took_the_break_still_has_its_tree_ended(self, monkeypatch):
         """Whatever it left running is in its job, and only its tree is."""
@@ -269,6 +332,15 @@ class TestEndTree:
             job=process_control.TreeJob(api, 101))
         assert verdict == "killed"
         assert api.names() == ["terminate"]
+
+
+class _Weakly:
+    """A ``Popen`` stand-in a ``WeakSet`` can hold, as it holds a real
+    ``Popen``: hashed by identity and weakly referenceable, which a
+    ``SimpleNamespace`` is neither."""
+
+    def __init__(self, **attrs):
+        self.__dict__.update(attrs)
 
 
 class _GroupJobApi(FakeJobApi):
@@ -361,7 +433,8 @@ def test_a_real_timeout_kill_ends_the_whole_tree_through_its_job(shell):  # prag
         grandchild = int(proc.stdout.readline())
         assert process_control.process_alive(grandchild)
         verdict = process_control.kill_tree(
-            proc.pid, start_time=None, escalate_after_s=0.5, poll_interval_s=0.05, job=job)
+            proc.pid, start_time=None, escalate_after_s=0.5, poll_interval_s=0.05,
+            job=job, child=proc)
         assert verdict == "killed"
         proc.wait(timeout=10)
         deadline = time.time() + 10
