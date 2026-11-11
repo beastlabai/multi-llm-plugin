@@ -1238,6 +1238,11 @@ class TestOnlyACheckedPlatformTakesTheOwnedKill:
             raise AssertionError("ctypes was reached on an unchecked platform")
 
         monkeypatch.setattr(ctypes, "CDLL", no_native_call)
+        # Unread, the disposition is only known after this process reset
+        # SIGCHLD itself; every orchestrator's main() does that, so a test run
+        # in-process earlier in the session would answer True here. The row is
+        # about the native read, so no reset stands in for it.
+        monkeypatch.setattr(process_control, "_SIGCHLD_RESET", [])
         assert process_control._sigchld_action() is None
         assert process_control._children_become_zombies() is None
         assert process_control._SIGACTION == []
