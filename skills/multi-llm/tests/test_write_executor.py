@@ -46,6 +46,7 @@ from utils import subagent_executor as executor  # noqa: E402
 from utils import subagent_prompts  # noqa: E402
 from utils import write_safety  # noqa: E402
 from utils.providers import opencode as oc  # noqa: E402
+from utils.providers import version_gate  # noqa: E402
 from utils.providers.base import PROFILE_AGENT_WRITE  # noqa: E402
 from utils.providers.claude_code import (  # noqa: E402
     JSON_SCHEMA_FLAG,
@@ -67,6 +68,8 @@ from utils.write_batch_scheduler import (  # noqa: E402
     WriteBatchScheduler,
     resolve_human_task_plan,
 )
+from tests.harness.native_invoker import native_dispatcher  # noqa: E402
+from utils.task_ledger import mirror_ids  # noqa: E402
 from tests.mock_launchers import (  # noqa: E402
     MOCK_LLM,
     install_mock_llm,
@@ -248,7 +251,6 @@ class WriteEnv:
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         self.monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(path))
         registry._config = None
-        registry._config_key = None
         return path
 
     def edits(self, entries, result=None, prose=False) -> None:
@@ -300,6 +302,10 @@ class WriteEnv:
             repo_root=str(self.root),
             log=lambda line: None,
         )
+        respond = over.pop("respond", None)
+        if respond is not None:
+            # The simulated native invoker, through the dispatch seam.
+            over["dispatcher"] = native_dispatcher(respond)
         kwargs.update(over)
         return WriteBatchScheduler(**kwargs)
 
@@ -309,7 +315,6 @@ def env(tmp_path, monkeypatch):
     e = WriteEnv(tmp_path, monkeypatch)
     yield e
     registry._config = None
-    registry._config_key = None
 
 
 class FakeState:
@@ -349,6 +354,19 @@ class FakeState:
 
     def record_metric(self, phase, label, **kwargs):
         return metrics.record_metric_in_state(self.state, phase, label, **kwargs)
+
+    def set_metrics_left_out(self, phase, tasks):
+        metrics.set_left_out_in_state(self.state, phase, tasks)
+
+    def set_metrics_set_aside(self, phase, tasks):
+        metrics.set_set_aside_in_state(self.state, phase, tasks)
+
+    def set_metrics_total(self, phase, total):
+        progress = (self.state.get("metrics_progress") or {}).get(phase)
+        if not isinstance(progress, dict):
+            return False
+        progress["total_batches"] = total
+        return True
 
     def update_task_status(self, task_id, status, reason=None):
         self.state.setdefault("task_status", {})[task_id] = status
@@ -1276,7 +1294,9 @@ class TestVerificationOnlyImplementTask:
         )["progress"]["write_subagents"]
         assert mirror["tasks"][0]["outcome_label"] == "check-findings"
         assert mirror["tasks"][0]["check_findings"] == self.FINDINGS
-        assert mirror["check_findings_task_ids"] == ["T009"]
+        # Read from the rows (STATE-6: the mirror writes no id list its rows carry).
+        assert "check_findings_task_ids" not in mirror
+        assert mirror_ids(mirror, "check_findings_task_ids") == ["T009"]
         status_text = ", ".join(run_status._mirror_text("write_subagents", mirror))
         assert "check findings T009" in status_text, status_text
         assert "verified" not in status_text, status_text
@@ -1297,6 +1317,48 @@ class TestVerificationOnlyImplementTask:
         prompt = [json.loads(l) for l in log.read_text().splitlines()][0]["prompt"]
         assert "## Check result (required for this task)" in prompt
         assert '"check": {"passed": false, "findings"' in prompt
+
+    def test_a_refusal_after_a_check_points_its_findings_at_the_partial_summary(
+        self, env,
+    ):
+        """A runner refused before a later batch ends the run like every other
+        stop: the partial summary is written first, so the `Check findings:`
+        line names it, as a stop on a failed batch does."""
+        import utils.write_grant as write_grant
+
+        env.edits([], result=self._check_reply())
+        later = env.apply_task(
+            1, kind="implement", task_id="T010", expected_ids=["T010"],
+            output_name="implement_batch_T010.json",
+            declared_files=[str(env.root / "src" / "a.py")],
+        )
+        preflight = write_grant.preflight_runner
+
+        def refused_once_the_check_ran(spec, **kwargs):
+            if (env.phase_dir / "implement_batch_T009.json").exists():
+                raise executor.RunnerRejected(
+                    "The runner cannot serve this batch.",
+                    key="driver.subagent_runner", spec=spec,
+                    reason_code="missing_profile",
+                )
+            return preflight(spec, **kwargs)
+
+        env.monkeypatch.setattr(write_grant, "preflight_runner", refused_once_the_check_ran)
+        summary = env.out_dir / "implement" / "implementation_summary.md"
+        result = env.scheduler(
+            [self._task(env), later], kind="implement",
+            state=FakeState(env.tmp_path / "state.json"), summary_file=str(summary),
+        ).run()
+
+        assert result.exit_code == 3, result.messages
+        assert result.stopped_at_batch == 1
+        assert result.summary_file == str(summary)
+        findings = [m for m in result.messages if m.startswith("Check findings: T009 ")]
+        assert len(findings) == 1, result.messages
+        assert f"; they are listed in {summary}. Review-code" in findings[0]
+        partial = f"Partial implementation summary: {summary}"
+        assert result.messages[-1] == partial
+        assert result.messages.index(findings[0]) < result.messages.index(partial)
 
     def test_a_check_that_says_it_could_not_run_stops(self, env):
         """Fix round 11 (review T4) made a check that could not run a failed
@@ -1645,8 +1707,8 @@ class TestVerificationOnlyImplementTask:
         so with no census it is refused and the runner never starts."""
         index = env.root / "index.html"
         index.write_text("<p>orig</p>\n", encoding="utf-8")
-        import utils.write_batch_scheduler as wbs
-        monkeypatch.setattr(wbs, "SWEEP_MAX_FILES", 0)
+        import utils.write_sweep as write_sweep
+        monkeypatch.setattr(write_sweep, "SWEEP_MAX_FILES", 0)
         env.edits([_patch_edit(index, "<p>rewritten</p>\n")],
                   result={"status": "applied", "ids": ["T009"],
                           "files_touched": ["index.html"], "summary": "did it"})
@@ -1667,10 +1729,10 @@ class TestVerificationOnlyImplementTask:
         itself pushed the tree past the cap (an `npm install`), so the
         post-run census is None. "Could not look" is a failed batch, never
         VERIFIED."""
-        import utils.write_batch_scheduler as wbs
+        import utils.write_sweep as write_sweep
         scheduler = env.scheduler([self._task(env)], kind="implement",
                                   finalize=False)
-        monkeypatch.setattr(wbs, "SWEEP_MAX_FILES", len(scheduler._census()))
+        monkeypatch.setattr(write_sweep, "SWEEP_MAX_FILES", len(scheduler._sweep.census()))
         env.edits([{"path": str(env.root / "node_modules" / "x.js"),
                     "mode": "create", "content": "x\n"}],
                   result={"status": "applied", "ids": ["T009"],
@@ -2850,6 +2912,34 @@ class TestSecuritySet:
         assert "exactly as the runner left" not in outcome.reason
         assert "not the runner's" in outcome.reason
 
+    def test_a_denied_path_whose_restore_is_refused_is_not_called_unbacked(
+        self, env, monkeypatch,
+    ):
+        """Codex review 1 of U87: a path the snapshot holds, whose restore
+        refused (its folder replaced meanwhile, say), was reported as "no
+        rollback point exists", though the snapshot keeps it. The reason now
+        gives the restore's own words instead."""
+        secret = env.root / ".env"
+        secret.write_text("TOKEN=original\n", encoding="utf-8")
+        env.edits([{"path": ".env", "mode": "patch", "content": "LEAKED=1\n"}],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": [".env"], "summary": "edited .env"})
+        task = env.apply_task(0, declared_files=[str(env.plan)],
+                             snapshot_files=[str(env.plan), str(secret)])
+
+        def refused(*_args, **_kwargs):
+            raise OSError("its folder was replaced (the snapshot is kept)")
+
+        monkeypatch.setattr(write_safety, "_replace_with_payload", refused)
+        outcome = env.scheduler([task]).run().outcomes[0]
+
+        assert outcome.status == executor.STATUS_POLICY_VIOLATION
+        assert "no rollback point" not in outcome.reason
+        assert ("Not restored (.env: its folder was replaced (the snapshot is "
+                "kept)): left on disk as it is now, so inspect it by hand."
+                ) in outcome.reason
+        assert "LEAKED=1" in secret.read_text()
+
     def test_a_denied_path_with_no_rollback_point_is_not_called_restored(self, env):
         """#27 (2026-10-02): the message said "restored from the pre-batch
         snapshot (.multi-llm/providers.yaml: skipped: not in this task's
@@ -3274,13 +3364,14 @@ class TestAdditivityAndDetach:
         progress = status["progress"]["write_subagents"]
         assert progress["total"] == 2
         assert progress["batches_dispatched"] == [0, 1]
-        assert progress["finalized"] is True
+        # A finalized run's phase state, beside the mirror (STATE-6).
+        assert status["state"] == "complete"
         assert [t["task_id"] for t in progress["tasks"]] == [
             "apply-batch-0", "apply-batch-1",
         ]
         assert all(t["write_outcome"] == executor.WRITE_APPLIED
                    for t in progress["tasks"])
-        assert progress["failed_task_ids"] == []
+        assert mirror_ids(progress, "failed_task_ids") == []
 
     def test_status_json_carries_item_counts_distinct_from_batch_counts(
         self, env
@@ -3389,7 +3480,7 @@ class TestAdditivityAndDetach:
             # F10: `_begin_sweep` also patches `write_subagents` (its
             # `in_flight` entry), one write per dispatch START rather than
             # per task completion — real, but a different advance than the
-            # one this test pins. Only a full `_mirror_status` write carries
+            # one this test pins. Only a full `WriteReports.mirror_status` write carries
             # `step`, so that is what distinguishes the two here.
             if "step" in progress and isinstance(mirror, dict):
                 rows.append(len(mirror["tasks"]))
@@ -3414,12 +3505,11 @@ class TestAdditivityAndDetach:
                   result={"status": "failed", "ids": [],
                           "files_touched": ["plans/p.md"], "summary": "broke"})
         env.scheduler([env.apply_task(0), env.apply_task(1)]).run()
-        progress = json.loads(
-            (env.phase_dir / ".status.json").read_text()
-        )["progress"]["write_subagents"]
+        status = json.loads((env.phase_dir / ".status.json").read_text())
+        progress = status["progress"]["write_subagents"]
         assert progress["stopped_at_batch"] == 0
-        assert progress["finalized"] is False
-        assert progress["failed_task_ids"] == ["apply-batch-0"]
+        assert status["state"] == "subagents_failed"
+        assert mirror_ids(progress, "failed_task_ids") == ["apply-batch-0"]
 
     def test_a_run_ends_in_exactly_one_terminal_state(self, env):
         """0 or 3, never both, and never a report that says neither."""
@@ -3633,8 +3723,14 @@ class TestReadDryRun:
         reset_flag_gate_cache()
         # `--pure` renders only when `opencode run --help` documents it; the mock
         # CLI's help does not, so pin the sniff rather than the adapter's rule.
-        monkeypatch.setattr(oc, "_read_help_tokens",
-                            lambda binary: frozenset({oc.PURE_FLAG}))
+        real_read = version_gate.read_help_tokens
+
+        def _help(binary, *, help_argv=("--help",), **kw):
+            if tuple(help_argv) == ("run", "--help"):  # opencode's `--pure` read only
+                return frozenset({oc.PURE_FLAG})
+            return real_read(binary, help_argv=help_argv, **kw)
+
+        monkeypatch.setattr(version_gate, "read_help_tokens", _help)
         # Deterministic: `_user_defines_provider` reads the *inherited* config
         # home, and a developer's own opencode config would decide the refusal.
         monkeypatch.setenv("XDG_CONFIG_HOME", str(env.tmp_path / "xdg-config"))
@@ -3731,7 +3827,10 @@ class TestResultContract:
         # The contract is bound at dispatch, like the prior-changes context: the
         # hash-bound task file never learns it.
         assert "## Result" not in task["prompt"]
-        assert prompt.index("Apply batch 0") < prompt.index("## Result")
+        # The contract leads, the batch follows, the ids close the prompt
+        # (write-scheduler.md "Prompt order").
+        assert prompt.index("## Result (required") < prompt.index("Apply batch 0")
+        assert prompt.index("Apply batch 0") < prompt.index("suggestion 1 = `s0`")
 
     def test_the_implement_kind_names_its_task_id(self, env):
         log = env.enable_call_log()
@@ -4003,7 +4102,7 @@ class TestTheEmptyDiffBranch:
         progress = json.loads(
             (env.phase_dir / ".status.json").read_text()
         )["progress"]["write_subagents"]
-        assert progress["failed_task_ids"] == ["apply-batch-0"]
+        assert mirror_ids(progress, "failed_task_ids") == ["apply-batch-0"]
 
     def test_resume_does_not_count_a_recorded_failure_as_done(self, env):
         """A schema-valid `{"status": "failed"}` result file on disk is the
@@ -4297,10 +4396,10 @@ class TestFinalizeTrackingSeesTheVerifiedFiles:
     """
 
     def test_every_applied_file_travels_as_touched(self, env, monkeypatch):
-        import finalize_tracking
+        from utils import tracking
 
         seen = []
-        monkeypatch.setattr(finalize_tracking, "main",
+        monkeypatch.setattr(tracking, "main",
                             lambda argv: seen.append(list(argv)) or 0)
         _code_edit(env)
         state = FakeState(env.tmp_path / "state.json")
@@ -4318,7 +4417,7 @@ class TestFinalizeTrackingSeesTheVerifiedFiles:
     def test_a_batch_skipped_on_resume_still_contributes_its_files(self, env, monkeypatch):
         """The earlier run's result file records what it changed; a resumed
         run's finalization must not lose those files."""
-        import finalize_tracking
+        from utils import tracking
 
         state = FakeState(env.tmp_path / "state.json")
         _code_edit(env)
@@ -4326,7 +4425,7 @@ class TestFinalizeTrackingSeesTheVerifiedFiles:
                       finalize=False).run()
 
         seen = []
-        monkeypatch.setattr(finalize_tracking, "main",
+        monkeypatch.setattr(tracking, "main",
                             lambda argv: seen.append(list(argv)) or 0)
         result = env.scheduler([_code_task(env)], kind="implement",
                                state=state).run()
@@ -4343,7 +4442,7 @@ class TestFinalizeTrackingSeesTheVerifiedFiles:
         files come from the earlier run's report rows: without them a file
         that task edited while it was already dirty (the baseline subtracts
         it) left `tracked_files` the moment the resumed run recorded its own."""
-        import finalize_tracking
+        from utils import tracking
 
         state = FakeState(env.tmp_path / "state.json")
         _code_edit(env)
@@ -4351,7 +4450,7 @@ class TestFinalizeTrackingSeesTheVerifiedFiles:
                       finalize=False).run()
 
         seen = []
-        monkeypatch.setattr(finalize_tracking, "main",
+        monkeypatch.setattr(tracking, "main",
                             lambda argv: seen.append(list(argv)) or 0)
         _code_edit(env, "src/b.py", task_id="T002")
         result = env.scheduler(
@@ -4363,10 +4462,10 @@ class TestFinalizeTrackingSeesTheVerifiedFiles:
         assert touched == ["src/a.py", "src/b.py"]
 
     def test_a_no_op_batch_contributes_nothing(self, env, monkeypatch):
-        import finalize_tracking
+        from utils import tracking
 
         seen = []
-        monkeypatch.setattr(finalize_tracking, "main",
+        monkeypatch.setattr(tracking, "main",
                             lambda argv: seen.append(list(argv)) or 0)
         env.edits([], result={"status": "no-op", "ids": ["T001"],
                               "files_touched": [], "summary": "there"})
@@ -4383,15 +4482,15 @@ class TestFinalizeTrackingSeesTheVerifiedFiles:
         "Tracked 1 implementation files: index.html" finalized with the two stale
         entries earlier phases had left, and the metric every batch recorded went
         with it (three audited runs ended `metrics: null`)."""
-        import finalize_tracking
+        from utils import tracking
         from utils.state_manager import StateManager
 
         # The census is `git status` on the *test process's* cwd; the `--touched`
         # set is what this assertion is about, so pin the other half to empty.
-        monkeypatch.setattr(finalize_tracking, "get_all_modified_files", set)
+        monkeypatch.setattr(tracking, "get_all_modified_files", set)
         # Likewise the ignore lookup: the process cwd's own .gitignore covers
         # `plans/`, which is not what this assertion is about.
-        monkeypatch.setattr(finalize_tracking, "ignored_paths",
+        monkeypatch.setattr(tracking, "ignored_paths",
                             lambda paths, cwd=None: set())
         _code_edit(env)
         state = StateManager(env.plan)
@@ -4427,9 +4526,9 @@ class TestFinalizeTrackingSeesTheVerifiedFiles:
         could read, the phase finalized, and `tracked_files` stayed whatever an
         earlier phase had left for `review-code` to review, with nothing in the
         log or the result saying so."""
-        import finalize_tracking
+        from utils import tracking
 
-        monkeypatch.setattr(finalize_tracking, "main", lambda argv: 1)
+        monkeypatch.setattr(tracking, "main", lambda argv: 1)
         _code_edit(env)
         lines = []
         result = env.scheduler(
@@ -4509,10 +4608,10 @@ class TestOnlyACodePhaseRecordsTrackedFiles:
     `index.html` implement created was not in its scope at all."""
 
     def test_a_planning_phase_leaves_tracked_files_alone(self, env, monkeypatch):
-        import finalize_tracking
+        from utils import tracking
 
         seen = []
-        monkeypatch.setattr(finalize_tracking, "main",
+        monkeypatch.setattr(tracking, "main",
                             lambda argv: seen.append(list(argv)) or 0)
         recorded = [{"path": "index.html", "action": "created",
                      "task_id": "implementation"}]
@@ -4624,7 +4723,7 @@ class TestOnlyACodePhaseRecordsTrackedFiles:
 class TestTheEtaLineUsesThisRunsOwnBatchCount:
     """A resumed run's materialized tasks carry `batch_index` wherever the
     plan's decomposition put them (5..9 here) and still include a deferred
-    human task never dispatched — `_record_metrics`/`_metrics_start` used to
+    human task never dispatched — `EtaLines.record`/`EtaLines.start` used to
     pass both straight through, so every line read `batch 6/6` ...
     `batch 10/6 ... WARNING: batch_index > total_batches`."""
 
@@ -4667,7 +4766,7 @@ class TestTheEtaLineUsesThisRunsOwnBatchCount:
             assert "WARNING" not in line, line
 
         on_disk = json.loads(Path(state.state_file).read_text(encoding="utf-8"))
-        # `_metrics_finish` (via `_finalize`, skipped here by `finalize=False`)
+        # `EtaLines.finish` (via `_finalize`, skipped here by `finalize=False`)
         # is what pops `metrics_progress`; with it off the baseline this run
         # started with is still on disk to assert against directly.
         assert on_disk["metrics_progress"]["implement"]["total_batches"] == 5
@@ -4819,9 +4918,9 @@ class TestTheClosingEtaLineGoesToThePhaseLog:
     def test_the_phase_complete_line_lands_beside_the_batch_lines(
         self, env, monkeypatch, capsys
     ):
-        import finalize_tracking
+        from utils import tracking
 
-        monkeypatch.setattr(finalize_tracking, "get_all_modified_files", set)
+        monkeypatch.setattr(tracking, "get_all_modified_files", set)
         env.edits([_patch_edit(env.plan)],
                   result={"status": "applied", "ids": ["s0"],
                           "files_touched": ["plans/p.md"], "summary": "S"})
@@ -4845,10 +4944,10 @@ class TestTheRollbackStoreWarningNamesItsFiles:
     design)."""
 
     def test_a_file_past_the_cap_is_named_with_its_reason(self, env, monkeypatch):
-        import utils.write_batch_scheduler as scheduler_module
+        import utils.write_sweep as write_sweep
 
         (env.root / "big.bin").write_bytes(b"x" * 64)
-        monkeypatch.setattr(scheduler_module, "MAX_SNAPSHOT_BYTES", 32)
+        monkeypatch.setattr(write_sweep, "MAX_SNAPSHOT_BYTES", 32)
         lines = []
         env.edits([_patch_edit(env.plan)],
                   result={"status": "applied", "ids": ["s0"],
@@ -4970,21 +5069,21 @@ class TestTheRollbackStoreBudgetCountsBlobsAlreadyOnDisk:
         digest = write_safety.file_sha256(str(absolute))
 
         scheduler = env.scheduler([env.apply_task(0)])
-        blob = scheduler._blob_path(digest)
+        blob = scheduler._sweep.blob_path(digest)
         os.makedirs(os.path.dirname(blob), exist_ok=True)
         shutil.copy2(absolute, blob)
-        assert scheduler._retained_bytes == 0
+        assert scheduler._sweep._retained_bytes == 0
 
-        returned = scheduler._store_blob(relative, stamp)
+        returned = scheduler._sweep.store_blob(relative, stamp)
         assert returned == digest
-        assert scheduler._retained_bytes == info.st_size
+        assert scheduler._sweep._retained_bytes == info.st_size
 
         # A second call for the same content (a re-hash after an edit then a
         # revert, or a second relative path with identical bytes) must not
         # double-count it — the store is content-addressed once.
-        again = scheduler._store_blob(relative, stamp)
+        again = scheduler._sweep.store_blob(relative, stamp)
         assert again == digest
-        assert scheduler._retained_bytes == info.st_size
+        assert scheduler._sweep._retained_bytes == info.st_size
 
     def test_a_fresh_copy_is_still_counted_exactly_once(self, env):
         """The companion case: nothing pre-exists, so `_store_blob` copies
@@ -4995,11 +5094,11 @@ class TestTheRollbackStoreBudgetCountsBlobsAlreadyOnDisk:
         stamp = (info.st_size, info.st_mtime_ns)
 
         scheduler = env.scheduler([env.apply_task(0)])
-        digest = scheduler._store_blob(relative, stamp)
+        digest = scheduler._sweep.store_blob(relative, stamp)
         assert digest is not None
-        assert scheduler._retained_bytes == info.st_size
-        assert scheduler._store_blob(relative, stamp) == digest
-        assert scheduler._retained_bytes == info.st_size
+        assert scheduler._sweep._retained_bytes == info.st_size
+        assert scheduler._sweep.store_blob(relative, stamp) == digest
+        assert scheduler._sweep._retained_bytes == info.st_size
 
     def test_a_run_that_inherits_a_killed_runs_store_counts_its_bytes_too(
         self, env
@@ -5021,19 +5120,19 @@ class TestTheRollbackStoreBudgetCountsBlobsAlreadyOnDisk:
         first = env.scheduler([env.apply_task(0)])
         # A killed run never reaches `run()`'s `finally` (which tears the
         # store down) — simulate that by calling the retain step directly.
-        first._retain(first._census())
+        first._sweep.retain(first._sweep.census())
         assert (env.phase_dir / "rollback_store").is_dir()
-        inherited_bytes = first._retained_bytes
+        inherited_bytes = first._sweep._retained_bytes
         assert inherited_bytes > 0
 
         lines = []
         second = env.scheduler(
             [env.apply_task(1, expected_ids=["s0"])], log=lines.append,
         )
-        second._discard_rollback_store = lambda: None
+        second._sweep.discard_store = lambda: None
         result = second.run()
         assert result.exit_code == 0, result.messages
-        assert second._retained_bytes >= inherited_bytes
+        assert second._sweep._retained_bytes >= inherited_bytes
         reported = [
             l for l in lines
             if l.startswith("[write-subagents] rollback store peaked at")
@@ -5092,9 +5191,9 @@ class TestTheInFlightMirrorNamesADispatchInProgress:
         result = SchedulerResult(kind=scheduler.kind, phase=scheduler.phase)
         # The pre-loop mirror `_run` writes before dispatching anything —
         # `_begin_sweep`'s patch preserves whatever this last wrote.
-        scheduler._mirror_status(result)
+        scheduler._reports.mirror_status(result)
 
-        snapshot = scheduler._snapshot(task)
+        snapshot = scheduler._snapshots.take(task)
         scheduler._begin_sweep("apply-batch-0", ["plans/p.md"])
 
         mirror = status_file.read_status(
@@ -5102,12 +5201,12 @@ class TestTheInFlightMirrorNamesADispatchInProgress:
         )["progress"]["write_subagents"]
         assert [row["task_id"] for row in mirror["in_flight"]] == ["apply-batch-0"]
         assert mirror["in_flight"][0]["dispatched_at"]
-        assert mirror["completed"] == 0
+        assert mirror["tasks"] == []
         # The patch touched only `in_flight` — the fuller fields survive.
         assert mirror["total"] == 1
 
         scheduler._undeclared_writes("apply-batch-0", snapshot)
-        scheduler._mirror_status(result)
+        scheduler._reports.mirror_status(result)
         mirror = status_file.read_status(
             str(env.phase_dir)
         )["progress"]["write_subagents"]
@@ -5127,7 +5226,7 @@ class TestTheSweepLeavesGitignoredPathsOut:
         (env.root / "logs").mkdir()
         task = env.apply_task(0, task_id="T-A")
         scheduler = env.scheduler([task])
-        snapshot = scheduler._snapshot(task)
+        snapshot = scheduler._snapshots.take(task)
         scheduler._begin_sweep("T-A", ["plans/p.md"])
         (env.root / "logs" / "01-host.jsonl").write_text("{}\n", encoding="utf-8")
         (env.root / "notes.txt").write_text("real stray\n", encoding="utf-8")
@@ -5140,7 +5239,7 @@ class TestTheSweepLeavesGitignoredPathsOut:
         (env.root / ".gitignore").write_text(".env\n", encoding="utf-8")
         task = env.apply_task(0, task_id="T-A")
         scheduler = env.scheduler([task])
-        snapshot = scheduler._snapshot(task)
+        snapshot = scheduler._snapshots.take(task)
         scheduler._begin_sweep("T-A", ["plans/p.md"])
         (env.root / ".env").write_text("TOKEN=x\n", encoding="utf-8")
 
@@ -5251,7 +5350,7 @@ class TestTheSweepLeavesGitignoredPathsOut:
         task = env.apply_task(0, task_id="T-A")
         scheduler = env.scheduler([task])
         assert scheduler.policy.allow == ["src/**", "plans/**"]
-        snapshot = scheduler._snapshot(task)
+        snapshot = scheduler._snapshots.take(task)
         scheduler._begin_sweep("T-A", ["plans/p.md"])
         (env.root / "logs" / "run.jsonl").write_text("{}\n", encoding="utf-8")
         (env.root / ".env").write_text("TOKEN=x\n", encoding="utf-8")
@@ -5283,7 +5382,7 @@ class TestTheContainmentSweepIgnoresOnlyInFlightDeclarations:
 
         # T-A dispatches, declares .env, edits it (its OWN declared write —
         # correctly never flagged), and is classified: no longer in flight.
-        snap_a = scheduler._snapshot(task_a)
+        snap_a = scheduler._snapshots.take(task_a)
         scheduler._begin_sweep("T-A", [".env"])
         secret.write_text("TOKEN=updated-by-A\n", encoding="utf-8")
         undeclared_a = scheduler._undeclared_writes("T-A", snap_a)
@@ -5292,7 +5391,7 @@ class TestTheContainmentSweepIgnoresOnlyInFlightDeclarations:
         # T-B dispatches later, declares only the plan — but its runner
         # touches `.env` too: a genuine containment failure T-B never
         # declared, and T-A is long done by now.
-        snap_b = scheduler._snapshot(task_b)
+        snap_b = scheduler._snapshots.take(task_b)
         scheduler._begin_sweep("T-B", ["plans/p.md"])
         secret.write_text("TOKEN=leaked-by-B\n", encoding="utf-8")
         undeclared_b = scheduler._undeclared_writes("T-B", snap_b)
@@ -5317,8 +5416,8 @@ class TestTheContainmentSweepIgnoresOnlyInFlightDeclarations:
                                  snapshot_files=[str(file_b)])
         scheduler = env.scheduler([task_a, task_b])
 
-        snap_a = scheduler._snapshot(task_a)
-        snap_b = scheduler._snapshot(task_b)
+        snap_a = scheduler._snapshots.take(task_a)
+        snap_b = scheduler._snapshots.take(task_b)
         # Both dispatched into the same disjoint group: both in flight.
         scheduler._begin_sweep("T-A", ["src/a.py"])
         scheduler._begin_sweep("T-B", ["src/b.py"])
@@ -5343,13 +5442,12 @@ class TestTheContractCarriesTheProcessSafetyRule:
     """
 
     def test_every_write_kind_is_told_never_to_kill(self, tmp_path):
-        from utils.write_batch_scheduler import WriteBatchScheduler
+        from tests.scheduler_support import make_scheduler
 
         for kind in ("apply_suggestions", "apply_task_suggestions",
                      "apply_code_fixes", "implement"):
-            scheduler = WriteBatchScheduler.__new__(WriteBatchScheduler)
-            scheduler.kind = kind
-            text = scheduler._with_result_contract(
+            scheduler = make_scheduler(tmp_path, kind=kind)
+            text = scheduler._prompts.with_result_contract(
                 {"expected_ids": ["X1"]}, "do the thing"
             )
             assert "## Process safety (required)" in text, kind
@@ -5427,6 +5525,37 @@ class TestThePhaseRunsTheRepositorysOwnCheck:
             (env.phase_dir / ".status.json").read_text(encoding="utf-8")
         )
         assert mirror["progress"]["write_subagents"]["verification"]["exit_code"] == 0
+
+    def test_the_command_that_runs_and_its_logged_layer_come_from_one_load(
+        self, env, monkeypatch
+    ):
+        """The layer logged and recorded beside the executed command is the one
+        that supplied it. Here every config load answers differently (load
+        ``i`` names ``check.sh i`` from layer ``layer-i``), so a command read
+        in one load and its layer in another can never agree."""
+        check = self._script(env, 'echo "ran check $1"\nexit 0\n')
+        real = registry._load_snapshot
+        loads = []
+
+        def a_new_answer_every_load(anchor=None, permissive=None):
+            snapshot = real(anchor, permissive)
+            loads.append(anchor)
+            index = len(loads)
+            config = dict(snapshot.config)
+            config["driver"] = {**config["driver"], "verify_command": f"{check} {index}"}
+            layers = {**snapshot.driver_layers, "verify_command": f"layer-{index}"}
+            return registry._ConfigSnapshot(config, layers)
+
+        monkeypatch.setattr(registry, "_load_snapshot", a_new_answer_every_load)
+        lines = []
+        result = self._run(env, verify=check, log=lines)
+
+        assert result.exit_code == 0, result.messages
+        index = result.verification["source"].removeprefix("layer-")
+        assert result.verification["command"] == f"{check} {index}"
+        assert f"ran check {index}" in result.verification["output_tail"]
+        running = [l for l in lines if "running `" in l]
+        assert running and f"verification (layer-{index})" in running[0], running
 
     def test_a_failing_command_is_exit_three_and_reverts_nothing(self, env):
         verify = self._script(env, "echo 'a.py:1: type error'\nexit 2\n")

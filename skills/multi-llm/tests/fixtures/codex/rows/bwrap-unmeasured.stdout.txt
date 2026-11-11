@@ -1,0 +1,2 @@
+{"type":"thread.started","thread_id":"01a1c32f-fa78-7c70-b1ee-acf52312a77e"}
+{"type":"turn.started"}

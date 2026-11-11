@@ -30,13 +30,14 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import implement_orchestrator  # noqa: E402
 from tests.test_write_executor import _patch_edit, env  # noqa: E402,F401
-from tests.test_write_executor_orchestrators import (  # noqa: E402,F401
+from tests.support.write_orchestrators import (  # noqa: E402
     IMPLEMENT_WRITE_IDS,
     _phase_dir,
     _seed_generate_tasks,
-    repo,
+    orchestrator_repo,  # noqa: F401 - the repo fixture
 )
 from utils import subagent_executor as executor  # noqa: E402
+from utils import dispatch_spawn  # noqa: E402
 from utils import subagent_prompts  # noqa: E402
 from utils.retry_ladder import RESEND_NOTHING_CHANGED, RetryLadder  # noqa: E402
 
@@ -150,7 +151,7 @@ class TestTheReSend:
                     "summary": "already in the plan"}))
             return real(**kwargs)
 
-        env.monkeypatch.setattr(executor, "_spawn", spawn)
+        env.monkeypatch.setattr(dispatch_spawn, "_spawn", spawn)
         result = env.scheduler([env.apply_task(0)]).run()
 
         outcome = result.outcomes[0]
@@ -303,7 +304,7 @@ class TestTheReSend:
                 env.edits([_patch_edit(env.plan)], result=APPLIED_S0)
             return real(**kwargs)
 
-        env.monkeypatch.setattr(executor, "_spawn", spawn)
+        env.monkeypatch.setattr(dispatch_spawn, "_spawn", spawn)
         outcome = env.scheduler([env.apply_task(0)]).run().outcomes[0]
         assert outcome.status == executor.STATUS_OK, outcome.reason
         assert outcome.write_outcome == executor.WRITE_APPLIED
@@ -587,3 +588,25 @@ def test_the_native_leg_is_told_the_same_rule(name):
         encoding="utf-8")
     assert "answered `applied` but changed no file" in text
     assert "never `completed`" in text or "never a success" in text
+
+
+def test_a_batch_that_changed_its_declared_file_walks_the_tree_twice(env):
+    """Rule 9 is asked before the classification. When a declared file moved
+    the answer is already "applied", so it takes no census of its own: the
+    sweep's census before the dispatch and its census after are the only two
+    walks (WRITE-14)."""
+    from utils.write_sweep import ContainmentSweep
+
+    walks = []
+    census = ContainmentSweep.census
+
+    def counted(self, *args, **kwargs):
+        walks.append(1)
+        return census(self, *args, **kwargs)
+
+    env.monkeypatch.setattr(ContainmentSweep, "census", counted)
+    env.edits([_patch_edit(env.plan)], result=APPLIED_S0)
+    outcome = env.scheduler([env.apply_task(0)], finalize=False).run().outcomes[0]
+    assert outcome.status == executor.STATUS_OK, outcome.reason
+    assert outcome.write_outcome == executor.WRITE_APPLIED
+    assert len(walks) == 2

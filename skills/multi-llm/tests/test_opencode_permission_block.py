@@ -33,6 +33,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils import llm_client  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from utils import dispatch_spawn, runner_preflight  # noqa: E402
+from utils import sandbox_walk  # noqa: E402
 from utils.providers import opencode as oc  # noqa: E402
 from utils.providers.base import (  # noqa: E402
     PROFILE_AGENT_READONLY,
@@ -97,7 +99,6 @@ def _use_config(tmp_path, monkeypatch, body: str) -> None:
     path.write_text(body, encoding="utf-8")
     monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(path))
     registry._config = None
-    registry._config_key = None
 
 
 def _child_env(provider, model: str, profile: str) -> dict:
@@ -410,8 +411,8 @@ class TestTheVersionComesFromThePreflight:
         def _refuse(*_args, **_kwargs):  # pragma: no cover - the point
             raise AssertionError("a dispatch spawned a version probe")
 
-        monkeypatch.setattr(executor, "_run_probe", _refuse)
-        monkeypatch.setattr(executor, "_run_sandbox_probe", _refuse)
+        monkeypatch.setattr(runner_preflight, "_run_probe", _refuse)
+        monkeypatch.setattr(sandbox_walk, "_run_sandbox_probe", _refuse)
         monkeypatch.setattr(oc.subprocess, "run", _refuse)
 
     def _dispatch(self, provider) -> dict:
@@ -423,7 +424,7 @@ class TestTheVersionComesFromThePreflight:
             )
             return executor._Capture()
 
-        with patch.object(executor, "_spawn_in_context", _capture):
+        with patch.object(dispatch_spawn, "_spawn_in_context", _capture):
             executor._spawn_child(
                 provider=provider, model="opencode/sonnet", prompt="hi",
                 profile=PROFILE_AGENT_READONLY, transport="argv", timeout=5, cwd=None,

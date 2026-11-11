@@ -26,13 +26,9 @@ SKILL_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(SKILL_ROOT))
 
 import modes  # noqa: E402
-from tests.test_next_step_relay_rules import MARKDOWN_RULE  # noqa: E402
-from tests.test_report_check import (  # noqa: E402
-    COMPLETE_OUTPUT,
-    Transcript,
-    block_output,
-    decision_of,
-    run_check,
+from tests.support.relay_rules import MARKDOWN_RULE  # noqa: E402
+from tests.support.transcripts import (  # noqa: E402
+    COMPLETE_OUTPUT, Transcript, block_output, decision_of, run_check,
 )
 from utils import report_check  # noqa: E402
 

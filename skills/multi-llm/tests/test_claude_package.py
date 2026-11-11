@@ -63,15 +63,14 @@ for _path in (str(SKILL_ROOT), str(REPO_ROOT / "packaging")):
 import modes as mode_table  # noqa: E402
 import multi_llm  # noqa: E402
 from common import payload  # noqa: E402
-from tests.test_report_check import (  # noqa: E402
-    COMMAND, Transcript, block_output, report,
+from tests.support.transcripts import COMMAND, Transcript, block_output, report  # noqa: E402
+from tests.support.hook_settle_world import (  # noqa: E402
+    BACKGROUND_PHASE, LAUNCHED, LOOKUP, denied, reply, stop_input, tool_result, tool_use,
+    wakeup_input, write_later,
 )
-from tests.test_hook_transcript_settle import (  # noqa: E402
-    BACKGROUND_PHASE, LAUNCHED, LOOKUP, denied, own_call_entry, reply, stop_input,
-    tool_result, tool_use, wakeup_input, write_later,
-)
-from tests.test_hook_transcript_settle import line as transcript_line  # noqa: E402
-from tests.test_wakeup_check import hook_input, phase, racing_03  # noqa: E402
+from tests.support.wakeup_world import own_call_entry  # noqa: E402
+from tests.support.hook_settle_world import line as transcript_line  # noqa: E402
+from tests.support.wakeup_world import hook_input, phase, racing_03  # noqa: E402
 from utils import cli_common, unattended  # noqa: E402
 
 
@@ -168,9 +167,7 @@ def _differences(left: Mapping[str, Any], right: Mapping[str, Any]) -> List[str]
 def _expected_plugin_files() -> Set[str]:
     """What the plugin must hold, from ``git ls-files`` and the manifest alone, so it
     does not lean on the build's own bookkeeping."""
-    staged = payload.expected_payload(
-        REPO_ROOT, extra_allowlist=claude_build.LEGACY_ALLOWLIST,
-    )
+    staged = payload.expected_payload(REPO_ROOT)
     return set(claude_build.PLUGIN_FILES) | {f"{PAYLOAD}/{name}" for name in staged}
 
 
@@ -217,14 +214,6 @@ def staged_install(tmp_path_factory) -> Path:
     return root
 
 
-@pytest.fixture(scope="session")
-def opencode_staged(tmp_path_factory) -> Path:
-    """The OpenCode builder's staging directory, for the shared-API boundary."""
-    destination = tmp_path_factory.mktemp("opencode-staged")
-    opencode_build.build(destination=destination, allow_dirty=True)
-    return destination
-
-
 # ===========================================================================
 # The finished distribution
 # ===========================================================================
@@ -252,27 +241,12 @@ class TestFinishedDistribution:
             f"{PAYLOAD}/{name}"
             for name in (
                 *payload.REQUIRED_INVENTORY,
-                *claude_build.LEGACY_REQUIRED,
                 *payload.target_module_paths(SKILL_ROOT),
             )
         }
         assert sorted(required - present) == []
         for prefix in payload.REQUIRED_TREES:
             assert any(path.startswith(f"{PAYLOAD}/{prefix}") for path in present), prefix
-
-    def test_legacy_holds_exactly_the_named_files(self, finished):
-        """(tree, build) A partial ``legacy/`` falls back to the current core with no
-        error, so a non-empty directory proves nothing."""
-        prefix = f"{PAYLOAD}/legacy/"
-        held = {
-            path[len(prefix):] for path in claude_build.shipped_files(finished)
-            if path.startswith(prefix)
-        }
-        assert held == set(claude_build.LEGACY_FILES)
-        assert len(held) == 17
-        assert sum(name.startswith("instructions/") for name in held) == 11
-        assert sum(name.startswith("references/") for name in held) == 5
-        assert "README.md" in held
 
     def test_every_file_is_its_authored_source_byte_for_byte(self, finished):
         """(tree, build) Nothing renders the Claude plugin: the root stays the source,
@@ -405,18 +379,14 @@ class TestFinishedDistribution:
         assert claude_build.shipped_files(tree) == files
         assert claude_build.digest_of(tree) == digest
         assert claude_build.component_problems(tree, claude_build.project_version()) == []
-        staged = payload.expected_payload(
-            REPO_ROOT, extra_allowlist=claude_build.LEGACY_ALLOWLIST,
-        )
+        staged = payload.expected_payload(REPO_ROOT)
         assert claude_build._inventory_problems(tree, staged) == []  # noqa: SLF001
 
     def test_a_stray_or_a_missing_file_is_named_both_ways(self, tmp_path):
         """(tree) The inventory check is not a tautology: each direction fires."""
         tree = tmp_path / "multi-llm"
         _copy_shipped(PLUGIN_DIR, tree)
-        staged = payload.expected_payload(
-            REPO_ROOT, extra_allowlist=claude_build.LEGACY_ALLOWLIST,
-        )
+        staged = payload.expected_payload(REPO_ROOT)
         (tree / "hooks" / "stray.sh").write_text("#!/bin/sh\n", encoding="utf-8")
         (tree / "LICENSE").unlink()
         problems = claude_build._inventory_problems(tree, staged)  # noqa: SLF001
@@ -484,18 +454,6 @@ class TestDeterministicRegeneration:
 # ===========================================================================
 
 class TestTheBuilderSources:
-    def test_the_legacy_allowlist_is_literal(self):
-        """(src) A glob would admit a new file by accident; the exact-inventory check
-        names it only because nothing widened the allowlist first."""
-        assert len(claude_build.LEGACY_ALLOWLIST) == len(claude_build.LEGACY_FILES) == 17
-        for pattern in claude_build.LEGACY_ALLOWLIST:
-            assert not set(pattern) & set("*?["), pattern
-            assert pattern.startswith(f"{PAYLOAD}/legacy/")
-
-    def test_the_legacy_inventory_is_what_git_tracks(self):
-        """(src) The named list and the tracked directory agree, both ways."""
-        assert _tracked_below(f"{PAYLOAD}/legacy") == set(claude_build.LEGACY_FILES)
-
     def test_the_packaging_inputs_name_every_input(self):
         """(src) Everything the build reads outside the payload prefix is on the
         dirty-input list, and the generated tree, which is its output, is not."""
@@ -657,9 +615,7 @@ def rig_template(tmp_path_factory) -> Path:
     because the copy costs a fraction of a clean build."""
     base = tmp_path_factory.mktemp("claude-rig")
     repo = base / "repo"
-    payload_files = payload.expected_payload(
-        REPO_ROOT, extra_allowlist=claude_build.LEGACY_ALLOWLIST,
-    )
+    payload_files = payload.expected_payload(REPO_ROOT)
     sources = [
         *(f"{PAYLOAD}/{name}" for name in payload_files),
         payload.MANIFEST_RELATIVE,
@@ -788,33 +744,6 @@ class TestCredentialRefusals:
         assert "hooks/.env" not in claude_build.shipped_files(rig.out)
 
 
-class TestLegacyInventoryRefusals:
-    @pytest.mark.parametrize("name", claude_build.LEGACY_FILES)
-    def test_a_missing_legacy_file(self, rig, name):
-        """(rig) Each of the 17: a missing frozen copy would silently serve the current
-        core under ``MULTI_LLM_LEGACY_INSTRUCTIONS=1``."""
-        rig.remove(f"{PAYLOAD}/legacy/{name}")
-        message = rig.refused("the legacy inventory is not the one this plugin ships")
-        assert f"missing: legacy/{name}" in message
-
-    def test_a_legacy_file_gone_from_the_working_tree_only(self, rig):
-        """(rig) ``--allow-dirty`` reads the disk, so a tracked file deleted but not yet
-        ``git rm``-ed is as missing as an untracked one, and gets the same name."""
-        (rig.skill / "legacy" / "references" / "uv-check.md").unlink()
-        message = rig.refused("the legacy inventory", allow_dirty=True)
-        assert "missing: legacy/references/uv-check.md" in message
-
-    @pytest.mark.parametrize("name", [
-        "instructions/new-mode.md", "references/new.md", "NOTES.md",
-    ])
-    def test_an_extra_tracked_legacy_file(self, rig, name):
-        """(rig) The list is exact both ways: an extra file is not silently left out."""
-        rig.write(f"{PAYLOAD}/legacy/{name}", "frozen\n")
-        rig.commit()
-        message = rig.refused("the legacy inventory is not the one this plugin ships")
-        assert f"not in LEGACY_FILES: legacy/{name}" in message
-
-
 class TestVersionRefusals:
     def test_the_root_manifest_behind_the_owner(self, rig):
         """(rig) Claude Code caches by the manifest's version, so a stale one means
@@ -863,7 +792,6 @@ class TestDirtyInputRefusals:
     @pytest.mark.parametrize("relative", [
         *claude_build.PACKAGING_INPUTS,
         f"{PAYLOAD}/multi_llm.py",
-        f"{PAYLOAD}/legacy/README.md",
         payload.MANIFEST_RELATIVE,
     ])
     def test_a_dirty_input_without_allow_dirty(self, rig, relative):
@@ -889,14 +817,10 @@ class TestDirtyInputRefusals:
     @pytest.mark.parametrize("relative", [
         f"{PAYLOAD}/utils/new_module.py",
         f"{PAYLOAD}/references/new.md",
-        f"{PAYLOAD}/legacy/instructions/new-mode.md",
-        f"{PAYLOAD}/legacy/scratch.txt",
     ])
     def test_an_untracked_admitted_input_with_allow_dirty(self, rig, relative):
         """(rig) Staging reads ``git ls-files``, so the file would be silently absent
-        and a clean build of the commit could not reproduce the tree once it is added.
-        ``legacy/`` is refused whole, since an unlisted file there is an inventory fault
-        whichever way it arrives."""
+        and a clean build of the commit could not reproduce the tree once it is added."""
         rig.write(relative, "new\n")
         message = rig.refused("untracked input", allow_dirty=True)
         assert relative in message
@@ -956,13 +880,6 @@ class TestSymlinkRefusals:
         rig.track_symlink(f"{PAYLOAD}/utils/link.py", "doctor.py")
         message = rig.refused("payload containing symlinks", allow_dirty=True)
         assert "utils/link.py" in message
-
-    def test_a_tracked_symlink_in_legacy(self, rig):
-        """(rig) ``stage`` reads the whole prefix, so the Claude-only files are covered
-        even though the shared allowlist never names them."""
-        rig.remove(f"{PAYLOAD}/legacy/references/uv-check.md")
-        rig.track_symlink(f"{PAYLOAD}/legacy/references/uv-check.md", "../../references/uv-check.md")
-        rig.refused("the legacy inventory|payload containing symlinks", allow_dirty=True)
 
     @pytest.mark.parametrize("relative", sorted(claude_build.PLUGIN_FILES.values()))
     def test_a_tracked_symlink_among_the_plugin_files(self, rig, relative):
@@ -1152,81 +1069,15 @@ class TestCommittedDrift:
 # ===========================================================================
 
 class TestTheSharedBoundary:
-    def test_extra_allowlist_admits_for_that_call_only(self, rig, tmp_path):
-        """(rig) Another host's build straight after a Claude one must see nothing of
-        it, and the parsed allowlist must not have grown."""
-        allowlist = payload.runtime_allowlist(rig.repo)
-
-        def staged(name: str, **kwargs: Any) -> Tuple[str, ...]:
-            return payload.stage(rig.repo, tmp_path / name / "multi-llm", **kwargs)
-
-        legacy = tuple(f"legacy/{name}" for name in claude_build.LEGACY_FILES)
-        first = staged("first", extra_allowlist=claude_build.LEGACY_ALLOWLIST)
-        assert set(legacy) <= set(first)
-        second = staged("second")
-        assert not [path for path in second if path.startswith("legacy/")]
-        assert not (tmp_path / "second" / "multi-llm" / "legacy").exists()
-        assert set(first) - set(second) == set(legacy)
-        third = staged(
-            "third", extra_allowlist=(f"{PAYLOAD}/legacy/README.md",),
-        )
-        assert set(third) - set(second) == {"legacy/README.md"}
-        assert payload.runtime_allowlist(rig.repo) == allowlist
-
-    def test_extra_allowlist_admits_and_does_not_require(self, rig, tmp_path):
-        """(rig) A caller that needs the file present says so through *required_extra*,
-        which is why the Claude build passes both."""
-        rig.remove(f"{PAYLOAD}/legacy/README.md")
-        staged = payload.stage(
-            rig.repo, tmp_path / "a" / "multi-llm",
-            extra_allowlist=claude_build.LEGACY_ALLOWLIST,
-        )
-        assert "legacy/README.md" not in staged
-        with pytest.raises(payload.PayloadError, match="legacy/README.md"):
-            payload.stage(
-                rig.repo, tmp_path / "b" / "multi-llm",
-                extra_allowlist=claude_build.LEGACY_ALLOWLIST,
-                required_extra=claude_build.LEGACY_REQUIRED,
-            )
-
     def test_required_extra_does_not_admit(self, rig, tmp_path):
-        """(rig) The other half: requiring a file is not admitting it."""
-        with pytest.raises(payload.PayloadError, match="legacy/README.md"):
+        """(rig) Requiring a file is not admitting it: a tracked file the allowlist
+        leaves out is missing, not staged."""
+        rig.write(f"{PAYLOAD}/AGENTS.md", "development notes\n")
+        rig.commit()
+        with pytest.raises(payload.PayloadError, match="AGENTS.md"):
             payload.stage(
-                rig.repo, tmp_path / "a" / "multi-llm",
-                required_extra=claude_build.LEGACY_REQUIRED,
+                rig.repo, tmp_path / "a" / "multi-llm", required_extra=("AGENTS.md",),
             )
-
-    def test_expected_payload_defaults_to_no_legacy(self):
-        """(src) ``scan_tarball`` grades the npm artifact against this default."""
-        default = payload.expected_payload(REPO_ROOT)
-        assert not [path for path in default if path.startswith("legacy/")]
-        extended = payload.expected_payload(
-            REPO_ROOT, extra_allowlist=claude_build.LEGACY_ALLOWLIST,
-        )
-        assert set(extended) - set(default) == {
-            f"legacy/{name}" for name in claude_build.LEGACY_FILES
-        }
-
-    def test_the_manifest_s_allowlist_names_no_legacy(self):
-        """(src) The container image and every other host read this same list."""
-        assert not [p for p in payload.runtime_allowlist(REPO_ROOT) if "legacy" in p]
-
-    def test_the_codex_tree_carries_no_legacy(self):
-        """(tree) The legacy core names Claude Code's tools, which Codex does not have."""
-        tracked = _tracked_below(CODEX_RELATIVE)
-        assert tracked, "the Codex tree is tracked"
-        assert not [path for path in tracked if "legacy" in path.split("/")]
-        assert not (REPO_ROOT / CODEX_RELATIVE / PAYLOAD / "legacy").exists()
-
-    def test_the_opencode_staging_path_carries_no_legacy(self, opencode_staged):
-        """(build) The same for the npm route, from its real builder."""
-        assert (opencode_staged / PAYLOAD / "SKILL.md").is_file()
-        assert not (opencode_staged / PAYLOAD / "legacy").exists()
-        assert not [
-            path for path in payload.file_inventory(opencode_staged)
-            if "legacy" in path.split("/")
-        ]
 
 
 # ===========================================================================
@@ -1238,7 +1089,7 @@ _EXCLUDED_SEGMENTS = frozenset({
     "tests", "test", "fixtures", "golden", "goldens", "mocks", "plans", "docs",
     "coding_planning", "scratch", "tmp", ".git", ".github", ".multi-llm", ".gate",
     "__pycache__", ".venv", ".pytest_cache", ".ruff_cache", ".mypy_cache",
-    "node_modules", "legacy",
+    "node_modules",
 })
 
 #: A file name that is development material wherever it appears.
@@ -1254,9 +1105,8 @@ _EXCLUDED_GLOBS = (
     "*.log", "*.golden", "*.tgz", "*.swp", "*~", "README*",
 )
 
-#: The named exceptions, and the only ones: each is a path, never a pattern, so a new
-#: file under ``legacy/`` is not excused by this list.
-CLAUDE_EXCEPTIONS = frozenset(f"{PAYLOAD}/legacy/{name}" for name in claude_build.LEGACY_FILES)
+#: The named exceptions, and the only ones: each is a path, never a pattern.
+CLAUDE_EXCEPTIONS: frozenset = frozenset()
 CODEX_EXCEPTIONS: frozenset = frozenset()
 #: npm packs the root README whatever ``files`` says, and it is the package's page.
 OPENCODE_EXCEPTIONS = frozenset({"README.md"})
@@ -1336,19 +1186,16 @@ class TestExclusions:
         f"{PAYLOAD}/scratch/out.txt",
         f"{PAYLOAD}/notes.tmp",
         f"{PAYLOAD}/run.log",
-        f"{PAYLOAD}/legacy/README.md",
     ])
     def test_the_checker_flags_each_class(self, relative):
         """(src) Each class is caught, so the rows below are not vacuous."""
         assert _exclusion_problems([relative], CODEX_EXCEPTIONS) == [relative]
 
     def test_an_exception_is_a_path_and_not_a_pattern(self):
-        """(src) The Claude exceptions excuse the named files and nothing else there."""
-        extra = f"{PAYLOAD}/legacy/instructions/new-mode.md"
-        assert _exclusion_problems(CLAUDE_EXCEPTIONS, CLAUDE_EXCEPTIONS) == []
-        assert _exclusion_problems([extra], CLAUDE_EXCEPTIONS) == [extra]
-        nested = f"{PAYLOAD}/legacy/README.md/x"
-        assert _exclusion_problems([nested], CLAUDE_EXCEPTIONS) == [nested]
+        """(src) An exception excuses the named path and nothing else of that name."""
+        assert _exclusion_problems(OPENCODE_EXCEPTIONS, OPENCODE_EXCEPTIONS) == []
+        nested = f"{PAYLOAD}/README.md"
+        assert _exclusion_problems([nested], OPENCODE_EXCEPTIONS) == [nested]
 
     def test_the_claude_tree(self):
         """(tree) What the Git route serves, so a by-product on disk is not at issue."""
@@ -1362,12 +1209,8 @@ class TestExclusions:
             claude_build.shipped_files(built_plugin), CLAUDE_EXCEPTIONS,
         ) == []
 
-    def test_every_claude_exception_is_still_in_use(self):
-        """(tree) An exception nothing uses is one a later file could slip through."""
-        assert CLAUDE_EXCEPTIONS <= _tracked_below(PLUGIN_RELATIVE)
-
     def test_the_codex_tree(self):
-        """(tree) Codex has no exception at all, ``legacy/`` included."""
+        """(tree) Codex has no exception at all."""
         assert _exclusion_problems(
             _tracked_below(CODEX_RELATIVE), CODEX_EXCEPTIONS,
         ) == []
@@ -2043,533 +1886,6 @@ class TestTheStagedRuntime:
 
 
 # ===========================================================================
-# The legacy switch
-# ===========================================================================
-
-#: ``{mode word: instruction file}`` for every mode with a frozen copy. Mapped through
-#: the mode table, because a file name is not always its mode word.
-LEGACY_MODES: Dict[str, str] = {
-    mode.name: mode.instruction_file for mode in mode_table.MODES
-    if mode.instruction_file
-    and f"instructions/{mode.instruction_file}" in claude_build.LEGACY_FILES
-}
-
-#: Modes with a core file that postdate the frozen copy.
-UNFROZEN_MODES: Tuple[str, ...] = tuple(sorted(
-    mode.name for mode in mode_table.MODES
-    if mode.instruction_file and mode.name not in LEGACY_MODES
-))
-
-#: A dispatcher-driven mode, which has no core file at all.
-NO_CORE_MODE = "status"
-
-
-class TestTheLegacyModeMap:
-    def test_every_frozen_file_has_its_mode(self):
-        """(src) Eleven files and eleven modes, or a row below quietly grades fewer."""
-        frozen = {
-            name[len("instructions/"):] for name in claude_build.LEGACY_FILES
-            if name.startswith("instructions/")
-        }
-        assert set(LEGACY_MODES.values()) == frozen
-        assert len(LEGACY_MODES) == 11
-
-    def test_a_file_name_is_not_always_the_mode_word(self):
-        """(src) The two whose word differs are the ones a name match would lose."""
-        assert LEGACY_MODES["full"] == "full-workflow.md"
-        assert LEGACY_MODES["init"] == "init-config.md"
-        for word, name in LEGACY_MODES.items():
-            assert mode_table.instruction_path(word) == f"instructions/{name}"
-
-    def test_the_readme_names_the_modes_with_no_frozen_copy(self):
-        """(src) It is what the stderr notice sends an operator to read."""
-        text = (SKILL_ROOT / "legacy" / "README.md").read_text(encoding="utf-8")
-        assert UNFROZEN_MODES
-        for word in UNFROZEN_MODES:
-            assert f"`{word}`" in text, word
-
-
-@pytest.mark.package
-class TestTheLegacySwitch:
-    @pytest.mark.parametrize("word", sorted(LEGACY_MODES))
-    def test_the_switch_serves_the_frozen_core(self, staged_install, tmp_path, word):
-        """(tree, uv) The whole of stdout is the staged frozen file after the normal
-        rendering, inside the CLI's framing. Success or non-empty output cannot pass
-        this, and neither can serving the current core: the two differ."""
-        skill = staged_install / PAYLOAD
-        name = LEGACY_MODES[word]
-        result = _uv_cli(
-            skill, "util", "instructions", word, cwd=tmp_path,
-            env={multi_llm.LEGACY_INSTRUCTIONS_ENV: "1"},
-        )
-        assert result.returncode == 0, result.stdout + result.stderr
-
-        notice = [
-            line for line in result.stderr.splitlines()
-            if line.startswith("[LEGACY_INSTRUCTIONS]")
-        ]
-        assert len(notice) == 1, result.stderr
-        assert f"from instructions/{name} because" in notice[0]
-        assert "see legacy/README.md" in notice[0]
-        assert "[LEGACY_INSTRUCTIONS]" not in result.stdout, "stdout may be piped into a prompt"
-
-        frozen = skill / "legacy" / "instructions" / name
-        core = cli_common.render_instruction_text(frozen.read_text(encoding="utf-8"), skill)
-        line = _result_line(result.stdout, _framed(word, core))
-        assert line["artifacts"] == [str(frozen)]
-        assert line["exit"] == 0
-
-        current = cli_common.render_instruction_text(
-            (skill / "instructions" / name).read_text(encoding="utf-8"), skill,
-        )
-        assert core != current, f"{name}: the comparison cannot tell the two cores apart"
-        for token in ("{SKILL_DIR}", "${CLAUDE_SKILL_DIR}", "{UV_RUN_FLAGS}"):
-            assert token not in core, f"{name}: {token} reached the served text"
-
-    @pytest.mark.parametrize("word", sorted(LEGACY_MODES))
-    def test_without_the_variable_the_current_core_is_served(self, staged_install, tmp_path, word):
-        """(tree, uv) The switch is off unless asked, so a default install reads no
-        frozen text. Any value but ``1`` is off too."""
-        skill = staged_install / PAYLOAD
-        name = LEGACY_MODES[word]
-        result = _uv_cli(
-            skill, "util", "instructions", word, cwd=tmp_path,
-            env={multi_llm.LEGACY_INSTRUCTIONS_ENV: "true"},
-        )
-        assert result.returncode == 0, result.stdout + result.stderr
-        assert "[LEGACY_INSTRUCTIONS]" not in result.stderr
-        current = cli_common.render_instruction_text(
-            (skill / "instructions" / name).read_text(encoding="utf-8"), skill,
-        )
-        _result_line(result.stdout, _framed(word, current))
-
-    @pytest.mark.parametrize("word", UNFROZEN_MODES)
-    def test_a_mode_with_no_frozen_copy_prints_no_notice(self, staged_install, tmp_path, word):
-        """(tree, uv) It serves the current core, exactly as without the variable, and
-        claims nothing about a file it did not read."""
-        skill = staged_install / PAYLOAD
-        result = _uv_cli(
-            skill, "util", "instructions", word, cwd=tmp_path,
-            env={multi_llm.LEGACY_INSTRUCTIONS_ENV: "1"},
-        )
-        assert result.returncode == 0, result.stdout + result.stderr
-        assert "[LEGACY_INSTRUCTIONS]" not in result.stderr
-        assert "[LEGACY_INSTRUCTIONS]" not in result.stdout
-        path = skill / mode_table.instruction_path(word)
-        current = cli_common.render_instruction_text(path.read_text(encoding="utf-8"), skill)
-        assert _result_line(result.stdout, _framed(word, current))["artifacts"] == [str(path)]
-
-    def test_a_mode_with_no_core_file_prints_no_notice(self, staged_install, tmp_path):
-        """(tree, uv) The dispatcher-driven branch never reads a file at all."""
-        result = _uv_cli(
-            staged_install / PAYLOAD, "util", "instructions", NO_CORE_MODE, cwd=tmp_path,
-            env={multi_llm.LEGACY_INSTRUCTIONS_ENV: "1"},
-        )
-        assert result.returncode == 0, result.stdout + result.stderr
-        assert "[LEGACY_INSTRUCTIONS]" not in result.stderr
-        assert f"{multi_llm.CORE_END_MARKER} {NO_CORE_MODE}" in result.stdout
-
-
-# ===========================================================================
-# Legacy implement: the post-implementation test selection
-# ===========================================================================
-
-STEP_8 = "8. **Run post-implementation regression tests:**"
-UNAVAILABLE = "plugin self-tests: unavailable (development tests are not shipped)"
-NOT_RUN = "tests not run (no test command available)"
-
-
-def _serve_implement(skill: Path) -> str:
-    """The served text, so what runs below carries the path the renderer substituted.
-    On this test's interpreter rather than through uv, so these rows can run plain."""
-    result = subprocess.run(
-        [sys.executable, str(skill / "multi_llm.py"), "util", "instructions", "implement"],
-        cwd=str(skill.parent),
-        env=_clean_env(**{multi_llm.LEGACY_INSTRUCTIONS_ENV: "1"}),
-        capture_output=True, encoding="utf-8", timeout=120,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert "[LEGACY_INSTRUCTIONS]" in result.stderr
-    return result.stdout
-
-
-def _selection_block(served: str, *, as_served: bool = False) -> str:
-    """Step 8's fenced ``bash`` block. *as_served* keeps the list item's indentation,
-    which is what an agent has if it pastes the lines as they stand."""
-    start = served.index(STEP_8)
-    match = re.compile(r"^   ```bash\n(.*?)^   ```\n", re.S | re.M).search(served, start)
-    assert match, "step 8 has no fenced bash block"
-    body = match.group(1)
-    if as_served:
-        return body
-    return "".join(line[3:] if line.startswith("   ") else line for line in body.splitlines(True))
-
-
-class _Selection:
-    """Runs step 8's block in a fixture project, with recording stubs first on PATH."""
-
-    def __init__(self, tmp_path: Path):
-        self.project = tmp_path / "consuming project"
-        self.project.mkdir()
-        self.bin = tmp_path / "stub bin"
-        self.bin.mkdir()
-        self.log = tmp_path / "stub.log"
-        self._runner("pytest")
-        self._runner("npm")
-        self._runner("project-check")
-        self._stub(
-            "uv",
-            "while [ \"$#\" -gt 0 ] && [ \"$1\" != \"--\" ]; do shift; done\n"
-            "[ \"$#\" -gt 0 ] && shift\n"
-            "if [ \"${1:-}\" = python ]; then shift; exec \"$REAL_PYTHON\" \"$@\"; fi\n"
-            "echo \"stub uv ran\"\n",
-        )
-
-    def _stub(self, name: str, rest: str) -> None:
-        path = self.bin / name
-        path.write_text(
-            "#!/bin/sh\n"
-            f"{{ printf '%s\\037' '{name}' \"$@\"; printf '\\036'; }} >> \"$STUB_LOG\"\n"
-            + rest,
-            encoding="utf-8",
-        )
-        path.chmod(0o755)
-
-    def _runner(self, name: str) -> None:
-        self._stub(name, f"echo 'stub {name} ran'\n")
-
-    def fail_uv(self) -> None:
-        """A ``uv`` that cannot run anything: the config read comes back empty."""
-        self._stub("uv", "echo 'uv: broken' >&2\nexit 1\n")
-
-    def configure(self, text: str) -> None:
-        config = self.project / ".multi-llm" / "providers.yaml"
-        config.parent.mkdir(exist_ok=True)
-        config.write_text(text, encoding="utf-8")
-
-    def verify_command(self, command: str) -> None:
-        self.configure(yaml.safe_dump({"driver": {"verify_command": command}}))
-
-    def run(self, block: str, *, modifies: Optional[str] = None) -> subprocess.CompletedProcess:
-        environment = {
-            "PATH": f"{self.bin}{os.pathsep}/usr/bin{os.pathsep}/bin",
-            "HOME": str(self.project),
-            "STUB_LOG": str(self.log),
-            "REAL_PYTHON": sys.executable,
-        }
-        if modifies is not None:
-            environment["PLAN_MODIFIES_SKILL"] = modifies
-        return subprocess.run(
-            [shutil.which("bash") or "bash", "-c", block], cwd=str(self.project),
-            env=environment, capture_output=True, encoding="utf-8", timeout=120,
-        )
-
-    def calls(self) -> List[List[str]]:
-        if not self.log.exists():
-            return []
-        records = self.log.read_text(encoding="utf-8").split("\x1e")
-        return [record.split("\x1f")[:-1] for record in records if record]
-
-    def names(self) -> List[str]:
-        return [call[0] for call in self.calls()]
-
-    def assert_never_touched_the_skill_tests(self, skill: Path) -> None:
-        for call in self.calls():
-            for word in call:
-                if word.startswith("import pathlib"):
-                    continue
-                assert f"{skill}/tests" not in word, call
-        assert "tests/" not in " ".join(
-            word for call in self.calls() for word in call if not word.startswith("import ")
-        )
-
-
-@pytest.fixture
-def selection(tmp_path) -> _Selection:
-    return _Selection(tmp_path)
-
-
-@pytest.fixture(scope="module")
-def staged_block(staged_install) -> str:
-    return _selection_block(_serve_implement(staged_install / PAYLOAD))
-
-
-@pytest.fixture(scope="module")
-def staged_served(staged_install) -> str:
-    return _serve_implement(staged_install / PAYLOAD)
-
-
-def _make_source_checkout(root: Path) -> Path:
-    """The staged tree plus a ``tests/`` directory, which is the only difference
-    between a source checkout and an install that the block may look at."""
-    _copy_shipped(PLUGIN_DIR, root)
-    skill = root / PAYLOAD
-    (skill / "tests").mkdir()
-    (skill / "tests" / "test_stub.py").write_text("def test_x():\n    pass\n", encoding="utf-8")
-    return skill
-
-
-@pytest.fixture(scope="module")
-def source_checkout(tmp_path_factory) -> Path:
-    return _make_source_checkout(tmp_path_factory.mktemp("claude-source") / "source checkout")
-
-
-@posix_shell
-class TestTheImplementSelection:
-    def _self_test_argv(self, skill: Path) -> List[str]:
-        return [
-            "uv", "run", "--project", str(skill), "--", "pytest",
-            f"{skill}/tests/", "-v", "--tb=short",
-        ]
-
-    def _config_read(self, skill: Path, call: List[str]) -> None:
-        """The config read asks for the runtime set only, so reading one YAML key never
-        needs the dev group from the network."""
-        assert call[:-1] == [
-            "uv", "run", *unattended.DEFAULT_UV_RUN_ARGS, "--project", str(skill), "--",
-            "python", "-c",
-        ], call
-        assert call[-1].startswith("import pathlib, yaml"), call
-
-    @pytest.mark.parametrize("as_served", [False, True], ids=["dedented", "as-served"])
-    def test_a_skill_plan_in_a_source_checkout_runs_the_self_tests(
-        self, selection, source_checkout, as_served,
-    ):
-        """The existing route stays for a checkout that has the tests, ahead of any
-        command the project configures."""
-        selection.verify_command("project-check --all")
-        block = _selection_block(_serve_implement(source_checkout), as_served=as_served)
-        result = selection.run(block, modifies="1")
-        assert result.returncode == 0, result.stderr
-        assert selection.calls() == [self._self_test_argv(source_checkout)]
-        assert "stub uv ran" in result.stdout
-        assert UNAVAILABLE not in result.stdout
-        assert NOT_RUN not in result.stdout
-
-    @pytest.mark.parametrize("as_served", [False, True], ids=["dedented", "as-served"])
-    def test_a_skill_plan_in_a_staged_install_records_and_runs_the_project_s(
-        self, selection, staged_install, as_served,
-    ):
-        """An install has no tests to run, and says so, then runs what the project asked
-        for. The block has to work however it was pasted: a read that depended on the
-        list item's indentation would lose the configured command to an
-        ``IndentationError`` and report it as ``tests not run``."""
-        skill = staged_install / PAYLOAD
-        selection.verify_command("project-check --all")
-        block = _selection_block(_serve_implement(skill), as_served=as_served)
-        result = selection.run(block, modifies="1")
-        assert result.returncode == 0, result.stderr
-        assert result.stdout.splitlines()[0] == UNAVAILABLE
-        assert "stub project-check ran" in result.stdout
-        assert NOT_RUN not in result.stdout
-        assert selection.names() == ["uv", "project-check"]
-        self._config_read(skill, selection.calls()[0])
-        assert selection.calls()[1] == ["project-check", "--all"]
-        selection.assert_never_touched_the_skill_tests(skill)
-
-    def test_a_configured_pytest_is_the_project_s_and_not_the_skill_s(
-        self, selection, staged_install, staged_block,
-    ):
-        """A project that configures pytest gets exactly its own argv."""
-        selection.verify_command("pytest -q project_tests")
-        result = selection.run(staged_block, modifies="1")
-        assert result.returncode == 0, result.stderr
-        assert selection.calls()[1:] == [["pytest", "-q", "project_tests"]]
-        for call in selection.calls():
-            assert not any(f"{staged_install / PAYLOAD}/tests" in word for word in call)
-
-    @pytest.mark.parametrize("modifies", ["1", None], ids=["skill-plan", "other-plan"])
-    @pytest.mark.parametrize("files, runner, argv", [
-        ({"package.json": '{"scripts": {"test": "x"}}\n'}, "npm", ["npm", "test"]),
-        ({"pytest.ini": "[pytest]\n"}, "pytest", ["pytest", "-v", "--tb=short"]),
-        ({"conftest.py": ""}, "pytest", ["pytest", "-v", "--tb=short"]),
-        (
-            {"pyproject.toml": "[tool.pytest.ini_options]\n"},
-            "pytest", ["pytest", "-v", "--tb=short"],
-        ),
-    ], ids=["package-json", "pytest-ini", "conftest", "pyproject"])
-    def test_with_no_configured_command_it_detects_a_runner(
-        self, selection, staged_install, staged_block, files, runner, argv, modifies,
-    ):
-        """The runbook's existing detection, in order, with nothing configured."""
-        for name, body in files.items():
-            (selection.project / name).write_text(body, encoding="utf-8")
-        result = selection.run(staged_block, modifies=modifies)
-        assert result.returncode == 0, result.stderr
-        assert f"stub {runner} ran" in result.stdout
-        assert selection.names() == ["uv", runner]
-        assert selection.calls()[1] == argv
-        assert NOT_RUN not in result.stdout
-        assert (UNAVAILABLE in result.stdout) is (modifies == "1")
-        selection.assert_never_touched_the_skill_tests(staged_install / PAYLOAD)
-
-    def test_npm_is_detected_ahead_of_pytest(self, selection, staged_block):
-        """The order the runbook has always given."""
-        (selection.project / "package.json").write_text(
-            '{"scripts": {"test": "x"}}\n', encoding="utf-8",
-        )
-        (selection.project / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
-        selection.run(staged_block)
-        assert selection.names() == ["uv", "npm"]
-
-    def test_a_configured_command_beats_a_detected_runner(self, selection, staged_block):
-        """The project said what it wants, so nothing is guessed."""
-        selection.verify_command("project-check")
-        (selection.project / "package.json").write_text(
-            '{"scripts": {"test": "x"}}\n', encoding="utf-8",
-        )
-        (selection.project / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
-        selection.run(staged_block)
-        assert selection.names() == ["uv", "project-check"]
-
-    @pytest.mark.parametrize("config", [
-        "driver: {}\n",
-        "driver:\n  verify_command: ''\n",
-        "defaults: {}\n",
-        "",
-        "{not: [valid\n",
-    ], ids=["no-key", "empty-key", "no-driver", "empty-file", "malformed"])
-    def test_a_config_with_no_usable_command_falls_back(self, selection, staged_block, config):
-        """A config file that says nothing, or cannot be read, is not a test command,
-        and it must not stop the detection behind it."""
-        selection.configure(config)
-        (selection.project / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
-        result = selection.run(staged_block)
-        assert selection.names() == ["uv", "pytest"], result.stderr
-
-    @pytest.mark.parametrize("modifies", ["1", "0", None], ids=["skill-plan", "zero", "unset"])
-    def test_no_command_at_all_is_reported_as_not_run(
-        self, selection, staged_install, staged_block, modifies,
-    ):
-        """Never reported as passed, and no runner is called to find out."""
-        result = selection.run(staged_block, modifies=modifies)
-        assert result.returncode == 0, result.stderr
-        assert NOT_RUN in result.stdout
-        assert selection.names() == ["uv"]
-        self._config_read(staged_install / PAYLOAD, selection.calls()[0])
-        assert (UNAVAILABLE in result.stdout) is (modifies == "1")
-
-    @pytest.mark.parametrize("files", [
-        {"package.json": '{"scripts": {"build": "x"}}\n'},
-        {"pyproject.toml": "[project]\nname = 'x'\n"},
-    ], ids=["package-json-without-test", "pyproject-without-pytest"])
-    def test_a_project_file_that_names_no_runner_is_not_a_command(
-        self, selection, staged_block, files,
-    ):
-        """Having the file is not enough: it has to declare the runner."""
-        for name, body in files.items():
-            (selection.project / name).write_text(body, encoding="utf-8")
-        result = selection.run(staged_block)
-        assert NOT_RUN in result.stdout
-        assert selection.names() == ["uv"]
-
-    def test_a_uv_that_cannot_run_falls_back_honestly(self, selection, staged_block):
-        """The configured command is out of reach, so the result is the detection's, or
-        ``tests not run``. It must not be a silent success."""
-        selection.fail_uv()
-        selection.verify_command("project-check")
-        result = selection.run(staged_block)
-        assert NOT_RUN in result.stdout
-        assert selection.names() == ["uv"]
-
-    @pytest.mark.parametrize("fixture_name", ["staged_install", "source_checkout"])
-    def test_a_non_skill_plan_runs_the_configured_command(
-        self, selection, request, fixture_name,
-    ):
-        """Whatever the install looks like, and with no self-test record."""
-        located = request.getfixturevalue(fixture_name)
-        skill = located / PAYLOAD if fixture_name == "staged_install" else located
-        selection.verify_command("project-check --all")
-        result = selection.run(_selection_block(_serve_implement(skill)))
-        assert result.returncode == 0, result.stderr
-        assert selection.names() == ["uv", "project-check"]
-        assert selection.calls()[1] == ["project-check", "--all"]
-        assert UNAVAILABLE not in result.stdout
-        selection.assert_never_touched_the_skill_tests(skill)
-
-    def test_a_configured_pipeline_keeps_its_quoting(self, selection, staged_block):
-        """The documented shape is a shell string, so it goes through ``eval`` whole."""
-        selection.verify_command("project-check 'one word' && project-check second")
-        result = selection.run(staged_block)
-        assert result.returncode == 0, result.stderr
-        assert selection.calls()[1:] == [
-            ["project-check", "one word"], ["project-check", "second"],
-        ]
-
-    def test_an_apostrophe_in_the_path_does_not_break_the_block(self, selection, tmp_path):
-        """A rendered path lands inside the block's own quoting. Inside single quotes an
-        apostrophe in a home directory ends the string and the command is garbage."""
-        skill = _make_source_checkout(tmp_path / "o'brien source")
-        block = _selection_block(_serve_implement(skill))
-        result = selection.run(block, modifies="1")
-        assert result.returncode == 0, result.stderr
-        assert selection.calls() == [self._self_test_argv(skill)]
-
-    def test_the_served_text_keeps_the_conditions(self, staged_install, staged_served):
-        """The executed rows read the block; this holds the prose around it, which is
-        what tells an agent how to set the variable and report the result."""
-        skill = staged_install / PAYLOAD
-        served = staged_served
-        assert f"set `PLAN_MODIFIES_SKILL=1` if the plan modifies `{skill}/` files" in served
-        assert f'[ "${{PLAN_MODIFIES_SKILL:-0}}" = 1 ] && [ -d "{skill}/tests" ]' in served
-        assert f'echo "{UNAVAILABLE}"' in served
-        assert f'echo "{NOT_RUN}"' in served
-        assert "A printed `tests not run` line is the result to report. Never report it as passed." in served
-        assert served.count(NOT_RUN) >= 2, "the summary template keeps the same wording"
-
-        block = _selection_block(served)
-        config = block.index(".multi-llm/providers.yaml")
-        assert block.index('"verify_command"') > config
-        npm = block.index("npm test")
-        pytest_detected = block.rindex("pytest -v --tb=short")
-        assert config < npm < pytest_detected < block.index('eval "$TEST_COMMAND"')
-
-    def test_the_self_tests_are_cited_nowhere_else(self, staged_install, staged_served):
-        """A second unguarded citation would send an install to pytest on a directory
-        it does not have."""
-        skill = staged_install / PAYLOAD
-        outside = staged_served.replace(_selection_block(staged_served, as_served=True), "")
-        assert f"{skill}/tests" not in outside
-
-    def test_the_block_is_the_authored_one(self):
-        """Parity: the build copies it, and the source checkout runs the same text."""
-        authored = (SKILL_ROOT / "legacy" / "instructions" / "implement.md").read_bytes()
-        shipped = (PLUGIN_DIR / PAYLOAD / "legacy" / "instructions" / "implement.md").read_bytes()
-        assert authored == shipped
-
-
-@pytest.mark.package
-class TestTheImplementSelectionWithRealUv:
-    def test_the_config_read_runs_for_real_from_the_install(self, staged_install, tmp_path):
-        """(tree, uv) The stubbed rows cannot show that the runtime set can import yaml
-        from a path with spaces. Only the project's command is a stub here."""
-        uv = _real_uv()
-        skill = staged_install / PAYLOAD
-        _uv_cli(skill, "--help", cwd=tmp_path)
-        selection = _Selection(tmp_path)
-        (selection.bin / "uv").unlink()
-        selection.verify_command("project-check --all")
-        served = _uv_cli(
-            skill, "util", "instructions", "implement", cwd=tmp_path,
-            env={multi_llm.LEGACY_INSTRUCTIONS_ENV: "1"},
-        )
-        assert served.returncode == 0, served.stdout + served.stderr
-        result = subprocess.run(
-            [shutil.which("bash"), "-c", _selection_block(served.stdout)],
-            cwd=str(selection.project),
-            env=_clean_env(
-                PATH=os.pathsep.join((str(selection.bin), str(Path(uv).parent), "/usr/bin", "/bin")),
-                STUB_LOG=str(selection.log),
-                PLAN_MODIFIES_SKILL="1",
-            ),
-            capture_output=True, encoding="utf-8", timeout=300,
-        )
-        assert result.returncode == 0, result.stderr
-        assert UNAVAILABLE in result.stdout
-        assert selection.calls() == [["project-check", "--all"]], result.stderr
-
-
-# ===========================================================================
 # Runtime references
 # ===========================================================================
 
@@ -2582,15 +1898,6 @@ _BARE_CITATION = re.compile(
 _HOOK_CITATION = re.compile(r"\$(skill|root)/([\w./-]+)")
 _URL = re.compile(r"https?://[^\s)>\"'`]+")
 
-#: Paths the running skill creates, or that only a source checkout has. Named one by
-#: one, against the file that cites them, so neither can spread unnoticed.
-EXAMPLE_OF_A_RUNTIME_PATH = {
-    (f"{PAYLOAD}/legacy/instructions/implement.md", "state/abc123.json"),
-}
-SOURCE_CHECKOUT_ONLY = {
-    (f"{PAYLOAD}/legacy/instructions/implement.md", "tests"),
-    (f"{PAYLOAD}/legacy/instructions/implement.md", "tests/"),
-}
 #: A citation with ``<mode>`` in it, which stands for every mode with a core file.
 MODE_PLACEHOLDER = "instructions/<mode>.md"
 
@@ -2614,7 +1921,7 @@ def _runtime_text(tree: Path) -> Dict[str, str]:
     skill = tree / PAYLOAD
     paths = [
         skill / "SKILL.md",
-        *(path for folder in ("instructions", "references", "legacy")
+        *(path for folder in ("instructions", "references")
           for path in (skill / folder).rglob("*")),
         *(tree / "hooks").iterdir(),
     ]
@@ -2632,30 +1939,23 @@ def _resolves(skill: Path, cited: str) -> bool:
     return (skill / cited).exists()
 
 
-def _resolves_bare(skill: Path, cited: str, *, in_legacy: bool) -> bool:
-    """A bare citation may name a module attribute, ``utils/unattended.find_uv``, and a
-    frozen file's relative citation may mean its own frozen sibling."""
-    roots = [skill, skill / "legacy"] if in_legacy else [skill]
-    for root in roots:
-        if (root / cited).exists():
-            return True
-        stem, dot, _attribute = cited.rpartition(".")
-        if dot and (root / f"{stem}.py").is_file():
-            return True
-    return False
+def _resolves_bare(skill: Path, cited: str) -> bool:
+    """A bare citation may name a module attribute, ``utils/unattended.find_uv``."""
+    if (skill / cited).exists():
+        return True
+    stem, dot, _attribute = cited.rpartition(".")
+    return bool(dot) and (skill / f"{stem}.py").is_file()
 
 
 class TestRuntimeReferences:
     def test_every_cited_skill_path_resolves(self):
         """(tree) A citation is read at run time, where a missing file is an agent stuck
-        mid-phase. The exceptions are named above and cannot grow by accident."""
+        mid-phase."""
         skill = PLUGIN_DIR / PAYLOAD
         unresolved = []
         for relative, text in _runtime_text(PLUGIN_DIR).items():
             for cited in _token_citations(text):
                 if cited == MODE_PLACEHOLDER or _resolves(skill, cited):
-                    continue
-                if (relative, cited) in EXAMPLE_OF_A_RUNTIME_PATH | SOURCE_CHECKOUT_ONLY:
                     continue
                 unresolved.append((relative, cited))
         assert unresolved == []
@@ -2670,26 +1970,6 @@ class TestRuntimeReferences:
             if mode.instruction_file:
                 assert (skill / "instructions" / mode.instruction_file).is_file(), mode.name
 
-    def test_the_named_exceptions_are_still_needed(self):
-        """(tree) An exception nothing cites is one a later citation could hide behind,
-        and one that resolves was never an exception."""
-        skill = PLUGIN_DIR / PAYLOAD
-        text = _runtime_text(PLUGIN_DIR)
-        for relative, cited in EXAMPLE_OF_A_RUNTIME_PATH | SOURCE_CHECKOUT_ONLY:
-            assert cited in _token_citations(text[relative]), (relative, cited)
-            assert not _resolves(skill, cited), (relative, cited)
-
-    def test_the_source_checkout_branch_stays_guarded(self):
-        """(tree) The ``tests/`` exception exists for one guarded branch, so its citations
-        must all sit in the block whose condition checks for the directory."""
-        text = (PLUGIN_DIR / PAYLOAD / "legacy" / "instructions" / "implement.md").read_text(
-            encoding="utf-8",
-        )
-        block = text[text.index(STEP_8):]
-        block = block[:block.index("   ```\n", block.index("   ```bash\n") + 1)]
-        assert text.count("${CLAUDE_SKILL_DIR}/tests") == block.count("${CLAUDE_SKILL_DIR}/tests") == 2
-        assert '[ -d "${CLAUDE_SKILL_DIR}/tests" ]' in block
-
     def test_every_bare_skill_path_resolves(self):
         """(tree) The same rule for a citation without the token, which reads as a path
         relative to the skill. ``references/uv-check.md`` must exist, or the file
@@ -2697,12 +1977,11 @@ class TestRuntimeReferences:
         skill = PLUGIN_DIR / PAYLOAD
         unresolved = []
         for relative, text in _runtime_text(PLUGIN_DIR).items():
-            in_legacy = relative.startswith(f"{PAYLOAD}/legacy/")
             for match in _BARE_CITATION.finditer(text):
                 cited = match.group(1).rstrip(".")
                 if cited == MODE_PLACEHOLDER:
                     continue
-                if not _resolves_bare(skill, cited, in_legacy=in_legacy):
+                if not _resolves_bare(skill, cited):
                     unresolved.append((relative, cited))
         assert sorted(set(unresolved)) == []
 
@@ -2734,7 +2013,8 @@ class TestRuntimeReferences:
 
     def test_the_checker_finds_a_development_only_citation(self):
         """(src) Each shape it is meant to catch, so an empty answer above means
-        something. ``${CLAUDE_SKILL_DIR}/tests`` is the guarded branch's, not this rule's."""
+        something. ``${CLAUDE_SKILL_DIR}/tests`` is a token citation, which the token
+        rule above grades instead."""
         for sample, cited in (
             ("see `tests/test_x.py`.", "tests/test_x.py"),
             ("(plans/some-note.md T11)", "plans/some-note.md"),
@@ -2815,7 +2095,8 @@ class TestMake:
         for target in self.TARGETS:
             assert target in recipes, target
             assert re.search(rf"(?<![\w-]){re.escape(target)}(?![\w-])", phony), target
-            assert f"make {target}" in makefile, f"{target} has no help line"
+            assert re.search(rf"^{re.escape(target)}:[^\n]*## \S", makefile, re.M), (
+                f"{target} has no `## ` help description")
 
     def test_the_clean_build_ignores_every_dirty_opt_in(self):
         """(src) ``claude-package`` is what CI trusts, so a developer's exported variable

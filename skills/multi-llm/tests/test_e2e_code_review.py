@@ -1005,3 +1005,190 @@ class TestHighFindingsAreNotAFailedPhase:
         assert "[HIGH_PRIORITY_ISSUES]" not in result.stdout, (
             "the marker is the finding, so it is printed only when there is one"
         )
+
+
+def _write_every_batch_verdict(phase_dir: Path, status: str = "valid") -> None:
+    """The batch outputs a host writes after `[VALIDATION_PENDING]`, one per group."""
+    tasks = json.loads((phase_dir / "validation_tasks.json").read_text(encoding="utf-8"))
+    for batch in tasks["batches"]:
+        verdicts = [
+            {
+                "group_index": global_index,
+                "group_hash": batch["group_ids"][local_index],
+                "status": status,
+                "reason": "Confirmed against the diff.",
+                "confidence": 0.9,
+            }
+            for local_index, global_index in enumerate(batch["group_indices"])
+        ]
+        (phase_dir / f"validation_batch_{batch['batch_index']}.json").write_text(
+            json.dumps({"groups": verdicts}), encoding="utf-8"
+        )
+
+
+class TestTheReaggregateEndingHoldsTheGate:
+    """`--reaggregate` is how a host-driven review finishes, so it records the
+    HIGH groups and holds `--fail-on-high` exactly as the fan-out's own ending
+    does (docs/development/review-results.md)."""
+
+    def test_the_default_route_gates_on_the_reaggregate(
+        self,
+        skill_runner: SkillRunner,
+        fixture_manager: FixtureManager,
+        mock_provider: MockProvider,
+    ):
+        plan = _plan_with_issues(
+            skill_runner, fixture_manager, mock_provider,
+            "reaggregate-gate", _issues(high=2),
+        )
+        fanout = skill_runner.run_orchestrator(
+            "code_review", plan.plan_path,
+            "--models", "cursor-agent", "--fail-on-high", timeout=45,
+        )
+        phase_dir = plan.output_dir / "code-review"
+        handed_off = fanout.stdout + fanout.stderr
+        assert (
+            "[VALIDATION_PENDING]" in handed_off
+            or "[VALIDATION_BATCHES_PENDING]" in handed_off
+        ), (
+            f"the fixture must reach the host hand-off. stdout:\n{fanout.stdout}"
+            f"\nstderr:\n{fanout.stderr}"
+        )
+        assert fanout.exit_code == EXIT_OK
+        _write_every_batch_verdict(phase_dir)
+
+        result = skill_runner.run_orchestrator(
+            "code_review", plan.plan_path,
+            "--models", "cursor-agent", "--reaggregate", "--fail-on-high",
+            timeout=45,
+        )
+
+        assert "Reaggregation complete!" in result.stdout, result.stdout + result.stderr
+        assert "[HIGH_PRIORITY_ISSUES] 2" in result.stdout
+        assert result.exit_code == EXIT_NEEDS_HUMAN
+        status = json.loads((phase_dir / ".status.json").read_text(encoding="utf-8"))
+        assert status["high_priority_groups"] == {"count": 2}
+        # Recorded complete before the gate's exit 3 (`modes.REVIEW_GATE`).
+        assert status["state"] == "complete"
+        state = result.get_state() or {}
+        assert "code-review" in (state.get("phases_completed") or {})
+
+    def test_a_skip_validation_reaggregate_gates_too(
+        self,
+        skill_runner: SkillRunner,
+        fixture_manager: FixtureManager,
+        mock_provider: MockProvider,
+    ):
+        """The finding's repro: no validation round, so the groups on disk are
+        what is counted."""
+        plan = _plan_with_issues(
+            skill_runner, fixture_manager, mock_provider,
+            "reaggregate-gate-skip", _issues(high=2),
+        )
+        fanout = skill_runner.run_orchestrator(
+            "code_review", plan.plan_path,
+            "--models", "cursor-agent", "--skip-validation", timeout=45,
+        )
+        assert fanout.exit_code == EXIT_OK, fanout.stdout + fanout.stderr
+
+        gated = skill_runner.run_orchestrator(
+            "code_review", plan.plan_path,
+            "--models", "cursor-agent", "--reaggregate", "--skip-validation",
+            "--fail-on-high", timeout=45,
+        )
+        assert "[HIGH_PRIORITY_ISSUES] 2" in gated.stdout, gated.stdout + gated.stderr
+        assert gated.exit_code == EXIT_NEEDS_HUMAN
+
+        ungated = skill_runner.run_orchestrator(
+            "code_review", plan.plan_path,
+            "--models", "cursor-agent", "--reaggregate", "--skip-validation",
+            timeout=45,
+        )
+        assert "[HIGH_PRIORITY_ISSUES] 2" in ungated.stdout
+        assert ungated.exit_code == EXIT_OK
+
+    def test_an_unfinished_round_reopens_a_skip_validation_completion(
+        self,
+        skill_runner: SkillRunner,
+        fixture_manager: FixtureManager,
+        mock_provider: MockProvider,
+    ):
+        """The host hands validation out, `--reaggregate --skip-validation`
+        completes the phase over it, then a validating `--reaggregate` finds no
+        batch: it asks for the round again, so the phase is open again in the
+        checkpoint and in `state.json` (docs/development/review-results.md)."""
+        plan = _plan_with_issues(
+            skill_runner, fixture_manager, mock_provider,
+            "reaggregate-reopen", _issues(high=1),
+        )
+        fanout = skill_runner.run_orchestrator(
+            "code_review", plan.plan_path, "--models", "cursor-agent", timeout=45,
+        )
+        assert fanout.exit_code == EXIT_OK, fanout.stdout + fanout.stderr
+        phase_dir = plan.output_dir / "code-review"
+        assert (phase_dir / "validation_tasks.json").exists()
+
+        skipped = skill_runner.run_orchestrator(
+            "code_review", plan.plan_path,
+            "--models", "cursor-agent", "--reaggregate", "--skip-validation",
+            timeout=45,
+        )
+        assert "Reaggregation complete!" in skipped.stdout, skipped.stdout + skipped.stderr
+        assert "code-review" in ((skipped.get_state() or {}).get("phases_completed") or {})
+        assert (phase_dir / "validation_tasks.json").exists()
+
+        resumed = skill_runner.run_orchestrator(
+            "code_review", plan.plan_path,
+            "--models", "cursor-agent", "--reaggregate", timeout=45,
+        )
+
+        assert "batch files found." in resumed.stdout, resumed.stdout + resumed.stderr
+        assert "Reaggregation complete!" not in resumed.stdout
+        assert resumed.exit_code == EXIT_OK
+        status = json.loads((phase_dir / ".status.json").read_text(encoding="utf-8"))
+        assert status["state"] == "validation_pending"
+        assert status["progress"]["step"] == "validation_pending"
+        assert "code-review" not in (
+            (resumed.get_state() or {}).get("phases_completed") or {}
+        )
+
+    def test_a_new_round_reopens_a_skip_validation_completion(
+        self,
+        skill_runner: SkillRunner,
+        fixture_manager: FixtureManager,
+        mock_provider: MockProvider,
+    ):
+        """A `--skip-validation` review completes with no round on disk; a
+        validating `--reaggregate` then builds one and hands it out, so the
+        phase owes validation again in `state.json` as in the checkpoint
+        (docs/development/review-results.md)."""
+        plan = _plan_with_issues(
+            skill_runner, fixture_manager, mock_provider,
+            "reaggregate-new-round", _issues(high=1),
+        )
+        skipped = skill_runner.run_orchestrator(
+            "code_review", plan.plan_path,
+            "--models", "cursor-agent", "--skip-validation", timeout=45,
+        )
+        assert skipped.exit_code == EXIT_OK, skipped.stdout + skipped.stderr
+        assert "code-review" in ((skipped.get_state() or {}).get("phases_completed") or {})
+        phase_dir = plan.output_dir / "code-review"
+        assert not (phase_dir / "validation_tasks.json").exists()
+
+        handed_out = skill_runner.run_orchestrator(
+            "code_review", plan.plan_path,
+            "--models", "cursor-agent", "--reaggregate", timeout=45,
+        )
+
+        output = handed_out.stdout + handed_out.stderr
+        assert (
+            "[VALIDATION_PENDING]" in output or "[VALIDATION_BATCHES_PENDING]" in output
+        ), output
+        assert "Reaggregation complete!" not in handed_out.stdout
+        assert handed_out.exit_code == EXIT_OK
+        status = json.loads((phase_dir / ".status.json").read_text(encoding="utf-8"))
+        assert status["state"] == "validation_pending"
+        assert status["progress"]["step"] == "validation_pending"
+        assert "code-review" not in (
+            (handed_out.get_state() or {}).get("phases_completed") or {}
+        )

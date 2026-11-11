@@ -1,0 +1,5 @@
+[0m
+> code · stub-model
+[0m
+[91m[1mError: [0mThis model's maximum context length is 8192 tokens. However, your messages resulted in 214537 tokens. Please reduce the length of the messages.
+[91m[1mError: [0mSession too large to compact - context exceeds model limit even after stripping media. Start a new session to continue.

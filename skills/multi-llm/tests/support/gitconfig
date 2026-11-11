@@ -1,0 +1,12 @@
+# The global git configuration tests/support/gitrepo.py points GIT_CONFIG_GLOBAL
+# at, in place of the developer's ~/.gitconfig. Defaults only: a repository's
+# own config, and GIT_AUTHOR_* / GIT_COMMITTER_* in the environment, still win.
+[user]
+	name = t
+	email = t@example.invalid
+[commit]
+	gpgsign = false
+[tag]
+	gpgsign = false
+[init]
+	defaultBranch = master

@@ -7,7 +7,10 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 ## Contents
 
 - [Materialized task contract](#materialized-task-contract)
+- [The host index](#the-host-index)
 - [Code-review validation context](#code-review-validation-context)
+- [Cited plan sections](#cited-plan-sections)
+- [Where the executor's helpers live](#where-the-executors-helpers-live)
 - [Read and analyze executor](#read-and-analyze-executor)
 - [In-process continuations](#in-process-continuations)
 - [Validation model capability](#validation-model-capability)
@@ -37,9 +40,10 @@ instruction markdown. **No generator interpolates `plan_file`, `grouped_file` or
 
 **Two named exceptions**, each declared as `context_mode: workspace-read` so `refuse_reason` stays
 the single gate: `task_generation` names the repo root, and **a validation/revalidation task
-names at most one path per document whose context exceeded `VALIDATION_CONTEXT_LIMIT`, each a hash-bound
-snapshot** (plans/validation-context-by-path-and-codex-0156-fallout.md §2.3). Under the limit
-nothing changes (`inline`, no path, goldens byte-identical). Over it, per document,
+names at most one path per document whose context exceeded `VALIDATION_CONTEXT_LIMIT` or whose
+plan block carries only the batch's cited sections ([Cited plan sections](#cited-plan-sections)),
+each a hash-bound snapshot** (plans/validation-context-by-path-and-codex-0156-fallout.md §2.3).
+Under the limit and uncited nothing changes (`inline`, no path, goldens byte-identical). Over it, per document,
 the prompt keeps the 60 000-char head excerpt, ends it with a marker naming the dropped sections and
 telling the validator to read the file before judging anything those sections, or an
 omission/absence claim, depends on, and names the file once under `## Plan file` /
@@ -55,7 +59,8 @@ Each task records `context_sources[]` (`label`
 `plan`|`tasks`|`reviewed-code`|`diff`,
 `kind`, phase-dir-relative `path`, `abs_path`, raw-byte
 `sha256`, `bytes`, `chars_shown`, `truncated`,
-`mode` `inline`|`path`|`truncated`); the
+`mode` `inline`|`path`|`truncated`, and `selection: cited` on a `path` source whose excerpt is the
+batch's cited plan sections); the
 snapshot hash is re-verified before dispatch, on resume and on `--reaggregate`
 (`validation snapshot changed/missing; re-run validation`, never a silent re-point), and a moved or copied phase dir rebinds the
 prompt to the copy's snapshot only after its hash verifies.
@@ -111,7 +116,7 @@ The merge also binds `validation.json` to the batch bytes it consumed (`metadata
 vanished or belongs to another round; only a file without `batch_sha256` keeps the legacy
 mtime test. And `consolidation_recommended` is recomputed up or down on both completion paths
 (`recompute_consolidation_recommendation`), removed with `status_file.remove_status_keys` below the threshold, and once the
-consolidation it recommends has run on the current `grouped.json` (`consolidation.consolidation_is_current`:
+consolidation it recommends has run on the current `grouped.json` (`output_handler.consolidation_is_current`:
 the `--reaggregate-consolidation` merge removes it, `detach.classify_run` and a resumed
 `full` ignore it — live run 8) — never written as `null`.
 
@@ -134,8 +139,8 @@ sibling.
 `review-tasks` embeds two labelled `## Context (…)` blocks — the plan, and
 `tasks/tasks.md`, each excerpted on its own budget so a long plan cannot squeeze the task list
 out — and hashes the task list into `inputs.tasks_sha256` so an edited tasks.md invalidates the
-file the way an edited plan does (`review_orchestrator_base.validation_context_kwargs`, both the fan-out and the reaggregate site,
-which had to start resolving the tasks file too).
+file the way an edited plan does (`review_orchestrator_base.validation_context_blocks`, read by
+`review_validation_round`, the one round builder of both the fan-out and the reaggregate site).
 
 Measured 2026-09-16: 28 of 30 suggestions named a bare `T###`,
 `'T001' in prompt` was False for all eight batches, and two verdicts came back citing text — a
@@ -197,7 +202,7 @@ recorded decision" instruction (F3, 2026-09-16).
 
 **The validation task file carries the round's scope block** (`scope`: policy, prompt phase, the
 baseline these validators are shown and the round's own baseline id;
-plans/scope-policy-and-report-tags.md §3.1). `prepare_batched_validation_tasks(scope=...)` renders
+plans/scope-policy-and-report-tags.md §3.1). `materialize_validation_round` renders `ValidationRound.scope` as
 `scope_policy.validator_guidance` into every batch prompt per call, as its own argument after the
 phase guidance (so `PLAN_VALIDATION_SCOPE_GUIDANCE` still fills in when `extra_instructions` is
 empty), and both invokers run those bytes. The reply contract gains the optional
@@ -207,20 +212,73 @@ executor's result check never ask for them, so a reply without them is still a r
 override, recorded review policy, `expand`) and, when the current document is not the round's
 baseline document, embeds the round's hash-verified `validation-snapshot.md` as a second labelled
 context so correctness is judged against the current text and scope against the original
-(`revalidation_scope_binding`). The legacy `--internal-validation` route renders the same block, its
-Output Format asks for each group's `group_id` verbatim, and it stamps only a verdict whose echoed
-`group_id` names one of its groups (that echo also sets the record's `group_index`); any other echo
-joins by the reported index, for validity only.
+(`revalidation_scope_binding`). The in-process validation lane is retired: `--internal-validation`
+and `--internal-revalidation` still parse, print one warning and change nothing, so validation and
+revalidation always run through these task files (`cli_common.RETIRED_FLAGS`).
 
 The reply template's `group_index` example is a placeholder, never a number (models copied
 `0`: 41 of 46 and 18 of 32 verdicts echoed batch-local ordinals), and
 `_reported_group_index` coerces whatever comes back — a copied placeholder joins by hash and counts
 in the summary line; with no hash it falls through as `-1` instead of raising.
 
+## The host index
+
+`validation_tasks.json`, `revalidation_tasks.json` and `consolidation_tasks.json` each have a host
+index beside them, `<stem>.index.json` (`refresh_host_index` in `utils/validation.py`). It copies
+`total_batches`, `reaggregate_mode` and `plan_file` when the file has them, and per task `task_id`,
+`batch_index`, `prompt_path`, `prompt_lines`, `output_path`, `subagent_type` and `context_mode`:
+what a native host dispatches from, without the `prompt` strings, which are about 90% of the full
+file and which a host that hands its subagent the sidecar never reads. The instructions name the
+index on their "Read" lines, and the full file when there is no index.
+
+- **A view, not a contract.** The executor, `util check-reply`, the audit and the container digest
+  read the full file, which stays byte-identical, and so do the sidecars. Nothing but a host reads
+  the index.
+- **Every derived view follows one rule** (this index, and the apply phases' summary and batch
+  details, [write-scheduler.md](write-scheduler.md#the-host-summary)): it is published only after
+  its source is written, removed before its source or the sidecars it names change, and rebuilt
+  from the source at every hand-back to the host. A host then never reads a view newer or older
+  than the file beside it, and finding none always means reading the file.
+- **Removed before the file changes.** `materialize_validation_round` removes the round's index
+  before it writes a sidecar, `prepare_consolidation_tasks` before it writes anything,
+  `ensure_prompt_sidecars` before it rewrites a sidecar or a pointer its caller then persists (and
+  not at all when nothing needs repair), and `retire_stale_validation_round` before it moves any
+  of the round aside: an index it cannot remove stops it with nothing retired. An interrupted
+  rematerialisation or retirement therefore leaves no index beside what is left of the round.
+- **Rebuilt from the file on disk, never from a document in memory.** `dispatch_subagent_tasks`
+  rebuilds it on every call, the hand-back of a fresh round, a `--reaggregate` and the fan-out's
+  continuation alike, and `prepare_consolidation_tasks` right after its write. A task file that is
+  missing or unreadable leaves no index. An index whose bytes are already the ones it would write
+  is left in place, neither replaced nor removed, so a healthy hand-back never stops on a file a
+  host holds open (a Windows sharing violation).
+- **One views mutex per phase dir.** `host_views_lock` (`{phase}/.views.lock`, a
+  `process_control.FileMutex`, reentrant within a thread) is held across each sequence that
+  removes an index, changes its task file or sidecars, and publishes it again:
+  `materialize_validation_round` together with its caller's write of the full file (the
+  revalidation round's as well), `ensure_prompt_sidecars` together with the commit of the repaired
+  file, `prepare_consolidation_tasks`, and the refresh's read of the file and publication of its
+  index. A refresh that read the file before a repair therefore publishes before that repair
+  removes the index, never after it. A lock file that cannot be opened or locked at all lets the
+  sequence run, removing as before, but publishes no index, so a host reads the full file; one
+  another command holds for `HOST_VIEWS_LOCK_TIMEOUT_S` (60 s) stops the run with exit 3 naming
+  it. A phase lock that serialises whole runs over one phase dir, once there is one, orders these
+  sequences too; the views mutex does not depend on it.
+- **Fail closed.** An index that cannot be written leaves none (`publish_host_view`), and one that
+  cannot be removed stops the run with exit 3 naming it (`remove_host_view`): a phase dir made
+  read-only after a round was written would otherwise keep an index of that round beside a newer
+  full file.
+- **The sidecar fallback carries over.** A task whose sidecar was skipped (`[PROMPT_SIDECAR_SKIPPED]`)
+  has no `prompt_path` in the full file, so its index entry has none either, and the host runs that
+  task's `prompt` from the full file.
+- `RESERVED_OUTPUT_SUFFIXES` keeps a subagent result off it, and its name contains `validation`
+  or `consolidation`, so no reaggregation glob reads it as a model's result.
+- `task_generation_tasks.json` has no index: it holds one task.
+
 ## Code-review validation context
 
 **A code-review validation prompt carries no diff, and its first block is the plan, head-kept.**
-Both `review-code` sites hand `prepare_batched_validation_tasks` `context="Plan file: …\n\nPlan content:\n" + plan` and the second
+Both `review-code` sites build their round with `code_review_validation_round`: the first block is the
+bound plan snapshot, with no `Plan file:` line, and the second
 block is the implement record plus the cited files' line windows (`build_validation_secondary_context`); the
 144-file diff a reviewer fan-out reads never reaches a validator, so an over-limit first block is
 always the *plan* going over `VALIDATION_CONTEXT_LIMIT` (`excerpt_context` keeps the first 60 000
@@ -246,12 +304,170 @@ validator was told to open locations it was never given beside a code block nami
 saying nothing about which finding each belongs to. Keyed on presence, so plan-review records render
 byte-identically.
 
-Both context blocks are still **global** — excerpted once per phase, embedded verbatim in every
-batch (validation.py's `shared_context`/`shared_secondary`) — so a batch's prompt carries
-windows for files only *other* batches' groups cite (measured: 3–14% of each prompt, 71–80% of the
-code block in the single-HIGH batches). That, and choosing plan sections by relevance instead of by
-position, are the open design questions; the budget itself was not the problem, the cut's
-*placement* was.
+The code block is no longer global: each batch carries the windows its own issues cite, and the
+plan block carries only the sections they cite when the opt-in is on
+([Cited plan sections](#cited-plan-sections)). Before that, every batch repeated windows for files
+only *other* batches' groups cite (measured 2026-11-07: 72% of the code block and a third of all
+prompt chars on one round), and the round-wide budget dropped whole files from every batch.
+
+## Cited plan sections
+
+**Review-code batches carry the code windows their own issues cite. A batch's plan block can
+carry only the sections its suggestions cite, but that is opt-in (`MULTI_LLM_VALIDATION_CONTEXT=cited`)
+and the whole plan stays the default.** A round embeds one plan excerpt and used to embed one
+reviewed-code block in every batch: over 55 recorded rounds 84–98% of all validation prompt text
+repeated between batches, and the groups themselves were 3.7–13% of it
+(plans/2026-11-07-code-health-04-review-pipeline.md REVIEW-8, -08-performance.md PERF-2). Batching is
+unchanged; only what each batch embeds is.
+
+**Why plan scoping is opt-in.** Smaller prompts do not show that verdicts are as good. A batch that
+sees only its cited sections can uphold a suggestion that a section it was not shown forbids,
+without ever making the omission or disagreement claim that would send it to the full file. The
+code-health roadmap (plans/2026-11-07-code-health-13-roadmap.md, the REVIEW-8/PERF-2 row and owner
+decision 6, live spend) asks for a live check before the default changes: verdicts on the same
+recorded groups under cited and under full plan context. **That comparison is still owed.**
+Until it is done, `cited` is for measuring and trying the mode, and the default round is the whole
+plan in every batch, byte for byte what it was before cited sections existed (checked on all 622
+recorded review-plan batches). The code windows stay on by default: a validator was never promised
+the windows other batches' issues cite, the round-wide budget used to drop whole files from every
+batch, and a replay of 24 recorded code batches lost no code block that overlapped the batch's own
+citations.
+
+**The switch.** Unset: whole plan, per-batch code windows. `cited`: cited plan sections and
+per-batch code windows. `full`: the round-wide plan and code blocks in every batch. Any other value
+is reported once and read as `full`. The Codex plugin forwards it (`packaging/codex/mcp.json`
+`env_vars`); a name missing there never reaches the server.
+
+**The plan block** (`utils/validation_sections.py`, called from `materialize_validation_round`).
+A round qualifies (`cited_plan_for_round`) only when every batch can reach the rest of the plan:
+the switch is `cited`, the block is the bound plan with a hash-bound snapshot, the runner may read
+it (no `runner_read_refusal`; on a native host the snapshot is inside the project root), and the
+plan is at least `CITED_MIN_CHARS` (12 000) long and has section headings. Then, per batch:
+
+- *Headings.* ATX headings outside code fences; a lone `#` title belongs to the preamble. A fence
+  closes only on a line of its own character (backtick or tilde) at least as long as its opener,
+  so a four-backtick example showing a three-backtick block stays one fence. Setext headings (a
+  line of text over `===` or `---`) are not parsed: a plan with one, or with a line that looks like
+  one, is never cited (none of the 41 recorded plans has one).
+- *What counts as cited.* Each suggestion's `reference` is split on ` / `, `; ` and a comma that
+  starts another reference, and each part resolves against those headings. First rule that matches
+  wins, and every heading it matches is taken: the heading text or its start at a word boundary
+  (`## 2` → `## 2. Uploads`, never `## 20`), and for a part with no section key also every heading
+  whose title without its key it starts (`Testing` → both `## Testing` and `## 3. Testing`); a
+  numeric range (`§2.3-2.5`); the same section key (`9.2`, `stage a`, `t4.2`, `d5`); the title
+  without its key; a heading title of six or more characters that starts the part; a key in
+  parentheses (`### Fix (D5)` → `## D5 — …`).
+- *Global sections.* A heading at the plan's shallowest section level whose title (without its
+  number) has one of the words goal, non-goal, objective, scope, constraint, requirement,
+  definition, glossary, terminology, assumption, invariant, principle or decision (singular or
+  plural) is global: it rides in every cited batch with its subtree, whatever the batch cites.
+  These are the sections any suggestion can conflict with. A nested `### Constraints` belongs to
+  its parent and comes along only when that is cited.
+- *What the batch embeds.* The preamble (text before the first section heading), the global
+  sections, each cited heading's whole subtree, and the intro of every heading above it, merged in
+  plan order; each omitted stretch becomes one `[... not cited by this batch, not shown: <first
+  three headings> (+n more) ...]` line. Only a cited batch's records carry each suggestion's
+  `reference`, so the validator sees which section each one names; every other batch's records
+  render as before.
+- *When it embeds the whole plan instead* (the default block, byte for byte): any suggestion in
+  the batch has no `reference`, or any part of any reference names no heading (one resolved part
+  never vouches for another, so the prompt never claims a section it does not show); the plan is
+  unscoped (setext); the selection is 60% of the plan or more (`CITED_MAX_SHARE`); or it is over
+  `VALIDATION_CONTEXT_LIMIT`. A batch is the unit, so one unresolved part gives its whole batch
+  the whole plan.
+
+A cited batch's plan source is `mode: path` with `selection: cited`: the prompt names the snapshot
+under `## Plan file` and the task is `workspace-read`, so dispatch refusal, the executor's read
+dirs, the resume re-hash and phase-dir rebinding (`verify_context_sources`) treat it exactly like
+an over-limit excerpt. The prompt's `## Task` (`subagent_prompts._cited_task_section`) says the
+block holds the opening, the global sections and the section each reference names as matched to
+the plan's headings; it judges each group against those, tells the validator to read the file
+before judging a group whose verdict needs a section not shown or whose reference seems to mean
+another section, and judges every omission, "never defined" or "sections disagree" claim against
+the full file, never the selection. A round whose only partial block is cited publishes no
+`validation_context` (every cited section is whole in its prompt and the rest is one read away)
+unless a verdict answered `insufficient-context:`; when another source publishes the round, the
+plan entry reads "cited sections inline + full snapshot by path". One stderr line per cited round:
+`[VALIDATION_CONTEXT_CITED] plan: 8 of 13 batches carry the plan sections their groups cite (…);
+whole plan in 5 (a group cites a part that names no section of the plan); 52/90 reference parts
+resolved`.
+
+**The code block** (review-code). `build_validation_secondary_context(per_batch=…)` reads the cited
+files once, as before, and hands back `for_batch`; `reviewed_code_for_batch` keeps, for each file
+the batch's own issues cite, the windows that overlap those issues' windows, fitted to the same
+budget by whole files. `reviewed_code_batch_view` turns it into the per-batch block, its own
+`reviewed-code` source and its own dropped-file instruction, at both validation sites.
+`reviewed_code_sha256` still hashes the round's whole untrimmed excerpt, so a round materialized
+before this change resumes and reaggregates unchanged; `task_round` never hashed prompts.
+
+**Determinism.** A selection is a pure function of the round's inputs and the batch's records, so
+the same plan, `grouped.json` and files render byte-identical prompts per batch; batches now
+differ from each other, which nothing compares.
+
+**Measured** (2026-11-08, read-only replay of the recorded rounds in `plans/`, prompt chars).
+review-plan, re-materialized from each round's `grouped.json` and snapshot (41 rounds, 622
+batches): the default is identical to the code before cited sections; with `cited`, 321 batches
+are cited and the round total goes 28.1 M → 21.0 M chars (−25.3%), median round −17.7% for the
+34 plans of 12 000 chars or more. 494 of 3 617 reference parts name no heading (a task id or a
+step inside a section, a quoted phrase, a heading renamed since): 244 batches fall back for that,
+18 for the 60% share and 4 for the limit. Global sections are in 33 of the 41 plans (median 6.3%
+of the plan) and cost 10 cited batches. An earlier rule, which let one resolved part stand for a
+whole group, cited 503 batches for −42.6%, but kept 28 unresolved parts in cited batches.
+review-code, approximated by re-selecting each recorded batch's code block from the round-wide
+block (15 rounds whose prompts are inline, 105 batches): 12.5 M → 7.9 M chars (−36.6%, median
+round −35.0%) from the code windows alone, by default. `cited` changes nothing there, because code
+issues cite files rather than plan sections. These are prompt sizes, not spend: a validator that
+reads the snapshot pays for that read, and per-batch prompts share a shorter prefix for provider
+caching.
+
+## Where the executor's helpers live
+
+**`utils/subagent_executor.py` is a facade; the executor's code lives in thirteen modules below
+it.** Lowest first, each imports only the ones before it, and none imports the executor:
+
+| Module | What it owns |
+|--------|--------------|
+| `utils/batch_reply.py` | How a write reply is read, with no I/O: a check task's `check` (`read_check_reply`, `check_findings_from`), a code batch's own check and what it ran (`batch_check_findings`, `ran_check_outcomes`, `ran_no_check`), the items it declined (`declined_items`), the `WRITE_*` outcome words and labels, and the `row_*` readers of a recorded row. |
+| `utils/failure_capture.py` | The redaction every executor write goes through (`redact.redact_text`, imported here, and `_redact_json`, the probe boundary `_redact_probe_tail`), the owner-only atomic JSON writer (`_atomic_write_json`) and the per-attempt captures under `failed/`. |
+| `utils/task_outcome.py` | The records: `Attempt`, `TaskOutcome`, `BatchReport` and its file name (`batch_report_path`), and `ExecutorError` with `RunnerRejected`, `ResultRejected` and `BatchFailed`. |
+| `utils/task_result.py` | A task's result file (D3f): `resolve_output_target`, `persist_result`, `extract_result`, `validate_result`, the salvage reads, `normalize_result` and `task_is_complete`. |
+| `utils/runner_selection.py` | `profile_for_kind` and the jail grant's kind table beside it (`WRITE_SCOPE_BY_KIND`), `resolve_task_runner` and its source, the roster check (`eligible_runners`) and the refusal text a preflight leg raises. |
+| `utils/probe_state.py` | What the process learned about its runners: the preflight caches, the sandbox decisions and the shared sandbox probe cache with their locks, the jail summary lines, the `reset_*` functions, and `sandbox_rung`. |
+| `utils/sandbox_walk.py` | The sandbox gate: `sandbox_verdict` and `cached_sandbox_verdict`, the fallback ladder walk, the policy, the preflight's sandbox leg (`_detect_sandbox`, `repo_wide_write_refusal`) and the lines it prints. |
+| `utils/dispatch_spawn.py` | One attempt's spawn (`_spawn`, returning a `_Capture`): the schema leg, the child environment (`dispatch_child_env`, which the auth probe reads too) and cached version, the process tree, the jail and what it reported (its `[JAIL_DENIED]` line from `landlock_dispatch.jail_denied_text`), the argv an audit record shows (`render_audit_argv`, `audit_argv`), the timeout kill (`_kill_timed_out`, which words its verdict by `process_control.unconfirmed_kill`), and the grant a write dispatch gets (`_dispatch_grant`). |
+| `utils/attempt_classifier.py` | Which D3k rung an attempt lands on: `_classify_pre_parse` (rungs 1 and 2), `_parse_and_validate` and `_parse_with_schema_policy` (rungs 3 to 6), and `_classify_failed_run` with its redacted quote (`_quote_verdict`). Not `providers/failure_classifier.py`, the adapter-free stream rule it applies. |
+| `utils/runner_preflight.py` | `preflight_runner` and its version, auth, model and nested-exec legs (`_probe_nested_exec` spawns one dispatch and classifies it), and `probe_setup_metadata`. |
+| `utils/task_dispatch.py` | `dispatch_task` and its typed steps (below): the attempt loop, the state it carries (`AttemptState`), each hook's context (`hook_context`, `HOOK_CONTEXT_KEYS`), the re-asks and write hooks, the prompt budget, each attempt's record, the kind tables it reads (`SCHEMA_PHASE_BY_KIND`, `SCHEMA_REPAIRS_BY_KIND`, `RESENDS_BY_KIND`, `RECLASSIFIABLE_STATUSES`) and the D3g verification statuses (`STATUS_PARTIAL`, `STATUS_POLICY_VIOLATION`, `STATUS_BATCH_FAILED`). |
+| `utils/task_batch.py` | `run_tasks`: the batch preflight, the D3i ceiling (`effective_ceiling`), the dispatch order, the concurrent fan-out (`_gather`) with provider backpressure and the judge audit, the recorded runners and provenance, and the `.status.json` mirror. |
+| `utils/task_file_runner.py` | The entry points: `run_task_file`, the dry run (`dry_run_report`, D3l) and the continuation (`continue_past_marker`, D3b). |
+
+`CHECK_FAILED_WITHOUT_FINDINGS` lives in `utils/known_checks.py`, which reads it and imports nothing
+from the executor or these modules.
+
+**The executor re-exports every moved name for reading only** (`subagent_executor._MOVED`, the
+contract `write_batch_scheduler`, `providers/base`, `git_utils` and `run_status` already follow),
+and the `retry_ladder` vocabulary: `subagent_executor.X` returns the owner's current object, and a
+patch of `subagent_executor.X` reaches no code, because none is left there. The modules read a
+moved name through its owner at each call (`_dispatch_spawn._spawn`), never a copy, so one patch of
+the owner reaches them all. Patch the owner: `tests/test_subagent_executor_moved_names.py` fails a
+test that writes any name on the executor, and holds the layering. A name the executor's modules
+import from elsewhere (`get_provider`, `_resolve_executable`) is bound in each module that reads it,
+so a test patching one patches it in the module whose code it drives, or in each of them.
+`tests/test_import_layers.py` puts all thirteen at L3. New code imports from the owner, not the
+facade.
+
+**`dispatch_task` is a loop over typed steps.** `plan_dispatch` resolves once what every attempt
+sends (`DispatchPlan`), or refuses with nothing spawned (`Refusal`). Each attempt is admitted
+(`admit_attempt`: the provider's launch turn and the ladder's admission), passes the write path's
+`before_attempt`, is spawned (`spawn_attempt`) and read onto its rung (`read_attempt`, returning an
+`AttemptReading`). A schema-valid reply is persisted and asked about (`ask_about_reply`: rule 9's
+re-send, rule 7's report re-asks), then accepted (`finish_ok`); any other is checked for moved bytes
+on the write path (`check_moved_before_retry`), recorded with its `failed/` capture
+(`record_failed_attempt`) and decided (`decide_next`: the ladder's one `record` call, the
+schema-repair prompt, the backoff sleep), returning a `Next`; a stop ends in `close_outcome`. What one
+attempt carries into the next is `AttemptState`, changed only by its `start_*` methods; every hook's
+context comes from one table, `HOOK_CONTEXT_KEYS`. A step is tested alone from a hand-built
+`_Capture` in `tests/test_dispatch_steps.py`.
 
 ## Read and analyze executor
 
@@ -263,7 +479,8 @@ read/analyze kind, `cwd` pinned to the repo) → capture stdout → the adapter'
 extraction would match an envelope or a reasoning item and write a garbage result reaggregation
 would accept) → validate against the kind's result shape → atomic 0600 write under the phase dir.
 
-`persist_result` is the **shared** invoker-persists leg: `simulate_native_invoker` (which
+`persist_result` is the **shared** invoker-persists leg: the test harness's
+`simulate_native_invoker` (`tests/harness/native_invoker.py`, which
 `SkillRunner.simulate_subagents` delegates to) calls the same function, which is what makes "either invoker,
 byte-identical `output_path`" a property of the code.
 
@@ -313,22 +530,134 @@ counters above, and §7.5's two composition tests against the adapter's **declar
 re-ask — takes the same test in `record()`, so a slot whose attempt ran keeps that
 attempt's status with the refusal as `Action.note`, 2026-10-05), and an adapter that
 declares `retries_rate_limit: true` gets no identical rate-limit re-dispatch, because that would repeat
-a chain its own CLI already ran.
+a chain its own CLI already ran. For the same reason an attempt the adapter's stdout watch stopped
+keeps its `runner_error` but gets no identical re-dispatch either (rule 10, `stream_stopped`; see
+[a CLI that loops](providers.md#a-cli-that-loops)).
 
 The ladder is provider-free by construction (the envelope is read structurally) and each lane keeps
-only its own three-line loop: `subagent_executor._dispatch_task` blocks, `review_orchestrator_base.run_single_model` awaits — the
+only its own three-line loop: `task_dispatch.dispatch_task` blocks, `review_orchestrator_base.dispatch_with_ladder` awaits — the
 latter because it runs inside `asyncio.gather` under two semaphores, where a blocking retry
 loop would serialize the whole fan-out. Each failed attempt writes `{phase}/failed/{task_id}.attemptN.json` with the
 prompt elided to its sha256; attempt numbering restarts per invocation, so an existing file of that
 name is first retired to `{task_id}.attemptN.<its own mtime, UTC>.json` (`_retire_capture`) rather than overwritten — a
 retry never destroys the evidence of the attempt it retries.
 
+**What each lane hands the ladder: the adapter's verdict.** The adapter's `classify_failure` is the
+one classifier that knows its CLI's error shapes, so both lanes ask it rather than re-reading
+a sentence composed for a human. The executor asks it for a run with no usable result
+(`_classify_failed_run`) and lets the verdict replace the parse failure's status when it is one
+that changes the slot's fate (auth, invalid model, sandbox, rate limit, context length, budget, or
+a structural `runner_error`). Any other verdict, `None` included, leaves the parse failure's own
+status, rung 4 or 5: one transport retry. The review fan-out (`dispatch_with_ladder`, the one
+loop behind review-plan's and review-tasks' `run_single_model` and review-code's
+`run_single_review`) takes it from `details["failure_category"]`, which
+`llm_client.invoke_with_provider` sets on every failed child (a non-zero exit, and an exit 0 that
+left no answer, below) while it still holds the streams (its reading is
+`provider_outcome.outcome_from_capture`); only the category leaves, never the streams. The fan-out applies it the same way: `None` (the adapter recognised
+nothing) is `runner_error`, connection and server errors are rung 4 through
+`review_orchestrator_base._LADDER_STATUS_BY_CATEGORY`, and every other category reaches the ladder
+under its own name. `spawn_failed` (an install or argv refusal, such as omp's unknown `--tools`
+name) stops both lanes on a non-zero exit and fails the executor's batch, so it is read only off
+exit 127, stderr (`failure_classifier.STDERR_LAUNCH_FAILURE_MARKERS`: a shell's `command not found`, omp's
+refusals) and an adapter's own refusal shape (vibe's config refusal opening stdout), never off a
+model's answer or a tool's output on stdout. A shell's phrase there may name a hook's, a wrapper's
+or an MCP server's command rather than the CLI, so both lanes keep it only for a run that made no
+progress: nothing on stdout and nothing else the adapter recognises on stderr
+(`failure_classifier.launch_refusal`, asked by `provider_outcome` and `_classify_failed_run`).
+Otherwise the verdict is the adapter's reading with only those phrases blanked, so a 401 on the
+same line still decides (`None`, one transport retry, unless the rest names a rate limit or the
+like); exit 127, omp's own refusals (`failure_classifier.CLI_REFUSAL_MARKERS`) and an adapter's
+refusal shape stay fatal. `sandbox_unavailable` fails the batch too, so its
+bubblewrap refusals (`failure_classifier.SANDBOX_MARKERS`) are whole measured lines read off stderr alone: an
+answer that explains bubblewrap is not a broken sandbox; any other `bwrap: ` line on a non-zero
+exit is `runner_error`, one transport retry, with a reason that names `multi_llm.py doctor`
+(`attempt_classifier._sandbox_hinted`). Both read only the stderr of an adapter
+whose CLI writes it alone, never one that relays a model's or a tool's words there
+([launch diagnostics](providers.md#launch-diagnostics)). One verdict stops on the
+fan-out and is retried once by the executor, which does not forward it: `permission_denied` (a 403
+or a denied tool), which can fail one task and not its neighbour, so the difference is deliberate.
+On both lanes a run killed at its deadline is `timeout` whatever
+its partial streams say (the executor's `_classify_pre_parse`), and a jail denial is never retried
+whatever the category. The fan-out's error line on a non-zero exit ends with the category
+(`<cli> exited with code 1: <reason> [rate_limited]`), so `.status.json` names why a slot stopped
+or retried. Read by `classify_streams`, that tag can only ever name its own category. An adapter
+whose `classify_failure` raises, or answers something other than a category name or `None`,
+sets no key, and that slot falls back to its error line, below.
+
+On an **exit-0 failure** (an answer that did not parse, and no result file) stdout is usually the
+model's own answer, prose quoting whatever the plan says about 429s and 401s, and **no answer may
+decide a retry, a backoff or a stop on either lane**. Both lanes read such a run through one gate,
+`providers/failure_classifier.exit_zero_failure_category`. It gives a verdict only for an adapter that declares
+`EXIT0_CLASSIFIABLE = True`, a reviewed claim that its `classify_exit_zero` never reads the answer,
+in a complete envelope or an interrupted one: claude-code, cursor-agent, gemini and grok read their
+envelope without the answer field (and a cut or ambiguous stdout not at all), the one the parser
+reads, through one reduction on every exit code ([reading a capture](providers.md#reading-a-capture));
+the executor's failure reason quotes the same reduced streams, so an answer that quotes a diagnostic
+is never the quote of the CLI's own; and codex, opencode, omp, pi,
+cline, kimi and fx through `vendor_text` reductions that keep only the CLI's own events. Each
+adapter's declaration carries its reason. agy, aider, goose, kilocode, copilot, muse, qwen-code and
+vibe declare `False`: their answer cannot be told apart from what the CLI wrote (aider's answer cut
+before its accounting line can quote its own `litellm.RateLimitError: …` line verbatim; goose's
+model turn can open with its `Ran into this error` wording and lacks the `metadata.inference` stamp
+whenever goose could not resolve the model), so the run is left unclassified, the fan-out stops on
+its error line and the executor keeps its parse failure's one retry; their exit-0 rows are marked
+`open`. A line's shape cannot say who wrote it, so only a structural marker the model cannot write
+earns `True`. `spawn_failed` from the gate is read as nothing (a CLI that refused its own invocation
+never exits 0). A stdout answer that parses but is not one (`_is_valid_parsed_data`, a bare `raw`
+wrapper) takes one verdict on both lanes: the gate's when it names a category (a real diagnosis on
+stderr, say), else `unparseable_result`. The executor's `_classify_failed_run` asks the gate after
+its own rejection; `invoke_with_file_output` asks it the same way, through
+`provider_outcome.rejected_answer_category`, over the capture the exit 0 handed back, and carries the
+verdict on `details`. A failure with no verdict at all (a launch failure, an adapter that
+raised, an adapter that is not `EXIT0_CLASSIFIABLE`) is classified by its error line alone with
+`classify_streams`, retrying only what that line names (a rate limit, a connection or server
+error); an unrecognised line is never retried. `tests/test_exit_zero_prose_matrix.py` feeds every
+adapter rate-limit, auth, context-length, numeric and launch prose, and quoted diagnostic lines, in
+its complete, unfinished and cut envelopes and asserts neither lane moves off its status for a
+neutral answer; it also gives every adapter a rejected `raw` answer with and without a stderr
+diagnosis and asserts both lanes agree.
+`tests/test_lane_a_ladder.py` replays every committed failing fixture row, exit 0 included, and
+every row as a deadline kill, through both lanes' real paths (`invoke_with_file_output` into
+`run_single_model`, and `dispatch_task` with the spawn stubbed and the profile gate lifted) and
+asserts the same number of dispatches, apart from the deliberate verdict and the `open` exit-0
+rows above.
+`tests/test_code_review_ladder.py` drives the same verdicts through review-code's slot and asserts it
+dispatches each as often as review-plan's. On both review lanes the slot's deadline starts
+(`slot_ladder`) before its prompt and result baselines are prepared, which it pays for. A slot that
+raises is a failed result carrying `Exception: <type>: <message>`, redacted (`slot_exception_error`),
+never a deadline loss. When a dispatch raises, the attempts before it keep their spend, audits and
+home checks, the raising attempt counts as unaudited, and the write, mode and home checks run as
+after a return, so a write in the window still fails the slot by path. The raising attempt's home
+check is the ladder loop's own read-back of the jailed children it armed (see
+[providers](providers.md)), and a write it fails is recorded with `source: exception`. Cancellation
+(`CancelledError`, `KeyboardInterrupt`) is not caught there: the fan-out's teardown retires the slot.
+
+**Launch spacing is between dispatches, per provider.** An adapter with a measured concurrent-start
+fault declares `LAUNCH_STAGGER_S` (cursor-agent: 2 s); every other adapter declares 0 and is never
+throttled. Each fan-out (`run_models_concurrent`, used by review-plan, review-tasks and ask;
+`run_tasks_concurrent`; review-code's and review-plan's own loops) shares one
+`utils/launch_limiter.py` limiter across its slots and their retries. A slot takes its provider's
+turn only once it holds both semaphores (it reads `queued` while parked, `staggering` while it waits
+for the turn), so slots queued behind other providers cannot dispatch together. Every ladder attempt
+then takes a turn right before it dispatches (`dispatch_with_ladder`, and `dispatch_task` on its
+worker thread): the first attempt confirms the slot's turn or waits again if another slot of the
+provider took one meanwhile, a retry always takes a fresh one, and the wait is charged to the slot's
+deadline. A lane with no ladder (ask, review-plan without an output dir) takes the turn the same
+way at its one dispatch, after its pre-dispatch probe and snapshots, so slow preparation cannot eat
+the spacing. Turns are served in arrival order and taken when claimed, never reserved: a waiter that
+leaves (cancelled, or its deadline passed) takes no turn and wakes the waiters behind it to work
+their turns out again, and no turn is granted once the waiter's deadline has passed. A retry waiting
+for its turn reads `staggering` but has dispatched, so its row keeps counting run time. Lane B's
+blocking waiter is not stopped when its asyncio slot is cancelled, like the dispatch it precedes; no
+adapter with a launch interval serves the executor's profiles today. The overall deadline adds the
+largest provider's slot count times its stagger.
+
 A batch with any failed or incomplete task writes `{phase}/subagent_batch_report.json`, refuses to reaggregate and
 exits **3 even under `--yes`** — and **never** falls back to salvage. Resume is
 defined by artifacts: a task is done iff its `output_name` exists, parses and validates, so
 re-invoking a phase re-dispatches exactly the failed set. `run_tasks_concurrent`
 (`utils/review_orchestrator_base.py`) is `run_models_concurrent`'s mechanics keyed by `task_id`
-instead of `model_spec` — same global gate, same per-provider semaphores, same stagger —
+instead of `model_spec` — same global gate, same per-provider semaphores, same launch spacing —
 because a subagent batch normally shares one runner and a model-keyed map would overwrite completed
 tasks.
 
@@ -434,7 +763,7 @@ learned to re-derive the verdict out of `subagent_batch_report.json`. **With the
 and the documented native flow is byte-for-byte unchanged**: no dispatch, so no outcome, so the
 markers, the salvage-then-reaggregate loop and every printed command are what they were.
 
-**And the gate that decides all of this now reads stdout, not stderr alone.** `llm_client._attach_stdout_excerpt`
+**And the gate that decides all of this now reads stdout, not stderr alone.** `provider_outcome._attach_stdout_excerpt`
 attaches `details["stdout_excerpt"]` — redacted *then* bounded, and the key omitted rather than set empty
 so `details.get("stdout_excerpt")` means "the provider said something worth reading" — on all three losing
 paths (non-zero exit, timeout kill, zero-exit parse failure), and the code-review salvage site reads

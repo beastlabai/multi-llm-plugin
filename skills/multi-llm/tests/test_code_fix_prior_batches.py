@@ -31,7 +31,8 @@ if str(SKILL_DIR) not in sys.path:
 from utils import prior_changes, write_prompt  # noqa: E402
 from utils.code_fix_batcher import CodeFixBatch, format_fix_batch_prompt  # noqa: E402
 from utils.subagent_tasks import PRIOR_CHANGES_TOKEN  # noqa: E402
-from utils.write_batch_scheduler import WriteBatchScheduler, bind_prior_changes  # noqa: E402
+from utils.write_batch_scheduler import bind_prior_changes  # noqa: E402
+from tests.scheduler_support import make_scheduler  # noqa: E402
 from utils.write_phase_bridge import (  # noqa: E402
     materialize_write_tasks,
     write_task_file_for_phase,
@@ -202,15 +203,12 @@ def test_both_legs_bind_the_same_section(tmp_path):
         plan_file=str(plan),
     )
     native, _task, info = write_prompt.render_write_prompt(phase_dir, "apply-fix-batch-1")
-    scheduler = WriteBatchScheduler.__new__(WriteBatchScheduler)
-    scheduler.kind = "apply_code_fixes"
-    scheduler.output_dir = str(out)
-    scheduler.phase = "apply-code-fixes"
-    scheduler.state = json.loads((out / "state.json").read_text())
-    scheduler.tasks = tasks
-    scheduler.plan_file = str(plan)
-    executor = scheduler._with_result_contract(
-        tasks[1], scheduler.dispatched_prompt(tasks[1]))
+    scheduler = make_scheduler(
+        out, kind="apply_code_fixes", phase="apply-code-fixes", phase_dir=phase_dir,
+        state=json.loads((out / "state.json").read_text()), tasks=tasks, plan_file=plan,
+    )
+    executor = scheduler._prompts.with_result_contract(
+        tasks[1], scheduler._prompts.dispatched_prompt(tasks[1]))
     assert native == executor
     block = _block(native)
     assert "Cycle 2: camera aspect." in block and "Cycle 1" not in block
@@ -376,15 +374,12 @@ def test_both_legs_keep_this_runs_batches_after_a_phase_closed_over_a_failure(tm
         plan_file=str(plan),
     )
     native, _task, info = write_prompt.render_write_prompt(phase_dir, "apply-fix-batch-2")
-    scheduler = WriteBatchScheduler.__new__(WriteBatchScheduler)
-    scheduler.kind = "apply_code_fixes"
-    scheduler.output_dir = str(out)
-    scheduler.phase = "apply-code-fixes"
-    scheduler.state = json.loads((out / "state.json").read_text())
-    scheduler.tasks = tasks
-    scheduler.plan_file = str(plan)
-    executor = scheduler._with_result_contract(
-        tasks[2], scheduler.dispatched_prompt(tasks[2]))
+    scheduler = make_scheduler(
+        out, kind="apply_code_fixes", phase="apply-code-fixes", phase_dir=phase_dir,
+        state=json.loads((out / "state.json").read_text()), tasks=tasks, plan_file=plan,
+    )
+    executor = scheduler._prompts.with_result_contract(
+        tasks[2], scheduler._prompts.dispatched_prompt(tasks[2]))
     assert native == executor
     block = _block(native)
     assert "Fix batch 0 applied (run 1)." in block and "Fix batch 1 applied (run 1)." in block

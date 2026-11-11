@@ -30,7 +30,6 @@ import utils.provider_registry as registry
 
 def _reset_cache():
     registry._config = None
-    registry._config_key = None
 
 
 # ---------------------------------------------------------------------------

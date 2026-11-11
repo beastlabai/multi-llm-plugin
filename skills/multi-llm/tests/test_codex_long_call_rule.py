@@ -26,6 +26,7 @@ sys.path.insert(0, str(REPO_ROOT / "packaging"))
 
 import modes as mode_table  # noqa: E402
 from common import surface  # noqa: E402
+from tests.source_cache import source_tree  # noqa: E402
 
 MCP_JSON = REPO_ROOT / "packaging" / "codex" / "mcp.json"
 SERVER = REPO_ROOT / "packaging" / "codex" / "mcp_server.py"
@@ -37,7 +38,7 @@ def _budget_s() -> int:
 
 
 def _server_default_budget() -> int:
-    tree = ast.parse(SERVER.read_text(encoding="utf-8"))
+    tree = source_tree(SERVER)
     for node in tree.body:
         if isinstance(node, ast.Assign) and any(
             isinstance(t, ast.Name) and t.id == "DEFAULT_TOOL_TIMEOUT_S"

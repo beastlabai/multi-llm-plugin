@@ -208,6 +208,7 @@ rows:
       this stream sums to input 2268 / output 112 / cacheRead 200 / total 2580,
       `tool_uses == 1`.
     expect:
+      lane_status: {lane_a: ok, lane_b: ok}
       success: true
       data:
       - title: No testing strategy is stated
@@ -255,6 +256,7 @@ rows:
       IS reachable — cut after a content frame instead — and is committed as the extra
       row `truncated-partial` below, so the hazard is still graded.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: runner_error}
       success: false
       # MEASURED: every assistant message is an empty `stop`, so the parser reports
       # `Empty output` — and wraps omp's own give-up sentence
@@ -294,6 +296,7 @@ rows:
       it; the 18.8.3 rig's Python parent saw -9 — rather than the predicted 143, and the fallback §4 held in reserve —
       a hand-composed prefix of `success.stdout.txt` — was not needed.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       success: false
       error_contains: ["run ended before any assistant message", "message_end/user"]
       classify_failure: null
@@ -323,6 +326,7 @@ rows:
       only the last carries text, so a first-or-concatenate rule fails it. It is also
       the stream `parse_usage` is graded on — three blocks summed, `tool_uses == 2`.
     expect:
+      lane_status: {lane_a: ok, lane_b: ok}
       success: true
       data:
       - title: No problem statement or objectives section
@@ -375,6 +379,7 @@ rows:
       count (12 here versus 20, because a 200-with-JSON was not retried by the fetch
       wrapper the way a cut stream was); at 18.8.3 both are 12.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: runner_error}
       success: false
       # Byte-shape-identical to `truncated`, and graded the same way: the parser's
       # `Empty output` carries omp's retry-cap sentence in its parentheses. The
@@ -414,6 +419,7 @@ rows:
       `exit_zero_failure_markers` stays empty: `Command aborted` is deliberately not a
       marker, and this row is what pins the structural read instead.
     expect:
+      lane_status: {lane_a: timeout, lane_b: unparseable_result}
       success: false
       error_contains: ["run ended inside a tool call: bash"]
       raw_contains:
@@ -444,6 +450,7 @@ rows:
       and usage all zero. **stderr is 0 bytes**: the whole diagnosis is on the success
       channel, which is the opencode trap on omp's stdout.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       success: false
       error_contains: ["500", "The server had an error while processing your request"]
       raw_contains:
@@ -484,6 +491,7 @@ rows:
       change. The rows that really do reduce to "no answer at all" are
       `truncated`/`error-envelope` (exit 0, `Empty output`).
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       success: false
       # MEASURED: the connection sentence, not "Empty output" — this row is NOT the
       # zero-byte shape the canonical name suggests at omp. It is a dropped socket,
@@ -524,6 +532,7 @@ rows:
       found.` is immaterial. The pre-flight half of auth (no key at all) is the extra
       row `auth-error-preflight`.
     expect:
+      lane_status: {lane_a: auth_failed, lane_b: auth_failed}
       success: false
       error_contains: ["401", "Incorrect API key provided"]
       raw_contains:
@@ -561,6 +570,7 @@ rows:
       stderr 0 B,
       terminal `stopReason: "error"`, `errorStatus: 429`.
     expect:
+      lane_status: {lane_a: rate_limited, lane_b: rate_limited}
       success: false
       error_contains: ["429", "Rate limit reached for stub-model"]
       raw_contains:
@@ -595,6 +605,7 @@ rows:
       cannot satisfy it. No other adapter's row moved. Contrast `invalid-model-api`,
       where the same verdict arrives from the API in-stream.
     expect:
+      lane_status: {lane_a: invalid_model, lane_b: invalid_model}
       success: false
       error_contains: ["Empty output", 'Model "stub/nonexistent" not found']
       raw_contains:
@@ -631,6 +642,7 @@ rows:
       whenever a provider 400s. It is the reason this row needed a second replacement,
       and a live-lane capture would put the user's real home directory there.
     expect:
+      lane_status: {lane_a: context_length_exceeded, lane_b: context_length_exceeded}
       success: false
       error_contains: ["maximum context length"]
       raw_contains:
@@ -668,6 +680,7 @@ rows:
       (this row). The row's whole job is that no half-parsed object is ever returned
       as the answer.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       success: false
       error_contains: ["stream closed before a finish_reason was received"]
       raw_contains:
@@ -697,6 +710,7 @@ rows:
       `exit-zero-failure`, which is the same deadline landing one layer lower and
       exiting 0 — the pair is why the parser may not read the exit code.
     expect:
+      lane_status: {lane_a: timeout, lane_b: unparseable_result}
       success: false
       error_contains: ["Deadline exceeded"]
       raw_contains:
@@ -732,6 +746,7 @@ rows:
       reach the sentence that names the problem. `STDOUT_ELSE_STDERR` is what makes
       this row legible, and this is the capture that says why.
     expect:
+      lane_status: {lane_a: auth_failed, lane_b: auth_failed}
       success: false
       # This capture is what made the Bun strip reach the right lines. It used to
       # be worse than a trace-strip problem: omp puts a source-context PRELUDE
@@ -783,6 +798,7 @@ rows:
       refusal the adapter can produce, when `assets/omp/overlay.yml` is missing from
       a packaged install — joined the same row for the same reason.
     expect:
+      lane_status: {lane_a: spawn_failed, lane_b: spawn_failed}
       success: false
       # The parser's error is `Empty output (stderr: …)`. At 18.2.2 the tool name
       # survived the 300-char cap only because `stderr_diagnosis` drops Bun's
@@ -816,6 +832,7 @@ rows:
       does not — the two rows together are the measurement that omp's model failures
       are only categorised when they come back from the API.
     expect:
+      lane_status: {lane_a: invalid_model, lane_b: invalid_model}
       success: false
       error_contains: ["404", "does not exist or you do not have access to it"]
       raw_contains:
@@ -851,6 +868,7 @@ rows:
       parses, and neither the `isError` flag nor the EACCES sentence may be read as
       the run's verdict or reach `classify_failure`.
     expect:
+      lane_status: {lane_a: ok, lane_b: ok}
       success: true
       raw_contains:
         - '"isError":true'
@@ -897,6 +915,7 @@ rows:
       file written beside it, and `classify_failure` answers `permission_denied`,
       which is not in RETRYABLE_FAILURE_CATEGORIES.
     expect:
+      lane_status: {lane_a: permission_denied, lane_b: unparseable_result}
       success: false
       error_contains:
         - "was denied approval"
@@ -934,6 +953,7 @@ rows:
       in `details.stdout_excerpt` and in the run log — and is simply not in the
       haystack.
     expect:
+      lane_status: {lane_a: rate_limited, lane_b: rate_limited}
       success: false
       error_contains:
         - "429"
@@ -967,6 +987,7 @@ rows:
       number of times before ending the slot with this same named error. Those
       retries are accepted over inventing a category for a shape nobody has seen.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       success: false
       error_contains:
         - "unrecognized stopReason 'maxTokens'"
@@ -994,6 +1015,7 @@ rows:
       of a message it cannot read, so a findings file written beside it is not
       read either.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       success: false
       error_contains:
         - "assistant message_end without stopReason"
@@ -1021,6 +1043,7 @@ rows:
       the wrong document. The run succeeds, `data` is the REAL array, and `raw`
       (the concatenated text parts, not the JSONL) holds no byte of the decoy.
     expect:
+      lane_status: {lane_a: ok, lane_b: ok}
       success: true
       classify_failure: null
       salvage: answer
@@ -1061,6 +1084,7 @@ rows:
       Stderr is 0 B and the terminal `stopReason` is `error` with `errorStatus: 429`,
       exactly as on the completions client; only the count and the wall differ.
     expect:
+      lane_status: {lane_a: rate_limited, lane_b: rate_limited}
       success: false
       error_contains: ["429", "Rate limit reached for stub-model"]
       raw_contains:
@@ -1104,6 +1128,7 @@ rows:
       above's but for ids and timestamps — two rows sharing a shape is a measurement,
       and the two `wall_s` cells are what this one exists to record.
     expect:
+      lane_status: {lane_a: rate_limited, lane_b: rate_limited}
       success: false
       error_contains: ["429", "Rate limit reached for stub-model"]
       raw_contains:
@@ -1145,6 +1170,7 @@ rows:
       `errorStatus: 429` message: a successful tool turn ahead of the failure does not
       change the verdict, the classification or the parser's error text.
     expect:
+      lane_status: {lane_a: rate_limited, lane_b: rate_limited}
       success: false
       error_contains: ["429", "Rate limit reached for stub-model"]
       raw_contains:
@@ -1192,6 +1218,7 @@ rows:
       model call — so whether an omp overflow costs summarization calls depends
       on what `shake` can drop.
     expect:
+      lane_status: {lane_a: ok, lane_b: ok}
       success: true
       data:
         - {id: "S001", title: "Bound the retry ladder", severity: "high"}

@@ -16,7 +16,6 @@ import json
 import os
 import subprocess
 import sys
-import textwrap
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -26,7 +25,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from review_plan_orchestrator import _write_status, _update_status
+from utils.status_file import update_status as _update_status, write_status as _write_status
 from utils import status_file
 from utils.json_extractor import build_unsanitize_map
 
@@ -102,13 +101,58 @@ class TestUpdateStatus:
         assert data["output_files"]["a.json"] is True
         assert data["output_files"]["b.json"] is True
 
-    def test_no_crash_on_corrupted_file(self, tmp_path):
-        """Test that corrupted .status.json doesn't crash — falls back to fresh write."""
+    @pytest.mark.parametrize("content", ["not valid json{{{", "[1, 2]", "null", ""])
+    def test_an_unreadable_checkpoint_is_kept_not_replaced(self, tmp_path, content):
+        """A checkpoint that cannot be parsed, or is not a JSON object, is kept
+        as it is and the update skipped, without raising: the update written
+        alone over it would drop every key it does not name."""
         status_path = tmp_path / ".status.json"
-        status_path.write_text("not valid json{{{", encoding="utf-8")
+        status_path.write_text(content, encoding="utf-8")
         _update_status(str(tmp_path), {"state": "recovered"})
-        data = json.loads(status_path.read_text(encoding="utf-8"))
-        assert data["state"] == "recovered"
+        assert status_path.read_text(encoding="utf-8") == content
+
+    def test_a_failed_read_keeps_every_key_the_update_does_not_name(self, tmp_path, monkeypatch):
+        """One open of the checkpoint fails: the progress update is skipped,
+        and the withheld-answer records survive it."""
+        import builtins
+        import errno
+
+        _write_status(str(tmp_path), {
+            "state": "models_complete", "models_requested": ["a:one"],
+            "models_rejected": {"a:one": "[CODEX_HOME_CHECK] changed"},
+            "models_unchecked": {"b:two": "armed"},
+        })
+        before = json.loads((tmp_path / ".status.json").read_text(encoding="utf-8"))
+        real_open = builtins.open
+        failed = []
+
+        def flaky(file, mode="r", *args, **kwargs):
+            if not failed and "r" in mode and os.fspath(file).endswith(".status.json"):
+                failed.append(file)
+                raise OSError(errno.EIO, "simulated", os.fspath(file))
+            return real_open(file, mode, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "open", flaky)
+        status_file.update_progress(str(tmp_path), {"step": "fanout"})
+        assert failed
+        after = json.loads((tmp_path / ".status.json").read_text(encoding="utf-8"))
+        assert after == before
+
+    def test_load_status_tells_absence_from_an_unreadable_checkpoint(self, tmp_path):
+        assert status_file.load_status(str(tmp_path)) is None
+        (tmp_path / ".status.json").write_text("[]", encoding="utf-8")
+        with pytest.raises(status_file.CheckpointUnreadable):
+            status_file.load_status(str(tmp_path))
+        (tmp_path / ".status.json").write_text("{", encoding="utf-8")
+        with pytest.raises(status_file.CheckpointUnreadable):
+            status_file.load_status(str(tmp_path))
+        (tmp_path / ".status.json").unlink()
+        (tmp_path / ".status.json").mkdir()
+        with pytest.raises(status_file.CheckpointUnreadable):
+            status_file.load_status(str(tmp_path))
+        (tmp_path / ".status.json").rmdir()
+        _write_status(str(tmp_path), {"state": "x"})
+        assert status_file.load_status(str(tmp_path))["state"] == "x"
 
     def test_no_crash_on_invalid_dir(self):
         """Test that update to non-existent directory doesn't raise."""
@@ -233,6 +277,73 @@ class TestDetachFieldsAreAdditive:
         )
         assert data["question"], "the checkpoint keys still survive a takeover"
 
+    def test_claim_drops_a_predecessor_runs_high_priority_count(self, tmp_path):
+        """The count is one review run's finding; the top-level `state` beside
+        it is the phase's and survives, so a poll of the new run must not find
+        the old count there (docs/development/runtime.md)."""
+        _checkpoint(tmp_path)
+        status_file.claim_run(str(tmp_path), _run_record("run-old", "running"))
+        status_file.update_status(str(tmp_path), {
+            "state": "complete", "high_priority_groups": {"count": 2},
+        })
+        assert status_file.update_run(str(tmp_path), {"state": "done", "exit_code": 0},
+                                      expect_run_id="run-old")
+        status_file.claim_run(str(tmp_path), _run_record("run-new", "starting"))
+        data = json.loads((tmp_path / ".status.json").read_text(encoding="utf-8"))
+        assert "high_priority_groups" not in data
+        assert data["state"] == "complete"
+        assert data["run"]["run_id"] == "run-new"
+
+    def test_claim_drops_a_predecessor_runs_validation_counts(self, tmp_path):
+        """The verdict counts are one run's report, relayed by a pinned poll
+        whatever the `state`, so a run that stops short of its own report must
+        not find the previous run's there (docs/development/runtime.md)."""
+        _checkpoint(tmp_path)
+        status_file.claim_run(str(tmp_path), _run_record("run-old", "running"))
+        status_file.update_status(str(tmp_path), {
+            "state": "complete",
+            "validation_counts": {
+                "valid": 2, "invalid": 0,
+                "needs_human_decision": 1, "validation_failed": 0,
+            },
+        })
+        assert status_file.update_run(str(tmp_path), {"state": "done", "exit_code": 0},
+                                      expect_run_id="run-old")
+        status_file.claim_run(str(tmp_path), _run_record("run-new", "starting"))
+        data = json.loads((tmp_path / ".status.json").read_text(encoding="utf-8"))
+        assert "validation_counts" not in data
+        assert data["state"] == "complete"
+
+    @pytest.mark.parametrize("word", status_file.REFUSAL_STATES)
+    def test_claim_retires_a_predecessor_runs_refusal_close_out(self, tmp_path, word):
+        """A refusal's `state` and the keys beside it are that run's ending:
+        kept, the next run's poll would render its repair as this run's
+        (docs/development/runtime.md)."""
+        _checkpoint(tmp_path)
+        status_file.claim_run(str(tmp_path), _run_record("run-old", "running"))
+        status_file.update_status(str(tmp_path), {
+            "state": word, "reason_code": "binary_absent",
+            "runner": "codex:gpt-6-luna", "runner_key": "driver.subagent_runner",
+            "refused_batch": 0,
+        })
+        assert status_file.update_run(str(tmp_path), {"state": "failed", "exit_code": 3},
+                                      expect_run_id="run-old")
+        status_file.claim_run(str(tmp_path), _run_record("run-new", "starting"))
+        data = json.loads((tmp_path / ".status.json").read_text(encoding="utf-8"))
+        assert not {"state", *status_file.REFUSAL_KEYS} & set(data), data
+        assert data["run"]["run_id"] == "run-new"
+        assert data["question"] == "Is the rollback strategy sufficient — really?"
+
+    def test_claim_keeps_a_phase_state_but_not_a_stray_reason_code(self, tmp_path):
+        """Only a refusal word is retired with its close-out; a phase state a
+        later run wrote over the refusal stays, while the refusal's
+        `reason_code` it merged past does not."""
+        _checkpoint(tmp_path, state="subagents_failed", reason_code="binary_absent")
+        status_file.claim_run(str(tmp_path), _run_record("run-new", "starting"))
+        data = json.loads((tmp_path / ".status.json").read_text(encoding="utf-8"))
+        assert data["state"] == "subagents_failed"
+        assert "reason_code" not in data
+
     def test_resolutions_are_appended_for_the_audit_trail(self, tmp_path):
         _checkpoint(tmp_path)
         status_file.claim_run(str(tmp_path), _run_record())
@@ -335,42 +446,14 @@ class TestConsumersSurviveInterleavedHeartbeats:
             expect_run_id="run-a",
         )
 
-        # The exact collection reaggregate_from_existing_files performs — read from
-        # the module rather than restated, so a new phase-dir artifact that forgets
-        # its exclude pattern fails HERE instead of crashing a user's reaggregate.
-        exclude = _reaggregation_exclude_patterns()
-        result_files = sorted(
-            os.path.basename(f)
-            for f in glob.glob(str(tmp_path / "*.json"))
-            if not any(os.path.basename(f).startswith(ex)
-                       or ex in os.path.basename(f) for ex in exclude)
-        )
+        # The exact collection both reaggregates perform, through the shared
+        # rule rather than a restated list, so a new phase-dir artifact missing
+        # from it fails HERE instead of crashing a user's reaggregate.
+        from utils.result_files import model_result_paths
+
+        result_files = [os.path.basename(f) for f in model_result_paths(tmp_path)]
         assert result_files == ["cursor-agent_auto.json",
                                "gemini_gemini-2_5-flash.json"]
-
-
-def _reaggregation_exclude_patterns():
-    """The live ``exclude_patterns`` list from ``reaggregate_from_existing_files``.
-
-    Parsed out of the source rather than restated: the pitfall this guards is a new
-    non-model JSON file landing in a phase dir without being added to the list, and
-    a test carrying its own copy of the list cannot detect that.
-    """
-    import ast
-    import inspect
-
-    from utils import review_orchestrator_base
-
-    source = inspect.getsource(
-        review_orchestrator_base.reaggregate_from_existing_files
-    )
-    tree = ast.parse(textwrap.dedent(source))
-    for node in ast.walk(tree):
-        if (isinstance(node, ast.Assign)
-                and any(getattr(t, "id", "") == "exclude_patterns"
-                        for t in node.targets)):
-            return ast.literal_eval(node.value)
-    raise AssertionError("exclude_patterns not found in the reaggregation helper")
 
 
 class TestRunCompareAndSet:

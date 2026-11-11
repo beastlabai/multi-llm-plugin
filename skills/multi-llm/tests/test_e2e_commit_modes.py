@@ -42,6 +42,11 @@ root range's detached child.
   ``user_selections.json`` skip honoured;
 * ``--improve-commits last 2 commits`` typed again after it finished: exit 2
   ``[ALREADY_COMPLETE]`` naming both commit modes, no provider call;
+* a detached worker carrying a front door's stage, started through the
+  orchestrator its fronted mode runs (review-code, apply-code-fixes,
+  improve-commits) by path and by ``python -m`` instead of ``multi_llm.py``:
+  the stage is applied after the worker's lock, the run claimed and the phase
+  finished;
 * the one-commit repository: review, apply, a stopped apply and its ``--resume``,
   each through the command the step before printed (the brief path is a root
   range's pinned spelling), no ``HEAD~1`` warning or ``Diff failed:`` anywhere,
@@ -62,10 +67,12 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import subprocess
 import sys
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -76,10 +83,12 @@ import yaml
 sys.path.insert(0, str(Path(__file__).parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from harness import PERF_SCALE  # noqa: E402
 from tests.test_e2e_improve_modes import (  # noqa: E402
     COMMIT_REVIEW_PROMPT,
     COMMITS_FOLDER,
     MODEL,
+    SKILL_DIR,
     CommitWorld,
     Run,
     _commit_marked,
@@ -89,6 +98,7 @@ from tests.test_e2e_improve_modes import (  # noqa: E402
     _write_ids,
     classify,
 )
+from utils import status_file  # noqa: E402
 from utils.commit_range import DATA_UNDER_REVIEW, pinned_head_read_rule  # noqa: E402
 from utils.commit_review import BRIEF_MARKER  # noqa: E402
 
@@ -678,6 +688,92 @@ class TestARefusedDetachedRestart:
         applied = apply_fixes(world, world.pinned)
         assert applied.exit_code == 0, applied.explain()
         assert "[COMMIT_REVIEW_NOT_FOUND]" not in applied.stdout
+
+
+# --------------------------------------------------------------------------- #
+# A staged worker started through its orchestrator, not the dispatcher
+# --------------------------------------------------------------------------- #
+
+#: Stages a front door's ``--detach`` launch as the launcher does
+#: (``commit_front_door.prepare``) and prints the worker argv that launch
+#: hands its child (``_fronted_argv``, then ``detach.build_worker_argv``).
+#: Its own process: ``prepare`` reads the cwd and the environment.
+#: argv: <skill dir> <door mode> <run id> <door tokens...>
+_STAGE_SCRIPT = """\
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from utils import commit_front_door, detach
+prep = commit_front_door.prepare(sys.argv[2], sys.argv[4:])
+mode, recorded, _called = commit_front_door._fronted_argv(prep)
+print("STAGED " + json.dumps({
+    "stage": str(prep.stage), "mode": mode,
+    "worker": detach.build_worker_argv(mode, recorded, run_id=sys.argv[3]),
+}))
+"""
+
+#: door -> (the orchestrator its fronted mode's worker runs, the door's flags,
+#: the phases the worker records completed)
+_DIRECT_WORKERS = {
+    "review-commits": ("code_review_orchestrator", REVIEW_FLAGS, {"code-review"}),
+    "improve-commits": ("improve_commits_orchestrator", REVIEW_FLAGS,
+                        {"code-review", "apply-code-fixes"}),
+    "apply-commit-fixes": ("apply_code_fixes_orchestrator", APPLY_FLAGS,
+                           {"code-review", "apply-code-fixes"}),
+}
+
+
+class TestADirectStagedWorker:
+    """A detached worker carrying a front door's stage (``--internal-worker``,
+    ``--internal-run-id``, ``--commit-stage``), started through its
+    orchestrator by path or ``python -m`` instead of ``multi_llm.py``: direct
+    orchestrator invocation stays supported for internal re-entry
+    (skills/multi-llm/AGENTS.md). Its entry hands ``detach`` the stage applier
+    as the dispatcher does, so the worker applies the stage after its lock,
+    claims the run and finishes the phase."""
+
+    @pytest.mark.parametrize("form", ["path", "-m"])
+    @pytest.mark.parametrize("door", list(_DIRECT_WORKERS))
+    def test_the_worker_applies_its_stage_and_runs_the_phase(self, tmp_path, door, form):
+        world = _reviewed(tmp_path) if door == "apply-commit-fixes" else CommitWorld(tmp_path)
+        module, flags, phases = _DIRECT_WORKERS[door]
+        revs = world.pinned if door == "apply-commit-fixes" else "last 2 commits"
+        run_id = str(uuid.uuid4())
+        env = world.env()
+        staged = subprocess.run(
+            [sys.executable, "-c", _STAGE_SCRIPT, str(SKILL_DIR), door, run_id,
+             "--revs", revs, *flags, "--detach"],
+            cwd=world.repo, env=env, stdin=subprocess.DEVNULL, capture_output=True,
+            text=True, encoding="utf-8", errors="replace", timeout=60 * PERF_SCALE,
+        )
+        assert staged.returncode == 0, staged.stdout[-3000:] + staged.stderr[-3000:]
+        plan = json.loads(next(line for line in staged.stdout.splitlines()
+                               if line.startswith("STAGED "))[len("STAGED "):])
+        stage = Path(plan["stage"])
+        assert stage.is_file(), plan
+        assert "--commit-stage" in plan["worker"] and "--internal-worker" in plan["worker"]
+
+        if form == "path":
+            entry = [str(SKILL_DIR / f"{module}.py")]
+        else:
+            entry = ["-m", module]
+            env = {**env, "PYTHONPATH": os.pathsep.join(
+                part for part in (str(SKILL_DIR), env.get("PYTHONPATH")) if part)}
+        argv = [sys.executable, *entry, *plan["worker"]]
+        done = subprocess.run(
+            argv, cwd=world.repo, env=env, stdin=subprocess.DEVNULL, capture_output=True,
+            text=True, encoding="utf-8", errors="replace", timeout=120 * PERF_SCALE,
+        )
+        worker = Run(argv=argv, exit_code=done.returncode, stdout=done.stdout,
+                     stderr=done.stderr, seconds=0.0)
+
+        assert worker.exit_code == 0, worker.explain()
+        assert "could not apply the commit-review stage" not in worker.stdout + worker.stderr
+        assert not stage.exists(), "the stage was not consumed"
+        # The stage was applied before the run was claimed: the claim is this run's.
+        assert status_file.read_run(str(stage.parent)).get("run_id") == run_id
+        state = world.state()
+        assert state["commit_range"]["head"] == world.head, state["commit_range"]
+        assert phases <= set(state["phases_completed"]), state["phases_completed"]
 
 
 class TestImproveCommitsTypedAgain:

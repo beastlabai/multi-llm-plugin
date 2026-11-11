@@ -66,6 +66,7 @@ import multi_llm  # noqa: E402
 import render_capabilities as renderer  # noqa: E402
 from utils import host_capabilities as caps  # noqa: E402
 from utils import host_install as hi  # noqa: E402
+from utils import host_shim  # noqa: E402
 
 from tests.generated_distributions import (  # noqa: E402
     AUTHORED_MANIFEST,
@@ -73,6 +74,7 @@ from tests.generated_distributions import (  # noqa: E402
     CODEX,
     DISTRIBUTIONS,
 )
+from tests.source_cache import source_tree  # noqa: E402
 
 #: The repository (and published-plugin) root: the directory holding `README.md`
 #: and `docs/`. Anchored on the skill root, never derived from the depth of
@@ -399,7 +401,7 @@ class TestInstalledShimPassesTheShippedGuard:
 #: asserts nothing. A template edit therefore lands as a failing test naming the
 #: file, which is where the author is asked whether the edit also moved the
 #: rendered *shape* and so owes ``SHIM_VERSION`` a bump.
-PINNED_SHIM_VERSION = 4
+PINNED_SHIM_VERSION = 6
 
 #: Re-pinned with SHIM_VERSION unmoved for plans/review-commits.md §2.9: step 2
 #: gained the commit modes' range rule, prose beside the plan rule, with no new
@@ -410,11 +412,14 @@ PINNED_SHIM_VERSION = 4
 #: `implement` beside the fan-out modes: under the executor those run every
 #: write batch inside one command (codex-apply-executor, 2026-11-06). Prose
 #: inside an existing line; no step, slot or command form changed.
+#: Codex re-pinned at generation 6: step 3 reads the core with `--page` and
+#: states the paged completeness rule (a changed command form). OpenCode's
+#: template is unchanged and keeps its digest.
 PINNED_TEMPLATE_SHA256 = {
     "codex":
-        "3e6cc33df9b73b0a9369d22b636b2348ef213892db3dd5e9d4d3195bfa1478e1",
+        "8c748c4b9325f6794f5cbc53fea2c9c778b613802744b045617e378fa8c3bafc",
     "opencode":
-        "7372b4f496eed6706f3963519c57439d9415d6362623b129330c32ff210f304e",
+        "e3c1349756e7cbad34c6c7bf0da8c0c5bfdd4aa2af900adc483e026a544861d0",
 }
 
 
@@ -1322,34 +1327,59 @@ class TestWindowsSeam:
         assert "Git for Windows" in hi.GIT_BASH_MISSING
 
     def test_the_installer_never_reaches_for_a_symlink_api(self):
-        """No symlink, no junction, no elevation — enforced, not just documented."""
-        tree = ast.parse(
-            Path(hi.__file__).read_text(encoding="utf-8"), filename=hi.__file__
-        )
+        """No symlink, no junction, no elevation — enforced, not just documented.
+
+        Scans the installer and every module it is split into.
+        """
+        utils_dir = Path(hi.__file__).parent
+        sources = [Path(hi.__file__), utils_dir / "host_paths.py",
+                   utils_dir / "host_shim.py",
+                   *sorted((utils_dir / "host_routes").glob("*.py"))]
         offenders = [
-            node.attr if isinstance(node, ast.Attribute) else node.id
-            for node in ast.walk(tree)
+            f"{source.name}: "
+            + (node.attr if isinstance(node, ast.Attribute) else node.id)
+            for source in sources
+            for node in ast.walk(source_tree(source))
             if isinstance(node, (ast.Attribute, ast.Name))
             and (getattr(node, "attr", None) or getattr(node, "id", None))
             in ("symlink", "symlink_to", "hardlink_to", "link", "mklink")
         ]
         assert not offenders, offenders
 
-    def test_the_write_is_a_replace_into_the_target_directory(self):
-        source = Path(hi.__file__).read_text(encoding="utf-8")
-        assert "os.replace" in source
-        assert "os.fsync" in source
-        assert 'dir=str(target.parent)' in source, (
+    def test_the_write_is_a_replace_into_the_target_directory(self, tmp_path, monkeypatch):
+        """Through ``atomic_io`` (docs/development/runtime.md#atomic-file-writes)."""
+        replaced, flushed = [], []
+        real_replace, real_fsync = os.replace, os.fsync
+
+        def recording_replace(source, destination):
+            replaced.append((Path(source), Path(destination)))
+            return real_replace(source, destination)
+
+        def recording_fsync(descriptor):
+            flushed.append(descriptor)
+            return real_fsync(descriptor)
+
+        monkeypatch.setattr(os, "replace", recording_replace)
+        monkeypatch.setattr(os, "fsync", recording_fsync)
+        target = tmp_path / "commands" / "multi-llm.md"
+        hi.atomic_write(target, "a\nb\n")
+        hi.atomic_write_bytes(target, b"c\r\nd")
+        assert [d for _s, d in replaced] == [target, target]
+        assert all(s.parent == target.parent for s, _d in replaced), (
             "the temp file must live in the target directory, which is what makes "
             "os.replace atomic on Windows too"
         )
-        assert 'os.fdopen(handle, "wb")' in source, (
+        assert all(s.name.startswith(".multi-llm-shim-") for s, _d in replaced)
+        assert flushed, "the bytes are flushed before the rename"
+        assert target.read_bytes() == b"c\r\nd", (
             "the write is byte mode — identical bytes on every platform, which "
             "idempotency and the body hash both depend on, and which a backup or "
             "a rollback needs too: round-tripping a user's file through a text "
             "stream would rewrite its line endings"
         )
-        assert ', "w",' not in source, (
+        monkeypatch.undo()
+        hi.atomic_write(target, "a\nb\n")
+        assert target.read_bytes() == b"a\nb\n", (
             "a text-mode stream translates newlines on Windows; encode instead"
         )
 
@@ -1377,6 +1407,7 @@ class TestCli:
         monkeypatch.setenv("HOME", env["HOME"])
         monkeypatch.setenv("USERPROFILE", env["USERPROFILE"])
         monkeypatch.setattr(hi, "skill_dir", lambda: skill)
+        monkeypatch.setattr(host_shim, "skill_dir", lambda: skill)
         assert multi_llm.main(["install-host", "codex"]) == 0
         out = capsys.readouterr().out
         assert "[SHIM_INSTALLED]" in out
@@ -1392,6 +1423,7 @@ class TestCli:
         monkeypatch.setenv("HOME", env["HOME"])
         monkeypatch.setenv("USERPROFILE", env["USERPROFILE"])
         monkeypatch.setattr(hi, "skill_dir", lambda: skill)
+        monkeypatch.setattr(host_shim, "skill_dir", lambda: skill)
         assert multi_llm.main(["install-host", "--check", "--all"]) == 2
         capsys.readouterr()
         for host_id in INSTALLABLE:
@@ -1406,6 +1438,7 @@ class TestCli:
         self, skill, env, project, ready, monkeypatch, capsys
     ):
         monkeypatch.setattr(hi, "skill_dir", lambda: skill)
+        monkeypatch.setattr(host_shim, "skill_dir", lambda: skill)
         assert multi_llm.main(["install-host", "codex", "--all"]) == 3
         assert "not both" in capsys.readouterr().err
 
@@ -1427,6 +1460,7 @@ class TestCli:
         monkeypatch.setenv("HOME", env["HOME"])
         monkeypatch.setenv("USERPROFILE", env["USERPROFILE"])
         monkeypatch.setattr(hi, "skill_dir", lambda: skill)
+        monkeypatch.setattr(host_shim, "skill_dir", lambda: skill)
         assert multi_llm.main(["install-host", "codex"]) == 0
         payload = parse_result_line(capsys.readouterr().out)
         assert payload["mode"] == "install-host"
@@ -1442,6 +1476,7 @@ class TestCli:
         monkeypatch.setenv("HOME", env["HOME"])
         monkeypatch.setenv("USERPROFILE", env["USERPROFILE"])
         monkeypatch.setattr(hi, "skill_dir", lambda: skill)
+        monkeypatch.setattr(host_shim, "skill_dir", lambda: skill)
         assert multi_llm.main(["install-host", "codex"]) == 0
         capsys.readouterr()
         assert multi_llm.main(["uninstall-host", "codex", "--dry-run"]) == 0

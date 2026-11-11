@@ -40,9 +40,25 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.providers import base  # noqa: E402
+from utils.providers import child_env  # noqa: E402
 from utils.provider_registry import _PROVIDERS  # noqa: E402
+from tests.roster_check import assert_covers_registry, row_for  # noqa: E402
 
 SKILL_DIR = Path(__file__).parent.parent
+
+_PROFILES_WHERE = "ENV_ALLOWLIST_PROFILES in utils/providers/child_env.py"
+_PROFILES_HINT = (
+    "A row is a RunnerEnvProfile: the adapter's CA family (node or native), the "
+    "env prefixes its CLI owns, and its own home/config variable names."
+)
+
+
+def _profile(name):
+    """``_profile(name)``, failing with where to add the row."""
+    return row_for(
+        base.ENV_ALLOWLIST_PROFILES, name, _PROFILES_WHERE,
+        what="an env profile", hint=_PROFILES_HINT,
+    )
 
 
 def _registry_names():
@@ -167,16 +183,16 @@ class TestTheShipGate:
             cell: base.ENV_ALLOWLIST_GREEN
             for cell in base.env_allowlist_column("linux")
         }
-        with patch.object(base, "ENV_ALLOWLIST_MEASURED", measured):
+        with patch.object(child_env, "ENV_ALLOWLIST_MEASURED", measured):
             assert base.env_allowlist_column_is_green("linux")
         one_short = dict(measured)
         one_short.pop(next(iter(one_short)))
-        with patch.object(base, "ENV_ALLOWLIST_MEASURED", one_short):
+        with patch.object(child_env, "ENV_ALLOWLIST_MEASURED", one_short):
             assert not base.env_allowlist_column_is_green("linux")
 
     def test_an_unknown_policy_value_warns_once_and_falls_back_to_off(self, capsys):
         base.reset_env_policy_warnings()
-        with patch.object(base, "_merged_config", return_value={"env_allowlist": "yes"}):
+        with patch.object(child_env, "_merged_config", return_value={"env_allowlist": "yes"}):
             for _ in range(3):
                 assert base.env_allowlist_policy() == base.ENV_ALLOWLIST_OFF
         assert capsys.readouterr().err.count("env_allowlist") == 1
@@ -184,9 +200,9 @@ class TestTheShipGate:
 
     def test_a_yaml_boolean_is_read_as_the_documented_word(self):
         """YAML 1.1 resolves a bare `on`/`off` to a boolean."""
-        with patch.object(base, "_merged_config", return_value={"env_allowlist": False}):
+        with patch.object(child_env, "_merged_config", return_value={"env_allowlist": False}):
             assert base.env_allowlist_policy() == base.ENV_ALLOWLIST_OFF
-        with patch.object(base, "_merged_config", return_value={"env_allowlist": True}):
+        with patch.object(child_env, "_merged_config", return_value={"env_allowlist": True}):
             assert base.env_allowlist_policy() == base.ENV_ALLOWLIST_ON
 
 
@@ -207,14 +223,17 @@ class TestTheListContents:
         normal case: a newly registered adapter with no row reds here rather than
         shipping without its own home and CA variables.
         """
-        assert name in base.ENV_ALLOWLIST_PROFILES
+        _profile(name)
 
     def test_no_profile_is_declared_for_an_unregistered_adapter(self):
-        assert set(base.ENV_ALLOWLIST_PROFILES) == set(_registry_names())
+        assert_covers_registry(
+            base.ENV_ALLOWLIST_PROFILES, _PROFILES_WHERE,
+            what="an env profile", hint=_PROFILES_HINT,
+        )
 
     @pytest.mark.parametrize("name", _registry_names())
     def test_every_adapter_is_in_exactly_one_ca_family(self, name):
-        assert base.ENV_ALLOWLIST_PROFILES[name].ca_family in base.CA_BUNDLE_ENV
+        assert _profile(name).ca_family in base.CA_BUNDLE_ENV
 
     def test_the_two_ca_families_partition_the_registry(self):
         """`NODE_EXTRA_CA_CERTS` is not "all these CLIs are Node".
@@ -227,7 +246,7 @@ class TestTheListContents:
         """
         by_family = {family: set() for family in base.CA_BUNDLE_ENV}
         for name in _registry_names():
-            by_family[base.ENV_ALLOWLIST_PROFILES[name].ca_family].add(name)
+            by_family[_profile(name).ca_family].add(name)
         assert set().union(*by_family.values()) == set(_registry_names())
         assert sum(len(v) for v in by_family.values()) == len(_PROVIDERS)
         for family, members in by_family.items():
@@ -304,7 +323,7 @@ class TestTheListContents:
         gemini is how gemini authenticates, and denying it would be the mid-run
         auth failure the matrix exists to prevent.
         """
-        own = base.ENV_ALLOWLIST_PROFILES[name].prefixes
+        own = _profile(name).prefixes
         for variable in self.CREDENTIAL_PROBES:
             if any(variable.startswith(prefix) for prefix in own):
                 continue
@@ -326,7 +345,7 @@ class TestTheListContents:
     @pytest.mark.parametrize("name", _registry_names())
     def test_an_adapters_own_prefix_family_passes(self, name):
         """Each harness's own prefix family, per adapter."""
-        profile = base.ENV_ALLOWLIST_PROFILES[name]
+        profile = _profile(name)
         for prefix in profile.prefixes:
             assert base.env_allowlist_admits(name, prefix + "SOMETHING")
         for variable in profile.names:
@@ -342,7 +361,7 @@ class TestTheListContents:
         declared = {
             name: {
                 variable
-                for variable in base.ENV_ALLOWLIST_PROFILES[name].names
+                for variable in _profile(name).names
                 # A name that is also in the shared base list (aider's `COLUMNS`)
                 # is admitted everywhere by design, not by leakage.
                 if variable.upper() not in shared_base
@@ -365,7 +384,7 @@ class TestTheListContents:
                 # A sibling may still admit it through its own prefix family —
                 # that is by design and only ever widens within one vendor.
                 for other in admitting:
-                    prefixes = base.ENV_ALLOWLIST_PROFILES[other].prefixes
+                    prefixes = _profile(other).prefixes
                     assert any(variable.startswith(p) for p in prefixes), (
                         f"{variable} is declared only by {name} but {other} "
                         f"admits it through the shared base list"
@@ -471,13 +490,13 @@ class TestLaneAEqualsLaneBUnderTheAllowlist:
 
     @pytest.mark.parametrize("name", _registry_names())
     def test_the_two_lanes_agree_with_the_allowlist_on(self, name):
-        with patch.object(base, "env_allowlist_enabled", return_value=True):
+        with patch.object(child_env, "env_allowlist_enabled", return_value=True):
             a, b = _both_lanes(_PROVIDERS[name], SAMPLE_ENV)
         assert a == b
 
     @pytest.mark.parametrize("name", _registry_names())
     def test_the_two_lanes_agree_with_the_allowlist_off(self, name):
-        with patch.object(base, "env_allowlist_enabled", return_value=False):
+        with patch.object(child_env, "env_allowlist_enabled", return_value=False):
             a, b = _both_lanes(_PROVIDERS[name], SAMPLE_ENV)
         assert a == b
 
@@ -490,7 +509,7 @@ class TestLaneAEqualsLaneBUnderTheAllowlist:
         this pass or fail for the wrong reason.
         """
         provider = _PROVIDERS[name]
-        with patch.object(base, "env_allowlist_enabled", return_value=True):
+        with patch.object(child_env, "env_allowlist_enabled", return_value=True):
             a = base.build_child_env(
                 provider,
                 provider_env=provider.resolve_env("m", base.PROFILE_GENERATE),
@@ -508,7 +527,7 @@ class TestLaneAEqualsLaneBUnderTheAllowlist:
         provider = _PROVIDERS[name]
         guards = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_SESSION_ID"]
         source = {**SAMPLE_ENV, **{g: "1" for g in guards}}
-        with patch.object(base, "env_allowlist_enabled", return_value=True):
+        with patch.object(child_env, "env_allowlist_enabled", return_value=True):
             a, b = _both_lanes(provider, source, host_guards=guards)
         assert set(a or {}) - set(b or {}) <= set(guards)
         assert set(b or {}) - set(a or {}) == set()
@@ -534,7 +553,7 @@ class TestLaneAEqualsLaneBUnderTheAllowlist:
         """
         provider = _PROVIDERS[name]
         own = _own_credential_env(provider)
-        with patch.object(base, "env_allowlist_enabled", return_value=True):
+        with patch.object(child_env, "env_allowlist_enabled", return_value=True):
             for env in _both_lanes(provider, SAMPLE_ENV):
                 assert "AWS_SESSION_TOKEN" not in env
                 if own == "OPENROUTER_API_KEY":
@@ -554,7 +573,7 @@ class TestLaneAEqualsLaneBUnderTheAllowlist:
         """
         provider = _PROVIDERS[name]
         delta = provider.resolve_env("m", base.PROFILE_GENERATE)
-        with patch.object(base, "env_allowlist_enabled", return_value=True):
+        with patch.object(child_env, "env_allowlist_enabled", return_value=True):
             composed = base.build_child_env(
                 provider, provider_env=delta, base_env=SAMPLE_ENV
             )
@@ -584,7 +603,7 @@ class TestTheBuilderPreservesTodaysBehaviour:
         )
 
     def test_the_allowlist_forces_a_composed_env_even_with_no_delta(self):
-        with patch.object(base, "env_allowlist_enabled", return_value=True):
+        with patch.object(child_env, "env_allowlist_enabled", return_value=True):
             composed = base.build_child_env(
                 self._Bare(), provider_env={}, base_env=SAMPLE_ENV
             )
@@ -660,7 +679,7 @@ class TestItComposesWithTheHermeticAdapter:
             with provider.hermetic_dispatch(base.PROFILE_GENERATE, "m") as refusal:
                 assert refusal is None
                 delta = provider.resolve_env("m", base.PROFILE_GENERATE)
-                with patch.object(base, "env_allowlist_enabled", return_value=True):
+                with patch.object(child_env, "env_allowlist_enabled", return_value=True):
                     composed = base.build_child_env(
                         provider,
                         provider_env=delta,
@@ -694,7 +713,7 @@ class TestTheAllowlistIsBuiltInsideTheSharedBuilder:
     """
 
     @pytest.mark.parametrize(
-        "module_name", ["llm_client.py", "subagent_executor.py"]
+        "module_name", ["llm_client.py", "dispatch_spawn.py"]
     )
     def test_neither_spawn_site_filters_the_env_itself(self, module_name):
         source = (SKILL_DIR / "utils" / module_name).read_text(encoding="utf-8")

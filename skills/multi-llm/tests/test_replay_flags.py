@@ -44,10 +44,8 @@ from utils.retry_ladder import (  # noqa: E402
 
 # The executor suite owns the mock runner harness; importing its fixture into
 # this namespace is what makes ``runner_env`` resolvable here.
-from tests.test_subagent_executor import (  # noqa: E402,F401
-    _validation_batch,
-    _write_validation_task_file,
-    runner_env,
+from tests.support.subagent_world import (  # noqa: E402
+    _validation_batch, _write_validation_task_file,
 )
 
 #: Spelled the way this OS spells it: a command names the plan natively (shell-
@@ -453,7 +451,6 @@ class TestSelectorFidelity:
         from utils import provider_registry
 
         provider_registry._config = None
-        provider_registry._config_key = None
         return path
 
     @pytest.mark.parametrize("selection", [["--quick"], []])

@@ -18,8 +18,7 @@ import os
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import patch
 
 import pytest
 
@@ -44,137 +43,19 @@ from utils.apply_output_helpers import (
     write_and_emit_output,
 )
 from utils.output_handler import derive_prefix, find_output_dir
+from tests.support.apply_base import (
+    MockApplyOrchestrator,
+    _FakeOutcome,
+    _FakeSchedulerResult,
+    _make_args,
+    _orchestrator_on,
+    _setup_plan_with_output,
+)
 
 
 # ======================================================================
 # Mock subclass for testing
 # ======================================================================
-
-
-class MockApplyOrchestrator(ApplyOrchestratorBase):
-    """Concrete mock subclass implementing all abstract methods with minimal stubs.
-
-    Records method calls for verifying template method sequencing.
-    """
-
-    phase_name = "apply-mock"
-    review_subdir = "review-plan"
-    item_noun = "suggestion"
-    supports_revalidation = False
-    supports_skip_flag = False
-
-    def __init__(self, args: argparse.Namespace):
-        # Track method call order
-        self.call_log: List[str] = []
-        super().__init__(args)
-
-    def load_data(self) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        self.call_log.append("load_data")
-        return ([], [])
-
-    def parse_user_edits(self, report_path: str) -> Dict[str, Tuple[str, str]]:
-        self.call_log.append("parse_user_edits")
-        return {}
-
-    def merge_user_edits(
-        self,
-        groups: List[Dict[str, Any]],
-        edited_descriptions: Dict[str, Tuple[str, str]],
-    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-        self.call_log.append("merge_user_edits")
-        return (groups, [])
-
-    def parse_skips_from_report(
-        self, report_path: str
-    ) -> Tuple[Set[str], Set[str], Set[str]]:
-        self.call_log.append("parse_skips_from_report")
-        return (set(), set(), set())
-
-    def parse_validation_overrides_from_report(
-        self, report_path: str
-    ) -> Tuple[Dict[str, str], Dict[str, str]]:
-        self.call_log.append("parse_validation_overrides_from_report")
-        return ({}, {})
-
-    def format_item_for_output(
-        self, group: Dict[str, Any], index: int
-    ) -> Dict[str, Any]:
-        self.call_log.append("format_item_for_output")
-        return {"index": index, **group}
-
-    def create_batches(self, items: List[Dict[str, Any]]) -> List[Any]:
-        self.call_log.append("create_batches")
-        return []
-
-    def generate_batch_prompts(self, batches: List[Any]) -> List[Any]:
-        self.call_log.append("generate_batch_prompts")
-        return batches
-
-    def build_output_json(
-        self,
-        batches: List[Any],
-        *,
-        resume_info: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        self.call_log.append("build_output_json")
-        return {"status": "ok", "batches": [], "phase": self.phase_name}
-
-    def get_output_path(self) -> str:
-        self.call_log.append("get_output_path")
-        phase_dir = os.path.join(self.out_dir, self.phase_name)
-        os.makedirs(phase_dir, exist_ok=True)
-        return os.path.join(phase_dir, "orchestrator_output.json")
-
-    def print_text_summary(
-        self, batches: List[Any], output_path: str
-    ) -> None:
-        self.call_log.append("print_text_summary")
-
-
-def _make_args(**overrides) -> argparse.Namespace:
-    """Build a minimal argparse.Namespace for testing."""
-    defaults = {
-        "plan_file": "/tmp/test-plan.md",
-        "yes": False,
-        "force": False,
-        "dry_run": False,
-        "fresh": False,
-        "resume": False,
-        "approve_all": False,
-        "include_low": False,
-        "min_priority": None,
-        "verbose": False,
-        "approve_all_low": False,
-        "skip_all_human": False,
-        "approve_importance": None,
-        "skip_human_review": False,
-        "no_batch": False,
-        "max_batch_size": 4,
-        "batch_review_mode": "by-importance",
-        "accept_stale_consolidation": False,
-        "no_confirm": True,  # Skip confirmation prompts in tests
-        "include_high": False,
-        "agent_decide": False,
-    }
-    defaults.update(overrides)
-    return argparse.Namespace(**defaults)
-
-
-def _setup_plan_with_output(tmp_path: Path, plan_name: str = "test-plan") -> Path:
-    """Create a plan file and its output directory structure for testing."""
-    plan_path = tmp_path / f"{plan_name}.md"
-    plan_path.write_text("# Test Plan\n", encoding="utf-8")
-
-    # Create the output directory structure
-    out_dir = tmp_path / plan_name
-    out_dir.mkdir(exist_ok=True)
-
-    # Create review-plan subdirectory with report.md
-    review_dir = out_dir / "review-plan"
-    review_dir.mkdir(exist_ok=True)
-    (review_dir / "report.md").write_text("# Review Report\n", encoding="utf-8")
-
-    return plan_path
 
 
 # ======================================================================
@@ -494,6 +375,18 @@ class TestInitSubclassValidation:
                 # supports_revalidation intentionally omitted
                 supports_skip_flag = False
 
+    def test_an_abstract_intermediate_is_not_validated_but_its_subclasses_are(self):
+        """`abstract=True` skips the checks for a shared class only."""
+        from utils.apply_suggestion_phase import SuggestionApplyPhase
+
+        assert SuggestionApplyPhase.phase_name == ""
+        with pytest.raises(TypeError, match="supports_skip_flag"):
+            class Bad(SuggestionApplyPhase):
+                phase_name = "apply-test"
+                review_subdir = "review-plan"
+                item_noun = "item"
+                supports_revalidation = False
+
     def test_invalid_bool_type(self):
         """TypeError raised when boolean config is not a bool."""
         with pytest.raises(TypeError, match="must be a bool"):
@@ -702,9 +595,12 @@ class TestAbstractMethodContracts:
         with pytest.raises(NotImplementedError, match="build_output_json"):
             self._call_base_method("build_output_json", [])
 
-    def test_get_output_path_raises(self):
-        with pytest.raises(NotImplementedError, match="get_output_path"):
-            self._call_base_method("get_output_path")
+    def test_get_output_path_default_is_under_the_phase_dir(self):
+        dummy_args = _make_args()
+        orch = MockApplyOrchestrator(dummy_args)
+        orch.out_dir = "/out"
+        assert ApplyOrchestratorBase.get_output_path(orch) == os.path.join(
+            "/out", orch.phase_name, "orchestrator_output.json")
 
     def test_print_text_summary_raises(self):
         with pytest.raises(NotImplementedError, match="print_text_summary"):
@@ -1813,12 +1709,12 @@ class TestMachineParseableMarkers:
 
     M4. [REVALIDATION_PENDING] <path>   (single batch)
         Condition: --revalidate with supports_revalidation=True, 1 batch,
-                   not dry-run, not internal-revalidation
+                   not dry-run
         Source: handle_revalidation()
 
     M5. [REVALIDATION_BATCHES_PENDING] <path>   (multiple batches)
         Condition: --revalidate with supports_revalidation=True, >1 batch,
-                   not dry-run, not internal-revalidation
+                   not dry-run
         Source: handle_revalidation()
 
     M6. Full JSON output via emit_json_output()
@@ -5580,46 +5476,6 @@ class TestApplyCodeFixesCompletionContract:
 # ======================================================================
 
 
-class _FakeOutcome:
-    """The `TaskOutcome` fields the outcome summary reads, and no more."""
-
-    def __init__(self, task_id, status="ok", write_outcome="applied",
-                 duration_seconds=1.0, runner="mock:model", reason=None,
-                 files_touched=None, output_path=None):
-        self.task_id = task_id
-        self.status = status
-        self.write_outcome = write_outcome
-        self.duration_seconds = duration_seconds
-        self.runner = runner
-        self.reason = reason
-        # F7/F10: only read by `_touched_files()` and the batch's own result
-        # file (`notes`) — optional so every existing caller is unaffected.
-        self.files_touched = files_touched or []
-        self.output_path = output_path
-
-    @property
-    def ok(self):
-        return self.status == "ok"
-
-
-class _FakeSchedulerResult:
-    def __init__(self, outcomes, report_path=None, stopped_at_batch=None,
-                 verification=None):
-        self.outcomes = outcomes
-        self.report_path = report_path
-        self.stopped_at_batch = stopped_at_batch
-        self.verification = verification
-
-
-def _orchestrator_on(tmp_path, **arg_overrides):
-    """A MockApplyOrchestrator that has been through _setup on a real plan."""
-    plan_path = _setup_plan_with_output(tmp_path)
-    args = _make_args(plan_file=str(plan_path), **arg_overrides)
-    orch = MockApplyOrchestrator(args)
-    orch._setup()
-    return orch
-
-
 class TestTheTargetFileIsBackedUpBeforeTheFirstBatch:
     """F14: the phase that overwrites a file writes a backup of its own."""
 
@@ -5740,6 +5596,49 @@ class TestTheTargetFileIsBackedUpBeforeTheFirstBatch:
         (phase_dir / "tasks-backup.md").write_text("# tasks\n", encoding="utf-8")
         assert probe.write_target_backup() == str(phase_dir / "tasks-backup.md")
         assert not (phase_dir / "backup.md").exists()
+
+    @pytest.mark.parametrize("module,cls,backup", [
+        ("apply_suggestions_orchestrator", "ApplySuggestionsOrchestrator", "backup.md"),
+        ("apply_task_suggestions_orchestrator", "ApplyTaskSuggestionsOrchestrator",
+         "tasks-backup.md"),
+    ])
+    def test_the_fresh_refusal_names_the_phase_s_own_backup(
+        self, tmp_path, module, cls, backup,
+    ):
+        """`--fresh` over a target that still carries an executor run's edits
+        offers the phase's backup to copy back from: apply-task-suggestions
+        keeps it as tasks-backup.md, and the refusal used to say there was
+        no backup.md (Fable review 2026-11-10, F7)."""
+        import hashlib
+        import importlib
+        import subprocess
+
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        orchestrator = getattr(importlib.import_module(module), cls)
+        probe = orchestrator.__new__(orchestrator)
+        plan = tmp_path / "plan.md"
+        plan.write_text("# plan\n", encoding="utf-8")
+        target = tmp_path / "plan" / "target.md"
+        target.parent.mkdir()
+        target.write_text("edited by the previous run\n", encoding="utf-8")
+        probe.plan_path = str(plan)
+        probe.out_dir = str(tmp_path / "plan")
+        probe.write_target_file = lambda: str(target)
+        probe._review_completed_at = lambda: None
+        phase_dir = Path(probe.out_dir) / probe.phase_name
+        phase_dir.mkdir()
+        (phase_dir / backup).write_text("pre-run\n", encoding="utf-8")
+        after = hashlib.sha256(target.read_bytes()).hexdigest()
+        (phase_dir / "subagent_audit.jsonl").write_text(json.dumps({
+            "event": "completed", "task_id": "batch-0",
+            "timestamp": "2026-11-10T10:00:00Z",
+            "observed": {"plan/target.md": {"sha256_before": "0" * 64,
+                                            "sha256_after": after}},
+        }) + "\n", encoding="utf-8")
+        refusal = probe._fresh_target_refusal()
+        assert refusal is not None
+        assert f"copy the pre-run file back from {phase_dir / backup}" in refusal
+        assert "there is no" not in refusal
 
 
 _ROUND_ONE, _REVIEWED, _ROUND_TWO = (
@@ -5913,7 +5812,7 @@ class TestTheExecutorLegHandsBackItsArtifacts:
         context = cli_common.ResultContext(mode="apply-mock", phase="apply-mock")
         cli_common.activate_result(context)
         try:
-            orch._record_write_artifacts(str(output_path))
+            orch.phase_report().record_write_artifacts(str(output_path))
         finally:
             cli_common.deactivate_result()
 
@@ -5937,7 +5836,7 @@ class TestTheExecutorLegHandsBackItsArtifacts:
         context = cli_common.ResultContext(mode="apply-mock", phase="apply-mock")
         cli_common.activate_result(context)
         try:
-            orch._record_write_artifacts(str(output_path))
+            orch.phase_report().record_write_artifacts(str(output_path))
         finally:
             cli_common.deactivate_result()
 
@@ -5970,7 +5869,7 @@ class TestTheExecutorLegReportsItsOutcome:
                 {"task_id": "apply-batch-1", "expected_ids": ["d"]},
             ],
         )
-        orch.print_write_outcome_summary()
+        orch.phase_report().print_write_outcome_summary()
         out = capsys.readouterr().out
 
         assert "Batches: 1/2 ok" in out
@@ -5997,7 +5896,7 @@ class TestTheExecutorLegReportsItsOutcome:
                 "reason": "the plan file exists and is readable",
             }
         ]
-        orch.print_write_outcome_summary()
+        orch.phase_report().print_write_outcome_summary()
         out = capsys.readouterr().out
 
         assert "Skipped: 1" in out
@@ -6088,19 +5987,15 @@ class TestTheExecutorLegReportsItsOutcome:
                 )
                 return 0
 
-            def print_text_summary(self, batches, output_path):
-                # What every concrete phase does under `--output-format json`.
-                with open(output_path, "r", encoding="utf-8") as handle:
-                    print(json.dumps(json.load(handle), indent=2))
-
-        assert JsonExecutorOrch(args).run() == 0
+        orch = JsonExecutorOrch(args)
+        assert orch.run() == 0
         captured = capsys.readouterr()
 
-        # From the payload to the end of stdout, nothing but the payload. (The
-        # `[AUTO_RESOLVED]` markers D6 requires precede it; they are the one
-        # thing this run prints to stdout that is not the contract.)
-        payload = captured.out[captured.out.index("{"):]
-        assert json.loads(payload)["phase"] == "apply-json-leg"
+        # The base emits the payload itself; the phase's text renderer is
+        # never asked. The `[AUTO_RESOLVED]` markers D6 requires go to stderr.
+        assert json.loads(captured.out)["phase"] == "apply-json-leg"
+        assert "print_text_summary" not in orch.call_log
+        assert "[AUTO_RESOLVED]" in captured.err
         assert "APPLY-JSON-LEG: RESULT" not in captured.out
         assert "APPLY-JSON-LEG: RESULT" in captured.err
         assert "Batches: 1/1 ok" in captured.err
@@ -6328,11 +6223,11 @@ class TestTheExecutorLegRunsStepSeven:
             batch_context={"decision_source": "user"},
         )
         orch.state.save()
-        assert list(orch.judge_decisions()) == ["3b810046f0a56e8c"]
+        assert list(orch.phase_report().judge_decisions()) == ["3b810046f0a56e8c"]
 
     def test_the_result_block_names_what_the_judge_decided(self, tmp_path, capsys):
         orch = self._orchestrator_with_a_decision(tmp_path)
-        orch.print_write_outcome_summary()
+        orch.phase_report().print_write_outcome_summary()
         out = capsys.readouterr().out
         assert "Decided by the judge agent (1)" in out
         assert "  judge: codex:gpt-6-astra" in out
@@ -6348,7 +6243,7 @@ class TestTheExecutorLegRunsStepSeven:
         self, tmp_path
     ):
         orch = self._orchestrator_with_a_decision(tmp_path)
-        path = orch.write_apply_summary_report()
+        path = orch.phase_report().write_apply_summary_report()
         assert path == str(Path(orch.out_dir) / orch.phase_name / "summary.md")
         text = Path(path).read_text(encoding="utf-8")
         assert "## Summary" in text
@@ -6386,11 +6281,11 @@ class TestTheExecutorLegRunsStepSeven:
             },
         )
         orch.state.save()
-        orch.print_write_outcome_summary()
+        orch.phase_report().print_write_outcome_summary()
         out = capsys.readouterr().out
         assert "[salvaged] " in out
         assert "source: judge agent (salvaged)" in out
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "(MEDIUM) — Salvaged" in text
         assert "**Source**: judge agent (salvaged)" in text
         assert "(0 approved, 1 salvaged, 1 skipped)" in text
@@ -6403,11 +6298,11 @@ class TestTheExecutorLegRunsStepSeven:
             {"group_id": "3b810046f0a56e8c", "title": "Raise T001 to high",
              "status": "judge_skipped", "reason": "subjective"}
         ]
-        orch.print_write_outcome_summary()
+        orch.phase_report().print_write_outcome_summary()
         out = capsys.readouterr().out
         assert "[skipped by judge] Raise T001 to high" in out
         assert "judge_skipped" not in out
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "### Raise T001 to high [skipped by judge]" in text
 
     def test_the_report_names_the_verification_the_template_promised(
@@ -6425,20 +6320,20 @@ class TestTheExecutorLegRunsStepSeven:
             "command": "pnpm typecheck", "source": "project",
             "exit_code": 1, "duration_seconds": 4.2, "output_tail": "boom",
         }
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "- Verification: `pnpm typecheck` — FAIL (exit 1), 4.2s" in text
 
     def test_an_unconfigured_check_is_reported_as_unconfigured(self, tmp_path):
         orch = self._orchestrator_with_a_decision(tmp_path)
         orch.write_kind = "apply_code_fixes"
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "- Verification: not configured" in text
 
     def test_a_plan_text_phase_reports_no_verification_line_at_all(self, tmp_path):
         """`apply_suggestions` edits markdown — there is nothing to typecheck."""
         orch = self._orchestrator_with_a_decision(tmp_path)
         orch.write_kind = "apply_suggestions"
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "Verification" not in text
 
     def test_the_report_omits_the_decision_section_when_nothing_was_judged(
@@ -6447,7 +6342,7 @@ class TestTheExecutorLegRunsStepSeven:
         orch = _orchestrator_on(tmp_path, yes=True)
         orch.write_tasks = []
         orch.write_result = _FakeSchedulerResult([])
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "## Decided by the judge agent" not in text
 
     def test_the_overlay_is_regenerated_from_the_review_sidecar(self, tmp_path):
@@ -6458,7 +6353,7 @@ class TestTheExecutorLegRunsStepSeven:
             json.dumps({"templateStyle": "flat", "groups": []}),
             encoding="utf-8",
         )
-        written = orch.regenerate_decisions_overlay()
+        written = orch.phase_report().regenerate_decisions_overlay()
         assert written == str(review_dir / "report.html")
         assert (review_dir / "report.html").exists()
 
@@ -6467,7 +6362,7 @@ class TestTheExecutorLegRunsStepSeven:
         orch = self._orchestrator_with_a_decision(tmp_path)
         review_dir = Path(orch.out_dir) / orch.review_subdir
         assert not (review_dir / "report_data.json").exists()
-        assert orch.regenerate_decisions_overlay() is None
+        assert orch.phase_report().regenerate_decisions_overlay() is None
 
     def test_write_outputs_produces_both_on_the_executor_leg(
         self, tmp_path, capsys
@@ -6544,12 +6439,7 @@ class TestTheExecutorLegRunsStepSeven:
             ApplySuggestionsOrchestrator,
             ApplyTaskSuggestionsOrchestrator,
         ):
-            assert cls.write_apply_summary_report is (
-                ApplyOrchestratorBase.write_apply_summary_report
-            )
-            assert cls.regenerate_decisions_overlay is (
-                ApplyOrchestratorBase.regenerate_decisions_overlay
-            )
+            assert cls.phase_report is ApplyOrchestratorBase.phase_report
             assert cls._rebuild_formatted_skipped is (
                 ApplyOrchestratorBase._rebuild_formatted_skipped
             )
@@ -6573,7 +6463,7 @@ class TestTheFilesChangedFallback:
             [_FakeOutcome("apply-fix-batch-0", files_touched=["index.html"])],
             [{"task_id": "apply-fix-batch-0", "expected_ids": ["a"]}],
         )
-        orch.print_write_outcome_summary()
+        orch.phase_report().print_write_outcome_summary()
         out = capsys.readouterr().out
         assert "Files changed: index.html" in out
         assert orch.plan_path not in out
@@ -6585,7 +6475,7 @@ class TestTheFilesChangedFallback:
                           write_outcome=None)],
             [{"task_id": "apply-fix-batch-0", "expected_ids": ["a"]}],
         )
-        orch.print_write_outcome_summary()
+        orch.phase_report().print_write_outcome_summary()
         out = capsys.readouterr().out
         assert "Files changed: (none)" in out
 
@@ -6598,9 +6488,9 @@ class TestTheFilesChangedFallback:
             [{"task_id": "apply-fix-batch-0", "expected_ids": ["a", "b"]}],
         )
         orch.batches = [{"fixes": [{"title": "Incomplete fix"}]}]
-        orch.print_write_outcome_summary()
+        orch.phase_report().print_write_outcome_summary()
         stdout = capsys.readouterr().out
-        report = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        report = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "Files changed: index.html" in stdout
         assert "**Files changed**: index.html" in report
         assert "Incomplete fix** - Partial application; inspect batch" in report
@@ -6611,7 +6501,7 @@ class TestTheFilesChangedFallback:
         orch = _orchestrator_on(tmp_path, yes=True)
         orch.write_tasks = [{"task_id": "apply-batch-0", "expected_ids": ["a"]}]
         orch.write_result = _FakeSchedulerResult([_FakeOutcome("apply-batch-0")])
-        orch.print_write_outcome_summary()
+        orch.phase_report().print_write_outcome_summary()
         out = capsys.readouterr().out
         assert f"File: {orch.plan_path}" in out
         assert "Files changed:" not in out
@@ -6622,7 +6512,7 @@ class TestTheFilesChangedFallback:
             [_FakeOutcome("apply-fix-batch-0", files_touched=["index.html"])],
             [{"task_id": "apply-fix-batch-0", "expected_ids": ["a"]}],
         )
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "**Files changed**: index.html" in text
         assert "**Applied to**" not in text
 
@@ -6648,7 +6538,7 @@ class TestTheFilesChangedFallback:
                 {"task_id": "apply-fix-batch-2", "expected_ids": ["c"]},
             ],
         )
-        assert orch._touched_files() == ["index.html", "style.css"]
+        assert orch.phase_report().touched_files() == ["index.html", "style.css"]
 
     def test_record_write_artifacts_names_the_touched_files(self, tmp_path):
         from utils import cli_common
@@ -6658,7 +6548,7 @@ class TestTheFilesChangedFallback:
             [_FakeOutcome("apply-fix-batch-0", files_touched=["index.html"])],
             [{"task_id": "apply-fix-batch-0", "expected_ids": ["a"]}],
         )
-        # `_touched_files()` names repo-root-relative paths; the resolved file
+        # `touched_files()` names repo-root-relative paths; the resolved file
         # must actually exist for `record_output_files`/`record_artifacts` to
         # name it (same rule every other artifact path follows).
         plan_dir = Path(orch.plan_path).parent
@@ -6671,7 +6561,7 @@ class TestTheFilesChangedFallback:
         context = cli_common.ResultContext(mode="apply-mock", phase="apply-mock")
         cli_common.activate_result(context)
         try:
-            orch._record_write_artifacts(str(output_path))
+            orch.phase_report().record_write_artifacts(str(output_path))
         finally:
             cli_common.deactivate_result()
 
@@ -6705,7 +6595,7 @@ class TestTheFilesChangedFallback:
         context = cli_common.ResultContext(mode="apply-mock", phase="apply-mock")
         cli_common.activate_result(context)
         try:
-            orch._record_write_artifacts(str(output_path))
+            orch.phase_report().record_write_artifacts(str(output_path))
         finally:
             cli_common.deactivate_result()
 
@@ -6754,7 +6644,7 @@ class TestPerFixDetailInTheSummary:
 
     def test_each_fix_is_listed_with_its_title_and_status(self, tmp_path):
         orch = self._orchestrator_with_a_fix_batch(tmp_path)
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "1. **Fix the OOB teleport** - Applied" in text
         assert "2. **Drop speedForward** - Applied" in text
 
@@ -6774,9 +6664,9 @@ class TestPerFixDetailInTheSummary:
         outcome.files_touched = []
         outcome.reason = "Snapshot comparison confirms no byte changes."
 
-        orch.print_write_outcome_summary()
+        orch.phase_report().print_write_outcome_summary()
         stdout = capsys.readouterr().out
-        report = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        report = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         for text in (stdout, report):
             assert "Suggestions applied: 0" in text
             assert f"Suggestions {count_label}: 2" in text
@@ -6794,9 +6684,9 @@ class TestPerFixDetailInTheSummary:
             _FakeOutcome("noop", write_outcome="no-op"),
             _FakeOutcome("clean-failure", write_outcome="clean-failure"),
         ])
-        orch.print_write_outcome_summary()
+        orch.phase_report().print_write_outcome_summary()
         stdout = capsys.readouterr().out
-        report = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        report = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         for text in (stdout, report):
             assert "Suggestions applied: 2" in text
             assert "Suggestions needing no changes: 3" in text
@@ -6804,13 +6694,13 @@ class TestPerFixDetailInTheSummary:
 
     def test_a_two_element_line_range_renders_as_a_span(self, tmp_path):
         orch = self._orchestrator_with_a_fix_batch(tmp_path)
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         stripped = [line.strip() for line in text.splitlines()]
         assert "- File: index.html:725-727" in stripped
 
     def test_a_single_element_line_range_renders_without_a_span(self, tmp_path):
         orch = self._orchestrator_with_a_fix_batch(tmp_path)
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         stripped = [line.strip() for line in text.splitlines()]
         assert "- File: index.html" in stripped
 
@@ -6822,12 +6712,12 @@ class TestPerFixDetailInTheSummary:
                 reason="no bytes moved",
             )
         ])
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "1. **Fix the OOB teleport** - Not applied" in text
 
     def test_the_batch_result_notes_are_carried_through(self, tmp_path):
         orch = self._orchestrator_with_a_fix_batch(tmp_path)
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "**Notes**: Fix 1: OOB now resyncs lap timing." in text
 
     def test_a_missing_result_file_yields_no_notes_line(self, tmp_path):
@@ -6835,7 +6725,7 @@ class TestPerFixDetailInTheSummary:
         orch.write_result = _FakeSchedulerResult([
             _FakeOutcome("apply-fix-batch-0")  # no output_path
         ])
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "**Notes**" not in text
 
     def test_batching_efficiency_line_when_batching_ran(self, tmp_path):
@@ -6845,25 +6735,25 @@ class TestPerFixDetailInTheSummary:
             "subagent_calls_saved": 5,
             "efficiency_gain_percent": 42,
         }
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "Batching efficiency: 5 subagent call(s) saved (42%)" in text
 
     def test_no_batching_line_when_batching_was_not_enabled(self, tmp_path):
         orch = self._orchestrator_with_a_fix_batch(tmp_path)
         orch.batching_stats = {"batching_enabled": False}
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "Batching efficiency" not in text
 
     def test_base_ref_line_when_the_orchestrator_resolves_one(self, tmp_path):
         orch = self._orchestrator_with_a_fix_batch(tmp_path)
         orch.resolve_base_ref = lambda: "abc1234"
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "**Base ref**: abc1234" in text
 
     def test_no_base_ref_line_when_none_is_resolved(self, tmp_path):
         """The default hook returns "" for the sibling phases — no line."""
         orch = self._orchestrator_with_a_fix_batch(tmp_path)
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "**Base ref**" not in text
 
 
@@ -6887,8 +6777,8 @@ class TestTheSummaryFileIsPatchedIntoTheWriteBatchReport:
             [_FakeOutcome("apply-batch-0")], report_path=str(report_path)
         )
 
-        summary_path = orch.write_apply_summary_report()
-        orch._patch_write_batch_report_summary_file(summary_path)
+        summary_path = orch.phase_report().write_apply_summary_report()
+        orch.phase_report().patch_write_batch_report_summary_file(summary_path)
 
         patched = json.loads(report_path.read_text(encoding="utf-8"))
         assert patched["summary_file"] == summary_path
@@ -6907,14 +6797,14 @@ class TestTheSummaryFileIsPatchedIntoTheWriteBatchReport:
         orch.write_result = _FakeSchedulerResult([], report_path=str(report_path))
         mtime_before = report_path.stat().st_mtime_ns
 
-        orch._patch_write_batch_report_summary_file("/already/there.md")
+        orch.phase_report().patch_write_batch_report_summary_file("/already/there.md")
 
         assert report_path.stat().st_mtime_ns == mtime_before
 
     def test_a_missing_report_path_is_a_quiet_no_op(self, tmp_path):
         orch = _orchestrator_on(tmp_path, yes=True)
         orch.write_result = _FakeSchedulerResult([])  # report_path=None
-        orch._patch_write_batch_report_summary_file("/tmp/does-not-matter.md")
+        orch.phase_report().patch_write_batch_report_summary_file("/tmp/does-not-matter.md")
         assert orch.write_result.summary_file == "/tmp/does-not-matter.md"
 
     def test_the_executor_leg_wires_it_end_to_end(self, tmp_path):

@@ -343,14 +343,18 @@ class TestPrepareConsolidationTasks:
         for batch in result["batches"]:
             assert batch["groups_count"] <= MAX_GROUPS_PER_CONSOLIDATION_BATCH
 
-    def test_char_budget_enforcement(self, tmp_path):
-        """Batches exceeding CONSOLIDATION_CHAR_BUDGET are split further."""
-        # Create groups with large descriptions that exceed budget
+    def test_char_budget_is_not_applied_to_batch_formation(self, tmp_path):
+        """Batches are cut by count alone (CONSOLIDATION_BATCH_CHAR_BUDGET is
+        None), however long the suggestion texts: a content budget waits on
+        the decision in docs/development/review-results.md ("Consolidation
+        batches"). The splitter itself still honours a budget it is given."""
+        from utils.consolidation import _split_into_budget_batches
+
         big_desc = "x" * (CONSOLIDATION_CHAR_BUDGET // 2 + 100)
         groups = [
             _make_group(
                 theme=f"T{i}",
-                suggestions=[{"title": "S", "description": big_desc}],
+                suggestions=[{"title": "S", "desc": big_desc}],
                 reference="Task 1",
             )
             for i in range(4)
@@ -359,9 +363,10 @@ class TestPrepareConsolidationTasks:
         result = prepare_consolidation_tasks(
             groups, section_groups, str(tmp_path), "plan.md"
         )
-        # Each batch should have at most 2 groups (budget limits)
-        for batch in result["batches"]:
-            assert batch["groups_count"] <= 2
+        assert [b["group_indices"] for b in result["batches"]] == [[0, 1, 2, 3]]
+        assert _split_into_budget_batches(
+            [0, 1, 2, 3], groups, 4, CONSOLIDATION_CHAR_BUDGET
+        ) == [[0], [1], [2], [3]]
 
     def test_global_sequential_batch_numbering(self, tmp_path):
         """Batch numbering is global and sequential across sections."""
@@ -1238,9 +1243,13 @@ class TestMakeSingletonConsolidated:
         result = _make_singleton_consolidated(gid, 0, group)
         assert result["type"] == "clarification"
 
-    def test_importance_normalized(self):
-        """Importance is uppercased and validated."""
-        group = _make_group(importance="high")
+    def test_importance_is_the_members_highest(self):
+        """A group has no importance field (``SuggestionGroup.to_dict`` writes
+        none): the singleton's level is its members' highest, either case."""
+        group = _make_group(importance="low", suggestions=[
+            {"title": "A", "desc": "a", "importance": "low"},
+            {"title": "B", "desc": "b", "importance": "high"},
+        ])
         gid = generate_group_id(group)
         result = _make_singleton_consolidated(gid, 0, group)
         assert result["importance"] == "HIGH"

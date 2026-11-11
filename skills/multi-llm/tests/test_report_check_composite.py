@@ -30,8 +30,8 @@ import pytest
 SKILL_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(SKILL_ROOT))
 
-from tests.test_report_check import Transcript, decision_of, run_check  # noqa: E402
-from tests.test_wakeup_check import DISPATCH, call  # noqa: E402
+from tests.support.transcripts import Transcript, decision_of, run_check  # noqa: E402
+from tests.support.wakeup_world import DISPATCH, call  # noqa: E402
 from utils import detach, improve_steps, report_check, wakeup_check  # noqa: E402
 
 

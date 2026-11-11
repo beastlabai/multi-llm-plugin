@@ -100,7 +100,7 @@ DIST_FILES: Tuple[str, ...] = (
 #: ``.tgz`` — and a digest over that superset attests to bytes npm never packs
 #: while making the publish gate's key environment-dependent: a ``.pyc`` is
 #: interpreter-version-specific, so a Python-minor switch between the gate and
-#: ``make opencode-publish-first`` would produce a spurious "staged tree has changed".
+#: the publish would produce a spurious "staged tree has changed".
 SHIPPED_TREES: Tuple[str, ...] = ("dist/", "skills/")
 SHIPPED_FILES: Tuple[str, ...] = ("LICENSE", "README.md", "package.json")
 
@@ -148,8 +148,8 @@ SURFACE_SCHEMA_VERSION = surface.SURFACE_SCHEMA_VERSION
 #: recipe cannot reach it, and without this a developer's local pack refuses on
 #: their own uncommitted work while the recipe that called it had already been
 #: told to allow it. It is deliberately a named opt-in rather than a fallback:
-#: ``make opencode-publish-first`` neither sets nor forwards it, so a dirty publish is
-#: refused however it was reached.
+#: the publish path neither sets nor forwards it, so a dirty publish is refused
+#: however it was reached.
 #:
 #: Read by *exact* spelling — ``=1`` and nothing else — rather than as "any
 #: non-empty value", which is the spelling the Makefile writes
@@ -495,9 +495,7 @@ def check_bump(
 #: session that authorized this stamp (``release_gate.py export-record``, into
 #: the gitignored ``.gate/export/``). It is copied into
 #: ``tests/container/records/`` and committed in the default branch's own commit
-#: after the fast-forward, never in the tag's tree; the tag's commit is then
-#: checked out again, clean, before ``make opencode-publish-first`` reads this
-#: stamp.
+#: after the fast-forward, never in the tag's tree.
 STAMP_NAME = ".package-check.stamp"
 
 #: The tier a stamp must carry to authorize a publish. A `-ci` run writes no
@@ -830,8 +828,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # Both stamp branches call ``build()`` and therefore ``payload.stage()``,
     # whose dirty-tree refusal is a ``PayloadError``. Caught here for the same
     # reason the ``build`` branch catches it: a refusal is this tool's most
-    # likely outcome on the publish path — `make opencode-publish-first` from a dirty
-    # skill tree hits it, and so does the gate's final ``--write-stamp``, which
+    # likely outcome on the publish path — a publish from a dirty skill tree
+    # hits it, and so does the gate's final ``--write-stamp``, which
     # ignores $MULTI_LLM_ALLOW_DIRTY by design — and a gate that answers with a
     # traceback instead of a named line is a gate nobody can act on. The
     # evidence refusals (no session, a rehearsal, a row missing) are raised as

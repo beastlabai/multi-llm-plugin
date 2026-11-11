@@ -34,7 +34,8 @@ override: starting from an inert template, it **uncomments** the full `providers
 block, `defaults.models` / `quick_models` entries, and `default_provider` for each
 CLI it detects, leaving the rest commented. `default_provider` is set to the
 **first detected provider** in base order (claude-code, cursor-agent, gemini,
-grok, fx, opencode, codex, kilocode, kimi, qwen, copilot, cline, goose, aider, agy, pi, muse, vibe, omp). With **no CLIs installed** it writes the inert
+grok, fx, opencode, codex, kilocode, cline, goose, aider, agy, muse, pi, kimi,
+qwen-code, copilot, vibe, omp). With **no CLIs installed** it writes the inert
 template (which inherits the built-in defaults) and exits 0 with an install
 notice — it never errors. Pass `--template-only` to skip detection and write the
 pristine commented stub for hand-editing. Add `--gitignore` to keep the file
@@ -149,6 +150,41 @@ prints the path), so you can port any custom settings into the regenerated file.
     reviewed range holds a commit that added them, and its `Left out N of the
     workflow's own file(s)` line names them. Anything else you keep in the
     folder (a README, notes, a script) is reviewed like any other file.
+
+## Environment variables
+
+These are the `MULTI_LLM_*` variables a person may set. Codex starts the
+plugin's tool server with a stripped environment: of these variables, only the
+ones the plugin's `.mcp.json` lists in `env_vars` arrive from the environment
+Codex itself was started in. The "Codex manifest" column says which. The server
+then starts every run through a `bash -lc` login shell, which reads
+`~/.bash_profile` or `~/.profile`, so a variable exported there reaches the run
+whether the manifest lists it or not, and overrides a forwarded value (see
+[hosts](hosts.md)). `MULTI_LLM_CODEX_UNSANDBOXED_WRITES` is the exception: the
+server reads it itself before any shell starts, so only a value in Codex's own
+environment counts. The variables the plugin sets for itself (handshakes,
+probes, host inputs) and the build and test switches are listed, with their
+owners, in `skills/multi-llm/utils/env_vars.py`.
+
+<!-- BEGIN GENERATED: environment-variables (utils/env_vars.py) -->
+<!-- Generated from the `setting` rows of utils/env_vars.py. Edit the row, then run `python utils/env_vars.py`. -->
+
+| Variable | What it does | Codex manifest |
+|---|---|---|
+| `MULTI_LLM_PROVIDERS_CONFIG` | Path to a `providers.yaml` deep-merged over the project and user config, above both. A malformed file fails fast (see the next row). | forwarded |
+| `MULTI_LLM_PROVIDERS_CONFIG_PERMISSIVE` | `1` (also `true`, `yes`, `on`) turns a malformed explicit override file into a warning and skips it instead of failing fast. | forwarded |
+| `MULTI_LLM_GIT_CREDENTIAL_HELPER` | One-run override of the git credential-helper policy for runner children: `auto` (default), `wipe` or `keep`. Wins over both config layers; anything else warns and uses `auto`. | forwarded |
+| `MULTI_LLM_HOST` | Host id used when `--host` is not passed (for a host that calls `multi_llm.py` without a rendered shim). Default `claude-code`; an unknown id exits 3. | forwarded |
+| `MULTI_LLM_UV` | Explicit path to `uv`, tried before `PATH` and the documented probe chain. Also used to re-run a detached worker. | forwarded |
+| `MULTI_LLM_UV_RUN_ARGS` | Replaces the flags passed to `uv run` (split on whitespace, no shell). Unset or empty keeps the default; `--no-sync` is correct only against an already-built `.venv`. | forwarded |
+| `MULTI_LLM_MAX_DETACHED` | Ceiling on concurrent detached runs per project (default 4, minimum 1). The `--max-detached` flag beats it. | forwarded |
+| `MULTI_LLM_HEARTBEAT_INTERVAL_S` | Seconds between a detached worker's heartbeats (default 10, minimum 0.05). Mostly for tests and slow disks. | forwarded |
+| `MULTI_LLM_HANDSHAKE_TIMEOUT_S` | Seconds `--detach` waits for the worker to confirm it started (default 10, minimum 0.1) before reporting the launch as failed. | forwarded |
+| `MULTI_LLM_VALIDATION_CONTEXT` | How much plan and code each validation batch embeds: unset (whole plan plus the code its issues cite), `cited` (plan scoped per batch) or `full` (round-wide blocks in every batch). Anything else reads as `full`. | forwarded |
+| `MULTI_LLM_CODEX_UNSANDBOXED_WRITES` | Codex plugin only: `1` lifts the tool's own refusal of write-capable modes under a read-only or unreadable session posture. It never changes which sandbox the runners use. Set it in the environment that starts Codex. | forwarded |
+| `MULTI_LLM_CODEX_SKIP_RUNG` | `plugin-landlock` skips that sandbox rung alone for the process; any other value is rejected at start-up. Use it to tell a jail denial from a codex fault. | not forwarded |
+| `MULTI_LLM_DEBUG` | `1` (also `true`, `yes`, `on`) writes each exception an advisory read swallowed (a status block, a hint line, a recorded route) to stderr, with the site's label and the traceback. Stdout and exit codes do not change. The Codex tool server does not forward it: run the command in a shell instead. | not forwarded |
+<!-- END GENERATED: environment-variables -->
 
 ## Safety
 
@@ -274,8 +310,14 @@ it by version, `auto` goes on to rung 2 and `contained` refuses.
 
 Because the default is already the widest value, a cloned repository's
 `.multi-llm/providers.yaml` can only narrow the fallback — there is nothing for
-an untrusted override to widen here. See the key's comment in `providers.yaml`
-for what each rung gives up.
+an untrusted override to widen here. What rung 3 gives up, in plain words: for
+a codex read-only slot, no OS boundary of any kind between the model's shell and
+this machine (reads and writes anywhere you can, network from model commands,
+and no prompt-injection resistance for a validation batch beyond the `git
+status` check). That is the footing the other reviewers already run on
+(measured 2026-09-17: the host's own shell tool runs in the same namespaces as
+your terminal), which is why `auto` keeps it as the last rung rather than
+refusing; set `contained` to keep the boundary and drop the bypass.
 
 **codex's trust entries.** codex adds `[projects."<repo>"] trust_level =
 "trusted"` to your `$CODEX_HOME/config.toml` whenever it runs with write access
@@ -363,3 +405,289 @@ steps:
    - any other value stops every mode at start-up with exit 3, naming the one
      accepted value. `doctor` reports it on its row instead, and shows the rung
      as skipped while the variable is set.
+
+## Base config reference
+
+The shipped [`providers.yaml`](../skills/multi-llm/providers.yaml) keeps one
+short comment per key: the values it takes and what you must know to set one.
+This section carries the reasons. Every key here can be set in any layer
+(see [Good to know](#good-to-know) for the order); a key the base does not
+declare merges and is then ignored.
+
+### Provider blocks
+
+Each `providers.<name>` block is metadata for one built-in adapter. The binary,
+every flag and every argument live in the adapter under
+`skills/multi-llm/utils/providers/`. Two keys that used to sit here,
+`command:` and `supports_json_output:`, were removed because nothing read
+them; a `command:` in any layer still merges and still never changes which
+program runs.
+
+- **`default_timeout`** is the slot timeout in seconds, and the only
+  per-provider number. Several adapters derive an inner deadline from it and
+  hold it under the slot, so the CLI reports its own error before multi-llm
+  kills it: agy's `--print-timeout` and qwen-code's `--max-wall-time` sit 30 s
+  under it, and claude-code's `API_TIMEOUT_MS` is a quarter of it less 30 s,
+  capped at 300 s, so its retries fit inside the slot. Raising the key raises
+  those too. The shipped values carry measurements: muse's 1800 s is generous
+  because muse retries a failing call up to 10 times with exponential backoff
+  (a 429 alone waits 60 s), so an unfunded account burns minutes before it
+  reports the 402, and the slot holds one whole chain; copilot's 1200 s
+  clears its own ~86 s rate-limit chain; kimi's bounds a stalled upstream that
+  only kimi's own ~300 s request timeout ends; qwen-code's bounds its
+  unbounded 429 and stall paths through the derived `--max-wall-time`; vibe's
+  clears its declared inner bound (3 × 90 s plus backoff). A provider with no
+  row gets `DEFAULT_TIMEOUT_S` (1200 s, in `utils/providers/base.py`); the
+  adapters declare no timeout of their own, so there is no second number to
+  disagree with this one.
+- **`max_concurrent`** caps that provider's parallel slots. cline's `-m`
+  rewrites the saved default in `~/.cline`, which is why cline is capped.
+- **`models`** is the `--interactive` picker's menu, the first entry being the
+  provider's default ([a menu, not a gate](providers.md#the-provider-table)).
+  Keep each CLI's own spelling: a model OpenRouter serves may not exist in a
+  native CLI's catalog, and the reverse. The catalogs list with
+  `codex debug models`, `cursor-agent models`, `agy models`, `grok models`,
+  `opencode models`, `kilocode models <backend> --verbose`,
+  `omp models openrouter --json` and `pi --list-models`; OpenRouter slugs are
+  at `https://openrouter.ai/api/v1/models`. The repository's
+  `tests/test_model_catalogs.py` checks configured ids against committed
+  catalog snapshots where one exists.
+
+**The `:effort` suffix.** Most providers accept `model:effort`, split on the
+last colon against that provider's accepted names; any other suffix stays part
+of the model name, so `:free` ids and Bedrock `...-v1:0` ids pass through
+whole. The accepted names come from one canonical ladder (none, minimal, low,
+medium, high, xhigh, max) in `utils/providers/reasoning.py`, of which each adapter
+declares its subset as `EFFORT_LADDER`; `off` is a CLI's spelling of `none`
+(goose, pi, vibe), `ultra` of `max` (muse; codex accepts it and sends `max`),
+and `thinking` / `instant` (kilocode, opencode) are a mode rather than an
+amount and pass through uncompared. Where a provider differs:
+
+| Provider | The suffix becomes | What an unsupported value does |
+| --- | --- | --- |
+| claude-code | `--effort <level>` | the CLI downgrades it per model, silently |
+| cursor-agent | no suffix: effort is part of the model name (`-xhigh` variants) | stays in the name |
+| gemini | no suffix and no per-run control: define a custom alias with a `thinkingConfig` under `modelConfigs.customAliases` in `~/.gemini/settings.json` (or the project's `.gemini/settings.json`) and list the alias as the model | stays in the name |
+| codex | `-c model_reasoning_effort=<level>` | `max` is advertised per model by `codex debug models` (`supported_reasoning_levels`); `none`/`minimal` are accepted on the wire but advertised by no catalog entry, so pass one only when you mean it |
+| grok | `--reasoning-effort <level>` | per-model support varies |
+| opencode | `run --variant <name>` (names are provider-specific) | resolved or ignored server-side; one model that hangs on a variant is declared in the adapter and loses the suffix with a warning |
+| kilocode | `run --variant <name>` | **ignored silently**: variants are per model and drift, so check each one against `tests/fixtures/kilocode/model_variants.json` |
+| cline | `--thinking <level>` (does not touch the saved default) | cline exits 1; `xhigh` may be downgraded to `high` on some backends |
+| goose | `GOOSE_THINKING_EFFORT` in the child's environment (goose has no flag) | ignored silently, as is any effort for an OpenRouter model goose does not class as reasoning-capable |
+| aider | `--reasoning-effort <value>` | passed unvalidated: `openrouter/` models accept it as OpenRouter's `reasoning.effort`, others warn and ignore it |
+| agy | `--effort low\|medium\|high`, beside the tier its display name already carries | stays in the name, which agy then rejects out loud |
+| muse | `--reasoning-effort <level>` | muse hard-errors; without a suffix muse reads `reasoning_effort` from `~/.config/muse/settings.json`, not its `--help` default |
+| pi, omp | `--thinking <level>`, stripped before `--model` so the CLI's own `:level` parsing never sees it | omp validates nothing, so the whitelist is the only guard; omp's own `:auto` stays in the name and reaches omp |
+| kimi, qwen-code | no suffix: a third `:` segment is part of the id | qwen-code sends it to the backend verbatim, which answers "model not found"; kimi's `KIMI_MODEL_THINKING_EFFORT` is inert on the wire at 0.36.1 |
+| copilot | the effort setting (all seven accepted at 1.0.80) | which ones a backend honours is server-side |
+| vibe | `VIBE_THINKING` (vibe has no flag) | split anyway, since an alias with `:high` glued on selects no model |
+
+### Version ceilings
+
+Every supported build of every CLI is decided by one gate in
+`utils/providers/version_gate.py`. The floor (`min_version`) and the build the
+fixtures came from (`verified_version`) are declared on the adapter, next to
+the parser they protect. The ceiling, `max_version_exclusive`, is declared on
+the adapter too and can be overridden per provider in config, because a
+vendor can ship a broken build between two releases of this plugin and
+pinning it must not need a code edit. Below the floor, or at or above the
+ceiling, a slot is refused before any child starts, naming the number; above
+`verified_version` is a warning, never a block.
+
+A number ships with a comment naming the feature it protects (or the breakage
+it avoids), never alone: a ceiling with no reason cannot be retired, because
+nobody can tell what would retire it. A version measured once is an upper
+bound on the true floor, so a flag verified on one recent build is gated per
+flag (the CLI's own `--help`, read once per process) rather than by raising
+the floor. The key is written out on opencode, shipped empty (no ceiling),
+because opencode's npm `latest` has been a prerelease: e.g.
+`max_version_exclusive: "2.0.0"` refuses every slot on 2.0.0 and later.
+
+### claude-code keys
+
+- **`fallback_models`** (and **`fallback_models_default`** for primaries
+  with no entry) map a primary model to the stand-ins claude-code's
+  `--fallback-model` uses when the primary is overloaded (three consecutive
+  529s) or unavailable (a 404 falls back on the first error). It ships empty,
+  and empty emits no flag: nothing here knows which model should stand in for
+  which, and an implicit list would answer with a model nobody configured.
+  The list is joined verbatim in your order. The CLI accepts a bad list
+  silently, so it is validated at load: an entry that repeats, is empty, names
+  a model not in `models:`, or is its own primary fails the run naming the
+  key. A fired fallback is recorded as `served_model`, read from the
+  envelope's `modelUsage`.
+- **`strip_vendor_keys: auto | always | never`**. Measured at claude-code
+  2.1.233: with a subscription login present, an exported `ANTHROPIC_API_KEY`
+  swaps the request's subscription bearer token for `x-api-key` and the run is
+  billed per token. `ANTHROPIC_AUTH_TOKEN` overrides it the same way, and
+  `ANTHROPIC_CUSTOM_HEADERS` is a third path. `auto` strips those three only
+  on an affirmative subscription verdict from a sanitized `claude auth status`
+  (run once per process with the three already removed, no network, about
+  0.3 s, and never for a run with no claude-code slot or no such variable
+  set). Every other outcome keeps them, with one warning naming the billing
+  consequence, because failing closed would break every claude-code slot of an
+  API-key-only user. `always` strips without asking; `never` keeps them.
+  `ANTHROPIC_BASE_URL` is never stripped, and its presence makes `auto` keep
+  the keys: a gateway user's credentials belong to the gateway
+  ([endpoint recipes](providers.md#pointing-a-provider-cli-at-a-different-endpoint-glm--zai-and-the-general-case)).
+  `OPENAI_API_KEY`, `CLAUDE_CONFIG_DIR` and `CODEX_HOME` are never stripped.
+- **`vendor_backend: auto | keep | strip`** is a second, independent gate
+  over the seven `CLAUDE_CODE_USE_*` names (BEDROCK, VERTEX, FOUNDRY,
+  ANTHROPIC_AWS, GOOGLE_CLOUD, MANTLE, GATEWAY). An inherited one is worse than
+  a billing bug: `CLAUDE_CODE_USE_BEDROCK` hung for 137 s with no request and
+  no output, waiting on AWS credentials. `auto` strips one that arrived by
+  inheritance, meaning one not named in this provider's own `env:` block
+  (`env: {CLAUDE_CODE_USE_BEDROCK: "1"}` declares it yours; the seven names
+  are the only ones such a declaration may name). `keep` never strips it, its
+  hang then bounded by the slot timeout; `strip` always does. The two gates
+  are independent: `vendor_backend: keep` still gets the credential row
+  evaluated, and `strip_vendor_keys: never` still removes an undeclared
+  backend.
+
+### cursor-agent keys
+
+**`isolate_profile: auto | on | off`** gives each run its own cursor profile:
+`CURSOR_CONFIG_DIR` and `CURSOR_DATA_DIR` pointed at a 0700 temporary
+directory removed at exit. Without it, `--model` rewrites your global default
+model in `cli-config.json` and `--trust` writes a lasting
+`.workspace-trusted` marker; a snapshot-and-restore guard puts them back, but
+only within one process, so two overlapping runs can leave your default model
+changed for good. `auto` redirects only where cursor's login is verified not
+to follow those two variables, which is Linux today (measured: `auth.json`
+lives under `$XDG_CONFIG_HOME/cursor/`, and a run against an empty redirected
+directory authenticated). `on` redirects everywhere; where cursor finds its
+login differently, every cursor slot then looks logged out, which is why it is
+not the default. `off` keeps your profile, for a project rule set or an MCP
+config cursor must see. Setting `CURSOR_CONFIG_DIR` or `CURSOR_DATA_DIR`
+yourself also turns the redirect off, and that profile is never written or
+deleted.
+
+### opencode keys
+
+- **`hermetic: on | auto | off`**. `on` and `auto` run opencode under an
+  empty, run-scoped `XDG_CONFIG_HOME` plus `--pure`, and move
+  `OPENCODE_TEST_HOME` there too, so neither your
+  `~/.config/opencode/opencode.json`, `~/.opencode/` nor the user-level skills
+  under `~/.claude/skills` change the model, agent or permissions a dispatch
+  uses. `XDG_DATA_HOME` (stored logins, `opencode auth list`) and
+  `XDG_CACHE_HOME` (the model catalog) are kept. It applies to fan-out, `ask`
+  and `agent-readonly` slots; `agent-write` inherits your config. The cost: an
+  MCP server opencode starts also sees the empty config home; `off` restores
+  inheritance for that case. Quote the value: YAML 1.1 reads a bare `on` or
+  `off` as a boolean.
+- **`config_providers`** is a verbatim opencode `provider` map, without
+  credentials (those stay in `auth.json`). A hermetic run cannot see a provider
+  defined only in your own opencode config, so declare it here; a slot naming
+  an undeclared one is refused before spawn rather than failing to resolve the
+  model. Built-in providers need nothing here. A declared provider passes the
+  login preflight wherever its key lives: in `auth.json` under its id, in an
+  `{env:VAR}` reference resolved in the dispatch's own environment (so
+  `env_allowlist` applies), or nowhere (a keyless local server); the preflight
+  reads `opencode debug config` before refusing. A built-in provider
+  overridden without a key, or with an `{env:VAR}` that is unset, is still
+  refused.
+- **`opencode/*` models** are opencode Zen's server-side catalog: models.dev
+  marks one deprecated and `opencode models` stops listing it, with no opencode
+  release involved. `opencode/nemotron-3-ultra-free` went that way by
+  2026-11-06.
+
+### codex keys
+
+- **`strip_vendor_keys`** is deliberately unset for codex, which means
+  `never`. codex has no zero-network login verdict (`codex login status`
+  reports a `CODEX_API_KEY`-only user as logged out, and `codex doctor --json`
+  is advisory), and `auto` behaves as `never` for any adapter without one.
+  `always` would leave a `CODEX_API_KEY`-only user without a credential, and
+  codex does not fail fast then: it sends the request with no
+  `Authorization` header and the turn dies at the server. `OPENAI_API_KEY` is
+  never stripped: codex does not read it, and a custom provider declaring
+  `env_key = "OPENAI_API_KEY"` needs it.
+- **`sandbox_fallback: auto | contained | off`** is described in full under
+  [Safety](#safety). A probe verdict of `unavailable` (never `unknown`) starts
+  the ladder; "read-only phases" means the review and ask fan-out plus the
+  executor's validation, revalidation, consolidation, salvage, task generation
+  and human-decision judge. YAML booleans read as the word they spell:
+  `off`/`false` is `off`, `on`/`true` is `auto`. doctor's BROKEN row names the
+  value in force and the rung its probe chose.
+
+### Model names per provider
+
+- **cline, goose:** `<backend>/<model-id>`, split at the first `/` into the
+  backend (`-P` / `--provider`) and the model (`-m` / `--model`). goose reads
+  its key from the environment only (`OPENROUTER_API_KEY` for `openrouter/`).
+- **aider:** a litellm spec, passed whole to `--model`; `openrouter/` models
+  need `OPENROUTER_API_KEY` exported.
+- **pi:** pi model patterns, passed whole; pi resolves `provider/id` itself.
+  Keys come from provider variables (`OPENROUTER_API_KEY`,
+  `ANTHROPIC_API_KEY`, ...) or pi's `/login`.
+- **agy:** the exact display names `agy models` prints, spaces and parentheses
+  included. An unknown name is refused with an error listing the valid ones
+  (verified 2026-07-29; older builds fell back to the default model
+  silently). It signs in with Google once (`~/.gemini/antigravity-cli/`); no
+  API key.
+- **kilocode:** `backend/provider/model`. Prime and ultraspeed SKUs are
+  separately priced speed variants, not replacements for the standard ids.
+- **kimi, qwen-code, copilot, fx:** OpenRouter slugs on each CLI's generic
+  bring-your-own-key backend. A Kimi Code subscription, a Qwen first-party plan
+  and a Copilot seat each have a different catalog, and their model names do
+  not transfer. kimi takes the slug in `KIMI_MODEL_NAME`, never on its command
+  line. copilot's 1.0.80 probe recorded a completions-parser issue with
+  `reasoning_content` deltas (copilot-cli#4196), with
+  `COPILOT_PROVIDER_WIRE_API=responses` as the stub-tested fallback; the
+  shipped entry's model availability is checked, its compatibility with that
+  parser is not.
+- **vibe:** aliases, not slugs. vibe has no `--model` flag; each entry names a
+  `[[models]]` alias in `$VIBE_HOME/config.toml` whose own `name` is the
+  OpenRouter slug, selected through `VIBE_ACTIVE_MODEL`. A host needs that
+  alias defined; the container lanes render it from the selected model.
+- **omp:** selectors, passed whole to `--model`: copy the `selector` field of
+  `omp models openrouter --json` (`openrouter/openai/gpt-6-luna`), not its `id`
+  (`openai/gpt-6-luna`). Where omp finds its key is under [Safety](#safety).
+- **muse:** model ids from `https://dev.meta.ai/docs/models` or
+  `muse model-profile show <id>`; Wonder Full needs a Power Usage or Maximum
+  Usage subscription. Login is stored (`muse login` / `muse auth set`).
+- **claude-code:** moving aliases (`sonnet`, `opus`, ...) and explicit ids
+  (`https://code.claude.com/docs/en/model-config`).
+- **gemini:** `https://ai.google.dev/gemini-api/docs/models`; an API key and
+  an OAuth or Code Assist login can see different models.
+
+### `git_env`
+
+Every provider CLI shells out to git, and a credential prompt behind captured
+pipes blocks forever: measured against a private HTTPS remote, a terminal
+prompt burned 75 s with two empty streams, and a GUI-style credential helper
+90 s, surviving the parent's kill as an orphan. Two layers apply:
+
+- **Always**, for every provider: `GIT_TERMINAL_PROMPT=0` and an empty
+  `GIT_ASKPASS` (plus `SSH_ASKPASS`, `SSH_ASKPASS_REQUIRE` and
+  `GCM_INTERACTIVE`, inert on Linux). A helper that answers still works.
+- **Scoped**, set by `credential_helper`: `credential.helper=""` through
+  `GIT_CONFIG_COUNT`. `auto` applies it to the read-only lanes only (the
+  `generate` fan-out and `agent-readonly`), never to `agent-write`, which
+  legitimately runs clone, fetch and commit against your own remotes. `keep`
+  never applies it, for a read-only lane that needs a private remote (a
+  private plan repository, a submodule fetch); a helper that hangs is then
+  bounded only by the slot timeout. `wipe` applies it everywhere, at the cost
+  of `agent-write` reaching private HTTPS remotes.
+
+Set it globally or per provider under `providers.<name>.git_env`;
+`MULTI_LLM_GIT_CREDENTIAL_HELPER` overrides both for one run, and an unknown
+value in either layer is rejected at load. The accepted cost of `auto`: in the
+read-only lanes a private HTTPS clone fails in about 0.3 s with
+`terminal prompts disabled`, the CLI reports its own tool error, and the model
+continues.
+
+### `env_allowlist`
+
+Every provider child sees every other provider's API key and every cloud
+token in your shell. `on` replaces that with a deny-by-default list (proxy,
+CA bundle, XDG, keyring and each CLI's own home variables pass) built in the
+one shared child-environment builder, so both dispatch lanes get the same
+list. It ships `off` because the list is only as good as the per-CLI,
+per-platform matrix behind it (credential, keyring, proxy and CA bundle for
+every registered adapter on three platforms), and a cell is green only when
+the CLI under `env -i` plus the list reaches that capability as it does with
+the full environment. No cell has been measured, so turning it on risks a
+mid-run login or TLS failure on any CLI; `tests/test_env_allowlist.py` keeps
+the default `off` while a Linux cell is unmeasured. Quote the value: YAML 1.1
+reads a bare `on` or `off` as a boolean.

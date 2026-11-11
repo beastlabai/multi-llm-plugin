@@ -25,41 +25,21 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_implement_stop_account import (  # noqa: E402
-    CHECK_GATE,
-    PLAN,
-    _dispatched_titles,
-    _implement,
-    _statuses,
-    make_repo,
+from tests.support.implement_world import (  # noqa: E402
+    CHECK_GATE, PLAN, _dispatched_titles, _implement, _statuses, make_repo,
 )
 
 import implement_orchestrator  # noqa: E402
 import multi_llm  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
 from utils import run_status  # noqa: E402
+from utils.task_ledger import mirror_ids  # noqa: E402
 from utils.state_manager import get_or_create_state  # noqa: E402
+from tests.support.implement_world import implement_repo  # noqa: F401 - the repo fixture
+from tests.support.check_findings import FINDINGS, _check_finds
 
-FINDINGS = [
-    "npx html-validate index.html: index.html:1 doctype must be lowercase",
-    "npx html-validate index.html: index.html:9 aria-label misused",
-]
 #: The `[CHECK_FINDINGS]` line both legs print for T002 (fix round 26).
 NATIVE_AND_EXECUTOR_LINE = f"[CHECK_FINDINGS] T002 2 problem(s): {'; '.join(FINDINGS)}"
-
-
-@pytest.fixture
-def repo(tmp_path, monkeypatch):
-    yield make_repo(tmp_path, monkeypatch)
-    registry._config = None
-    registry._config_key = None
-
-
-def _check_finds(repo, findings=FINDINGS) -> None:
-    repo.monkeypatch.setenv("MOCK_LLM_WRITE_CHECK_IF_PROMPT_HAS", CHECK_GATE)
-    repo.monkeypatch.setenv("MOCK_LLM_WRITE_CHECK", json.dumps(
-        {"passed": False, "findings": list(findings)}
-    ))
 
 
 def _check_passes(repo) -> None:
@@ -153,7 +133,7 @@ class TestTheDependentsAreNotRun:
         )["progress"]["write_subagents"]
         assert write["blocked_by_check"] == {"T004": "T002"}
         assert write["not_run_task_ids"] == ["T004"]
-        assert write["check_findings_task_ids"] == ["T002"]
+        assert mirror_ids(write, "check_findings_task_ids") == ["T002"]
         line = ", ".join(run_status._mirror_text("write_subagents", write))
         assert "check findings T002" in line
         assert "not run (upstream check T002 reported problems) T004" in line
@@ -701,7 +681,6 @@ Needs the manual play-through first.
 def chain_repo(tmp_path, monkeypatch):
     yield make_repo(tmp_path, monkeypatch, PLAN_THROUGH_A_MANUAL_TASK)
     registry._config = None
-    registry._config_key = None
 
 
 def _paused(repo, *flags) -> int:
@@ -884,7 +863,6 @@ class TestTwoChecksHoldOneTask:
             assert not get_or_create_state(repo.plan).is_phase_completed("implement")
         finally:
             registry._config = None
-            registry._config_key = None
 
     def test_finalize_computes_the_hold_when_no_reason_says_so(
         self, tmp_path, monkeypatch, capsys,
@@ -911,7 +889,6 @@ class TestTwoChecksHoldOneTask:
             assert "T004 (waits for T003) did not run" in err
         finally:
             registry._config = None
-            registry._config_key = None
 
 
 class TestABlockedRecordIsNotAFailure:

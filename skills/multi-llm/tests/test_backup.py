@@ -1,10 +1,11 @@
 """Tests for backup utility."""
 
+import contextlib
+import itertools
 import os
 import subprocess
 import sys
-import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -14,6 +15,21 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.backup import backup_before_write, generate_backup_path
+
+
+@contextlib.contextmanager
+def _clock_moving_a_second_per_reading():
+    """``utils.backup``'s clock, advancing one second each time it is read.
+
+    A backup name carries a one-second timestamp, so successive names need
+    successive seconds; this supplies them without waiting for real ones.
+    """
+    ticks = itertools.count()
+    with patch("utils.backup.datetime") as fake_datetime:
+        fake_datetime.now.side_effect = lambda: (
+            datetime(2026, 1, 1, 12, 0, 0) + timedelta(seconds=next(ticks))
+        )
+        yield
 
 
 class TestGenerateBackupPath:
@@ -134,9 +150,9 @@ class TestGenerateBackupPath:
 
     def test_timestamp_increases_over_time(self):
         """Test that timestamps increase when called sequentially."""
-        path1 = generate_backup_path("file.txt")
-        time.sleep(1.1)  # Wait for timestamp to change
-        path2 = generate_backup_path("file.txt")
+        with _clock_moving_a_second_per_reading():
+            path1 = generate_backup_path("file.txt")
+            path2 = generate_backup_path("file.txt")
 
         # Extract timestamps
         ts1 = path1.split("-BEFORE-SALVAGE-")[1].replace(".txt", "")
@@ -278,17 +294,15 @@ class TestBackupBeforeWrite:
         test_file = tmp_path / "file.txt"
         test_file.write_text("content", encoding="utf-8")
 
-        # Create first backup
-        backup1 = backup_before_write(str(test_file))
-        assert backup1 is not None
+        with _clock_moving_a_second_per_reading():
+            # Create first backup
+            backup1 = backup_before_write(str(test_file))
+            assert backup1 is not None
 
-        # Wait for timestamp to change
-        time.sleep(1.1)
-
-        # Modify file and create second backup
-        test_file.write_text("updated content", encoding="utf-8")
-        backup2 = backup_before_write(str(test_file))
-        assert backup2 is not None
+            # Modify file and create second backup (a second later)
+            test_file.write_text("updated content", encoding="utf-8")
+            backup2 = backup_before_write(str(test_file))
+            assert backup2 is not None
 
         # Backups should have different names (different timestamps)
         assert backup1 != backup2
@@ -522,12 +536,11 @@ class TestBackupEdgeCases:
         backup_paths = []
 
         # Create multiple backups rapidly
-        for i in range(3):
-            test_file.write_text(f"version {i}", encoding="utf-8")
-            backup_path = backup_before_write(str(test_file))
-            backup_paths.append(backup_path)
-            # Small delay to ensure different timestamps
-            time.sleep(1.1)
+        with _clock_moving_a_second_per_reading():
+            for i in range(3):
+                test_file.write_text(f"version {i}", encoding="utf-8")
+                backup_path = backup_before_write(str(test_file))
+                backup_paths.append(backup_path)
 
         # All backup paths should be unique
         assert len(backup_paths) == len(set(backup_paths))

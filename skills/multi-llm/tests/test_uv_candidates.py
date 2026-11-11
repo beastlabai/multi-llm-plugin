@@ -81,7 +81,6 @@ READERS = {
     "hosts/opencode/shim.md.tmpl": "ls",
     "SKILL.md": "ls",
     "references/uv-check.md": "ls",
-    "legacy/references/uv-check.md": "ls",
     "hosts/uv-missing.txt": "bracket",
     # The Claude Code plugin's SessionStart hook (D6 step 5) resolves uv the
     # same way before running `doctor --warn-only`; it lives at the repo root
@@ -340,11 +339,9 @@ class TestNoUnlistedReader:
         # Codex's skill is rendered, so a ladder there is new text in that one
         # file. It must not pass as the authored SKILL.md, which is a known reader.
         (CODEX.manifest, CODEX.manifest),
-        # Codex ships no hooks and no legacy tree, so these copy nothing: the
-        # authored files of the same names are readers, these would not be.
+        # Codex ships no hooks, so this copies nothing: the authored file of the
+        # same name is a reader, this would not be.
         (f"{CODEX.root}hooks/doctor.sh", f"{CODEX.root}hooks/doctor.sh"),
-        (f"{CODEX.root}{PAYLOAD}legacy/references/uv-check.md",
-         f"{CODEX.root}{PAYLOAD}legacy/references/uv-check.md"),
         # A tree the shared list does not name is not excused by its shape.
         ("packaging/other/multi-llm/hooks/doctor.sh",
          "packaging/other/multi-llm/hooks/doctor.sh"),
@@ -372,8 +369,6 @@ class TestNoUnlistedReader:
         (f"{CLAUDE.root}hooks/wakeup-check.sh", "hooks/wakeup-check.sh"),
         (CLAUDE.manifest, "SKILL.md"),
         (f"{CLAUDE.root}{PAYLOAD}references/uv-check.md", "references/uv-check.md"),
-        (f"{CLAUDE.root}{PAYLOAD}legacy/references/uv-check.md",
-         "legacy/references/uv-check.md"),
         (f"{CLAUDE.root}{PAYLOAD}utils/unattended.py", "utils/unattended.py"),
         (f"{CODEX.root}{PAYLOAD}references/uv-check.md", "references/uv-check.md"),
     ])
@@ -484,11 +479,6 @@ class TestGeneratedCopies:
         for source in (*tree.copied.values(), *tree.rendered.values()):
             assert (REPO_ROOT / source).is_file(), source
         assert (REPO_ROOT / tree.manifest).is_file()
-        for prefix in tree.not_shipped:
-            assert not (REPO_ROOT / tree.root / PAYLOAD / prefix).exists(), (
-                f"{tree.root}{PAYLOAD}{prefix} exists, but this host is declared "
-                "not to ship it, so nothing grades what is in there"
-            )
 
     @pytest.mark.parametrize("tree", DISTRIBUTIONS, ids=lambda tree: tree.root)
     def test_every_mapped_copy_is_its_source_byte_for_byte(self, tree):
@@ -501,12 +491,10 @@ class TestGeneratedCopies:
     @pytest.mark.parametrize("path, source", [
         (f"{CLAUDE.root}hooks/hooks.json", "hooks/hooks.json"),
         (f"{CLAUDE.root}.claude-plugin/plugin.json", ".claude-plugin/plugin.json"),
-        (f"{CLAUDE.root}{PAYLOAD}legacy/README.md", f"{PAYLOAD}legacy/README.md"),
         (CLAUDE.manifest, f"{PAYLOAD}SKILL.md"),
         (f"{CODEX.root}mcp/server.py", "packaging/codex/mcp_server.py"),
         (CODEX.manifest, None),
         (f"{CODEX.root}dist/cli-surface.json", None),
-        (f"{CODEX.root}{PAYLOAD}legacy/README.md", None),
         (f"{CLAUDE.root}unknown.txt", None),
         (f"{PAYLOAD}SKILL.md", None),
         # The trailing slash on each root is what keeps a sibling directory out.

@@ -116,7 +116,8 @@ def _pin_probe(monkeypatch, rung):
     """The fan-out's probe answers ``unavailable`` and the walk selected
     ``rung``; everything downstream of it — the key, the gate, the notice, the
     argv, the records — is the real code."""
-    monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+    from utils import subagent_executor
+    subagent_executor._SANDBOX_PROBE_CACHE.clear()
     if rung == "unsandboxed":
         # What codex 0.156.1 measures (2026-09-24): rung 1 probed, its panic
         # classified by text, then the uncontained rung.
@@ -202,7 +203,7 @@ def _run_review_plan(tmp_path, monkeypatch, rung, *, prior_served=None):
     with patch("shutil.which", return_value="/usr/bin/codex"), \
          patch("utils.llm_client.subprocess.run", side_effect=fake_run), \
          patch.object(base, "invoke_with_file_output", side_effect=recording_invoke), \
-         patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+         patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
         exit_code = asyncio.run(rpo.main(argv))
     assert exit_code == 0
     return Path(phase_dir), seen
@@ -598,7 +599,7 @@ class TestTheJailsWordSurvivesTheRunAndReaggregate:
             plan_path=str(tmp_path / "auth-feature.md"),
             args=argparse.Namespace(
                 skip_validation=True, validation_model="auto", timeout=None,
-                internal_validation=False, force=False,
+                force=False,
             ),
             orchestrator_script="review_plan_orchestrator.py",
         ))

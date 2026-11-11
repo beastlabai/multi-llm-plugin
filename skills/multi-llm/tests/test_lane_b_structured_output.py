@@ -51,6 +51,8 @@ import mock_llm  # noqa: E402 - the one definition of each CLI's stream shape
 
 from utils import structured_output as so  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from utils import sandbox_walk  # noqa: E402
+from utils import dispatch_spawn, runner_preflight, task_dispatch  # noqa: E402
 from utils.provider_registry import get_provider  # noqa: E402
 from utils.providers.base import PROFILE_AGENT_READONLY  # noqa: E402
 from utils.providers.claude_code import (  # noqa: E402
@@ -251,15 +253,19 @@ def lane(tmp_path, monkeypatch):
     reset_flag_gate_cache()
     so.reset_declined_cache()
     monkeypatch.setattr(executor.subprocess, "Popen", _CannedPopen)
+    for module in (dispatch_spawn, task_dispatch, runner_preflight):
+        monkeypatch.setattr(
+            module, "_resolve_executable", lambda name: ([f"/usr/bin/{name}"], False)
+        )
     monkeypatch.setattr(
-        executor, "_resolve_executable", lambda name: ([f"/usr/bin/{name}"], False)
+        sandbox_walk, "_resolve_executable", lambda name: ([f"/usr/bin/{name}"], False)
     )
     monkeypatch.setenv("MULTI_LLM_TEST_FAST_BACKOFF", "1")
     with patch(
         "shutil.which", side_effect=lambda name, *a, **k: f"/usr/bin/{name}"
     ), patch(
         # M14: the gate has one implementation, so the sniff is pinned there.
-        "utils.providers.base.read_help_tokens",
+        "utils.providers.version_gate.read_help_tokens",
         lambda binary, **_kwargs: frozenset({JSON_SCHEMA_FLAG}),
     ):
         yield _Lane(tmp_path)
@@ -434,6 +440,25 @@ class TestSchemaReachesTheRunner:
         assert json.loads(
             Path(outcome.output_path).read_text(encoding="utf-8")
         ) == GENERATED_TASKS_DOC
+
+    def test_a_capped_stdout_is_refused_at_rung_5_even_with_a_native_head(
+        self, lane, monkeypatch
+    ):
+        """A stdout the capture cut at its bound is partial evidence only, on
+        this lane too: refused at rung 5 before the schema verdict reads it, so
+        a native document in its head is never the answer."""
+        lane.respond(_envelope("ignored prose", structured=GENERATED_TASKS_DOC))
+        monkeypatch.setattr(
+            executor.process_capture.PipeCapture, "capped",
+            property(lambda _self: frozenset({"stdout"})),
+        )
+
+        outcome = lane.dispatch("task_generation")
+
+        assert outcome.status == executor.STATUS_UNPARSEABLE
+        assert "refusing to parse it" in (outcome.reason or "")
+        assert outcome.structured_output is None
+        assert not Path(lane.phase_dir / "task_generation_result.json").exists()
 
     def test_a_prose_answer_that_validates_is_marked_recovered(self, lane):
         lane.respond(_envelope(json.dumps(GENERATED_TASKS_DOC)))
@@ -715,7 +740,7 @@ class TestAReplyThatIsNotJson:
             sent.append(kwargs)
             return real(kind, original, errors, **kwargs)
 
-        monkeypatch.setattr(executor, "build_schema_repair_prompt", spy)
+        monkeypatch.setattr(task_dispatch, "build_schema_repair_prompt", spy)
         lane.respond(_opencode_stream(self.BROKEN))
 
         outcome = lane.dispatch(
@@ -775,23 +800,25 @@ class TestAReplyThatIsNotJson:
     ):
         """Fix round 8: the diagnosis re-ran the candidate scan over the whole
         reply — twice per attempt, once for the reason and once for the
-        re-ask — and that scan is quadratic on unclosed brackets (a 300 KB
-        reply took 43 s, charged to the task's deadline)."""
+        re-ask — and that scan was then quadratic on unclosed brackets (a
+        300 KB reply took 43 s, charged to the task's deadline). The scan is
+        ``_balanced_spans``, which every candidate reader goes through."""
         from utils import json_extractor
 
         scans = []
-        real = json_extractor.find_json_candidates
+        real = json_extractor._balanced_spans
 
-        def counting(text, char_type="array"):
+        def counting(text, char_type):
             scans.append(len(text))
             return real(text, char_type)
 
-        monkeypatch.setattr(json_extractor, "find_json_candidates", counting)
+        monkeypatch.setattr(json_extractor, "_balanced_spans", counting)
         stream = _opencode_stream(self.BROKEN)
         executor.extract_result(
             get_provider("opencode"), stream, "", prefer_arrays=False
         )
         per_extraction = len(scans)
+        assert per_extraction > 0, "the counter no longer sees the scan"
         scans.clear()
         lane.respond(stream)
 

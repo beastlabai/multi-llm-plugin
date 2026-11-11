@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"01a1c32e-ae4d-7511-abe0-9baa051b08d1"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"FIRST ANSWER (must NOT be selected)\n[\n  {\"id\": \"D999\", \"title\": \"Decoy\", \"severity\": \"low\"}\n]"}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"[\n  {\"id\": \"S001\", \"title\": \"Bound the retry ladder\", \"severity\": \"high\"},\n  {\"id\": \"S002\", \"title\": \"Strip the vendor token\", \"severity\": \"medium\"}\n]"}}
+{"type":"turn.completed","usage":{"input_tokens":2,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":2,"reasoning_output_tokens":0}}

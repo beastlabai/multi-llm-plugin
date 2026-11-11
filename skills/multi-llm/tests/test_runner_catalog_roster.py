@@ -45,7 +45,6 @@ def project(tmp_path, monkeypatch):
     layer = tmp_path / ".multi-llm" / "providers.yaml"
     layer.parent.mkdir()
     registry._config = None
-    registry._config_key = None
 
     def write(quick, catalog=("gpt-5.5", "gpt-5.6-sol")):
         layer.write_text(
@@ -57,13 +56,11 @@ def project(tmp_path, monkeypatch):
             encoding="utf-8",
         )
         registry._config = None
-        registry._config_key = None
         return str(plan)
 
     write.layer = layer
     yield write
     registry._config = None
-    registry._config_key = None
 
 
 def _preflight(spec, anchor, key=PIN_KEY):

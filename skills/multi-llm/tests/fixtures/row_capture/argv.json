@@ -1,0 +1,60 @@
+{
+  "codex": [
+    "codex",
+    "exec",
+    "--sandbox",
+    "workspace-write",
+    "--json",
+    "-c",
+    "features.plugins=false",
+    "--ephemeral",
+    "--skip-git-repo-check",
+    "--model",
+    "gpt-5.5",
+    "PROMPT_PLACEHOLDER"
+  ],
+  "kilocode": [
+    "kilocode",
+    "run",
+    "--auto",
+    "-m",
+    "stub/stub-model",
+    "PROMPT_PLACEHOLDER"
+  ],
+  "kimi": [
+    "kimi",
+    "--output-format",
+    "stream-json",
+    "-p",
+    "PROMPT_PLACEHOLDER"
+  ],
+  "opencode": [
+    "opencode",
+    "run",
+    "--format",
+    "json",
+    "--print-logs",
+    "--log-level",
+    "ERROR",
+    "--model",
+    "stub/stub-model",
+    "PROMPT_PLACEHOLDER"
+  ],
+  "qwen-code": [
+    "qwen",
+    "--bare",
+    "--chat-recording",
+    "false",
+    "-o",
+    "json",
+    "--max-tool-calls",
+    "0",
+    "--max-session-turns",
+    "25",
+    "--max-wall-time",
+    "200",
+    "-m",
+    "stub-model",
+    "PROMPT_PLACEHOLDER"
+  ]
+}

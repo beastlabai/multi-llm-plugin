@@ -41,26 +41,21 @@ from utils import write_batch_scheduler as scheduler  # noqa: E402
 from utils.state_manager import StateManager, get_or_create_state  # noqa: E402
 from utils.task_decomposer import Task, TaskStatus  # noqa: E402
 
-from tests.test_implement_stop_account import (  # noqa: E402
-    PLAN, _check_fails, _check_passes, _dispatched_titles, _implement,
-    _run_one_that_stops, _statuses, make_repo,
+from tests.support.implement_world import (  # noqa: E402
+    PLAN,
+    PLAN_WITH_CODE_DEPENDENT,
+    _check_fails,
+    _check_passes,
+    _dispatched_titles,
+    _implement,
+    _run_one_that_stops,
+    _statuses,
+    implement_repo,  # noqa: F401 - the repo fixture
+    make_repo,
 )
 
-PLAN_WITH_CODE_DEPENDENT = PLAN + """
-### T006: Edit: after the manual step
-Needs the manual play-through first.
-- Depends on: T005
-- Files to modify: src/main.py
-"""
 
 PLAN_NO_HUMAN = PLAN.split("### T005", 1)[0]
-
-
-@pytest.fixture
-def repo(tmp_path, monkeypatch):
-    yield make_repo(tmp_path, monkeypatch)
-    registry._config = None
-    registry._config_key = None
 
 
 @pytest.fixture
@@ -71,14 +66,12 @@ def repo_dep(tmp_path, monkeypatch):
     ))
     yield obj
     registry._config = None
-    registry._config_key = None
 
 
 @pytest.fixture
 def repo_nohuman(tmp_path, monkeypatch):
     yield make_repo(tmp_path, monkeypatch, PLAN_NO_HUMAN)
     registry._config = None
-    registry._config_key = None
 
 
 def _summary(repo) -> str:
@@ -368,7 +361,7 @@ class TestAResumeKeepsEverySkippedTask:
         assert [t["id"] for t in result[0]["tasks"]] == ["T006"]
 
     def test_a_recorded_skip_still_applies_once_the_task_is_skipped(self, tmp_path):
-        """``_applicable_task_decisions`` keeps a ``skip`` for a task whose
+        """``_applicable_from_state`` keeps a ``skip`` for a task whose
         state says ``skipped`` (it is materialized again now) and drops a
         ``done`` once the task is no longer ``failed``."""
         plan = tmp_path / "plans" / "p.md"
@@ -378,7 +371,7 @@ class TestAResumeKeepsEverySkippedTask:
         state.set("human_task_decisions", {"T002": "skip", "T003": "done", "T005": "done"})
         state.update_task_status("T002", "skipped", reason="skipped — you answered")
         state.update_task_status("T003", "completed", reason="accepted —")
-        applicable = implement_orchestrator._applicable_task_decisions(
+        applicable = implement_orchestrator._applicable_from_state(
             state, ["T005"], {},
         )
         assert applicable == {"T002": "skip", "T005": "done"}
@@ -406,7 +399,7 @@ class TestALaterResumeKeepsEveryAnsweredTask:
         assert _implement(repo, "--resume", "--human-task", "T002=done") == 3
         assert "1 accepted after failing (T002)" in _account_line(repo)
         # Run 3: T004 passes now.
-        from tests.test_implement_stop_account import EDIT_GATE
+        from tests.support.implement_world import EDIT_GATE
 
         repo.monkeypatch.setenv("MOCK_LLM_EDITS_IF_PROMPT_HAS", EDIT_GATE)
         _check_passes(repo)

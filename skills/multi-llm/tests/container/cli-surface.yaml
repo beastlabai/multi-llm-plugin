@@ -431,7 +431,7 @@ clis:
       # row's, per that file's own comment — which carries no suffix, so the
       # flag never appears in a real probe. It IS documented at 1.0.44
       # ("--reasoning-effort <EFFORT> ... [aliases: --effort]") and its form is
-      # pinned by test_providers.py's test_grok_build_command_all_reasoning_
+      # pinned by test_provider_grok.py's test_grok_build_command_all_reasoning_
       # efforts, which derives the exact `-m <base> --reasoning-effort
       # <effort>` argv for every accepted suffix.
     hidden_options:
@@ -483,7 +483,7 @@ clis:
       # `build_command()` with `timeout_s=None` (§1's guard -- that call renders
       # argv byte-identical to omitting the keyword). It IS documented by the
       # probed surface, and its presence is pinned by expected_argv.yaml's
-      # `<timeout>` placeholder plus test_providers.py's derivation table.
+      # `<timeout>` placeholder plus test_provider_qwen_code.py's derivation table.
 
   - cli: kilocode
     binary: kilocode

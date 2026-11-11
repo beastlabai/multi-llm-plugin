@@ -99,6 +99,7 @@ rows:
       `full` are identical on this row — the single-turn case the adapter
       docstring names.
     expect:
+      lane_status: {lane_a: ok, lane_b: ok}
       success: true
       data:
         - {id: "S001", title: "Bound the retry ladder", severity: "high"}
@@ -144,6 +145,7 @@ rows:
       the boundary and even when it is the only thing that parses. This row is
       still the only capture in the repo that exercises that boundary at all.
     expect:
+      lane_status: {lane_a: ok, lane_b: ok}
       success: true
       data:
         - {id: "S001", title: "Bound the retry ladder", severity: "high"}
@@ -177,6 +179,7 @@ rows:
       record here, so the expectation moved with the bytes and the verdict did
       not.
     expect:
+      lane_status: {lane_a: null, lane_b: unparseable_result, by_design: "not EXIT0_CLASSIFIABLE: muse's diagnosis and its answer share the run.terminal record's text, and every measured failure exits 1 (run.terminal.failed); the fan-out stops on it, the executor keeps its one parse-failure retry"}
       success: false
       error_contains: ["No output events found in output"]
       raw_contains:
@@ -217,6 +220,7 @@ rows:
       leaves every `run.output.delta`, so a pattern loose enough to match a
       model's prose would fail whole batches).
     expect:
+      lane_status: {lane_a: auth_failed, lane_b: auth_failed}
       success: false
       error_contains: ["Muse run failed", "was rejected"]
       raw_contains:
@@ -251,6 +255,7 @@ rows:
       config edit landed on a retryable rung. **C2 swapped that pair**; the 1.4.3
       bytes no longer carry `api error` at all. No muse pattern was added.
     expect:
+      lane_status: {lane_a: invalid_model, lane_b: invalid_model}
       success: false
       error_contains: ["Muse run failed", "muse-spark-9.9-nonexistent"]
       raw_contains:
@@ -275,6 +280,7 @@ rows:
       classification failures were not a pass-through problem, they were a
       wording problem in exactly two shapes.
     expect:
+      lane_status: {lane_a: context_length_exceeded, lane_b: context_length_exceeded}
       success: false
       error_contains: ["API error 400", "maximum context length"]
       raw_contains:
@@ -299,6 +305,7 @@ rows:
       an error object can never be mistaken for an answer here, and an error
       object can never be classified here either (`classify_failure` is None).
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       success: false
       error_contains: ["Muse run failed", "non-SSE response"]
       raw_contains:
@@ -328,6 +335,7 @@ rows:
       longer holds for this CLI. The row still pins the first: a nonzero exit
       whose diagnosis is on stdout is never read as an answer.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       success: false
       error_contains: ["API error 500", "after 10 provider attempts"]
       raw_contains:
@@ -354,6 +362,7 @@ rows:
       does so through the adapter's own added pattern rather than a base one:
       `api error 429`.
     expect:
+      lane_status: {lane_a: rate_limited, lane_b: rate_limited}
       success: false
       error_contains: ["API error 429", "after 10 provider attempts"]
       raw_contains:
@@ -400,6 +409,7 @@ rows:
       and a zero-byte response are the same event at this CLI's output" result,
       reached from the other side, which is why it is not a second file.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       success: false
       error_contains:
         - "Muse run failed"
@@ -449,6 +459,7 @@ rows:
       rather than `None` (Lane B reads exactly that to choose rung 5 over
       rung 4).
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       success: false
       error_contains:
         - "Muse run failed"
@@ -503,6 +514,7 @@ rows:
       `tests/test_muse_terminal_state.py` drives the executor over these exact
       bytes for both halves.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       success: false
       error_contains:
         - "Muse run failed"
@@ -543,4 +555,4 @@ rows:
       process was killed before it wrote a line — a harness artifact, not a CLI
       behaviour — and manufacturing one with `timeout(1)` is the zero-byte-hang
       trap §6 step 3 forbids. The parser's empty branch is still covered, by
-      unit assertion in test_providers.py.
+      unit assertion in test_provider_muse.py.

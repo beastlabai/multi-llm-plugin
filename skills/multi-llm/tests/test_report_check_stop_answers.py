@@ -20,31 +20,13 @@ waits (`test_check_gate_fixture.TestTheNativeLeg`).
 
 from __future__ import annotations
 
-import json
 
 import pytest
 
-from tests.test_check_gate_fixture import (  # noqa: E402
-    CHECK_GATE,
-    DENY,
-    FINDINGS,
-    PLAN,
-    _policy,
-)
-from tests.test_implement_stop_account import make_repo  # noqa: E402
-from tests.test_report_check import (  # noqa: E402
-    Transcript,
-    decision_of,
-    report,
-    run_check,
-)
+from tests.support.transcripts import decision_of, report  # noqa: E402
 
-import multi_llm  # noqa: E402
-from utils import provider_registry as registry  # noqa: E402
 from utils import report_check  # noqa: E402
-from utils.state_manager import get_or_create_state  # noqa: E402
-
-RESUME = "/multi-llm:multi-llm --implement plans/checked.md --resume"
+from tests.support.stop_answers import RESUME, _check, _native_stop
 
 
 def _missing_list(reason: str) -> str:
@@ -55,53 +37,6 @@ def _missing_list(reason: str) -> str:
     for end in ("Carry the block's other", report_check.WHOLE_REPORT):
         listed = listed.split(end, 1)[0]
     return listed
-
-
-@pytest.fixture
-def repo(tmp_path, monkeypatch):
-    obj = make_repo(tmp_path, monkeypatch, PLAN)
-    _policy(obj, DENY)
-    monkeypatch.setenv("MOCK_LLM_WRITE_IDS", json.dumps(
-        [f"T00{n}" for n in range(1, 8)]))
-    monkeypatch.setenv("MOCK_LLM_WRITE_CHECK_IF_PROMPT_HAS", CHECK_GATE)
-    yield obj
-    registry._config = None
-    registry._config_key = None
-
-
-def _util(capsys, *argv):
-    code = multi_llm.main(["util", *argv])
-    captured = capsys.readouterr()
-    return code, captured.out, captured.err
-
-
-def _native_stop(repo, capsys, *, check: str) -> str:
-    """The native first stop (T005 refused by the emit), T002's check
-    recorded *check*; returns `util next-command`'s output."""
-    import implement_orchestrator
-
-    assert implement_orchestrator.main(["--plan-file", str(repo.plan), "--yes"]) == 0
-    capsys.readouterr()
-    phase = str(repo.phase_dir)
-    for task_id in ("T001", "T003", "T004"):
-        assert _util(capsys, "batch-done", "--phase-dir", phase, "--task-id",
-                     task_id, "--status", "completed")[0] == 0
-    extra = (["--check", "findings", "--finding", FINDINGS[0]]
-             if check == "findings" else ["--check", "passed"])
-    assert _util(capsys, "batch-done", "--phase-dir", phase, "--task-id", "T002",
-                 "--status", "completed", *extra)[0] == 0
-    state_file = str(get_or_create_state(repo.plan).state_file)
-    assert _util(capsys, "finalize-tracking", "--state-file", state_file)[0] == 0
-    code, out, err = _util(capsys, "next-command", "plans/checked.md",
-                           "--after", "implement")
-    assert code == 0, err
-    return out
-
-
-def _check(tmp_path, capsys, output: str, message: str) -> str:
-    path = (Transcript().prompt("implement it").bash(output).say(message)
-            .write(tmp_path / "t.jsonl"))
-    return run_check(capsys, path)
 
 
 class TestOneWaitingTask:

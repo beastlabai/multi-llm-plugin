@@ -45,11 +45,11 @@ from utils.providers.base import (  # noqa: E402
     PROFILE_GENERATE,
 )
 from utils.providers.codex import PLUGIN_LANDLOCK_RUNG, CodexProvider  # noqa: E402
-from tests.test_plugin_landlock_executor import (  # noqa: E402,F401
+from tests.support.landlock_world import (  # noqa: E402
     _plan_request,
-    jail_home,
-    repo,
-    wrapper,
+    landlock_jail_home,  # noqa: F401 - the jail_home fixture
+    landlock_repo,  # noqa: F401 - the repo fixture
+    landlock_wrapper,  # noqa: F401 - the wrapper fixture
 )
 
 NAMES = ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT")
@@ -210,7 +210,7 @@ class TestTheBuilder:
         _assert_clean(env)
 
     def test_the_repository_verification_command(self):
-        """`write_batch_scheduler._verify_env` composes with no provider."""
+        """`write_verify.VerifyCommand.env` composes with no provider."""
         with patch.dict(os.environ, _leaky(), clear=False):
             env = base.build_child_env(None, provider_env={})
         _assert_clean(env)

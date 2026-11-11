@@ -128,6 +128,14 @@ def _argv_inputs() -> list[Path]:
         EXPECTED,
         harness.HERE.parent / "golden" / "normalize_argv.py",
         skill / "utils" / "subagent_executor.py",
+        # The modules split out of the executor (its `_MOVED` table): the
+        # sandbox walk decides the rung a dispatch's argv carries.
+        *(skill / "utils" / f"{owner}.py" for owner in (
+            "batch_reply", "failure_capture", "task_outcome", "task_result",
+            "runner_selection", "probe_state", "sandbox_walk", "dispatch_spawn",
+            "attempt_classifier", "runner_preflight", "task_dispatch", "task_batch",
+            "task_file_runner",
+        )),
         skill / "utils" / "write_batch_scheduler.py",
         *sorted((skill / "utils" / "providers").glob("*.py")),
     ]

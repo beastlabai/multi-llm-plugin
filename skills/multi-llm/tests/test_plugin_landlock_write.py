@@ -21,8 +21,8 @@ approved"; §8.3 items 8-11, 13, 14; §5 I11):
 
 The executor's side (the rung walk, the probe, the wrap, the stream reading)
 belongs to ``subagent_executor`` and is stubbed here: ``dispatch_task`` and
-``preflight_runner`` are replaced in the scheduler's namespace and
-``sandbox_rung``/``write_rung_notice`` on the executor module, so these tests
+``preflight_runner`` are replaced in the namespaces that call them (the
+scheduler's and ``write_grant``'s) and ``sandbox_rung``/``write_rung_notice`` on the executor module, so these tests
 hold whichever executor is installed. The denials themselves are computed by
 the real ``landlock_dispatch.jail_denied_edits`` over a codex-shaped JSONL
 stream, so the classifier and the verdict are exercised together. No real
@@ -45,7 +45,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils import landlock_dispatch  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from utils import runner_selection  # noqa: E402
+from utils import probe_state, sandbox_walk  # noqa: E402
 from utils import write_batch_scheduler as wbs  # noqa: E402
+from utils import write_grant  # noqa: E402
 from utils.providers.base import (  # noqa: E402
     PROFILE_AGENT_WRITE,
     SANDBOX_RUNG_PLUGIN_LANDLOCK,
@@ -58,10 +61,7 @@ from utils.subagent_tasks import (  # noqa: E402
     make_write_task,
 )
 from utils.write_batch_scheduler import WriteBatchScheduler  # noqa: E402
-from tests.test_plugin_landlock_executor import (  # noqa: E402
-    _slot_dirs,
-    use_own_temp_base,
-)
+from tests.support.landlock_world import _slot_dirs, use_own_temp_base  # noqa: E402
 
 RUNG = SANDBOX_RUNG_PLUGIN_LANDLOCK
 NOTICE_STEM = "[SANDBOX_INCIDENTAL]"
@@ -129,7 +129,6 @@ class Repo:
         monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(config))
         monkeypatch.setenv("MULTI_LLM_TEST_MODE", "1")
         registry._config = None
-        registry._config_key = None
 
     def task(self, index: int, *, kind: str = "apply_suggestions",
              target: Optional[Path] = None, declared=None, **over):
@@ -198,7 +197,6 @@ def own_temp_base(tmp_path, monkeypatch):
 def repo(tmp_path, monkeypatch):
     yield Repo(tmp_path, monkeypatch)
     registry._config = None
-    registry._config_key = None
 
 
 Step = Callable[[Repo], "tuple"]
@@ -225,9 +223,9 @@ class FakeExecutor:
         self.notices: List[Any] = []
         self.rung_queries: List[Optional[str]] = []
         monkeypatch.setattr(wbs, "dispatch_task", self.dispatch_task)
-        monkeypatch.setattr(wbs, "preflight_runner", self.preflight_runner)
-        monkeypatch.setattr(executor, "sandbox_rung", self.sandbox_rung)
-        monkeypatch.setattr(executor, "write_rung_notice",
+        monkeypatch.setattr(write_grant, "preflight_runner", self.preflight_runner)
+        monkeypatch.setattr(probe_state, "sandbox_rung", self.sandbox_rung)
+        monkeypatch.setattr(sandbox_walk, "write_rung_notice",
                             self.write_rung_notice, raising=False)
 
     def script(self, *steps: Step) -> "FakeExecutor":
@@ -371,17 +369,16 @@ class TestTheWriteTargetIsCheckedAtConstruction:
 
 class TestTheWriteScopeMap:
 
-    def test_the_fallback_map_names_every_write_kind(self, monkeypatch):
-        monkeypatch.delattr(executor, "WRITE_SCOPE_BY_KIND", raising=False)
+    def test_every_write_kind_has_a_scope(self):
         assert wbs.write_scope_for_kind("apply_suggestions") == "plan-file"
         assert wbs.write_scope_for_kind("apply_task_suggestions") == "tasks"
         assert wbs.write_scope_for_kind("apply_code_fixes") == "repo-wide"
         assert wbs.write_scope_for_kind("implement") == "repo-wide"
         assert wbs.write_scope_for_kind("validation") is None
 
-    def test_the_executors_map_wins_when_it_exists(self, monkeypatch):
-        monkeypatch.setattr(executor, "WRITE_SCOPE_BY_KIND",
-                            {"apply_suggestions": "plan-file"}, raising=False)
+    def test_the_executors_map_is_the_one_in_force(self, monkeypatch):
+        monkeypatch.setattr(runner_selection, "WRITE_SCOPE_BY_KIND",
+                            {"apply_suggestions": "plan-file"})
         assert wbs.write_scope_for_kind("apply_suggestions") == "plan-file"
         assert wbs.write_scope_for_kind("implement") is None
 
@@ -561,41 +558,6 @@ class TestTheGrantReachesTheExecutor:
             [repo.task(0, kind="apply_task_suggestions", target=repo.tasks)],
             kind="apply_task_suggestions",
         ).run()
-        assert result.exit_code == 0, result.messages
-        assert result.outcomes[0].write_outcome == executor.WRITE_APPLIED
-
-    def test_an_executor_without_the_new_keywords_still_dispatches(
-        self, repo, monkeypatch
-    ):
-        """The executor package lands separately (2026-09-30): against the old
-        signatures the scheduler passes no ``jail_request`` and still runs."""
-        seen: Dict[str, Any] = {}
-
-        def old_preflight(spec, *, profile, anchor=None, key=""):
-            seen["preflight"] = True
-            return {"version": "0.158.0"}
-
-        def old_dispatch(task, *, phase_dir, runner, anchor=None, cwd=None,
-                         prompt=None, before_attempt=None, after_result=None,
-                         changed_files=None):
-            repo.plan.write_text(repo.plan.read_text() + "\nx\n", encoding="utf-8")
-            outcome = executor.TaskOutcome(
-                task_id=task["task_id"], kind=task["kind"], runner=runner,
-                status=executor.STATUS_OK, profile=PROFILE_AGENT_WRITE,
-            )
-            data = claim("applied", ids=task["expected_ids"])
-            outcome.output_path = executor.persist_result(task, phase_dir, data)
-            after_result({"outcome": outcome, "result": data, "attempt": 1,
-                          "exit_code": 0, "duration_seconds": 0.1})
-            return outcome
-
-        monkeypatch.setattr(wbs, "preflight_runner", old_preflight)
-        monkeypatch.setattr(wbs, "dispatch_task", old_dispatch)
-        monkeypatch.setattr(executor, "sandbox_rung",
-                            lambda spec, profile: None)
-        monkeypatch.delattr(executor, "write_rung_notice", raising=False)
-        result = repo.scheduler([repo.task(0)]).run()
-        assert seen["preflight"]
         assert result.exit_code == 0, result.messages
         assert result.outcomes[0].write_outcome == executor.WRITE_APPLIED
 
@@ -973,7 +935,7 @@ class TestABatchZeroRefusalLeavesNothingInFlight:
                 reason_code="sandbox_unavailable",
             )
 
-        monkeypatch.setattr(wbs, "preflight_runner", refusing_preflight)
+        monkeypatch.setattr(write_grant, "preflight_runner", refusing_preflight)
         return repo.scheduler([repo.task(0), repo.task(1)]).run()
 
     def test_status_json_lists_no_batch_in_flight_and_names_the_refusal(
@@ -1014,10 +976,8 @@ class TestTheApplyBaseHandsOverItsArtifact:
     apply-code-fixes, and turns a target the scheduler refuses into exit 3."""
 
     def _orchestrator(self, tmp_path, monkeypatch, *, single=True):
-        from tests.test_apply_orchestrator_base import (
-            MockApplyOrchestrator,
-            _make_args,
-            _setup_plan_with_output,
+        from tests.support.apply_base import (
+            MockApplyOrchestrator, _make_args, _setup_plan_with_output,
         )
         from utils import write_phase_bridge
 
@@ -1045,8 +1005,8 @@ class TestTheApplyBaseHandsOverItsArtifact:
             report_path = None
 
         class _Recorder:
-            def __init__(self, **kwargs):
-                seen.update(kwargs)
+            def __init__(self, options):
+                seen.update(vars(options))
 
             def run(self):
                 return _Result()
@@ -1089,7 +1049,7 @@ class TestTheJailLinesAreRepeatedAtThePhasesClose:
     ):
         from utils import subagent_executor as executor
 
-        monkeypatch.setattr(executor, "_JAIL_SUMMARY_LINES", ["[CODEX_HOME_CHECK] an earlier phase"])
+        executor._JAIL_SUMMARY_LINES[:] = ["[CODEX_HOME_CHECK] an earlier phase"]
         line = "[CODEX_HOME_CHECK] codex:m: config.toml (mcp_servers.x) changed during this dispatch"
 
         def home_changed(repo_: Repo):

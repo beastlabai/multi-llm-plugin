@@ -34,11 +34,44 @@ uv run --project skills/multi-llm -- pytest skills/multi-llm/tests/test_filterin
 uv run --project skills/multi-llm -- pytest -m robustness
 ```
 
-Two marker groups are excluded from a bare run. Tests marked `live` require
-provider CLIs and real API access and are skipped in CI. Tests marked `container`
-need a Docker daemon: `pyproject.toml` sets `addopts = -m 'not container'`, so a
-bare `pytest` stays green without one, and each container-marked module also
-carries a daemon probe that skips with a named reason.
+Three marker groups are excluded from a bare run: `pyproject.toml` sets
+`addopts = -m 'not container and not package and not codex_jail'`. Tests marked
+`container` need a Docker daemon (each container-marked module also carries a
+daemon probe that skips with a named reason), `package` rows need a packaging
+artifact plain CI does not build, and `codex_jail` drives the developer's own
+`codex` binary. Tests marked `live` require provider CLIs and real API access;
+they are not in that default, so CI passes `-m "not live and not container and
+not package and not codex_jail"` itself.
+
+To find the tests for the module you are editing, run
+`make test-for MODULE=utils/foo.py` (or read
+[`skills/multi-llm/tests/MODULE_TESTS.md`](../skills/multi-llm/tests/MODULE_TESTS.md)).
+It is an advisory import map and never replaces the CI selection; see
+[`skills/multi-llm/tests/README.md`](../skills/multi-llm/tests/README.md).
+
+### CI trial: parallel suite
+
+`.github/workflows/test.yml` has a second job, `test-parallel`, beside the gating
+`test` job: the same suite and the same `-m "not live and not container and not
+package and not codex_jail"` selection on ubuntu, macOS and Windows, run with
+`pytest -n auto --dist loadfile` (pytest-xdist, from the `dev` dependency group).
+`loadfile` keeps each test file on one worker. Locally, four workers finish the
+suite in about six minutes.
+
+The leg is **non-blocking** (`continue-on-error: true`) and its checks are named
+`test-parallel (<os>)`, so no required check changes. It is a one-week trial,
+because hosted runners are slower than a developer machine and tests that time a
+2 to 3 s child can flake there. Compare it with the serial legs on the same
+commits: pass rate, flakes (a failure the serial leg does not share) and wall time.
+
+- **Promote it** when the week is clean: make `test-parallel` the gating job, by
+  moving the `-n auto --dist loadfile` flags into `test`'s command and deleting
+  the trial job, so the check names `test (<os>)` stay the required ones.
+- **Fall back to file shards** if Windows stays too slow or the flakes do not go
+  away: split the file list over a matrix instead, each shard still running whole
+  files.
+- **Drop it** if neither holds; the serial job is unchanged and nothing depends
+  on this one.
 
 ---
 
@@ -104,6 +137,95 @@ and the generated section of [`docs/hosts.md`](hosts.md):
 uv run --project skills/multi-llm -- python skills/multi-llm/hosts/render_capabilities.py          # write both
 uv run --project skills/multi-llm -- python skills/multi-llm/hosts/render_capabilities.py --check  # CI staleness guard
 ```
+
+[`docs/development/markers.md`](development/markers.md), the registry of bracket markers
+(`[BATCH_DONE]` and the rest), is rendered from the skill's and `packaging/`'s sources and
+the instructions by `skills/multi-llm/tests/tools/render_markers.py` (`--check` for the
+staleness guard); `tests/test_markers_registry.py` fails when it is stale, when a marker
+is neither handled by an instruction nor listed as not-for-the-host, and when a printed
+marker is built from parts the scan cannot list.
+
+---
+
+## Vendored report scripts
+
+The HTML reports (`report.html` in both styles, and `consolidated-report.html`) render
+model and plan text as Markdown with [marked](https://github.com/markedjs/marked) and then
+sanitise it with [DOMPurify](https://github.com/cure53/DOMPurify). Both are vendored under
+`skills/multi-llm/templates/vendor/`, and `utils/html_report_generator.py` inlines them
+into every page at the `<!--MLLM:vendor-scripts-->` slot. The rules:
+
+- **No page loads a script from the network.** A report is one file that reads the same
+  offline, and opening it tells no CDN anything. `tests/test_html_report_scripts.py`
+  fails on any `<script src>`, any module import from a URL, and any unpinned or
+  integrity-less script.
+- **The files are the npm tarballs' own bytes**, with their licence files beside them.
+  `VENDORED_SCRIPTS` pins each file's sha256. The generator inlines a file only when its
+  digest matches. When one does not match, or is missing, the page escapes model text
+  instead of rendering it.
+- **One renderer.** The `BEGIN SAFE MARKDOWN` block lives once, in the
+  [shared report code](#shared-report-code) every page inlines, and nothing outside it
+  calls marked or DOMPurify. DOMPurify is given a markdown-only
+  profile: no `script`, `style` or `img` element, no form control, and no `id`, `class`,
+  `style` or `data-*` attribute. That matters because the pages' own export code queries checkboxes by
+  attribute. Without both libraries, or when DOMPurify reports `isSupported` false (it
+  then returns its input unchanged), the text is escaped.
+- **Everything else is escaped, in the same block.** Statuses, importances, model names,
+  ids, labels, file paths and references come from model or validator output too. The
+  block's `escapeHtml` escapes `& < > " '` and serves text and quoted attributes alike
+  (`escapeAttr` is the same function, named for attribute sites); a value inside an
+  inline handler's JS string takes `escapeJsAttr`. No class name is built from data:
+  `getValidationBadgeClass` and `getImportanceBadgeClass` map onto a fixed list. The
+  tests scan every template and the shared script for a raw value in an attribute, load
+  hostile metadata into all three pages in headless Chrome, and run the real sanitiser
+  there on hostile markdown (`tests/test_report_templates_js.py`). A reviewer's identity is the slot that ran it:
+  code-review aggregation stamps `source_model` from the slot, whatever the reply claims.
+
+To update a library, choose a release at least two weeks old. Download its tarball from
+`registry.npmjs.org` and check it against the registry's `dist.integrity`. Then copy the
+same file (`lib/marked.umd.js` or `dist/purify.min.js`) and its `LICENSE` over the old ones,
+and update the version and sha256 in `VENDORED_SCRIPTS`. The current pins are marked
+18.1.1 (tarball `sha512-zEGgrtUG8crk+TrMacJSVABU4DYDDkS8uqgU3ohrn/2fW9C2AEfUrO3m6IhpIpQpl7YcVpiXXC9cSMWDANT3dg==`)
+and DOMPurify 3.4.17 (`sha512-B/pSlYVHQ58kqISD/yDjuJ1yfzI34m1gF4lAod2bwSRhiN4K5Cl3H8Af7hqB2PmTL911tdEudnnXn5FnhRoz0w==`).
+A changed file changes what every package ships, so it needs a release bump.
+
+---
+
+## Shared report code
+
+The three report pages (`report.html` in the flat and PR styles, and
+`consolidated-report.html`) share their escaping, markdown, badges, notices, selection
+storage and export, card order, commit-review badges and scope tags. That code lives once,
+in `skills/multi-llm/templates/shared/report_core.js`, with the styles they share in
+`report_core.css`. `utils/html_report_generator.py` inlines both into every page:
+
+- **Where.** The style goes at `<!--MLLM:report-core-style-->`, before the page's own
+  `<style>`, so a page's rule wins a tie. The script goes at
+  `<!--MLLM:report-core-script-->`, after the vendored libraries and before the page's
+  own `<script>`. Each is an element of its own, marked `data-shared`.
+- **When.** These slots and the vendored scripts are filled first, then the slots derived
+  from the data, then the data itself. Text in the data is never searched for a slot.
+- **What may not be in them.** A missing file is a missing template: generation writes
+  the error page. A file holding `<script`, `</script`, `</style`, `<!--` or the data
+  placeholder is refused.
+- **What a page supplies.** The shared script only declares functions and constants;
+  nothing in it runs at load. It reads the page's `reportData` and three page hooks:
+  `selections` (the fields the page keeps), `getStorageKey()` and `selectionsFile(now)`
+  (the name and content its Export saves). That is how one `exportSelections` serves
+  report.html, which saves the whole selection as `user_selections.json`, and the
+  consolidated page, which saves only its groups' decisions as
+  `consolidated_user_selections.json`.
+- **What stays per page.** A function a page needs differently stays in its template:
+  the filters, the renderers and `init`, the commit-review header and filter, the header
+  panel, and each page's `:root` palette and component sizes. No page may declare a
+  shared function again, because that would silently replace it for that page.
+
+`tests/test_report_templates_js.py` generates every page kind and runs its code. Under
+Node it parses every inline script and checks no page redefines a shared function. It
+runs the escapers on hostile text, and a selection through export, reload and the Python
+reader the apply phase uses. In headless Chrome it runs the real marked and DOMPurify on
+hostile markdown. The Node checks skip without `node`, and the browser checks without
+Chrome.
 
 ---
 

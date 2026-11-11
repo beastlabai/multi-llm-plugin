@@ -10,6 +10,7 @@ import pytest
 
 from utils.providers.fx import FxProvider
 from utils.providers import fx
+from utils import dispatch_spawn
 
 
 def envelope(**overrides):
@@ -129,8 +130,8 @@ def test_answer_format_failure_allows_file_recovery(provider):
     assert "error_code" not in result
 
 
-def test_unknown_keys_warn_once_without_discarding_answer(provider, monkeypatch):
-    monkeypatch.setattr(fx, "_WARNED_KEYS", set())
+def test_unknown_keys_warn_once_without_discarding_answer(provider):
+    fx._WARNED_KEYS.clear()
     with pytest.warns(UserWarning, match="fx version drift.*future_key"):
         assert provider.parse_output(envelope(future_key=1), "")["success"]
     import warnings
@@ -412,7 +413,7 @@ def test_lane_b_releases_home_on_error_and_cancellation(provider, monkeypatch, f
         assert home.is_dir()
         raise failure("dispatch interrupted")
 
-    monkeypatch.setattr(subagent_executor, "_spawn_in_context", spawn)
+    monkeypatch.setattr(dispatch_spawn, "_spawn_in_context", spawn)
     with pytest.raises(failure):
         subagent_executor._spawn_child(provider=provider, model="test/model", prompt="hi", profile="generate", transport="stdin", timeout=1, cwd=None)
     assert seen and not seen[0].exists()

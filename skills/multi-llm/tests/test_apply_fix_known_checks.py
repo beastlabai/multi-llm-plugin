@@ -25,6 +25,7 @@ from pathlib import Path
 import pytest
 
 from tests import test_write_executor
+from tests.scheduler_support import make_scheduler
 from tests.test_write_executor import FakeState
 from utils import known_checks
 from utils import write_prompt
@@ -36,7 +37,6 @@ from utils.subagent_tasks import (
 )
 from utils.write_batch_scheduler import (
     BATCH_CHECK_MARKER,
-    WriteBatchScheduler,
     dispatched_prompt_path,
     unverified_line,
     with_result_contract,
@@ -297,7 +297,7 @@ class TestEachBatchIsToldTheChecks:
         _declare_npm_test(env)
         for kind in ("implement", "apply_suggestions"):
             scheduler = env.scheduler([], kind=kind)
-            assert scheduler._known_checks_section({"task_id": "T001"}) == ""
+            assert scheduler._prompts.known_checks_section({"task_id": "T001"}) == ""
         task = {"task_id": "x", "expected_ids": ["x"], "declared_files": ["src/a.py"]}
         assert "## The repository's checks" not in with_result_contract(
             "implement", task, "Do it.")
@@ -392,15 +392,12 @@ class TestTheTwoLegsBindTheSameSection:
 
         native, _task, _info = write_prompt.render_write_prompt(
             phase_dir, "apply-fix-batch-1")
-        scheduler = WriteBatchScheduler.__new__(WriteBatchScheduler)
-        scheduler.kind = "apply_code_fixes"
-        scheduler.output_dir = str(out)
-        scheduler.phase = "apply-code-fixes"
-        scheduler.state = state
-        scheduler.tasks = tasks
-        scheduler.plan_file = str(plan)
-        executor = scheduler._with_result_contract(
-            tasks[1], scheduler.dispatched_prompt(tasks[1]))
+        scheduler = make_scheduler(
+            out, kind="apply_code_fixes", phase="apply-code-fixes",
+            phase_dir=phase_dir, state=state, tasks=tasks, plan_file=plan,
+        )
+        executor = scheduler._prompts.with_result_contract(
+            tasks[1], scheduler._prompts.dispatched_prompt(tasks[1]))
         assert native == executor
         assert f"- `{RACE_CHECK}` (named by task T004)" in native
         assert f'- apply-fix-batch-0: "{FAILING}"' in native
@@ -519,7 +516,6 @@ class TestTheTestsLineNamesWhatTheBatchesReported:
         from utils import provider_registry as registry
 
         monkeypatch.setattr(registry, "_config", None)
-        monkeypatch.setattr(registry, "_config_key", None)
         plan = root / "plans" / "racing.md"
         plan.parent.mkdir(parents=True)
         plan.write_text(TASK_LIST, encoding="utf-8")
@@ -613,7 +609,6 @@ class TestTheTestsLineNamesWhatTheBatchesReported:
         from utils import provider_registry as registry
 
         monkeypatch.setattr(registry, "_config", None)
-        monkeypatch.setattr(registry, "_config_key", None)
         plan = tmp_path / "plans" / "p.md"
         plan.parent.mkdir(parents=True)
         plan.write_text("# P\n", encoding="utf-8")

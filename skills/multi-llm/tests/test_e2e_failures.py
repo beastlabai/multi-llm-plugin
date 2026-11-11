@@ -37,6 +37,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import code_review_orchestrator as cro
 from utils import subagent_executor as executor
+from utils import task_file_runner
+from tests.harness.native_invoker import simulate_native_invoker
 from utils.llm_client import invoke_with_provider
 from utils import review_orchestrator_base as base
 from utils.review_orchestrator_base import save_model_result as base_save_model_result
@@ -1011,7 +1013,7 @@ def _real_hard_failure(model_spec: str, stdout: str, stderr: str) -> Dict[str, A
     `_unparseable_reply`) are literals, and a literal `details` dict is a snapshot
     of what the plumbing looked like on the day it was typed. `details` is exactly
     where the plumbing and its consumers meet: `_attach_stdout_excerpt`
-    (`utils/llm_client.py:413`) decides which keys appear and salvage site A
+    (`utils/provider_outcome.py`) decides which keys appear and salvage site A
     decides which it reads, and `_hard_failure_with_empty_stderr` below spent a
     release asserting — in its own docstring — that a non-zero exit carries no
     stdout, which stopped being true the moment that helper landed. A fixture that
@@ -1257,7 +1259,7 @@ class TestSalvageSiteAReadsTheAnswerTheProviderLeftOnStdout:
     landed (its `raw_output` was the empty string), so this closes a latent hole
     rather than a regression — but site A is the one place the gate could turn
     that hole into a *visible* loss, which is why the two halves shipped in the
-    same pass: `_attach_stdout_excerpt` (`utils/llm_client.py:413`) puts the text
+    same pass: `_attach_stdout_excerpt` (`utils/provider_outcome.py`) puts the text
     on the envelope, and this reads it.
 
     Every test here drives the real provider chain
@@ -1319,7 +1321,7 @@ class TestSalvageSiteAReadsTheAnswerTheProviderLeftOnStdout:
         kilocode's dead-account failure is four words of ANSI-coloured prose on
         stderr by a CLI that never emitted a byte of answer, so
         `_attach_stdout_excerpt` omits `stdout_excerpt` entirely rather than
-        setting it to `""` (`utils/llm_client.py:413` — "absent means absent").
+        setting it to `""` (`utils/provider_outcome.py` — "absent means absent").
         Reading stdout *ahead of* stderr must therefore leave stderr reachable: a
         precedence written as a replacement would blank `raw_content` for every
         provider that dies before speaking, and the gate would then reach the
@@ -1429,7 +1431,7 @@ def _hard_failure_with_empty_stderr() -> Dict[str, Any]:
     and that opencode's error body being absent was "the point of the fixture,
     not an omission in it". That was true of the code it was written against and
     is false of the code now: `_attach_stdout_excerpt`
-    (`utils/llm_client.py:413`) attaches the excerpt on all three losing paths,
+    (`utils/provider_outcome.py`) attaches the excerpt on all three losing paths,
     non-zero exit included, and salvage site A reads exactly that key ahead of
     `details["stderr"]`.
 
@@ -1513,7 +1515,10 @@ def _review_args(plan: Path, models: List[str], **overrides):
         models=list(models),
         interactive=False,
         quick=False,
-        timeout=5,
+        # Wide enough that §7.5 rule 4 dispatches gemini's slot: a budget too
+        # small for one worst-case attempt of its declared envelope (243 s) is
+        # refused with nothing spawned. The dispatch is canned, so nothing waits.
+        timeout=1800,
         max_parallel=2,
         base_ref=None,
         skip_validation=True,
@@ -1559,12 +1564,12 @@ def _run_cro_review(tmp_path: Path, replies: Dict[str, Dict[str, Any]], **arg_ov
                       return_value=_review_args(plan, models, **arg_overrides)), \
          patch.object(cro, "get_project_root", return_value=str(tmp_path)), \
          patch.object(cro, "get_or_create_state", return_value=_review_state()), \
-         patch.object(cro, "resolve_models", return_value=models), \
-         patch.object(cro, "is_model_valid", return_value=True), \
+         patch("utils.interactive.resolve_models", return_value=models), \
+         patch("utils.interactive.is_model_valid", return_value=True), \
          patch.object(cro, "validate_git_ref", side_effect=lambda ref: ref or "HEAD~1"), \
          patch.object(cro, "intent_to_add_untracked",
                       side_effect=lambda files, **_: contextlib.nullcontext()), \
-         patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0), \
+         patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0), \
          patch.object(cro, "invoke_with_file_output",
                       side_effect=lambda **kwargs: replies[kwargs["model_spec"]]):
         exit_code = asyncio.run(cro.main())
@@ -1593,7 +1598,7 @@ class TestAProviderWhoseFailureIsItselfJSON:
         gate's judgement — site A built `raw_content` from `details["stderr"]`
         alone, a non-zero exit carried no stdout, and so the error body never
         reached the predicate at all. Both halves of that have now landed:
-        `_attach_stdout_excerpt` (`utils/llm_client.py:413`) puts the body on the
+        `_attach_stdout_excerpt` (`utils/provider_outcome.py`) puts the body on the
         envelope and site A reads `details["stdout_excerpt"]` ahead of
         `details["stderr"]`, so `OPENCODE_ERROR_EVENT` now goes straight into
         `has_salvageable_json`'s clause 1 and the verdict below is the gate's own.
@@ -2117,7 +2122,7 @@ def _native_salvage_reply(reply: Any):
     """
     def _run(task_file, *, phase_dir=None, phase="", **_ignored):
         document = json.loads(Path(task_file).read_text(encoding="utf-8"))
-        return executor.simulate_native_invoker(
+        return simulate_native_invoker(
             tasks_of(document),
             phase_dir=phase_dir or os.path.dirname(os.path.abspath(task_file)),
             phase=phase,
@@ -2151,7 +2156,7 @@ class TestASalvageThatGaveUpIsNotAParticipant:
 
     def _run(self, tmp_path):
         with patch.object(
-            executor, "run_task_file", _native_salvage_reply(SALVAGE_SENTINEL)
+            task_file_runner, "run_task_file", _native_salvage_reply(SALVAGE_SENTINEL)
         ):
             return _run_cro_review(
                 tmp_path,
@@ -2314,7 +2319,7 @@ class TestATerminalSalvageIsNotReAdvertised:
 
     def _run(self, tmp_path, reply, **arg_overrides):
         with patch.object(
-            executor, "run_task_file", _native_salvage_reply(reply)
+            task_file_runner, "run_task_file", _native_salvage_reply(reply)
         ):
             return _run_cro_review(
                 tmp_path,
@@ -2521,7 +2526,7 @@ class TestTheHeaderNamesTheReviewerTheSalvageGaveUpOn:
         self, tmp_path, capsys
     ):
         with patch.object(
-            executor, "run_task_file", _native_salvage_reply(SALVAGE_SENTINEL)
+            task_file_runner, "run_task_file", _native_salvage_reply(SALVAGE_SENTINEL)
         ):
             plan, phase_dir, exit_code = _run_cro_review(
                 tmp_path, dict(_TWO_REVIEWERS), exec_subagents=True,
@@ -2581,7 +2586,7 @@ class TestATimedOutRunsSalvagedEmptyArrayIsNotAReview:
     """
 
     def _run(self, tmp_path, kilocode_reply):
-        with patch.object(executor, "run_task_file", _native_salvage_reply([])):
+        with patch.object(task_file_runner, "run_task_file", _native_salvage_reply([])):
             return _run_cro_review(
                 tmp_path,
                 {
@@ -2717,7 +2722,7 @@ class TestAStaleSalvagePairDoesNotSurviveTheNextAttempt:
         plan, phase_dir = self._first_run_leaves_a_salvage_pair(tmp_path, capsys)
         stem = cro.sanitize_model_name(KILOCODE_SPEC)
 
-        with patch.object(executor, "run_task_file", _never_dispatched), \
+        with patch.object(task_file_runner, "run_task_file", _never_dispatched), \
              patch.object(cro, "record_next") as next_command:
             _, _, exit_code = _run_cro_review(
                 tmp_path,
@@ -3354,8 +3359,7 @@ class TestTheFanOutBaseReadsTheAnswerTheProviderLeftOnStdout:
     ):
         """`failure_output` is keyword-only and defaults to `None`, and that is load-bearing.
 
-        `review_plan_orchestrator.save_model_result`'s backward-compatible wrapper
-        and every test call site in this suite pass the eight positional arguments
+        Every test call site in this suite passes the eight positional arguments
         and nothing else. For them the hard-failure branch must behave exactly as
         it did before the parameter existed: the error log, `False`, and not one
         salvage artifact — because a caller that supplies no failure output is
@@ -3478,12 +3482,12 @@ class TestAFanOutCutOffMidRun:
         with patch.object(cro, "parse_args", return_value=_review_args(plan, models)), \
              patch.object(cro, "get_project_root", return_value=str(tmp_path)), \
              patch.object(cro, "get_or_create_state", return_value=_review_state()), \
-             patch.object(cro, "resolve_models", return_value=models), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.resolve_models", return_value=models), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref", side_effect=lambda ref: ref or "HEAD~1"), \
              patch.object(cro, "intent_to_add_untracked",
                           side_effect=lambda files, **_: contextlib.nullcontext()), \
-             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0), \
+             patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0), \
              patch.object(cro, "invoke_with_file_output", side_effect=reply):
             with pytest.raises(SystemExit):
                 asyncio.run(cro.main())

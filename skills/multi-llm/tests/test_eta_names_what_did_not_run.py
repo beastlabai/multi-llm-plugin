@@ -24,17 +24,11 @@ from __future__ import annotations
 import json
 import re
 
-from tests.test_check_gate_fixture import (  # noqa: F401  (the fixture)
-    CHECK_GATE,
-    DENY,
-    FINDINGS,
-    _first_run,
-    _policy,
-    repo,
-)
-from tests.test_dispatch_counts import LIVE_LAYOUT, _emit, _util
-from tests.test_implement_stop_account import _implement, make_repo
+from tests.support.gate_fixture import CHECK_GATE, DENY, FINDINGS, _first_run, _policy
+from tests.support.dispatch_world import LIVE_LAYOUT, _emit, _util
+from tests.support.implement_world import make_repo
 from utils import metrics
+from tests.support.dispatch_world import _run
 
 #: What the check-gate fixture's stop leaves, on both legs.
 LEFT = (
@@ -50,12 +44,6 @@ def _eta_lines(text: str) -> list:
 
 def _task_etas(text: str) -> list:
     return [(int(a), int(b)) for a, b in TASK_ETA.findall(text)]
-
-
-def _run(repo, capsys, *flags) -> tuple:
-    code = _implement(repo, *flags)
-    captured = capsys.readouterr()
-    return code, captured.out + captured.err
 
 
 class TestTheExecutorClosesOnWhatItLeft:

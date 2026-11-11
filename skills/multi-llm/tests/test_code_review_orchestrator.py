@@ -225,9 +225,9 @@ class TestTheLaunchWriteDropsAPredecessorsMap:
         with patch.object(cro, "parse_args",
                           return_value=_make_args(plan_path)), \
              patch.object(cro, "get_or_create_state", return_value=fake_state), \
-             patch.object(cro, "resolve_models",
+             patch("utils.interactive.resolve_models",
                           return_value=["cursor-agent:auto"]), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref",
                           side_effect=lambda r: r or "HEAD~1"), \
              patch.object(cro, "report_progress", record), \
@@ -294,9 +294,9 @@ class TestMainWrapsPipelineWithIntentToAdd:
 
         with patch.object(cro, "parse_args", return_value=args), \
              patch.object(cro, "get_or_create_state", return_value=fake_state), \
-             patch.object(cro, "resolve_models",
+             patch("utils.interactive.resolve_models",
                           return_value=["cursor-agent:auto"]), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref",
                           side_effect=lambda r: r or "HEAD~1"), \
              patch.object(cro, "intent_to_add_untracked",
@@ -367,11 +367,11 @@ class TestValidationInputsCarryTheStampedGroupHash:
 
         captured: dict = {}
 
-        def fake_prepare(groups, **kwargs):
-            captured["prepare_groups"] = groups
+        def fake_prepare(round_):
+            captured["prepare_groups"] = round_.groups
             return {"total_batches": 1, "batching_stats": {}}
 
-        def fake_merge(phase_dir, batch_metadata, grouped, validation_path):
+        def fake_merge(phase_dir, batch_metadata, grouped, validation_path, claim=None):
             captured["merge_grouped"] = grouped
             return grouped
 
@@ -384,9 +384,9 @@ class TestValidationInputsCarryTheStampedGroupHash:
 
         with patch.object(cro, "parse_args", return_value=args), \
              patch.object(cro, "get_or_create_state", return_value=fake_state), \
-             patch.object(cro, "resolve_models",
+             patch("utils.interactive.resolve_models",
                           return_value=["cursor-agent:auto"]), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref",
                           side_effect=lambda r: r or "HEAD~1"), \
              patch.object(cro, "intent_to_add_untracked", side_effect=fake_ctx), \
@@ -395,7 +395,7 @@ class TestValidationInputsCarryTheStampedGroupHash:
              )), \
              patch.object(cro, "build_validation_secondary_context",
                           return_value=("", "")), \
-             patch.object(cro, "prepare_batched_validation_tasks",
+             patch.object(cro, "materialize_validation_round",
                           side_effect=fake_prepare), \
              patch.object(cro, "dispatch_subagent_tasks", return_value=True), \
              patch.object(cro, "merge_validation_batches",
@@ -407,7 +407,7 @@ class TestValidationInputsCarryTheStampedGroupHash:
 
         prepare_groups = captured.get("prepare_groups")
         merge_grouped = captured.get("merge_grouped")
-        assert prepare_groups, "no groups reached prepare_batched_validation_tasks"
+        assert prepare_groups, "no groups reached materialize_validation_round"
         assert merge_grouped, "no groups reached merge_validation_batches"
         assert all(g.get("group_hash") for g in prepare_groups), prepare_groups
         assert all(g.get("group_hash") for g in merge_grouped), merge_grouped
@@ -464,9 +464,9 @@ class TestValidationInputsCarryTheStampedGroupHash:
 
         with patch.object(cro, "parse_args", return_value=args), \
              patch.object(cro, "get_or_create_state", return_value=fake_state), \
-             patch.object(cro, "resolve_models",
+             patch("utils.interactive.resolve_models",
                           return_value=["cursor-agent:auto"]), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref",
                           side_effect=lambda r: r or "HEAD~1"), \
              patch.object(cro, "intent_to_add_untracked", side_effect=fake_ctx), \
@@ -596,9 +596,9 @@ class TestAFanoutModelLostToTheGatherDeadline:
 
         with patch.object(cro, "parse_args", return_value=args), \
              patch.object(cro, "get_or_create_state", return_value=fake_state), \
-             patch.object(cro, "resolve_models",
+             patch("utils.interactive.resolve_models",
                           return_value=["cursor-agent:auto", "claude-code:sonnet"]), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref",
                           side_effect=lambda r: r or "HEAD~1"), \
              patch.object(cro, "run_all_reviews", new=fake_run_all_reviews):
@@ -676,8 +676,8 @@ class TestAnInProcessSalvageMovesTheMapWithTheReport:
 
         with patch.object(cro, "parse_args", return_value=args), \
              patch.object(cro, "get_or_create_state", return_value=fake_state), \
-             patch.object(cro, "resolve_models", return_value=list(specs)), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.resolve_models", return_value=list(specs)), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref",
                           side_effect=lambda r: r or "HEAD~1"), \
              patch.object(cro, "dispatch_salvage_tasks", new=fake_salvage), \
@@ -808,8 +808,8 @@ class TestEmptyReviewReplacesPreviousFindings:
 
         with patch.object(cro, "parse_args", return_value=args), \
              patch.object(cro, "get_or_create_state", return_value=fake_state), \
-             patch.object(cro, "resolve_models", return_value=["cursor-agent:auto"]), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.resolve_models", return_value=["cursor-agent:auto"]), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref", side_effect=lambda ref: ref or "HEAD~1"), \
              patch.object(cro, "build_unsanitize_map", return_value={"cursor-agent_auto": "cursor-agent:auto"}), \
              patch.object(cro, "run_all_reviews", new=AsyncMock(return_value={"cursor-agent:auto": (True, [], None)})), \
@@ -899,8 +899,8 @@ class TestOneModelsMalformedElementCannotStrandTheOthers:
 
         with patch.object(cro, "parse_args", return_value=args), \
              patch.object(cro, "get_or_create_state", return_value=fake_state), \
-             patch.object(cro, "resolve_models", return_value=models), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.resolve_models", return_value=models), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref", side_effect=lambda ref: ref or "HEAD~1"), \
              patch.object(cro, "build_unsanitize_map", return_value={
                  "cursor-agent_kimi-k3-high": "cursor-agent:kimi-k3-high",
@@ -1209,8 +1209,8 @@ class TestTheFanoutReportsProgressWhileItRuns:
             calls.append(dict(updates))
 
         with patch.object(cro, "run_single_review", new=_answering_review()), \
-             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0), \
-             patch.object(base._detach, "report_progress", record):
+             patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0), \
+             patch.object(base._run_record, "report_progress", record):
             results = asyncio.run(cro.run_all_reviews(
                 ["cursor-agent:auto", "claude-code:sonnet", "codex:gpt-5.5"],
                 plan_path, tmp_path, 30, 3,
@@ -1244,8 +1244,8 @@ class TestTheFanoutReportsProgressWhileItRuns:
             calls.append(dict(updates))
 
         with patch.object(cro, "run_single_review", new=_answering_review()), \
-             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0), \
-             patch.object(base._detach, "report_progress", record):
+             patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0), \
+             patch.object(base._run_record, "report_progress", record):
             results = asyncio.run(cro.run_all_reviews(
                 ["cursor-agent:auto", "claude-code:sonnet"],
                 plan_path, tmp_path, 30, 2,
@@ -1288,15 +1288,15 @@ class TestThisLanesOwnFanoutCarriesTheMapAndTheTicker:
         plan_path.write_text("# plan\n", encoding="utf-8")
         specs = ["cursor-agent:auto", "claude-code:sonnet", "codex:gpt-5.5"]
         calls = []
-        real_report_progress = base._detach.report_progress
+        real_report_progress = base._run_record.report_progress
 
         def record(phase_dir, **updates):
             calls.append(dict(updates))
             real_report_progress(phase_dir, **updates)
 
         with patch.object(cro, "run_single_review", new=_answering_review()), \
-             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0), \
-             patch.object(base._detach, "report_progress", record):
+             patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0), \
+             patch.object(base._run_record, "report_progress", record):
             asyncio.run(cro.run_all_reviews(specs, plan_path, tmp_path, 30, 3))
 
         seeded = calls[0]["models"]
@@ -1332,7 +1332,7 @@ class TestThisLanesOwnFanoutCarriesTheMapAndTheTicker:
             return True, [], None
 
         with patch.object(cro, "run_single_review", new=fake_review), \
-             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0), \
+             patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0), \
              patch.object(progress_tracker, "_monotonic", clock.monotonic), \
              patch.object(progress_tracker, "_tick_sleep", clock.sleep), \
              patch.object(progress_tracker, "_emit", emitted.append):
@@ -1363,7 +1363,7 @@ class TestThisLanesOwnFanoutCarriesTheMapAndTheTicker:
             return True, [], None
 
         with patch.object(cro, "run_single_review", new=fake_review), \
-             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0):
+             patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             asyncio.run(cro.run_all_reviews(
                 ["cursor-agent:auto", "claude-code:sonnet"],
                 plan_path, tmp_path, 30, 2,
@@ -1435,7 +1435,7 @@ class TestASlotWaitingOnTheSemaphoreReadsQueuedOnThisFanout:
             await task
 
         with patch.object(cro, "run_single_review", new=fake_review), \
-             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0):
+             patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             asyncio.run(drive())
 
         assert seen["head"] == "running", seen
@@ -1455,13 +1455,15 @@ class TestASlotWaitingOnTheSemaphoreReadsQueuedOnThisFanout:
 class TestTheStaggeringRowCarriesItsCountdownOnThisFanout:
     """2026-09-21, this lane's copy: `run_all_reviews` names the sleep it takes.
 
-    The base's `run_models_concurrent` reaches nothing here, so the one
-    `tracker.staggering` call this fan-out makes has to pass `delay_s` itself
-    — without it the row reads `staggering` with no `starts in Ns`, on the
-    one lane a user watching a `--review-code` launch would see.
+    Its slots run on the base's `run_models_concurrent`, which hands the
+    fan-out's tracker to each launch turn (`slot_launch`): without it the row
+    reads `staggering` with no `starts in Ns`, on the one lane a user watching
+    a `--review-code` launch would see.
     """
 
-    MODELS = ["cursor-agent:auto", "claude-code:sonnet", "codex:gpt-5.5"]
+    # One provider: launch spacing is per provider, so only repeated slots of
+    # one provider wait.
+    MODELS = ["cursor-agent:auto", "cursor-agent:sonnet", "cursor-agent:gpt-5"]
 
     def test_every_staggered_slot_is_stamped_with_its_own_delay(self, tmp_path):
         plan_path = tmp_path / "plan.md"
@@ -1472,7 +1474,7 @@ class TestTheStaggeringRowCarriesItsCountdownOnThisFanout:
         def spy(self, spec, **kwargs):
             real(self, spec, **kwargs)
             # The row as a poll landing on this write would read it.
-            seen[spec] = (kwargs, dict(self.snapshot()[spec]))
+            seen.setdefault(spec, (kwargs, dict(self.snapshot()[spec])))
 
         async def fake_review(model_spec, *args, **kwargs):
             tracker = kwargs["tracker"]
@@ -1480,21 +1482,23 @@ class TestTheStaggeringRowCarriesItsCountdownOnThisFanout:
             tracker.done(model_spec, source="file")
             return True, [], None
 
+        # On a virtual clock, so each slot waits for its launch turn exactly once.
+        from tests.launch_timeline import run_on_virtual_clock
         with patch.object(cro, "run_single_review", new=fake_review), \
-             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.02), \
+             patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.02), \
              patch.object(progress_tracker.FanoutProgress, "staggering", spy):
-            asyncio.run(cro.run_all_reviews(
+            run_on_virtual_clock(cro.run_all_reviews(
                 list(self.MODELS), plan_path, tmp_path, 30, 3,
             ))
 
         head, *tail = self.MODELS
-        assert head not in seen, "index 0 never staggers"
+        assert head not in seen, "a provider's first slot never staggers"
         assert list(seen) == tail
+        step = base.get_backoff_delay(0.02)
         for index, spec in enumerate(tail, start=1):
             kwargs, row = seen[spec]
-            # This lane sleeps the bare product; it does not route the delay
-            # through `get_backoff_delay`, and the row must say what it slept.
-            assert kwargs == {"delay_s": pytest.approx(index * 0.02)}, (spec, kwargs)
+            # The row must say how long the slot waits for its turn.
+            assert kwargs == {"delay_s": pytest.approx(index * step)}, (spec, kwargs)
             assert row["state"] == "staggering"
             assert "stagger_until" in row, (spec, row)
         # And once dispatched, no row still carries a countdown.
@@ -1531,7 +1535,7 @@ class TestEveryEndingRetiresEverySlotOnThisFanout:
         # `timeout=0` makes `total_timeout` 0 with the stagger patched out, so
         # `asyncio.wait_for` fires its deadline on the first suspension.
         with patch.object(cro, "run_single_review", new=never_returns), \
-             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0):
+             patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             results = asyncio.run(
                 cro.run_all_reviews(specs, plan_path, tmp_path, 0, 2)
             )
@@ -1592,7 +1596,7 @@ class TestEveryEndingRetiresEverySlotOnThisFanout:
             return True, issues, None
 
         with patch.object(cro, "run_single_review", new=one_answers_one_straggles), \
-             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0):
+             patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             results = asyncio.run(
                 cro.run_all_reviews(specs, plan_path, tmp_path, 0.05, 2)
             )
@@ -1644,20 +1648,21 @@ class TestEveryEndingRetiresEverySlotOnThisFanout:
             return True, [], None
 
         with patch.object(cro, "run_single_review", new=one_explodes), \
-             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0):
+             patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             results = asyncio.run(
                 cro.run_all_reviews(specs, plan_path, tmp_path, 30, 2)
             )
 
-        # The raising slot never reaches `results` — it is printed as `Review
-        # exception:` and dropped — which is exactly why the map has to carry
-        # its reason.
-        assert list(results) == [specs[0]]
+        # The raising slot is a failed result carrying the exception, so
+        # `failed_models` names it rather than `backfill_deadline_losses`
+        # calling it a deadline loss, and the map names the same cause.
+        expected = "Exception: RuntimeError: provider exploded"
+        assert results[specs[1]] == (False, None, expected)
         phase_dir = cro.get_phase_dir(plan_path, "code-review")
         models = status_file.read_status(str(phase_dir))["progress"]["models"]
         loser = models[specs[1]]
         assert loser["state"] == "failed"
-        assert loser["error"] == "provider exploded", loser
+        assert loser["error"] == expected, loser
         assert loser["source"] == "exception", loser
         # Not the sweep's wording, which is what it used to get.
         assert loser["error"] != progress_tracker.CANCELLED_ERROR
@@ -1693,7 +1698,7 @@ class TestEveryEndingRetiresEverySlotOnThisFanout:
                 await task
 
         with patch.object(cro, "run_single_review", new=hang), \
-             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0):
+             patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             asyncio.run(scenario())
 
         phase_dir = cro.get_phase_dir(plan_path, "code-review")
@@ -1729,7 +1734,7 @@ class TestAResumedRunDoesNotReportSkippedModelsAsPending:
             raise AssertionError("a resumed slot must not dispatch")
 
         with patch.object(cro, "run_single_review", new=never_dispatched), \
-             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0):
+             patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             results = asyncio.run(
                 cro.run_all_reviews(specs, plan_path, tmp_path, 30, 2)
             )
@@ -1808,12 +1813,12 @@ class TestThePhaseTickerCoversTheRestOfThePhase:
 
         with patch.object(cro, "parse_args", return_value=args), \
              patch.object(cro, "get_or_create_state", return_value=fake_state), \
-             patch.object(cro, "resolve_models", return_value=["cursor-agent:auto"]), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.resolve_models", return_value=["cursor-agent:auto"]), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref", side_effect=lambda r: r or "HEAD~1"), \
              patch.object(cro, "run_single_review", new=fake_review), \
              patch.object(cro, "run_all_reviews", new=watched_fanout), \
-             patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0), \
+             patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0), \
              patch.object(progress_tracker, "_monotonic", clock.monotonic), \
              patch.object(progress_tracker, "_tick_sleep", clock.sleep), \
              patch.object(progress_tracker, "_emit", emitted.append):
@@ -1926,8 +1931,8 @@ class TestThePhaseTickerCoversTheRestOfThePhase:
         with _realtime_ticker() as emitted, \
              patch.object(cro, "parse_args", return_value=args), \
              patch.object(cro, "get_or_create_state", return_value=fake_state), \
-             patch.object(cro, "resolve_models", return_value=list(specs)), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.resolve_models", return_value=list(specs)), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref",
                           side_effect=lambda r: r or "HEAD~1"), \
              patch.object(cro, "dispatch_salvage_tasks", new=blocking_salvage), \
@@ -2070,9 +2075,9 @@ class TestTheHostValidationHandOffIsTerminal:
         with patch.object(cro, "parse_args", return_value=args), \
              patch.object(cro, "get_or_create_state",
                           return_value=self._fake_state()), \
-             patch.object(cro, "resolve_models",
+             patch("utils.interactive.resolve_models",
                           return_value=["cursor-agent:auto"]), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref",
                           side_effect=lambda r: r or "HEAD~1"), \
              patch.object(cro, "get_project_root", return_value=str(tmp_path)), \
@@ -2126,6 +2131,117 @@ class TestTheHostValidationHandOffIsTerminal:
         assert status["progress"]["step"] == "validation_pending", status["progress"]
 
 
+class TestModelIssueShapesNeverCrashTheReport:
+    """A reviewer's ``line_range: [42]``, a bare ``42``, a list for ``file`` or
+    ``title``: model output in a shape the report indexes otherwise. Each is
+    normalised on arrival, on the fan-out and on every reaggregate, with one
+    warning naming the model; the report is written and no issue is lost
+    (docs/development/review-results.md, "Malformed result entries")."""
+
+    @pytest.mark.parametrize("field, raw, expected", [
+        ("line_range", [42], [42, 42]),
+        ("line_range", 42, [42, 42]),
+        ("line_range", "42", [42, 42]),
+        ("line_range", "40-42", [40, 42]),
+        ("line_range", [3, 9, 12], [3, 9]),
+        ("line_range", ["3", "9"], [3, 9]),
+        ("line_range", [3.0, 9.0], [3, 9]),
+        ("line_range", ["a", "b"], None),
+        ("line_range", {"start": 1}, None),
+        ("line_range", [True, False], None),
+        ("line_range", [], None),
+        ("file", ["src/a.py", "src/b.py"], "src/a.py"),
+        ("file", None, None),
+        ("file", {"path": "src/a.py"}, None),
+        ("title", ["Retry", "loop"], "Retry loop"),
+    ])
+    def test_a_field_is_normalised_or_removed_and_the_model_named(
+        self, capsys, field, raw, expected,
+    ):
+        issue = {"title": "T", "desc": "d", "file": "src/a.py", "line_range": [1, 2]}
+        issue[field] = raw
+
+        cro.normalize_issue_shapes([issue], "gemini:flash")
+
+        if expected is None:
+            assert field not in issue
+        else:
+            assert issue[field] == expected
+        assert "gemini:flash" in capsys.readouterr().err
+
+    def test_a_well_formed_issue_is_left_alone(self, capsys):
+        issue = {"title": "T", "desc": "d", "file": "src/a.py", "line_range": [1, 2]}
+        before = json.dumps(issue)
+
+        cro.normalize_issue_shapes([issue, {"title": "U", "desc": "e", "file": "b.py"}], "m")
+
+        assert json.dumps(issue) == before
+        assert capsys.readouterr().err == ""
+
+    @pytest.mark.parametrize("line_range", [[42], 42, "x"])
+    def test_format_issue_takes_a_raw_line_range(self, line_range):
+        lines = cro._format_issue(1, {"title": "T", "desc": "d", "file": "src/a.py",
+                                      "line_range": line_range})
+        assert any("**File:**" in line for line in lines)
+
+    ODD = [
+        {"title": "One line", "desc": "d1", "importance": "high",
+         "file": "src/a.py", "line_range": [42], "type": "bug"},
+        {"title": ["Two", "files"], "desc": "d2", "importance": "medium",
+         "file": ["src/a.py", "src/b.py"], "line_range": 7, "type": "bug"},
+    ]
+
+    def test_the_reaggregate_writes_the_report(self, tmp_path):
+        plan_path = TestTheHostValidationHandOffIsTerminal._tree(tmp_path)
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        phase_dir = tmp_path / "phase"
+        phase_dir.mkdir()
+        (phase_dir / "cursor-agent_auto.json").write_text(
+            json.dumps(self.ODD), encoding="utf-8"
+        )
+        args = _make_args(plan_path, reaggregate=True, skip_validation=True)
+
+        with patch.object(cro, "get_or_create_state",
+                          return_value=TestTheHostValidationHandOffIsTerminal._fake_state()), \
+             patch.object(cro, "get_phase_dir", return_value=phase_dir), \
+             patch.object(cro, "validate_git_ref",
+                          side_effect=lambda r: r or "HEAD~1"), \
+             patch.object(cro, "get_project_root", return_value=str(tmp_path)), \
+             patch.object(cro, "build_unsanitize_map", return_value={}):
+            asyncio.run(cro.reaggregate_from_existing_files(
+                "plan", out_dir, plan_path, args
+            ))
+
+        report = (tmp_path / "plan" / "code-review" / "report.md").read_text(encoding="utf-8")
+        assert "`src/a.py:42-42`" in report
+        assert "`src/a.py:7-7`" in report
+        assert "Two files" in report
+
+    def test_the_fanout_writes_the_report(self, tmp_path):
+        plan_path = TestTheHostValidationHandOffIsTerminal._tree(tmp_path)
+        phase_dir = cro.get_phase_dir(plan_path, "code-review")
+        args = _make_args(plan_path, skip_validation=True)
+        issues = json.loads(json.dumps(self.ODD))
+
+        with patch.object(cro, "parse_args", return_value=args), \
+             patch.object(cro, "get_or_create_state",
+                          return_value=TestTheHostValidationHandOffIsTerminal._fake_state()), \
+             patch("utils.interactive.resolve_models",
+                          return_value=["cursor-agent:auto"]), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
+             patch.object(cro, "validate_git_ref",
+                          side_effect=lambda r: r or "HEAD~1"), \
+             patch.object(cro, "get_project_root", return_value=str(tmp_path)), \
+             patch.object(cro, "run_all_reviews", new=AsyncMock(
+                 return_value={"cursor-agent:auto": (True, issues, None)})):
+            asyncio.run(cro.main())
+
+        report = (phase_dir / "report.md").read_text(encoding="utf-8")
+        assert "`src/a.py:42-42`" in report
+        assert "Two files" in report
+
+
 class TestTheValidationStretchIsNamedBeforeItIsDispatched:
     """The word is written where the stretch begins, not where it may end.
 
@@ -2173,9 +2289,9 @@ class TestTheValidationStretchIsNamedBeforeItIsDispatched:
              patch.object(cro, "get_or_create_state",
                           return_value=TestTheHostValidationHandOffIsTerminal
                           ._fake_state()), \
-             patch.object(cro, "resolve_models",
+             patch("utils.interactive.resolve_models",
                           return_value=["cursor-agent:auto"]), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref",
                           side_effect=lambda r: r or "HEAD~1"), \
              patch.object(cro, "get_project_root", return_value=str(tmp_path)), \
@@ -2230,29 +2346,44 @@ class TestTheValidationStretchIsNamedBeforeItIsDispatched:
     def test_both_lanes_write_it_at_the_same_point_in_their_source(self):
         """Parity with the base lane, asserted structurally rather than by run.
 
-        The two orchestrators materialize `validation_tasks.json` at four sites
-        between them, and the invariant is one sentence: every one of them
+        `validation_tasks.json` is materialized at two sites, both in the lane
+        the two review lanes share (`utils/review_lane.py`): the fan-out's and
+        the reaggregate's. The invariant is one sentence: every one of them
         writes `state: validation_pending` before it reaches
-        `dispatch_subagent_tasks`. A behavioural test covers this lane's two;
-        this covers all four, so a fifth site added to either file is caught by
-        the same rule rather than by whoever remembers.
+        `dispatch_subagent_tasks`. A behavioural test covers this lane's two
+        paths; this covers every site, so a new one added to any of the files
+        is caught by the same rule rather than by whoever remembers. A site may
+        write the word itself or through the base's
+        `reopen_phase_for_validation`, which writes it (and reopens a completed
+        phase) for the shared reaggregate.
         """
         marker = '{"state": "validation_pending"}'
+        reopen = "reopen_phase_for_validation("
         dispatch = "dispatch_subagent_tasks,"
-        for rel in ("code_review_orchestrator.py",
-                    "utils/review_orchestrator_base.py"):
+        base = (SKILL_ROOT / "utils/review_orchestrator_base.py").read_text(
+            encoding="utf-8"
+        )
+        helper = base.index(f"def {reopen}")
+        assert marker in base[helper:base.index("\ndef ", helper + 1)], (
+            "`reopen_phase_for_validation` no longer writes "
+            "`state: validation_pending`, so the sites that call it do not either"
+        )
+        for rel, expected in (("code_review_orchestrator.py", 0),
+                              ("utils/review_orchestrator_base.py", 0),
+                              ("utils/review_lane.py", 2)):
             body = (SKILL_ROOT / rel).read_text(encoding="utf-8")
             sites = [
                 i for i in range(len(body))
-                if body.startswith("json.dump(batched_tasks", i)
+                if body.startswith(("json.dump(batched_tasks", "json.dumps(batched_tasks"), i)
             ]
-            assert len(sites) == 2, (
+            assert len(sites) == expected, (
                 f"{rel} materializes a validation document at {len(sites)} "
-                "sites; the parity rule below is written for two"
+                f"sites; the parity rule below is written for {expected}"
             )
             for start in sites:
                 nxt = body.index(dispatch, start)
-                assert marker in body[start:nxt], (
+                stretch = body[start:nxt]
+                assert marker in stretch or reopen in stretch, (
                     f"{rel} dispatches a validation batch (offset {nxt}) without "
                     "having written `state: validation_pending` since it "
                     f"materialized the document (offset {start}). The stretch "
@@ -2270,6 +2401,7 @@ class TestTheValidationStretchIsNamedBeforeItIsDispatched:
 _BWRAP_BROKEN_LINE = "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted"
 
 
+@pytest.mark.shell_probe
 class TestTheCodeReviewFanoutGatesOnTheSandboxProbe:
     """`run_single_review` is its own dispatch lane, so it asks for itself.
 
@@ -2310,7 +2442,7 @@ class TestTheCodeReviewFanoutGatesOnTheSandboxProbe:
 
         plan_path = tmp_path / "plan.md"
         plan_path.write_text("# Plan\n", encoding="utf-8")
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+        executor._SANDBOX_PROBE_CACHE.clear()
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._Probed())
         monkeypatch.setattr(cro, "get_project_root", lambda _p: str(tmp_path))
 
@@ -2330,7 +2462,7 @@ class TestTheCodeReviewFanoutGatesOnTheSandboxProbe:
             probes.append(list(argv))
             return real(argv, **kwargs)
 
-        monkeypatch.setattr(executor, "_run_sandbox_probe", counting)
+        monkeypatch.setattr(sandbox_walk, "_run_sandbox_probe", counting)
 
         success, issues, error = asyncio.run(cro.run_single_review(
             "fakebwrap:m1", plan_path, tmp_path / "out",
@@ -2385,7 +2517,8 @@ class TestTheCodeReviewFanoutGatesOnTheSandboxProbe:
         adapter = adapter or self._AutoFallback
         plan_path = tmp_path / "plan.md"
         plan_path.write_text("# Plan\n", encoding="utf-8")
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+        from utils import subagent_executor
+        subagent_executor._SANDBOX_PROBE_CACHE.clear()
         monkeypatch.setattr(rob, "get_provider", lambda _name: adapter())
         monkeypatch.setattr(cro, "get_project_root", lambda _p: str(tmp_path))
         monkeypatch.setattr(cro, "invoke_with_file_output", dispatch)
@@ -3169,9 +3302,9 @@ class TestTheValidationTaskFileMainWrites:
 
         with patch.object(cro, "parse_args", return_value=args), \
              patch.object(cro, "get_or_create_state", return_value=fake_state), \
-             patch.object(cro, "resolve_models",
+             patch("utils.interactive.resolve_models",
                           return_value=["cursor-agent:auto"]), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref",
                           side_effect=lambda r: r or "HEAD~1"), \
              patch.object(cro, "get_project_root", return_value=str(tmp_path)), \
@@ -3309,9 +3442,9 @@ class TestTheValidatorIsToldToOpenTheFilesItLost:
         with patch.object(cro, "parse_args", return_value=args), \
              patch.object(cro, "get_or_create_state",
                           return_value=self._fake_state(cited)), \
-             patch.object(cro, "resolve_models",
+             patch("utils.interactive.resolve_models",
                           return_value=["cursor-agent:auto"]), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref",
                           side_effect=lambda r: r or "HEAD~1"), \
              patch.object(cro, "get_project_root", return_value=str(root)), \
@@ -3484,23 +3617,34 @@ class TestTheValidatorIsToldToOpenTheFilesItLost:
     def test_both_validation_sites_materialize_the_same_instruction(
         self, tmp_path
     ):
+        """Each batch carries the windows its own issues cite, so a drop is
+        per batch: every file here is ~20K chars at its window, and a batch of
+        four cites more than its block holds. Both sites name the same files
+        for the same batch, and a batch names only files its records cite."""
         plan_path = self._plan(tmp_path)
         names = [f"src/m{i:02d}.py" for i in range(20)]
         for name in names:
-            self._write(tmp_path / name)
+            self._write(tmp_path / name, pad=16000)
 
         fanout_dir = self._fanout(plan_path, tmp_path, names)
         reaggregate_dir = self._reaggregate(
             plan_path, tmp_path, names, tmp_path / "reagg" / "code-review"
         )
 
-        fanout = {self._instruction(p) for p in self._prompts(fanout_dir)}
-        reaggregate = {self._instruction(p) for p in self._prompts(reaggregate_dir)}
-        assert len(fanout) == 1
+        fanout_prompts = self._prompts(fanout_dir)
+        fanout = [self._instruction(p) for p in fanout_prompts]
+        reaggregate = [self._instruction(p) for p in self._prompts(reaggregate_dir)]
         assert fanout == reaggregate
-        (instruction,) = fanout
-        # Absolute, so in this OS's own spelling.
-        assert f"`{(tmp_path / 'src').resolve()}{os.sep}" in instruction
+        assert len(set(fanout)) == len(fanout) > 1
+        for prompt, instruction in zip(fanout_prompts, fanout):
+            # Absolute, so in this OS's own spelling.
+            assert f"`{(tmp_path / 'src').resolve()}{os.sep}" in instruction
+            cited = {name for name in names if f'"file": "{name}"' in prompt}
+            named = {
+                name for name in names
+                if f"`{(tmp_path / name).resolve()}`" in instruction
+            }
+            assert named and named <= cited, (named, cited)
 
     # -- T7.5 ------------------------------------------------------------
 
@@ -3534,30 +3678,42 @@ class TestTheValidatorIsToldToOpenTheFilesItLost:
 
         sidecars = sorted(phase_dir.glob("validation_batch_*.prompt.txt"))
         assert sidecars
-        contained = [str((repo / path).resolve()) for path in longs]
         target = str(secret.resolve())
-        without_the_link = 0
+        filled = 0
         for sidecar in sidecars:
             prompt = sidecar.read_text(encoding="utf-8")
             block = prompt.split(
                 f"## Context ({cro.REVIEWED_CODE_CONTEXT_LABEL})"
             )[1].split("## Suggestion groups to validate")[0]
+            cited = [path for path in longs if f'"file": "{path}"' in prompt]
+            assert target not in prompt
+            if f'"file": "{big}"' not in prompt:
+                # Each batch carries its own files' windows: one without the
+                # filler is not over its budget and shows every one of them.
+                assert "[... truncated ...]" not in block
+                for path in cited:
+                    assert f"### {path}" in block
+                # The escaping link shows only as its note, never resolved.
+                assert prompt.count(link) == (
+                    prompt.count(f'"file": "{link}"')
+                    + block.count(f"### {link}\n\n(outside the repository; not shown)")
+                )
+                continue
+            filled += 1
             # The precondition: the block really was filled, and its own note
             # (the only in-block list of the dropped files) was cut away.
             assert "[... truncated ...]" in block
             assert not any(path in block for path in longs + [link])
 
             instruction = self._instruction(prompt)
-            for path in contained:
-                assert f"`{path}`" in instruction
-            assert target not in prompt
+            assert cited
+            for path in cited:
+                assert f"`{(repo / path).resolve()}`" in instruction
             assert link not in instruction
             # The link's only mentions are its own finding's `file` field, the
             # record the validator is judging.
             assert prompt.count(link) == prompt.count(f'"file": "{link}"')
-            without_the_link += link not in prompt
-        if len(sidecars) > 1:
-            assert without_the_link >= 1
+        assert filled == 1
 
 
 # ---------------------------------------------------------------------------
@@ -3625,10 +3781,11 @@ def _run_fanout_capturing_prompts(tmp_path, monkeypatch, args_overrides, *, diff
         }
 
     monkeypatch.setattr(rob, "get_provider", lambda _name: _NoProbeAdapter())
-    monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+    from utils import subagent_executor
+    subagent_executor._SANDBOX_PROBE_CACHE.clear()
     monkeypatch.setattr(cro, "get_project_root", lambda _p: str(tmp_path))
     monkeypatch.setattr(cro, "invoke_with_file_output", dispatch)
-    monkeypatch.setattr(cro, "PROVIDER_STAGGER_DELAY", 0.0)
+    monkeypatch.setattr("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0)
     if stdin is not None:
         import io
 
@@ -3636,8 +3793,8 @@ def _run_fanout_capturing_prompts(tmp_path, monkeypatch, args_overrides, *, diff
 
     args = _make_args(plan_path, **{"files": [], "files_from": None, **args_overrides})
     with patch.object(cro, "parse_args", return_value=args), \
-         patch.object(cro, "resolve_models", return_value=["cursor-agent:auto"]), \
-         patch.object(cro, "is_model_valid", return_value=True), \
+         patch("utils.interactive.resolve_models", return_value=["cursor-agent:auto"]), \
+         patch("utils.interactive.is_model_valid", return_value=True), \
          patch.object(cro, "validate_git_ref", side_effect=lambda r: r or "HEAD~1"), \
          patch.object(cro, "get_files_changed_since_ref",
                       side_effect=(lambda _ref: list(diff)) if diff is not None
@@ -3878,12 +4035,14 @@ import re
 import subprocess as _subprocess
 from types import SimpleNamespace as _NS
 
-from utils import git_utils as _git_utils
+from utils import review_diff as _review_diff
 from utils import llm_client as _llm_client
+from utils import prompt_channels as _prompt_channels
 from utils.git_utils import (
     REVIEW_SCOPE_FILENAME as _MANIFEST,
     read_review_scope as _read_review_scope,
 )
+from utils import sandbox_walk
 
 _HERMETIC_GIT = {
     "GIT_CONFIG_GLOBAL": _os.devnull,
@@ -3980,21 +4139,25 @@ def _scope_fanout(plan, monkeypatch, models, *, respond=None, capabilities=None,
                 "output_file": "", "details": {}}
 
     monkeypatch.setattr(rob, "get_provider", lambda _name: _NoProbeAdapter())
-    monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+    from utils import subagent_executor
+    subagent_executor._SANDBOX_PROBE_CACHE.clear()
     monkeypatch.setattr(cro, "invoke_with_file_output", dispatch)
-    monkeypatch.setattr(cro, "PROVIDER_STAGGER_DELAY", 0.0)
+    monkeypatch.setattr("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0)
     if capabilities is not None:
+        # Both readers of the adapter's declarations: the prompt blocks
+        # (`prompt_channels`) and the argv measurement (`llm_client`).
         real = _llm_client.get_provider
-        monkeypatch.setattr(
-            _llm_client, "get_provider",
-            lambda name: capabilities.get(name) or real(name),
-        )
+        for module in (_llm_client, _prompt_channels):
+            monkeypatch.setattr(
+                module, "get_provider",
+                lambda name: capabilities.get(name) or real(name),
+            )
     args = _make_args(plan, models=list(models), files=[], files_from=None,
                       **arg_overrides)
     with contextlib.ExitStack() as stack:
         stack.enter_context(patch.object(cro, "parse_args", return_value=args))
-        stack.enter_context(patch.object(cro, "resolve_models", return_value=list(models)))
-        stack.enter_context(patch.object(cro, "is_model_valid", return_value=True))
+        stack.enter_context(patch("utils.interactive.resolve_models", return_value=list(models)))
+        stack.enter_context(patch("utils.interactive.is_model_valid", return_value=True))
         if not real_report:
             stack.enter_context(
                 patch.object(cro, "generate_review_report", return_value="# report\n"))
@@ -4010,10 +4173,10 @@ def _full_prompt(dispatch, plan) -> str:
     kwargs = dispatch["kwargs"]
     context = dict(kwargs["prompt_context"])
     context["output_json_path"] = "<unused>"
-    context["output_location"] = _llm_client.render_output_location(
+    context["output_location"] = _prompt_channels.render_output_location(
         "<unused>", kwargs["model_spec"], anchor=str(plan)
     )
-    context["working_limits"] = _llm_client.render_working_limits(kwargs["timeout"])
+    context["working_limits"] = _prompt_channels.render_working_limits(kwargs["timeout"])
     return kwargs["prompt_template"].format(**context)
 
 
@@ -4209,7 +4372,7 @@ class TestAResumeReusesOnlyResultsOfThisScope:
                 )
             return rob.SandboxVerdict(rob.SANDBOX_DISPATCH, None)
 
-        monkeypatch.setattr(cro, "sandbox_refusal", gate)
+        monkeypatch.setattr(rob, "sandbox_refusal", gate)
 
         seen, _ = _scope_fanout(scope_repo.plan, monkeypatch, self.SPECS, force=True)
 
@@ -4267,14 +4430,14 @@ class TestTheReportRecordsTheDiffCoverage:
         self, scope_repo, monkeypatch, capsys
     ):
         _record_scope(scope_repo.plan, scope_repo.base)
-        real = _git_utils._git_diff_output
+        real = _review_diff._git_diff_output
 
         def flaky(args, cwd):
             if args[0] == "diff" and args[-1] == "tests/test_app.py" and "--numstat" not in args:
                 return None, "fatal: simulated"
             return real(args, cwd)
 
-        monkeypatch.setattr(_git_utils, "_git_diff_output", flaky)
+        monkeypatch.setattr(_review_diff, "_git_diff_output", flaky)
 
         _scope_fanout(scope_repo.plan, monkeypatch, ["cursor-agent:auto"],
                       real_report=True)
@@ -4447,8 +4610,8 @@ class TestALaneThatCannotOpenTheArtifacts:
         line = next(text for text in out.splitlines()
                     if text.startswith("[REVIEW_UNSUPPORTED] qwen-code:qwen3-coder"))
         inline = int(re.search(r"inline (\d+) B", line).group(1))
-        assert inline <= _llm_client.INLINE_DIFF_CAP_BYTES
-        assert (f"exceeds the {_llm_client.INLINE_PROMPT_CAP_BYTES} B argv cap"
+        assert inline <= _prompt_channels.INLINE_DIFF_CAP_BYTES
+        assert (f"exceeds the {_prompt_channels.INLINE_PROMPT_CAP_BYTES} B argv cap"
                 in line)
         status = json.loads((_phase(scope_repo.plan) / ".status.json").read_text())
         assert status["models_failed"]["qwen-code:qwen3-coder"].startswith(
@@ -4475,14 +4638,14 @@ class TestALaneThatCannotOpenTheArtifacts:
         self, scope_repo, monkeypatch, capsys
     ):
         _record_scope(scope_repo.plan, scope_repo.base)
-        real = _git_utils._git_diff_output
+        real = _review_diff._git_diff_output
 
         def flaky(args, cwd):
             if args[0] == "diff" and args[-1] == "src/app.py" and "--numstat" not in args:
                 return None, "fatal: simulated"
             return real(args, cwd)
 
-        monkeypatch.setattr(_git_utils, "_git_diff_output", flaky)
+        monkeypatch.setattr(_review_diff, "_git_diff_output", flaky)
 
         seen, _ = _scope_fanout(
             scope_repo.plan, monkeypatch, ["qwen-code:qwen3-coder", "cursor-agent:auto"],
@@ -4549,7 +4712,7 @@ class TestTheTwoRenderingsNeverDisagree:
             capabilities=self.CAPABILITIES,
         )
 
-        block = _llm_client.render_working_limits(1200)
+        block = _prompt_channels.render_working_limits(1200)
         assert "git" not in block and "`" not in block
         prompts = {
             d["kwargs"]["model_spec"].split(":")[0]: _full_prompt(d, scope_repo.plan)

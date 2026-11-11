@@ -74,7 +74,7 @@ import tarfile
 import tempfile
 from pathlib import Path
 from typing import (
-    Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple,
+    Callable, Dict, List, Optional, Sequence, Tuple,
 )
 
 #: Repo-root-relative path of the manifest the allowlist is parsed out of.
@@ -99,6 +99,8 @@ _BLOCK_END = "--- the rig that drives it ---"
 #: * ``templates/config/providers.override.yaml`` — the ``--init`` contract;
 #: * ``templates/consolidated_report_template.html`` — loaded by
 #:   ``utils/consolidation.py``;
+#: * ``templates/shared/report_core.{js,css}`` — inlined into every HTML
+#:   report; absent, report generation writes an error page instead;
 #: * ``references/`` — cited by ``instructions/*.md`` at run time;
 #: * ``assets/icons/`` — inlined by the HTML report.
 #: * ``assets/omp/overlay.yml`` — passed to ``--config`` on every omp
@@ -127,6 +129,8 @@ REQUIRED_INVENTORY: Tuple[str, ...] = (
     "hosts/codex/shim.md.tmpl",
     "templates/config/providers.override.yaml",
     "templates/consolidated_report_template.html",
+    "templates/shared/report_core.js",
+    "templates/shared/report_core.css",
     "assets/omp/overlay.yml",
     "utils/landlock_exec.py",
 )
@@ -448,7 +452,6 @@ def expected_payload(
     prefix: str = "skills/multi-llm",
     strip: str = "skills/multi-llm",
     allowlist: Optional[Sequence[str]] = None,
-    extra_allowlist: Sequence[str] = (),
 ) -> Tuple[str, ...]:
     """The allowlist expansion, payload-relative: what a staged tree — or a
     tarball built from one — must contain **exactly**.
@@ -463,7 +466,7 @@ def expected_payload(
     patterns = tuple(allowlist) if allowlist is not None else runtime_allowlist(base)
     return tuple(sorted(
         path[len(strip_prefix):]
-        for path in selected_files(base, prefix, (*patterns, *extra_allowlist))
+        for path in selected_files(base, prefix, patterns)
         if path.startswith(strip_prefix)
     ))
 
@@ -503,7 +506,6 @@ def stage(
     required: Sequence[str] = REQUIRED_INVENTORY,
     required_trees: Sequence[str] = REQUIRED_TREES,
     required_extra: Sequence[str] = (),
-    extra_allowlist: Sequence[str] = (),
 ) -> Tuple[str, ...]:
     """Copy the allowlisted payload into *destination*, then account for it.
 
@@ -520,14 +522,6 @@ def stage(
     ls-files`` never selected (untracked), and the static list has no way to
     know the module exists at all. The caller derives that set and passes it
     here; this function only merges and checks it.
-
-    *extra_allowlist* admits repo-root-relative globs for **this one build**, on
-    top of the manifest's list (or *allowlist*). It exists so one distribution
-    can carry a host-only file without broadening the manifest's list, which
-    every other distribution and the container image also read: Claude Code's
-    ``legacy/`` escape hatch is the case, and the Codex and OpenCode builders
-    pass nothing here. A file it admits is staged but not required: a caller
-    that needs it present names it in *required_extra* too.
 
     The write is **atomic against the destination**: staging happens in a temp
     directory on the same filesystem (see :func:`_staging_parent` for *which*
@@ -553,7 +547,7 @@ def stage(
         )
 
     patterns = tuple(allowlist) if allowlist is not None else runtime_allowlist(root)
-    chosen = selected_files(root, prefix, (*patterns, *extra_allowlist))
+    chosen = selected_files(root, prefix, patterns)
     if not chosen:
         raise PayloadError(
             f"the allowlist selected no files under {prefix}. Either the prefix "
@@ -979,9 +973,20 @@ def target_module_paths(base: Optional[Path] = None) -> Tuple[str, ...]:
 #: A deliberate growth past one of these is a reviewed edit here, not a silent side
 #: effect. Claude Code's limit also stays under its 12,000,000-byte review target.
 DISTRIBUTION_BUDGETS: Dict[str, Tuple[int, int]] = {
-    "claude-code": (260, 11_500_000),  # measured 234 files, 10,350,754 bytes
-    "codex": (240, 11_300_000),        # measured 218 files, 10,215,610 bytes
-    "opencode": (240, 11_400_000),     # measured 218 files, 10,261,602 bytes, unpacked
+    # Raised 2026-11-08 for the code-health split (about 26 new runtime modules,
+    # references and schemas, none of them development files); measured then:
+    # claude-code 243 files / 10,527,413 bytes, codex 244 / 10,689,125. Raised
+    # again the same day for the module splits (U42a's six scheduler modules, with
+    # the provider and executor splits to come); measured at U42a: claude-code 272
+    # files, codex 273 / 10,793,263 bytes. File budgets raised 2026-11-09 for
+    # U44b's six executor modules (the executor is now a re-export facade);
+    # measured at U44b: claude-code 300 files / 11,043,439 bytes, codex 301 /
+    # 11,217,795. Byte budgets raised the same day: codex had 82 KB left, and the
+    # split modules each carry their docstrings; a development file leaking in
+    # still shows first in the file count.
+    "claude-code": (340, 12_000_000),     # the review target: past it is a decision
+    "codex": (330, 12_000_000),
+    "opencode": (330, 12_100_000),     # unpacked; tracks the codex tree
 }
 
 

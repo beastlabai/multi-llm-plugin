@@ -28,7 +28,7 @@ sys.path.insert(0, str(SKILL.parent.parent / "packaging"))
 
 import modes  # noqa: E402
 import multi_llm  # noqa: E402
-from tests.test_next_phase import S, UP_TO_TASKS, _build  # noqa: E402
+from tests.support.next_phase_world import S, UP_TO_TASKS, _build  # noqa: E402
 from utils import next_phase as np_  # noqa: E402
 
 #: What a why must never start with: the label is the host's to print.

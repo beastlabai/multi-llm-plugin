@@ -302,11 +302,10 @@ class TestOmpStreamReading:
         assert provider.parse_output(stdout, stderr)["success"] is True
         assert provider.classify_failure(stdout, stderr, 0) is None
 
-    def test_the_five_hundred_row_needs_the_structural_branch(self, provider):
-        """The stub's 500 sentence matches no shared `SERVER_ERROR_MARKERS` row.
-
-        Read off `errorStatus` instead, so the wording of any one vendor's 5xx
-        body is immaterial.
+    def test_the_five_hundred_row_is_a_server_error(self, provider):
+        """Read off `errorStatus`, so the wording of any one vendor's 5xx body
+        is immaterial. The stub's body is OpenAI's own 500 sentence, which a
+        shared `SERVER_ERROR_MARKERS` row also reads, so both routes agree here.
         """
         assert provider.classify_failure(*self._row("stdout-error"), 1) == \
             CATEGORY_SERVER_ERROR
@@ -322,12 +321,13 @@ class TestOmpStreamReading:
     def test_the_structural_verdict_survives_lane_as_string_classification(
         self, provider, row, exit_code
     ):
-        r"""Lane A classifies the error STRING and never calls `classify_failure`.
+        r"""The error STRING names the structural verdict.
 
-        `run_single_model`'s file-output lane reaches for
-        `classify_streams(str(result["error"]), "")`; `_format_failure_details`
-        and the Lane B executor are the only callers of the structural read. So
-        a verdict the sentence does not name arrives at that ladder as `None`,
+        Every failed child carries the structural read itself
+        (`details["failure_category"]`), and the sentence is held to the same
+        words as the reader's account of the verdict and as the fan-out's
+        `classify_streams(str(result["error"]), "")` fallback, where a verdict
+        the sentence does not name arrives as `None`,
         and `RetryLadder.record`'s last branch never retries it. `Command
         aborted` is deliberately not a marker, the denial's own text is not one,
         and the 500 body's `(type=server_error)` matches no
@@ -606,9 +606,10 @@ class TestOmpStreamReading:
 class TestAToolUseDeadlineKeepsToolContentsOutOfTheError:
     """A ``toolUse``-final stream is a deadline, whatever the tool read.
 
-    Lane A classifies the invocation's ``error`` string with
-    ``classify_streams(error, "")`` (``review_orchestrator_base``), and the
-    non-zero-exit path composes ``describe_failure`` into that string
+    The invocation's ``error`` string is the reader's account of the verdict
+    and the fan-out's ``classify_streams(error, "")`` fallback
+    (``review_orchestrator_base``), and the non-zero-exit path composes
+    ``describe_failure`` into that string
     (``llm_client``). A tool result quoting 401/429 must not reach either —
     the same rule pi's adapter keeps. The stream is the committed
     ``exit-zero-failure`` row with its tool result swapped for the markers.

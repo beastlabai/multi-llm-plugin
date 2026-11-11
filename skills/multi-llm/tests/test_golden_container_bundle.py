@@ -48,6 +48,7 @@ sys.path.insert(0, str(TESTS_DIR / "golden"))
 
 import container_bundle  # noqa: E402
 from bundle_compare import AllowlistError, load_allowlist, partition  # noqa: E402
+from tests.source_cache import source_text, source_tree  # noqa: E402
 
 CHAIN_MODULE = TESTS_DIR / "test_container_full_chain.py"
 REDIRECT = TESTS_DIR / "container" / "redirect.yaml"
@@ -160,7 +161,7 @@ class TestTheGateIsWired:
     """The assertions whose absence let a documented guard run nothing."""
 
     def test_the_chain_module_imports_the_capture_and_comparison_machinery(self):
-        tree = ast.parse(CHAIN_MODULE.read_text(encoding="utf-8"))
+        tree = source_tree(CHAIN_MODULE)
         imported: set[str] = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom):
@@ -179,13 +180,13 @@ class TestTheGateIsWired:
 
     def test_the_chain_module_asserts_against_the_baseline(self):
         """A comparison, not just an import: `diff_bundles` reaching an assert."""
-        source = CHAIN_MODULE.read_text(encoding="utf-8")
+        source = source_text(CHAIN_MODULE)
         assert "container_bundle.diff_bundles(" in source, (
             "the chain module imports the capture module but never diffs a "
             "bundle against a baseline"
         )
         assert "container_bundle.load_baseline(" in source
-        tree = ast.parse(source)
+        tree = source_tree(CHAIN_MODULE)
         classes = [node.name for node in ast.walk(tree)
                    if isinstance(node, ast.ClassDef)]
         assert "TestTheNormalizedBundleReproducesItsBaseline" in classes, (

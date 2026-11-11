@@ -34,10 +34,11 @@ what the gate falls back to.
 
 **Where the labels live.** copilot and muse have manifests, so each row's label
 is its ``expect.salvage``; a row with files and no label fails. codex and
-opencode have no manifest (both sit in ``MANIFEST_PENDING``), so their labels
-are the two tables below, keyed by path, and a coverage test fails on any
-stdout capture a table does not name — a new capture is labelled when it is
-committed, not when it bites.
+opencode also carry captures no manifest row names (the version folders and
+the permission rig), so those are labelled by the two tables below, keyed by
+path, and a coverage test fails on any stdout capture that neither a table nor
+a manifest row names — a new capture is labelled when it is committed, not
+when it bites.
 
 **The baseline.** Plan §4.1 measured the gate over the raw captures: copilot 11
 of 12, codex 14 of 18, opencode 187 of 312 passed. The ``none`` rows among them
@@ -46,7 +47,8 @@ are what this sweep turns red on the old input and green on the reduced one;
 
 **Six more adapters** (plans/ask-answer-recovery-and-false-success.md T2.4,
 D2.5): cline, goose, grok and vibe, labelled in their manifests, and kimi and
-qwen-code, labelled by the tables below (both sit in ``MANIFEST_PENDING``).
+qwen-code, whose manifest rows live under ``rows/`` and whose older top-level
+captures are labelled by the tables below.
 Their hooks also feed the ask lane's ``answer_text``, and unlike the four
 above they never answer ``None``: each CLI is always run in its structured
 mode, so a stdout that does not hold the adapter's answer shape is a transport
@@ -311,7 +313,11 @@ _RIG_CASES = (
 #: permission whose text parts are only narration, and the raw stream passed
 #: the gate on its tool parts.
 OPENCODE_LABELS: Dict[str, str] = {
-    f"capture/{OC_PIN}/{case}.jsonl": "none" for case in _RIG_CASES
+    **{f"capture/{OC_PIN}/{case}.jsonl": "none" for case in _RIG_CASES},
+    # The heads of the two runs that looped on a failed response (loop/README.md):
+    # empty steps only, no text part at all.
+    "loop/error-envelope.head.stdout.txt": "none",
+    "loop/truncated.head.stdout.txt": "none",
 }
 
 
@@ -372,12 +378,12 @@ QWEN_CODE_LABELS: Dict[str, str] = {
     "invalid-model.stdout.json": "none",
     "no-finish-reason.stdout.json": "none",
     "truncated.stdout.json": "none",
-    "stdout-error.stdout.json": "none",
     "wall-time-exceeded.stdout.txt": "none",
     "rate-limit-wall-time.stdout.txt": "none",
     # 0.21.13 (the floor) marked its API-error record clean; kept graded.
-    "exit-zero-failure.0.21.13.stdout.json": "none",
     "truncated.0.21.13.stdout.json": "none",
+    # exit-zero-failure.0.21.13 and stdout-error are rows of the manifest,
+    # which labels them.
 }
 
 
@@ -390,6 +396,16 @@ def _qwen_code_stdout_captures() -> Set[str]:
     return {
         path.name
         for path in list(root.glob("*.stdout.json")) + list(root.glob("*.stdout.txt"))
+    }
+
+
+def _manifest_stdout(provider: str) -> Set[str]:
+    """The stdout files ``provider``'s manifest rows name, relative to its
+    fixture directory: swept by :func:`test_manifest_row_meets_its_salvage_label`."""
+    return {
+        body["stdout"]
+        for body in ((MANIFESTS.get(provider) or {}).get("rows") or {}).values()
+        if body.get("stdout") and "not_applicable" not in body
     }
 
 
@@ -409,9 +425,10 @@ TABLE_ROWS = [
 
 @pytest.mark.parametrize("provider", sorted(TABLES))
 def test_the_table_names_every_stdout_capture(provider: str) -> None:
-    """A capture committed without a label fails here, by name."""
+    """A capture committed without a label fails here, by name. A capture a
+    manifest row names is labelled there (``expect.salvage``) and not here."""
     table, discover = TABLES[provider]
-    on_disk = discover()
+    on_disk = discover() - _manifest_stdout(provider)
     assert sorted(on_disk - set(table)) == [], "unlabelled stdout captures"
     assert sorted(set(table) - on_disk) == [], "labels for captures that are gone"
 

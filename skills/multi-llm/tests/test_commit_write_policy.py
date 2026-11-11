@@ -605,12 +605,12 @@ class TestTheProtectedCheckDoesNotNeedTheSweep:
     def test_a_protected_write_is_caught_and_restored_from_the_guards_copy(
         self, env, monkeypatch, budget,
     ):
-        from utils import write_batch_scheduler as wbs
+        from utils import write_sweep
 
         head = _committed_repo(env)
         (env.root / "src/b.py").write_text("b = 'drifted'\n", encoding="utf-8")
         guard = _guard_with_copies(env, head, {"src/b.py": _disk_blob(env.root, "src/b.py")})
-        monkeypatch.setattr(wbs, budget, 1 if budget == "SWEEP_MAX_FILES" else 0)
+        monkeypatch.setattr(write_sweep, budget, 1 if budget == "SWEEP_MAX_FILES" else 0)
 
         result, respond, state, _lines = self._run(
             env, guard,
@@ -632,12 +632,12 @@ class TestTheProtectedCheckDoesNotNeedTheSweep:
         assert state.get_task_status("apply-fix-batch-0") == "failed"
 
     def test_a_protected_path_absent_before_the_batch_is_deleted(self, env, monkeypatch):
-        from utils import write_batch_scheduler as wbs
+        from utils import write_sweep
 
         head = _committed_repo(env, "src/gone.py")
         (env.root / "src/gone.py").unlink()          # deleted since head: protected, null
         guard = _guard_with_copies(env, head, {"src/gone.py": None})
-        monkeypatch.setattr(wbs, "SWEEP_MAX_FILES", 1)
+        monkeypatch.setattr(write_sweep, "SWEEP_MAX_FILES", 1)
 
         result, _respond, _state, _lines = self._run(
             env, guard,
@@ -649,13 +649,13 @@ class TestTheProtectedCheckDoesNotNeedTheSweep:
         assert not (env.root / "src/gone.py").exists()
 
     def test_without_a_copy_the_write_is_named_and_left_for_a_human(self, env, monkeypatch):
-        from utils import write_batch_scheduler as wbs
+        from utils import write_sweep
 
         head = _committed_repo(env)
         (env.root / "src/b.py").write_text("b = 'drifted'\n", encoding="utf-8")
         guard = _guard(head, expect=_head_expect(env.root, head, "src/a.py"),
                        protected={"src/b.py": _disk_blob(env.root, "src/b.py")})
-        monkeypatch.setattr(wbs, "SWEEP_MAX_FILES", 1)
+        monkeypatch.setattr(write_sweep, "SWEEP_MAX_FILES", 1)
 
         result, _respond, _state, _lines = self._run(
             env, guard,
@@ -664,19 +664,19 @@ class TestTheProtectedCheckDoesNotNeedTheSweep:
 
         assert result.exit_code == 3
         reason = result.outcomes[0].reason
-        assert "Not restored, because no rollback point exists (src/b.py)" in reason
+        assert "Not restored (src/b.py: the commit review kept no copy of it)" in reason
 
     def test_a_copy_older_than_a_later_edit_is_never_written_over_it(self, env, monkeypatch):
         """The user edited protected ``b.py`` after the guard took its copy,
         then a batch clobbered it: the copy is not what ``b.py`` held before
         the batch, so it is not restored over the user's edit."""
-        from utils import write_batch_scheduler as wbs
+        from utils import write_sweep
 
         head = _committed_repo(env)
         (env.root / "src/b.py").write_text("b = 'drifted'\n", encoding="utf-8")
         guard = _guard_with_copies(env, head, {"src/b.py": _disk_blob(env.root, "src/b.py")})
         (env.root / "src/b.py").write_text("b = 'the user, later'\n", encoding="utf-8")
-        monkeypatch.setattr(wbs, "SWEEP_MAX_FILES", 1)
+        monkeypatch.setattr(write_sweep, "SWEEP_MAX_FILES", 1)
 
         result, _respond, _state, _lines = self._run(
             env, guard,
@@ -684,21 +684,21 @@ class TestTheProtectedCheckDoesNotNeedTheSweep:
         )
 
         assert result.exit_code == 3
-        assert "Not restored, because no rollback point exists (src/b.py)" in \
-            result.outcomes[0].reason
+        assert ("Not restored (src/b.py: the copy the commit review kept is not what "
+                "it held before the batch)") in result.outcomes[0].reason
         assert (env.root / "src/b.py").read_text() == "b = 'clobbered'\n"
 
     def test_an_edit_between_batches_is_the_users_not_a_violation(self, env, monkeypatch):
         """Only a change inside a batch's own window counts: a protected file
         the user edits before a batch that never touches it stays as they
         left it, and the batch completes."""
-        from utils import write_batch_scheduler as wbs
+        from utils import write_sweep
 
         head = _committed_repo(env)
         (env.root / "src/b.py").write_text("b = 'drifted'\n", encoding="utf-8")
         guard = _guard_with_copies(env, head, {"src/b.py": _disk_blob(env.root, "src/b.py")})
         (env.root / "src/b.py").write_text("b = 'the user, later'\n", encoding="utf-8")
-        monkeypatch.setattr(wbs, "SWEEP_MAX_FILES", 1)
+        monkeypatch.setattr(write_sweep, "SWEEP_MAX_FILES", 1)
 
         result, respond, _state, _lines = self._run(
             env, guard, {"apply-fix-batch-0": [("src/a.py", "a = 2\n")]},
@@ -711,12 +711,12 @@ class TestTheProtectedCheckDoesNotNeedTheSweep:
     def test_a_batch_that_never_reached_classification_is_restored_too(self, env, monkeypatch):
         """A reply that never parses ends the dispatch before ``_classify``
         (``_audit_terminal``): the protected write is put back all the same."""
-        from utils import write_batch_scheduler as wbs
+        from utils import write_sweep
 
         head = _committed_repo(env)
         (env.root / "src/b.py").write_text("b = 'drifted'\n", encoding="utf-8")
         guard = _guard_with_copies(env, head, {"src/b.py": _disk_blob(env.root, "src/b.py")})
-        monkeypatch.setattr(wbs, "SWEEP_MAX_FILES", 1)
+        monkeypatch.setattr(write_sweep, "SWEEP_MAX_FILES", 1)
         state = _guarded_state(env, guard)
 
         def respond(task, prompt):
@@ -732,13 +732,48 @@ class TestTheProtectedCheckDoesNotNeedTheSweep:
         assert "It also changed src/b.py, which the commit review protects" in outcome.reason
         assert (env.root / "src/b.py").read_text() == "b = 'drifted'\n"
 
+    def test_a_refused_restore_of_the_guards_copy_is_not_called_unbacked(
+        self, env, monkeypatch,
+    ):
+        """Codex review 1 of U87: a protected write in a dispatch that never
+        reached classification, whose restore from the guard's copy was
+        refused, was reported as "no rollback point exists", though the copy
+        is kept. The reason now gives the restore's own words instead."""
+        from utils import write_sweep
+        from utils import write_safety
+
+        head = _committed_repo(env)
+        (env.root / "src/b.py").write_text("b = 'drifted'\n", encoding="utf-8")
+        guard = _guard_with_copies(env, head, {"src/b.py": _disk_blob(env.root, "src/b.py")})
+        monkeypatch.setattr(write_sweep, "SWEEP_MAX_FILES", 1)
+        state = _guarded_state(env, guard)
+
+        def refused(*_args, **_kwargs):
+            raise OSError("its folder was replaced")
+
+        monkeypatch.setattr(write_safety, "_replace_with_payload", refused)
+
+        def respond(task, prompt):
+            (env.root / "src/b.py").write_text("b = 'clobbered'\n", encoding="utf-8")
+            return "no json here at all"
+
+        result = env.scheduler([_fix_task(env, 0, "src/a.py")], kind="apply_code_fixes",
+                               state=state, respond=respond, log=lambda line: None).run()
+
+        reason = result.outcomes[0].reason
+        assert "It also changed src/b.py, which the commit review protects" in reason
+        assert "no rollback point" not in reason
+        assert ("Not restored (src/b.py: its folder was replaced): left on disk as "
+                "it is now, so inspect it by hand.") in reason
+        assert (env.root / "src/b.py").read_text() == "b = 'clobbered'\n"
+
     def test_an_undeclared_write_to_the_context_plan_fails_like_a_protected_write(
         self, env, monkeypatch,
     ):
         """Item 4: the context plan joins the exact-path deny layer and the
         watched set even when it never changed since ``head`` (so it is not
         in the protected set)."""
-        from utils import write_batch_scheduler as wbs
+        from utils import write_sweep
         from utils.write_safety import CONTEXT_PLAN_RULE
 
         (env.root / "docs").mkdir()
@@ -748,7 +783,7 @@ class TestTheProtectedCheckDoesNotNeedTheSweep:
         _git(env.root, "commit", "-q", "-m", "reviewed")
         head = _git(env.root, "rev-parse", "HEAD")
         guard = _guard_with_copies(env, head, {}, context_plan="docs/x.md")
-        monkeypatch.setattr(wbs, "SWEEP_MAX_FILES", 1)
+        monkeypatch.setattr(write_sweep, "SWEEP_MAX_FILES", 1)
         state = _guarded_state(env, guard)
         respond = _runner(env, {"apply-fix-batch-0": [
             ("src/a.py", "a = 2\n"), ("docs/x.md", "# rewritten by the batch\n")]})
@@ -798,7 +833,7 @@ class TestTheSecondReviewOnTheExecutor:
         undone) and the link left re-pointed; it is now named and restored
         as the link, from the guard's copy, and ``a.py`` is left alone."""
         from utils import commit_apply as real
-        from utils import write_batch_scheduler as wbs
+        from utils import write_sweep
 
         head = _committed_repo(env, "src/b.py")
         link = env.root / "src" / "link.py"
@@ -807,7 +842,7 @@ class TestTheSecondReviewOnTheExecutor:
             env, head, real.disk_blob_ids(["src/link.py"], cwd=str(env.root)))
         assert os.path.islink(env.root / guard["protected_copies"] / "src/link.py")
         if sweep == "unavailable":
-            monkeypatch.setattr(wbs, "SWEEP_MAX_FILES", 1)
+            monkeypatch.setattr(write_sweep, "SWEEP_MAX_FILES", 1)
         state = _guarded_state(env, guard)
 
         def respond(task, prompt):
@@ -1131,7 +1166,7 @@ class TestNoGuardRunsUnchanged:
 
 
 class TestTheResumeBindingUnderAGuard:
-    """D2g's resume binding (``_task_fingerprint``) leaves the prompt's
+    """D2g's resume binding (``ResumeEvidence.task_fingerprint``) leaves the prompt's
     protected-path clause out under a guard. A ``--resume`` grows the
     protected set whenever its re-check protects a file edited by hand, and a
     completed batch must not read as made from changed inputs and be applied
@@ -1154,18 +1189,18 @@ class TestTheResumeBindingUnderAGuard:
             [self._task(env, rules[0])], kind="apply_code_fixes",
             state=_guarded_state(env, _guard(head, expect={})), respond=_runner(env, {}),
         )
-        bound = [guarded._task_fingerprint(self._task(env, rule)) for rule in rules]
+        bound = [guarded._evidence.task_fingerprint(self._task(env, rule)) for rule in rules]
         assert bound[0] == bound[1] == bound[2]
-        assert guarded._task_fingerprint(self._task(env, rules[1], title="b")) != bound[1]
+        assert guarded._evidence.task_fingerprint(self._task(env, rules[1], title="b")) != bound[1]
         other_plan = code_only_rule("plans/other.md", protected=["src/b.py"],
                                     protected_head=head)
-        assert guarded._task_fingerprint(self._task(env, other_plan)) != bound[1]
+        assert guarded._evidence.task_fingerprint(self._task(env, other_plan)) != bound[1]
 
         plain = env.scheduler(
             [self._task(env, rules[0])], kind="apply_code_fixes",
             state=FakeState(env.tmp_path / "plain-state.json"), respond=_runner(env, {}),
         )
-        assert plain._task_fingerprint(self._task(env, rules[0])) != plain._task_fingerprint(
+        assert plain._evidence.task_fingerprint(self._task(env, rules[0])) != plain._evidence.task_fingerprint(
             self._task(env, rules[1]))
 
 
@@ -1588,6 +1623,31 @@ class TestTheNativeReCheck:
 
         code, out, err = _write_prompt(native, capsys, "apply-fix-batch-1")
         assert code == 0 and out.startswith("[WRITE_PROMPT] "), err
+
+    @pytest.mark.parametrize("content", [b"[]", b"{not json"], ids=["a-list", "not-json"])
+    def test_a_state_file_with_no_object_by_the_locked_read_is_no_re_check(
+        self, native, fake_apply, monkeypatch, content,
+    ):
+        """The re-check's locked read finds ``state.json`` holding no object
+        (rewritten since its first look): no guard, so ``None`` and nothing
+        written, as for a state it cannot read at all."""
+        from utils import write_prompt
+
+        native.materialize([_batch("src/a.py", "g0")])
+        native.install_guard(_guard(native.head, expect=_head_expect(
+            native.root, native.head, "src/a.py")))
+        native.write("src/a.py", "a = 'by hand'\n")
+        real_recheck = write_prompt.commit_recheck_failing
+
+        def then_rewritten(*args, **kwargs):
+            failing = real_recheck(*args, **kwargs)
+            assert failing, "the edit fails the re-check"
+            native.state_path.write_bytes(content)
+            return failing
+
+        monkeypatch.setattr(write_prompt, "commit_recheck_failing", then_rewritten)
+        assert write_prompt.commit_stale_check(native.phase_dir, "apply-fix-batch-0") is None
+        assert native.state_path.read_bytes() == content
 
 
 class TestNoGuardOnTheNativeLeg:

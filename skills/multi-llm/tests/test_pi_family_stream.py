@@ -29,6 +29,7 @@ from utils.providers import omp as omp_module  # noqa: E402
 from utils.providers import pi as pi_module  # noqa: E402
 from utils.providers import pi_family_stream as pfs  # noqa: E402
 from utils.providers.omp import OMP_DIALECT, OmpProvider  # noqa: E402
+from tests.source_cache import source_tree  # noqa: E402
 
 MODULE_PATH = SKILL_ROOT / "utils" / "providers" / "pi_family_stream.py"
 OMP_FIXTURES = SKILL_ROOT / "tests" / "fixtures" / "omp"
@@ -117,7 +118,7 @@ class TestImportOrder:
         assert "utils.providers.pi_family_stream" in out[module]
 
     def test_the_source_never_names_pi_or_omp_in_an_import(self):
-        tree = ast.parse(MODULE_PATH.read_text(encoding="utf-8"))
+        tree = source_tree(MODULE_PATH)
         imported = []
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):

@@ -23,7 +23,7 @@ declares:
    which must return the content that went in, with ``parse_usage`` agreeing
    with the declared ``usage_support``.
 
-This is ``tests/test_providers.py``'s declaration-vs-implementation discipline
+This is ``tests/test_provider_contract.py``'s declaration-vs-implementation discipline
 applied to the mock: nothing here is new *behaviour*, it is the first assertion
 over behaviour the mock was already assumed to have.
 
@@ -59,6 +59,7 @@ from utils.providers.base import (  # noqa: E402
 )
 
 from .mocks import mock_llm  # noqa: E402
+from tests.source_cache import source_tree
 
 SKILL_DIR = Path(__file__).resolve().parent.parent
 PROVIDERS_YAML = SKILL_DIR / "providers.yaml"
@@ -100,7 +101,7 @@ NO_ADAPTER = "<no adapter in the provider registry>"
 
 
 def _mock_ast() -> ast.Module:
-    return ast.parse(MOCK_LLM_PATH.read_text(encoding="utf-8"))
+    return source_tree(MOCK_LLM_PATH)
 
 
 def _function(name: str) -> ast.FunctionDef:
@@ -414,7 +415,7 @@ class TestMockWireFormatSurvivesTheAdapter:
             assert usage is None, (
                 f"{identity} declares usage_support='none' but recovered {usage!r} "
                 f"from the mock's stream; the declaration and the extractor "
-                f"disagree (tests/test_providers.py owns the same invariant from "
+                f"disagree (tests/test_provider_contract.py owns the same invariant from "
                 f"the adapter's side)."
             )
             return

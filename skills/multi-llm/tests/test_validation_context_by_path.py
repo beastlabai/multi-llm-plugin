@@ -27,6 +27,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils import review_orchestrator_base as rob  # noqa: E402
 from utils import status_file  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from utils import dispatch_spawn, task_dispatch  # noqa: E402
+from utils import runner_selection  # noqa: E402
 from utils.subagent_tasks import (  # noqa: E402
     PromptBudget,
     TaskFileError,
@@ -47,9 +49,12 @@ from utils.validation import (  # noqa: E402
     TASKS_BACKUP_NAME,
     TASKS_SNAPSHOT_NAME,
     VALIDATION_CONTEXT_LIMIT,
+    RoundProvenance,
     ValidationContextError,
+    ValidationRound,
     bind_document_file,
     bind_document_text,
+    materialize_validation_round,
     merge_batched_validation_results,
     prepare_batched_revalidation_tasks,
     prepare_batched_validation_tasks,
@@ -291,7 +296,7 @@ class TestRefusals:
 
     def test_e_materialization_resolves_the_executor_runner(self, monkeypatch):
         args = argparse.Namespace(exec_subagents=True, validation_model="auto")
-        monkeypatch.setattr(executor, "resolve_task_runner", lambda task, anchor=None: "blind:m")
+        monkeypatch.setattr(runner_selection, "resolve_task_runner", lambda task, anchor=None: "blind:m")
         import utils.provider_registry as registry
 
         monkeypatch.setattr(registry, "parse_model_spec", lambda spec, anchor=None: ("blind", "m"))
@@ -546,7 +551,7 @@ class TestReadScopeOutsideCwd:
             seen.update(kwargs)
             raise Stop()
 
-        monkeypatch.setattr(executor, "_spawn", fake_spawn)
+        monkeypatch.setattr(dispatch_spawn, "_spawn", fake_spawn)
         with pytest.raises(Stop):
             executor.dispatch_task(
                 task, phase_dir=str(phase), runner="claude-code:sonnet",
@@ -575,8 +580,9 @@ class TestReadScopeOutsideCwd:
             supports_workspace_reads=True, reads_outside_cwd=False,
             read_scope_flag=None, supports_profile=lambda profile: True,
         )
-        monkeypatch.setattr(executor, "parse_model_spec", lambda spec, anchor=None: ("blind", "m"))
-        monkeypatch.setattr(executor, "get_provider", lambda name: blind)
+        monkeypatch.setattr(
+            task_dispatch, "parse_model_spec", lambda spec, anchor=None: ("blind", "m"))
+        monkeypatch.setattr(task_dispatch, "get_provider", lambda name: blind)
         outcome = executor.dispatch_task(
             task, phase_dir=str(phase), runner="blind:m", cwd=str(repo),
         )
@@ -620,18 +626,19 @@ def _review_tasks_round(tmp_path, plan_text, tasks_text, *, tasks_readable=True)
     tasks = write(tmp_path / "tasks" / "tasks.md", tasks_text)
     phase = tmp_path / "plan" / "review-tasks"
     plan_doc = bind_document_file(str(plan), str(phase))
-    kwargs = rob.validation_context_kwargs(
+    primary, secondary = rob.validation_context_blocks(
         "review-tasks", plan_doc.text, {"tasks_file": str(tasks)},
         plan_document=plan_doc, phase_dir=str(phase),
     )
     if not tasks_readable:
-        doc = kwargs["secondary_document"]
+        doc = secondary.document
         doc.path, doc.in_phase_dir = None, False
         doc.reason = "snapshot could not be written"
-    result = prepare_batched_validation_tasks(
+    result = materialize_validation_round(ValidationRound(
         groups=groups(), output_dir=str(phase), plan_file=str(plan),
-        tasks_file=str(tasks), phase="review-tasks", **kwargs,
-    )
+        primary=primary, secondary=secondary,
+        provenance=RoundProvenance(tasks_file=str(tasks), phase="review-tasks"),
+    ))
     return phase, plan, tasks, result
 
 
@@ -799,7 +806,7 @@ class TestSecondaryBlock:
 
 def _args(**over):
     base = dict(skip_validation=False, validation_model="auto", timeout=None,
-                internal_validation=False, force=False, consolidation_threshold=None)
+                force=False, consolidation_threshold=None)
     base.update(over)
     return argparse.Namespace(**base)
 
@@ -970,7 +977,7 @@ class TestThroughTheReaggregate:
         assert not list(phase_dir.glob("validation_batch_*[0-9].json"))
 
     def test_7_1d_a_legacy_validation_json_is_retired_by_the_stale_check(self, tmp_path):
-        from utils.validation import stale_validation_reason
+        from utils.validation import validation_source_decision
 
         plan, out_dir, phase_dir = _phase(tmp_path, big_doc())
         _reaggregate(plan, out_dir, phase_dir)
@@ -982,9 +989,9 @@ class TestThroughTheReaggregate:
             "groups": [], "metadata": {"model": "old", "schema_version": "2.1",
                                        "batch_sha256": {}},
         }), encoding="utf-8")
-        reason = stale_validation_reason(
+        reason = validation_source_decision(
             phase_dir / "validation.json", phase_dir / "grouped.json"
-        )
+        )[0]
         assert reason and "contract 1" in reason
 
     def test_2_10_an_under_limit_contract_1_round_is_left_alone(self, tmp_path):

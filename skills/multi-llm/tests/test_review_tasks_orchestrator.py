@@ -203,12 +203,16 @@ class TestParseArgs:
                 args = parse_args()
         assert args.validation_model == "gemini:flash"
 
-    def test_parse_args_internal_validation(self):
-        """--internal-validation flag is recognized."""
-        with patch("sys.argv", ["prog", "--plan-file", "p.md", "--internal-validation"]):
-            with patch("review_tasks_orchestrator.get_all_model_specs", return_value=[]):
+    def test_parse_args_retired_internal_validation(self, capsys):
+        """The retired --internal-validation still parses, warns once and sets nothing."""
+        with patch("review_tasks_orchestrator.get_all_model_specs", return_value=[]):
+            with patch("sys.argv", ["prog", "--plan-file", "p.md", "--internal-validation"]):
                 args = parse_args()
-        assert args.internal_validation is True
+            with patch("sys.argv", ["prog", "--plan-file", "p.md"]):
+                default = parse_args()
+        assert vars(args) == vars(default)
+        err = capsys.readouterr().err
+        assert err.count("--internal-validation is retired") == 1
 
     def test_parse_args_providers_yaml_not_found(self):
         """Argument parsing succeeds even when providers.yaml is missing."""
@@ -1154,39 +1158,39 @@ class TestValidationContextKwargs:
     two verdicts came back quoting text no validator had been given."""
 
     def test_review_tasks_embeds_both_documents_each_labelled(self, plan_with_tasks):
-        from utils.review_orchestrator_base import validation_context_kwargs
+        from utils.review_orchestrator_base import validation_context_blocks
 
         _plan_path, tasks_path = plan_with_tasks
-        kwargs = validation_context_kwargs(
+        primary, secondary = validation_context_blocks(
             "review-tasks", "PLAN TEXT", {"tasks_file": str(tasks_path)}
         )
-        assert kwargs["context"] == "PLAN TEXT"
-        assert "T001: Create database schema" in kwargs["secondary_context"]
-        assert "Plan" in kwargs["context_label"]
-        assert "artifact under review" in kwargs["secondary_context_label"]
+        assert primary.text == "PLAN TEXT"
+        assert "T001: Create database schema" in secondary.text
+        assert "Plan" in primary.label
+        assert "artifact under review" in secondary.label
 
     def test_every_other_phase_keeps_the_single_context_default(self):
         """review-plan's prompts must not move: the defaults are the contract."""
-        from utils.review_orchestrator_base import validation_context_kwargs
+        from utils.review_orchestrator_base import validation_context_blocks
+        from utils.validation import ContextBlock
 
-        assert validation_context_kwargs("review-plan", "PLAN TEXT", None) == {
-            "context": "PLAN TEXT"
-        }
-        assert validation_context_kwargs(
+        plan_only = (ContextBlock("PLAN TEXT"), None)
+        assert validation_context_blocks("review-plan", "PLAN TEXT", None) == plan_only
+        assert validation_context_blocks(
             "review-plan", "PLAN TEXT", {"tasks_file": "/somewhere/tasks.md"}
-        ) == {"context": "PLAN TEXT"}
+        ) == plan_only
 
     def test_an_unreadable_tasks_file_degrades_to_the_plan_and_says_so(
         self, capsys, temp_dir
     ):
         """A completed fan-out is not thrown away over a missing scratch file;
         the batch still validates, against less."""
-        from utils.review_orchestrator_base import validation_context_kwargs
+        from utils.review_orchestrator_base import validation_context_blocks
+        from utils.validation import ContextBlock
 
-        kwargs = validation_context_kwargs(
+        assert validation_context_blocks(
             "review-tasks", "PLAN TEXT", {"tasks_file": str(temp_dir / "gone.md")}
-        )
-        assert kwargs == {"context": "PLAN TEXT"}
+        ) == (ContextBlock("PLAN TEXT"), None)
         assert "validating against the plan alone" in capsys.readouterr().err
 
 
@@ -1208,7 +1212,7 @@ class TestValidationJsonIsNamedOnBothChannels:
     and `apply_task_suggestions_orchestrator.load_data` hard-fails without it."""
 
     def _aggregate(self, phase_dir, temp_dir, with_validation: bool):
-        from utils import detach, status_file
+        from utils import run_record, status_file
         from utils.json_extractor import sanitize_model_name
 
         suggestions = [{
@@ -1235,8 +1239,8 @@ class TestValidationJsonIsNamedOnBothChannels:
         plan_path = temp_dir / "test-plan.md"
         plan_path.write_text("# Test Plan\n\n## Overview\nTest.\n", encoding="utf-8")
 
-        saved = detach._ACTIVE
-        detach._ACTIVE = _FakeRunHandle(phase_dir)
+        saved = run_record._ACTIVE
+        run_record._ACTIVE = _FakeRunHandle(phase_dir)
         try:
             aggregate_results(
                 prefix="test-plan",
@@ -1248,7 +1252,7 @@ class TestValidationJsonIsNamedOnBothChannels:
                 plan_path=str(plan_path),
             )
         finally:
-            detach._ACTIVE = saved
+            run_record._ACTIVE = saved
         return status_file.read_status(phase_dir).get("output_files") or {}
 
     def test_validation_json_is_recorded_as_an_output_file(self, phase_dir, temp_dir):

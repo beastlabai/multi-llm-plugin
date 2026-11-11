@@ -25,46 +25,12 @@ import json
 import re
 
 import multi_llm  # noqa: E402
-from tests.test_check_gate_fixture import (  # noqa: F401  (the fixture)
-    ALLOW,
-    DENY,
-    FINDINGS,
-    PLAN as CHECK_GATE_PLAN,
-    _check,
-    _first_run,
-    _policy,
-    repo,
+from tests.support.gate_fixture import (
+    ALLOW, DENY, FINDINGS, PLAN as CHECK_GATE_PLAN, _check, _first_run, _policy,
 )
-from tests.test_implement_stop_account import _dispatched_titles, _implement
+from tests.support.implement_world import _dispatched_titles, _implement
 from utils.state_manager import get_or_create_state
-
-#: Implement's `[ETA]` lines count tasks and say so (fix round 22).
-ETA = re.compile(r"\[ETA\] implement: task (\d+)/(\d+) done")
-
-
-def _etas(text: str) -> list:
-    """Every ``[ETA] implement: task N/M`` line's ``(N, M)``, in order."""
-    return [(int(a), int(b)) for a, b in ETA.findall(text)]
-
-
-def _util(capsys, *argv):
-    code = multi_llm.main(["util", *argv])
-    captured = capsys.readouterr()
-    return code, captured.out, captured.err
-
-
-def _emit(repo, capsys, *flags):
-    import implement_orchestrator
-
-    assert implement_orchestrator.main(
-        ["--plan-file", str(repo.plan), "--yes", *flags]
-    ) == 0
-    out = capsys.readouterr().out
-    path = next(
-        line.split(": ", 1)[1] for line in out.splitlines()
-        if line.startswith("Output file: ")
-    )
-    return json.loads(open(path, encoding="utf-8").read()), out
+from tests.support.dispatch_world import LIVE_LAYOUT, _emit, _etas, _run, _util
 
 
 class TestTheNativeEtaEndsAtTheTasksDispatched:
@@ -237,7 +203,7 @@ class TestATaskKeptOutForTwoReasons:
 
     @staticmethod
     def _repo(tmp_path, monkeypatch):
-        from tests.test_implement_stop_account import make_repo
+        from tests.support.implement_world import make_repo
 
         return make_repo(tmp_path, monkeypatch, TWO_CAUSES)
 
@@ -336,15 +302,6 @@ def _organized(text: str) -> list:
     return [line for line in text.splitlines() if line.startswith("Organized into ")]
 
 
-#: The live fixture's layout (run 8): T007 writes its own file, so it sits in
-#: batch 2 beside T004, before the refused T005, and the run's dispatch walk
-#: counts it as waiting on T002's verdict.
-LIVE_LAYOUT = CHECK_GATE_PLAN.replace(
-    "Write the note.\n- Depends on: T002\n- Files to modify: src/main.py",
-    "Write the note.\n- Depends on: T002\n- Files to modify: docs/release.md",
-)
-
-
 class TestTheFirstRunEtaCountsWhatItDispatches:
     """Live run 8 #1 (Codex and OpenCode stop 01): "Organized into 3
     execution batches: 5 task(s) to dispatch (T007 waits on a check's
@@ -355,7 +312,7 @@ class TestTheFirstRunEtaCountsWhatItDispatches:
 
     @staticmethod
     def _live(tmp_path, monkeypatch):
-        from tests.test_implement_stop_account import make_repo
+        from tests.support.implement_world import make_repo
 
         repo = make_repo(tmp_path, monkeypatch, LIVE_LAYOUT)
         _policy(repo, DENY)
@@ -451,10 +408,10 @@ class TestTheFirstRunEtaCountsWhatItDispatches:
         test (here the grant check) leaves the total, as the native leg's
         `util batch-done` withdraws one; nothing finished, and the line says
         so."""
-        from utils.write_batch_scheduler import WriteBatchScheduler
+        from utils.write_grant import WriteGrant
 
         monkeypatch.setattr(
-            WriteBatchScheduler, "_grant_mismatch",
+            WriteGrant, "grant_mismatch",
             lambda self, task: (
                 "the grant does not match" if task.get("task_id") == "T001" else None
             ),
@@ -489,12 +446,6 @@ class TestTheFirstRunEtaCountsWhatItDispatches:
             "ALL DISPATCHED TASKS COMPLETE · T005 skipped at your request; "
             "T006 skipped with a skipped task"
         ) in text, text
-
-
-def _run(repo, capsys, *flags) -> tuple:
-    code = _implement(repo, *flags)
-    captured = capsys.readouterr()
-    return code, captured.out + captured.err
 
 
 class TestTheExecutorSaysWhatItsRunDispatches:
@@ -606,11 +557,13 @@ class TestARefusedTaskInAGroupThatRunsTogether:
     def test_the_line_counts_the_siblings_dispatched_beside_it(
         self, tmp_path, monkeypatch, capsys,
     ):
-        from tests.test_implement_stop_account import make_repo
+        from tests.support.implement_world import make_repo
         from utils.write_batch_scheduler import WriteBatchScheduler
 
         repo = make_repo(tmp_path, monkeypatch, PARALLEL)
-        _policy(repo, DENY)
+        # A batch is admitted under the phase's ceiling and the driver key as
+        # it reads now, so both say 3 (the host leg is pinned by the patch).
+        _policy(repo, DENY + "  max_concurrent_write_subagents: 3\n")
         monkeypatch.setattr(WriteBatchScheduler, "write_ceiling", lambda self: 3)
         code, text = _run(repo, capsys)
         assert code == 3, text
@@ -624,7 +577,7 @@ class TestARefusedTaskInAGroupThatRunsTogether:
     def test_one_at_a_time_the_line_still_stops_at_the_refused_task(
         self, tmp_path, monkeypatch, capsys,
     ):
-        from tests.test_implement_stop_account import make_repo
+        from tests.support.implement_world import make_repo
 
         repo = make_repo(tmp_path, monkeypatch, PARALLEL)
         _policy(repo, DENY)
@@ -642,7 +595,7 @@ class TestAFailedCheckAndAManualTask:
     def test_the_manual_task_is_not_counted_and_the_unchanged_failure_stops(
         self, tmp_path, monkeypatch, capsys,
     ):
-        from tests.test_implement_stop_account import _check_fails, make_repo
+        from tests.support.implement_world import _check_fails, make_repo
 
         stop = make_repo(tmp_path, monkeypatch)
         _check_fails(stop)
@@ -747,7 +700,7 @@ def _status_progress(repo, capsys) -> tuple:
 
 class TestEverySurfaceCountsTheSameTasks:
     """Fix round 19 (review of round 18, #1): the executor's `[ETA]` line left
-    out a task a check holds (`_eta_total`) while the run mirror kept it, so
+    out a task a check holds (`EtaLines.total`) while the run mirror kept it, so
     one run read "batch 6/6 … ALL BATCHES COMPLETE" in its log and
     "implement 6/7 batches ok, 5/7 items applied" on `status --view run` and
     the OpenCode poll line."""
@@ -774,7 +727,7 @@ class TestEverySurfaceCountsTheSameTasks:
         answered done read "implement 4/5 batches ok" beside "batch 4/4 …
         ALL BATCHES COMPLETE"."""
         import implement_orchestrator
-        from tests.test_implement_stop_account import _check_passes, make_repo
+        from tests.support.implement_world import _check_passes, make_repo
 
         stop = make_repo(tmp_path, monkeypatch)
         _check_passes(stop)

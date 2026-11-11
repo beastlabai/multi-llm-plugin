@@ -112,9 +112,9 @@ make for itself (this machine restricts unprivileged user namespaces, so no
   ``--version``;
 * ``docker cp`` of the probe KIT only (:data:`KIT_FILES`: this script, the
   row-7 probe library, the pinned install's check, the stub model and its
-  scenario matcher, the payload digest module) and a facts file, never the
-  candidate's sources: the candidate is rebuilt on the host and only its
-  inventory and digest go in;
+  scenario matcher, the payload digest module, the session kill helper) and a
+  facts file, never the candidate's sources: the candidate is rebuilt on the
+  host and only its inventory and digest go in;
 * the install phase, inside, as an unprivileged user (criteria 1-7, and 9);
 * ``docker stop``, ``docker commit``, then the committed image run with
   ``--network none``: the warm-offline ``status`` through the installed
@@ -181,7 +181,7 @@ import tempfile
 import time
 import traceback
 import uuid
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -273,6 +273,7 @@ KIT_FILES = (
     "packaging/opencode/registry-record.schema.json",
     "packaging/opencode/registry_stub.py",
     "packaging/common/payload.py",
+    "packaging/common/procgroup.py",
     "skills/multi-llm/tests/__init__.py",
     "skills/multi-llm/tests/scenario_matcher.py",
     "skills/multi-llm/tests/container/stub_server.py",
@@ -1014,9 +1015,54 @@ def _locate(ctx: Context, steps: Steps, iso: Any, cwd: Path, diag: Path, label: 
             "found": [str(f) for f in found]}
 
 
-def run_criteria(ctx: Context, steps: Optional[Steps] = None) -> Dict[str, Any]:
-    """Every criterion this environment can attempt but the offline one, in order."""
-    steps = steps or Steps()
+@dataclass
+class _Criteria:
+    """One environment's criteria run: what every criterion shares, and what
+    each leaves for the ones after it.
+
+    :func:`_criteria_setup` builds it; each stage of :data:`CRITERIA_STAGES`
+    reads and extends it, and answers whether the run goes on. A stage that
+    stops the run has already marked every criterion not yet decided as not
+    attempted (``_Run.skip``), with its reason.
+    """
+
+    ctx: Context
+    steps: Steps
+    probe: Any
+    run: _Run
+    root: Path
+    diag: Path
+    scratch: Path
+    userconfig: Path
+    names: List[str]
+    state: Dict[str, Any]
+    details: Dict[str, Any]
+    result: Dict[str, Any]
+    iso: Any
+    project: Path
+    #: Criterion 1: the integrity npm serves, and the registry's tarball extracted.
+    served_integrity: Optional[str] = None
+    extracted: Optional[Path] = None
+    #: OpenCode's first start: what was installed before it, its ``debug
+    #: config``, the installed copies it left and the one payload location.
+    preinstalled: List[str] = field(default_factory=list)
+    debug: Any = None
+    located_after: Dict[str, Any] = field(default_factory=dict)
+    found: List[Path] = field(default_factory=list)
+    location: Optional[Path] = None
+    #: Criteria 2 and 4: the installed tree's evidence and verdict; its surface.
+    tree_evidence: Dict[str, Any] = field(default_factory=dict)
+    tree_ok: bool = False
+    surface: Optional[Mapping[str, Any]] = None
+    #: Criterion 5: the installed skill, the tool's name, the caches before the call.
+    skill_dir: Optional[Path] = None
+    tool: Optional[str] = None
+    cold_before: Dict[str, Any] = field(default_factory=dict)
+
+
+def _criteria_setup(ctx: Context, steps: Steps) -> _Criteria:
+    """The isolated environment every criterion runs in, refused unless it is
+    empty, is not the invoking user's home, and runs the pinned OpenCode."""
     probe = _probe()
     run = _Run()
     root = Path(ctx.probe_root)
@@ -1034,7 +1080,6 @@ def run_criteria(ctx: Context, steps: Optional[Steps] = None) -> Dict[str, Any]:
     result = {"criteria": run.criteria, "failures": run.failures, "state": state,
               "details": details, "measured": {}, "variables_set": {}}
 
-    # -- the isolated environment ------------------------------------------
     iso = probe.isolated_env(root / "env", binary=ctx.binary, registry=ctx.read_registry + "/")
     if os.path.realpath(str(iso.home)) == os.path.realpath(probe.real_home()):
         raise CheckError("the isolated HOME resolved to the invoking user's home")
@@ -1061,8 +1106,17 @@ def run_criteria(ctx: Context, steps: Optional[Steps] = None) -> Dict[str, Any]:
     if answered != ctx.opencode_pin:
         raise CheckError(f"{ctx.binary} answers --version {answered!r}, not the pin "
                          f"{ctx.opencode_pin}; refusing before the probe runs")
+    return _Criteria(ctx=ctx, steps=steps, probe=probe, run=run, root=root, diag=diag,
+                     scratch=scratch, userconfig=userconfig, names=names, state=state,
+                     details=details, result=result, iso=iso, project=project)
 
-    # -- 1. npm_spec_resolves ----------------------------------------------
+
+def _npm_spec_resolves(env: _Criteria) -> bool:
+    """1. ``npm_spec_resolves``: a fresh-cache ``npm view`` serves the version
+    (polled through registry lag), and npm's own client downloads one tarball
+    whose bytes hash to the served integrity."""
+    ctx, steps, probe, run = env.ctx, env.steps, env.probe, env.run
+    root, diag, scratch, userconfig, iso = env.root, env.diag, env.scratch, env.userconfig, env.iso
     attempts = []
     view: Optional[Dict[str, Any]] = None
     deadline = steps.clock() + ctx.poll_s
@@ -1100,8 +1154,8 @@ def run_criteria(ctx: Context, steps: Optional[Steps] = None) -> Dict[str, Any]:
                         f"(last: exit {attempts[-1]['exit']}, code {attempts[-1]['code']}); "
                         "if this is registry lag, re-run once a clean-cache read serves it")
         run.decide(NPM, problems, npm_evidence)
-        run.skip(names, f"{ctx.spec} never resolved from {ctx.read_registry}")
-        return result
+        run.skip(env.names, f"{ctx.spec} never resolved from {ctx.read_registry}")
+        return False
     served_integrity = dist.get("integrity")
     tarball_url = dist.get("tarball")
     if not re.fullmatch(r"sha512-[A-Za-z0-9+/]{86}==", str(served_integrity or "")):
@@ -1139,32 +1193,48 @@ def run_criteria(ctx: Context, steps: Optional[Steps] = None) -> Dict[str, Any]:
             extracted = probe.extract_package(tarballs[0], root / "registry-files")
         except probe.ProbeError as exc:
             problems.append(str(exc))
-    state["integrity"] = served_integrity
+    env.state["integrity"] = served_integrity
+    env.served_integrity, env.extracted = served_integrity, extracted
     if not run.decide(NPM, problems, npm_evidence) or extracted is None:
-        run.skip(names, "the registry's tarball could not be downloaded and verified")
-        return result
+        run.skip(env.names, "the registry's tarball could not be downloaded and verified")
+        return False
+    return True
 
-    # -- OpenCode's first start: the install, before any tool call -----------
-    # Walked before OpenCode has run at all: nothing of the spec may be there yet.
+
+def _first_start(env: _Criteria) -> bool:
+    """OpenCode's first start, the install, before any tool call. What is
+    installed is walked before OpenCode has run at all: nothing of the spec may
+    be there yet. Not a criterion: criteria 2 to 4 grade what it left."""
+    ctx, steps, iso, project, diag = env.ctx, env.steps, env.iso, env.project, env.diag
     preinstalled = [str(p) for p in find_installed(
         [iso.path(n) for n in ("home", "config", "data", "cache", "state")], ctx.name, ctx.version)]
     debug = steps.debug_config(ctx.binary, iso.env, project, diag, "debug-config-first")
     located_after = _locate(ctx, steps, iso, project, diag, "after-first-start")
     found = [Path(p) for p in located_after["found"]]
     location = found[0] if len(found) == 1 else None
-    details["opencode_paths"] = located_after["debug_paths"]
-    details["installed_before_first_start"] = preinstalled
+    env.details["opencode_paths"] = located_after["debug_paths"]
+    env.details["installed_before_first_start"] = preinstalled
+    env.preinstalled, env.debug, env.located_after = preinstalled, debug, located_after
+    env.found, env.location = found, location
+    return True
 
-    # -- 2. installed_tree_matches_candidate (and the location) --------------
+
+def _installed_tree_matches_candidate(env: _Criteria) -> bool:
+    """2. ``installed_tree_matches_candidate``, and the location: the
+    registry's files and the one copy OpenCode installed are the candidate,
+    inside the probe's root, from the single registry at the served integrity."""
+    ctx, probe, iso, root = env.ctx, env.probe, env.iso, env.root
+    location, located_after, found = env.location, env.located_after, env.found
+    served_integrity, debug, state, details = env.served_integrity, env.debug, env.state, env.details
     problems = []
-    registry_files = compare_tree(extracted, ctx.candidate)
+    registry_files = compare_tree(env.extracted, ctx.candidate)
     tree_evidence: Dict[str, Any] = {
         "candidate": {"sha": ctx.candidate.get("sha"), "digest": ctx.candidate["digest"],
                       "files": len(ctx.candidate["inventory"])},
         "registry_files": registry_files, "located": located_after,
         "compared": "before the first tool call"}
-    if preinstalled:
-        problems.append(f"{ctx.spec} was installed before OpenCode's first start: {preinstalled}")
+    if env.preinstalled:
+        problems.append(f"{ctx.spec} was installed before OpenCode's first start: {env.preinstalled}")
     if not registry_files["matches"]:
         problems.append("the registry's files are not the candidate "
                         f"(missing {registry_files['missing_count']}, unexpected "
@@ -1205,39 +1275,57 @@ def run_criteria(ctx: Context, steps: Optional[Steps] = None) -> Dict[str, Any]:
                      installed_registry=origin.get("origin"))
         details["payload_location"] = str(location)
         details["installed_from"] = origins
-    tree_ok = run.decide(TREE, problems, tree_evidence)
+    env.tree_evidence = tree_evidence
+    env.tree_ok = env.run.decide(TREE, problems, tree_evidence)
+    return True
 
-    # -- 3. manifest_version_matches ----------------------------------------
+
+def _manifest_version_matches(env: _Criteria) -> bool:
+    """3. ``manifest_version_matches``: the installed manifest and the
+    installer's lockfile name the spec's version."""
+    ctx, location = env.ctx, env.location
     if location is not None:
         problems = []
         manifest = json.loads((location / "package.json").read_text(encoding="utf-8"))
-        origin = tree_evidence.get("origin") or {}
+        origin = env.tree_evidence.get("origin") or {}
         if (manifest.get("name"), manifest.get("version")) != (ctx.name, ctx.version):
             problems.append(f"the installed manifest is {manifest.get('name')}@"
                             f"{manifest.get('version')}, not {ctx.spec}")
         if origin.get("version") != ctx.version:
             problems.append(f"the installer's lockfile records {origin.get('version')!r}")
-        run.decide(MANIFEST, problems, {"manifest": {"name": manifest.get("name"),
-                                                      "version": manifest.get("version")},
-                                         "lockfile_version": origin.get("version"),
-                                         "location": str(location)})
+        env.run.decide(MANIFEST, problems, {"manifest": {"name": manifest.get("name"),
+                                                          "version": manifest.get("version")},
+                                             "lockfile_version": origin.get("version"),
+                                             "location": str(location)})
+    return True
 
-    # -- 4. command_resolves_installed_skill --------------------------------
-    surface: Optional[Mapping[str, Any]] = None
+
+def _command_resolves_installed_skill(env: _Criteria) -> bool:
+    """4. ``command_resolves_installed_skill``: ``/multi-llm`` is registered for
+    the spec and resolves into the installed payload. No tool call runs on a
+    payload that is missing or is not the candidate, so the run stops there."""
+    ctx, probe, location, debug = env.ctx, env.probe, env.location, env.debug
     if location is not None:
-        surface = probe.payload_surface(location)
+        env.surface = probe.payload_surface(location)
         command = read_command(debug.config, location)
         problems = list(_command_problems(command, ctx.spec))
-        run.decide(COMMAND, problems, {"command": command, "location": str(location),
-                                        "skill_dir": probe.skill_dir_of(location),
-                                        "debug_config": _bounded_view(debug.bounded)
-                                        if debug.bounded is not None else None})
-    if location is None or not tree_ok:
-        run.skip(names, "the installed payload is not the candidate; no tool call runs on it")
-        return result
+        env.run.decide(COMMAND, problems, {"command": command, "location": str(location),
+                                            "skill_dir": probe.skill_dir_of(location),
+                                            "debug_config": _bounded_view(debug.bounded)
+                                            if debug.bounded is not None else None})
+    if location is None or not env.tree_ok:
+        env.run.skip(env.names, "the installed payload is not the candidate; no tool call runs on it")
+        return False
+    return True
 
-    # -- 5. tool_init_runs_installed_payload, 6. cold_dependencies_install ---
-    skill_dir = Path(probe.skill_dir_of(location))
+
+def _tool_init_runs_installed_payload(env: _Criteria) -> bool:
+    """5. ``tool_init_runs_installed_payload``: the tool's ``init`` runs from
+    the installed skill and scaffolds the providers file."""
+    ctx, steps, probe, iso, project, diag = (env.ctx, env.steps, env.probe, env.iso,
+                                             env.project, env.diag)
+    surface, result = env.surface, env.result
+    skill_dir = Path(probe.skill_dir_of(env.location))
     tool = surface["tool_name"]
     cold_before = {"uv_cache_entries": _entries(iso.uv_cache),
                    "venv_present": (skill_dir / ".venv").exists()}
@@ -1250,11 +1338,19 @@ def run_criteria(ctx: Context, steps: Optional[Steps] = None) -> Dict[str, Any]:
     if probe.PROVIDERS_FILE not in created:
         problems.append(f"init created no {probe.PROVIDERS_FILE} in the project")
     problems += _ran_from(graded, skill_dir)
-    run.decide(INIT, problems, {"init": graded, "installed_skill_dir": str(skill_dir)})
+    env.run.decide(INIT, problems, {"init": graded, "installed_skill_dir": str(skill_dir)})
     if graded.get("uv"):
         result["measured"]["uv"] = _version_of(steps, [graded["uv"], "--version"], iso.env,
                                                project, diag, "uv-version") or "<unread>"
+    env.skill_dir, env.tool, env.cold_before = skill_dir, tool, cold_before
+    return True
 
+
+def _cold_dependencies_install(env: _Criteria) -> bool:
+    """6. ``cold_dependencies_install``: that first call installed the runtime
+    dependencies into a venv inside the installed skill, from an empty uv cache."""
+    steps, iso, project, diag = env.steps, env.iso, env.project, env.diag
+    skill_dir, cold_before, result = env.skill_dir, env.cold_before, env.result
     venv_python = skill_dir / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     cold_after: Dict[str, Any] = {"uv_cache_entries": _entries(iso.uv_cache),
                                   "venv_present": (skill_dir / ".venv").exists()}
@@ -1279,10 +1375,18 @@ def run_criteria(ctx: Context, steps: Optional[Steps] = None) -> Dict[str, Any]:
         problems.append(f"the dependency install was not cold: {cold_before}")
     if not cold_after["uv_cache_entries"]:
         problems.append("uv's cache is still empty after the first call: nothing was installed")
-    run.decide(COLD, problems, {"before_first_call": cold_before, "after_first_call": cold_after,
-                                "runtime_requirements": required, "uv_cache": str(iso.uv_cache)})
+    env.run.decide(COLD, problems, {"before_first_call": cold_before, "after_first_call": cold_after,
+                                    "runtime_requirements": required, "uv_cache": str(iso.uv_cache)})
+    return True
 
-    # -- 7. same_pin_restart_matches ----------------------------------------
+
+def _same_pin_restart_matches(env: _Criteria) -> bool:
+    """7. ``same_pin_restart_matches``: restarted on the same pin, OpenCode
+    keeps the payload where it was, byte for byte, and ``status`` behaves the
+    same; nothing it installed by the end came from another registry."""
+    ctx, steps, probe, iso, project, diag = (env.ctx, env.steps, env.probe, env.iso,
+                                             env.project, env.diag)
+    location, surface, tool, skill_dir = env.location, env.surface, env.tool, env.skill_dir
     problems = []
     baseline_call = steps.tool_call(ctx.binary, iso.env, project, ctx.spec, tool, probe.STATUS_ARGS,
                                     "status", "call_mllm_registry_status_before", diag,
@@ -1331,20 +1435,50 @@ def run_criteria(ctx: Context, steps: Optional[Steps] = None) -> Dict[str, Any]:
     origins = probe.installed_from([iso.opencode_config_dir],
                                    Path(relocated["debug_paths"].get("cache", iso.opencode_cache_dir)),
                                    ctx.read_registry)
-    details["installed_from"] = origins
+    env.details["installed_from"] = origins
     if origins["foreign"]:
         problems.append(f"by the end of the run OpenCode had installed packages from outside "
                         f"{ctx.read_registry}: {origins['foreign'][:5]}")
-    run.decide(RESTART, problems, {"before": {"payload": before_restart, "status": baseline},
-                                   "after": {"payload": after_restart, "version": manifest_after,
-                                             "command": restart_command, "status": restarted},
-                                   "installed_from_at_end": origins})
-    state["payload"] = after_restart or before_restart
+    env.run.decide(RESTART, problems, {"before": {"payload": before_restart, "status": baseline},
+                                       "after": {"payload": after_restart, "version": manifest_after,
+                                                 "command": restart_command, "status": restarted},
+                                       "installed_from_at_end": origins})
+    env.state["payload"] = after_restart or before_restart
+    return True
 
-    # -- 9. upgrade_runs_new_payload (a later release) ----------------------
-    if ctx.previous_pin:
-        run.criteria[UPGRADE] = run_upgrade(ctx, steps, run)
-    return result
+
+def _upgrade_runs_new_payload(env: _Criteria) -> bool:
+    """9. ``upgrade_runs_new_payload``, for a later release only (:func:`run_upgrade`)."""
+    if env.ctx.previous_pin:
+        env.run.criteria[UPGRADE] = run_upgrade(env.ctx, env.steps, env.run)
+    return True
+
+
+#: The criteria and the first start between them, in the order they run and
+#: record. 8, ``warm_offline_operation``, is the container's offline phase
+#: (:func:`offline_operation`), never run here.
+CRITERIA_STAGES: Tuple[Callable[[_Criteria], bool], ...] = (
+    _npm_spec_resolves,
+    _first_start,
+    _installed_tree_matches_candidate,
+    _manifest_version_matches,
+    _command_resolves_installed_skill,
+    _tool_init_runs_installed_payload,
+    _cold_dependencies_install,
+    _same_pin_restart_matches,
+    _upgrade_runs_new_payload,
+)
+
+
+def run_criteria(ctx: Context, steps: Optional[Steps] = None) -> Dict[str, Any]:
+    """Every criterion this environment can attempt but the offline one, in
+    order: the isolated environment, then each of :data:`CRITERIA_STAGES` until
+    one stops the run."""
+    env = _criteria_setup(ctx, steps or Steps())
+    for stage in CRITERIA_STAGES:
+        if not stage(env):
+            break
+    return env.result
 
 
 def read_command(config: Optional[Mapping[str, Any]], location: Path) -> Dict[str, Any]:

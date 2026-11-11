@@ -39,7 +39,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from utils import cli_common, detach, process_control, run_registry, status_file  # noqa: E402
+from utils import cli_common, detach, process_control, run_registry, run_sweep, status_file  # noqa: E402
 
 SKILL_ROOT = Path(__file__).parent.parent
 WINDOWS_ONLY = pytest.mark.skipif(sys.platform != "win32", reason="the real Win32 calls")
@@ -474,6 +474,9 @@ class TestTheWorker:
         monkeypatch.setattr(process_control, "enter_detached_worker",
                             lambda log, run_id=None: entered.append((log, run_id)))
         monkeypatch.setattr(detach, "RunHandle", Handle)
+        # The stand-in handle never finishes, which is what stops the worker
+        # recording its launches: kept to this test, not the next one's spawns.
+        monkeypatch.setattr(process_control, "_CLI_RECORD", [])
         phase = tmp_path / "review-plan"
         phase.mkdir()
         handle = detach.begin_worker_run(
@@ -723,7 +726,7 @@ class TestTheKillSites:
         monkeypatch.setattr(process_control, "process_alive", leader.process_alive)
         monkeypatch.setattr(process_control, "probe", lambda *_a: process_control.ALIVE)
         monkeypatch.setattr(process_control, "_send_ctrl_break", leader.end)
-        [row] = run_registry.sweep(str(root))
+        [row] = run_sweep.sweep(str(root))
         assert (row["run_id"], row["action"]) == (RUN_ID, "killed")
         assert windows.terminated == [NAME] and windows.taskkills == []
         assert ("close", 101) in windows.calls
@@ -803,11 +806,19 @@ class TestTheKillSites:
     def test_off_windows_each_site_calls_kill_tree_as_it_did(
         self, posix, host_locks, run_dirs, tmp_path, monkeypatch, site
     ):
-        """POSIX, byte for byte: the same pid and keywords, no ``job``."""
+        """POSIX, byte for byte: the same pid and keywords, no ``job``. Where
+        the kill goes by identity a teardown also hands over ``obligations``,
+        what it collects for its reread's kill, not a parameter of the kill."""
         plan, phase = run_dirs
         seen = []
-        monkeypatch.setattr(process_control, "kill_tree",
-                            lambda pid, **kwargs: (seen.append((pid, kwargs)), "killed")[1])
+
+        def kill_tree(pid, **kwargs):
+            owed = kwargs.pop("obligations", None)
+            assert owed is None or isinstance(owed, process_control.KillObligations)
+            seen.append((pid, kwargs))
+            return "killed"
+
+        monkeypatch.setattr(process_control, "kill_tree", kill_tree)
         if site == "sweep":
             root = tmp_path / "project"
             old = run_registry.write_entry(str(root), {
@@ -816,7 +827,7 @@ class TestTheKillSites:
             })
             os.utime(old, (time.time() - 8 * 86400,) * 2)
             monkeypatch.setattr(process_control, "probe", lambda *_a: process_control.ALIVE)
-            run_registry.sweep(str(root))
+            run_sweep.sweep(str(root))
             assert seen == [(4242, {"start_time": "t0", "pgid": 77})]
             return
         _record(phase, plan, pgid=77)

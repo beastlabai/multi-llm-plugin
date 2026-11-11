@@ -41,7 +41,9 @@ from utils.state_manager import (  # noqa: E402
     set_task_check_findings_in_state,
 )
 
-from tests.test_next_phase import S, UP_TO_CODE_REVIEW, UP_TO_IMPLEMENT, _build  # noqa: E402
+from tests.support.next_phase_world import (  # noqa: E402
+    S, UP_TO_CODE_REVIEW, UP_TO_IMPLEMENT, _build,
+)
 
 SKILL_ROOT = Path(__file__).parent.parent
 

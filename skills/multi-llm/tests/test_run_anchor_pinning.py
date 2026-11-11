@@ -356,7 +356,7 @@ def test_every_front_door_pins_through_the_phase_it_fronts(
     reads before that call (the commit-reviews folder) pass an explicit
     anchor, as ``status``'s runner line does.
 
-    ``utils.commit_review.is_commit_brief`` is the brief rule's one owner and
+    ``utils.commit_paths.is_commit_brief`` is the brief rule's one owner and
     another task's module; a stand-in that accepts this file keeps the row
     about the pin.
     """
@@ -366,11 +366,11 @@ def test_every_front_door_pins_through_the_phase_it_fronts(
 
     brief = tmp_path / "plans" / "commit-reviews" / "root-e4f5a6b7c8d9.md"
     _write_plan(brief.parent, brief.name)
-    stand_in = types.ModuleType("utils.commit_review")
+    stand_in = types.ModuleType("utils.commit_paths")
     stand_in.is_commit_brief = lambda path, *, cwd=None: (
         os.path.realpath(str(path)) == os.path.realpath(str(brief)))
-    monkeypatch.setitem(sys.modules, "utils.commit_review", stand_in)
-    monkeypatch.setattr(utils, "commit_review", stand_in, raising=False)
+    monkeypatch.setitem(sys.modules, "utils.commit_paths", stand_in)
+    monkeypatch.setattr(utils, "commit_paths", stand_in, raising=False)
 
     argv = multi_llm._normalize_positionals(door, [str(brief)], [])
     assert argv == ["--plan-file", str(brief)]

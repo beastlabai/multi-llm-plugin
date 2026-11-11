@@ -1,0 +1,4 @@
+[0m
+> code · stub-model
+[0m
+[91m[1mError: [0mRate limit reached for stub-model in organization org-stub on requests per min (RPM): Limit 3, Used 3. Please try again in 20s.

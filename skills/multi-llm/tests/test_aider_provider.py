@@ -2,7 +2,7 @@
 
 Plan: plans/ask-answer-recovery-and-false-success.md §4 — T4.1 (D4.1) and the
 provider side of T4.2 (D4.2). The argv pins, the fixture rows and the salvage
-sweep live elsewhere (``TestAiderProvider`` in ``test_providers.py``,
+sweep live elsewhere (``TestAiderProvider`` in ``test_provider_aider.py``,
 ``tests/fixtures/aider/manifest.yaml``, ``test_salvage_text.py``); this module
 holds what those cannot say:
 
@@ -49,6 +49,7 @@ from utils.providers.base import (  # noqa: E402
     ProfileUnsupported,
     ReadOnlyInvocationRefused,
 )
+from tests.source_cache import source_tree
 
 FIXTURES = Path(__file__).parent / "fixtures" / "aider"
 SKILL_ROOT = Path(__file__).parent.parent
@@ -693,8 +694,7 @@ class TestThroughInvokeWithProvider:
 def test_the_container_live_probe_spawns_aider_with_the_supply():
     """`tests/container/live_provider.py` spawns the real binary itself, so it
     must take the argv transport's pair, not `build_command` alone (T4.2)."""
-    tree = ast.parse((SKILL_ROOT / "tests" / "container" / "live_provider.py").read_text(
-        encoding="utf-8"))
+    tree = source_tree(SKILL_ROOT / "tests" / "container" / "live_provider.py")
     calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
 
     def attr(node):

@@ -567,13 +567,6 @@ DIGEST_PATH = f"{PLUGIN_RELATIVE}/{DIGEST_RELATIVE}"
 VERSION_PATH = "skills/multi-llm/pyproject.toml"
 
 
-def _version_key(version: str) -> Tuple[Any, ...]:
-    core, _, pre = version.partition("+")[0].partition("-")
-    numbers = tuple(int(part) for part in core.split("."))
-    # A release sorts after its own pre-releases.
-    return numbers + ((1, "") if not pre else (0, pre),)
-
-
 def release_tags(root: Optional[Path] = None) -> Tuple[str, ...]:
     """Every ``codex-v*`` tag, oldest version first."""
     checkout = Path(root) if root else REPO_ROOT
@@ -584,7 +577,7 @@ def release_tags(root: Optional[Path] = None) -> Tuple[str, ...]:
         version = tag[len(TAG_PREFIX):]
         if not ingestion_rules.SEMVER_RE.fullmatch(version):
             raise PayloadError(f"tag {tag} does not name a strict semver version")
-        parsed.append((_version_key(version), tag))
+        parsed.append((release_history.version_key(version), tag))
     return tuple(tag for _, tag in sorted(parsed))
 
 

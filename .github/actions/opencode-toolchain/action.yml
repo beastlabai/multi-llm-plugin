@@ -1,0 +1,47 @@
+# The toolchain the opencode publish workflow's `gate` and `verify` jobs set up
+# before any of their rows: uv with no cache, the pinned Node, and the pinned npm
+# (.github/workflows/publish-opencode-plugin.yml says why each is set up this
+# way). One definition, so the two jobs cannot drift apart; the `publish` job,
+# which holds `id-token: write`, keeps its own copy of the same three steps, and
+# tests/test_opencode_publish_workflow.py holds all three jobs equal.
+#
+# A local action runs with the calling job's permissions and reads that job's
+# environment: NPM_VERSION and NODE_FLOOR come from the workflow's `env:`.
+# Actions are pinned by commit SHA, exactly as in the workflows.
+#
+# Composite steps must name their shell, so the npm step says `bash` (GitHub runs
+# it as `bash --noprofile --norc -eo pipefail`, where a job's default is
+# `bash -e`); its script sets `-euo pipefail` itself, so both run it alike.
+name: opencode toolchain
+description: uv without a cache, the pinned Node and the pinned npm, for the opencode gate rows.
+inputs:
+  node-version:
+    description: The Node version to install (the workflow's NODE_VERSION).
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+      with:
+        enable-cache: false
+
+    - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Install the pinned npm
+      shell: bash
+      run: |
+        set -euo pipefail
+        npm install -g --ignore-scripts "npm@${NPM_VERSION}"
+        actual="$(npm --version)"
+        if [ "${actual}" != "${NPM_VERSION}" ]; then
+          echo "REFUSING: npm is ${actual} after installing the pinned ${NPM_VERSION}." >&2
+          exit 1
+        fi
+        node_version="$(node -p 'process.versions.node')"
+        if ! printf '%s\n%s\n' "${NODE_FLOOR}" "${node_version}" | sort -V -C; then
+          echo "REFUSING: Node ${node_version} is older than ${NODE_FLOOR}, trusted publishing's floor." >&2
+          exit 1
+        fi
+        echo "node ${node_version}, npm ${actual}"

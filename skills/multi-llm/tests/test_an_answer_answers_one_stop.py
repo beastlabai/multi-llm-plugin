@@ -28,12 +28,8 @@ import json
 
 import pytest
 
-from tests.test_check_gate_fixture import (  # noqa: F401 - the fixture
-    ALLOW, FINDINGS, NOTE, STAMP, _check, _policy, repo,
-)
-from tests.test_implement_stop_account import (
-    _dispatched_titles, _implement, _statuses,
-)
+from tests.support.gate_fixture import ALLOW, FINDINGS, NOTE, STAMP, _check, _policy
+from tests.support.implement_world import _dispatched_titles, _implement, _statuses
 
 import implement_orchestrator  # noqa: E402
 import multi_llm  # noqa: E402

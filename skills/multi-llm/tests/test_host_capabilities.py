@@ -116,7 +116,7 @@ def fixture_tree(tmp_path, monkeypatch):
         )
         caps.clear_cache()
 
-    monkeypatch.setattr(caps, "_CACHE", {})
+    caps.clear_cache()
     monkeypatch.setattr("utils.cli_common._SKILL_DIR", root)
     return root, write
 
@@ -1012,10 +1012,11 @@ class TestVerbResolution:
         assert head("models_running", "fanout", 0).startswith("running in foreground")
         assert "complete" in run_status.CHECKPOINT_TERMINAL_STEPS
         skill_root = Path(caps.__file__).parent.parent
+        # The review lanes open their round through the shared lane
+        # (`review_lane.open_round`); the ask lane opens its own.
         for src in (
-            "utils/review_orchestrator_base.py",
+            "utils/review_lane.py",
             "ask_orchestrator.py",
-            "code_review_orchestrator.py",
         ):
             body = (skill_root / src).read_text(encoding="utf-8")
             assert 'step="fanout"' in body, f"{src} no longer reports `fanout`"
@@ -1134,7 +1135,7 @@ class TestVerbResolution:
         sentence = caps.verb_sentence("claude-code", "detach")
         for fragment in (
             "report a non-zero exit status with that path rather than retrying.",
-            "`status` still reading `running in foreground`",
+            "`status` reading `ended in foreground without a final state`",
             "offer the user each of these and run none yourself",
             "made again the same way with `--force` added, which resumes",
             "(`[SKIP]`)",

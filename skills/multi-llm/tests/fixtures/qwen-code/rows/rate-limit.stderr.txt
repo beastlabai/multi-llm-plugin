@@ -1,0 +1,9 @@
+Retrying in 60s (attempt 1/10): [API Error: 429 Rate limit reached for stub-model in organization org-stub on requests per min (RPM): Limit 3, Used 3. Please try again in 20s.]
+Retrying provider attempt (0 buffered tool call(s) discarded).
+{
+  "error": {
+    "type": "FatalBudgetExceededError",
+    "message": "Run aborted: wall-clock budget of 200s exceeded (--max-wall-time).",
+    "code": 55
+  }
+}

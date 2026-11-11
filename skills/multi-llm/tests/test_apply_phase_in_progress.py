@@ -17,14 +17,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import check_workflow_prerequisites as prereq  # noqa: E402
-from tests.test_workflow_prerequisites import (  # noqa: E402
-    APPLY_PHASE_BATCH_ROWS,
-    _NEW,
-    _OLD,
-    _date_cycle,
-    _record,
-    _status,
-    _workflow_plan,
+from tests.support.workflow_world import (  # noqa: E402
+    APPLY_PHASE_BATCH_ROWS, _NEW, _OLD, _date_cycle, _record, _status, _workflow_plan,
 )
 from utils.state_manager import StateManager  # noqa: E402
 

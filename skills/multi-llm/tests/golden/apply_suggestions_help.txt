@@ -26,7 +26,6 @@ usage: apply_suggestions_orchestrator.py [-h] [--host ID] [--yes]
                                          [--skip]
                                          [--approve-validation-failed]
                                          [--revalidate-all-human]
-                                         [--internal-revalidation]
                                          [--mark-completed]
 
 Prepare validated suggestions for application to a plan
@@ -75,13 +74,20 @@ options:
                         processed items
   --fresh               Discard this phase's recorded progress (decisions,
                         processed items, prior-changes log) and dispatch every
-                        batch again. The target file must already be back at
-                        its pre-run bytes (copy it from {phase}/backup.md, or
-                        roll the batches back with `util restore-batch`): a
-                        target still carrying the previous run's edits is
-                        refused (exit 3), since every batch would land twice.
-                        Earlier rollback points are kept aside, never
-                        overwritten.
+                        batch again. Put back what the previous run edited
+                        first, or every batch lands twice: for apply-
+                        suggestions copy the plan back from {phase}/backup.md,
+                        for apply-task-suggestions copy tasks.md back from
+                        {phase}/tasks-backup.md; apply-code-fixes keeps no
+                        backup (undo its batches by hand; `git diff` shows
+                        them). After an --exec-subagents run, `util restore-
+                        batch` can roll the batches back newest-first instead;
+                        it holds nothing of a native run's. Only after an
+                        --exec-subagents run of the two suggestion phases is a
+                        target still carrying that run's edits refused (exit
+                        3); after a native run, or for apply-code-fixes,
+                        nothing checks it for you. Earlier rollback points are
+                        kept aside, never overwritten.
   --human-task BATCH=skip
                         With --resume and --exec-subagents, answer a batch
                         that stopped as a partial application because its
@@ -131,9 +137,6 @@ options:
                         failures (e.g., parsing/timeout)
   --revalidate-all-human
                         Re-run validation on ALL needs-human-decision items
-  --internal-revalidation
-                        Run revalidation inside orchestrator (legacy mode)
-                        instead of delegating to Claude Code subagent
   --mark-completed      Mark the phase as completed (call after all batches
                         are processed)
 

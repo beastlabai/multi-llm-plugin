@@ -23,14 +23,10 @@ from utils.write_batch_scheduler import (
     STOP_HEADLINE_QUOTE_MIN,
     fit_stop_headline,
 )
-from tests.test_check_gate_fixture import ALLOW, PLAN, _policy, repo  # noqa: F401
+from tests.support.gate_fixture import ALLOW, PLAN, _policy
 from tests.test_write_executor import FakeState, env  # noqa: F401
-from tests.test_write_batch_declined import (
-    CODEX_08_REPLY,
-    _codex_08_respond,
-    _codex_08_tasks,
-    _respond_with,
-    _two_item_task,
+from tests.support.declined_world import (
+    CODEX_08_REPLY, _codex_08_respond, _codex_08_tasks, _respond_with, _two_item_task,
 )
 
 UNVERIFIED = "Nothing ran this repository's tests: driver.verify_command is not set."

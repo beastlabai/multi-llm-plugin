@@ -35,6 +35,7 @@ import argparse  # noqa: E402
 import code_review_orchestrator as cro  # noqa: E402
 from utils import commit_report  # noqa: E402
 from utils.commit_range import resolve_range  # noqa: E402
+from utils.report_markdown import ESCAPED_TEXT_MARKER  # noqa: E402
 from utils.html_report_generator import (  # noqa: E402
     SLOT_APPLY_COMMANDS,
     SLOT_DOCUMENT_LABEL,
@@ -164,7 +165,8 @@ def blocks(report: str) -> Dict[str, str]:
 class TestReportMd:
     def test_the_header_labels_the_brief_and_carries_the_block(self, tmp_path):
         report, _html, _data, _ = report_for(tmp_path)
-        lines = report.splitlines()
+        marker, *lines = report.splitlines()
+        assert marker == ESCAPED_TEXT_MARKER
         assert lines[2] == f"**Commit brief:** {BASE[:12]}-{C3[:12]}.md"
         assert "**Plan:**" not in report
         fence = lines.index("```text")
@@ -350,9 +352,8 @@ class TestReportHtml:
 HOSTILE = "src/a\"b'c<d>&e.py"
 NODE = shutil.which("node")
 
-#: Enough of ``document`` for both templates' ``escapeHtml`` (``textContent``
-#: then ``innerHTML``, or ``appendChild(createTextNode(...))``): text
-#: serialised as a browser does, escaping ``&``, ``<`` and ``>`` only.
+#: A minimal ``document`` for page functions run under Node. The templates'
+#: ``escapeHtml`` is a plain string function now and does not use it.
 DOM_SHIM = r"""
 var document = {
   createElement: function () {
@@ -462,9 +463,9 @@ class TestTheBlocksDriftLine:
 
 class TestAttributesAreEscapedAsAttributes:
     """A file name a commit controls reaches HTML attributes (``title``,
-    ``data-target``, ``id``, inline handlers): ``escapeHtml`` leaves quotes
-    alone, so every such site takes ``escapeAttr``, and a value inside an
-    inline handler's JS string takes ``escapeJsAttr``."""
+    ``data-target``, ``id``, inline handlers): every such site names
+    ``escapeAttr`` (the reports' one escaper, which escapes both quotes), and a
+    value inside an inline handler's JS string takes ``escapeJsAttr``."""
 
     @pytest.mark.parametrize("style", ["pr", "flat"])
     def test_no_attribute_takes_the_text_escaper(self, tmp_path, style):
@@ -536,7 +537,7 @@ class TestTheAbsentAtHeadLabel:
             html, ["escapeHtml", "fileLabelHtml"],
             "console.log(JSON.stringify([fileLabelHtml('old.py'), fileLabelHtml('old.py:3-4'),"
             " fileLabelHtml(" + json.dumps(HOSTILE) + ")]));")
-        label = ' <span class="file-absent-label">(renamed to new"&lt;i&gt;.py in 0000001..3333333)</span>'
+        label = ' <span class="file-absent-label">(renamed to new&quot;&lt;i&gt;.py in 0000001..3333333)</span>'
         assert rendered == [label, label, ""]
 
     def test_a_plan_report_has_no_label(self, tmp_path):
@@ -555,7 +556,9 @@ class TestTheAbsentAtHeadLabel:
 class TestPlanReportsAreUnchanged:
     def test_report_md_has_no_commit_line(self, tmp_path):
         report, _html, _data, _ = report_for(tmp_path, commit=False)
-        lines = report.splitlines()
+        # Under the report grammar's first line (`report_markdown`).
+        marker, *lines = report.splitlines()
+        assert marker == ESCAPED_TEXT_MARKER
         assert lines[:3] == ["# Code Review Report", "", f"**Plan:** {BASE[:12]}-{C3[:12]}.md"]
         assert lines[3].startswith("**Generated:** ")
         assert lines[4:6] == ["**Files Changed:** 3", ""]
@@ -672,8 +675,8 @@ class TestTheCallSites:
         state = _fake_state(record, base)
         with patch.object(cro, "parse_args", return_value=args), \
              patch.object(cro, "get_or_create_state", return_value=state), \
-             patch.object(cro, "resolve_models", return_value=["cursor-agent:auto"]), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.resolve_models", return_value=["cursor-agent:auto"]), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref", side_effect=lambda ref: ref or "HEAD~1"), \
              patch.object(cro, "build_unsanitize_map",
                           return_value={"cursor-agent_auto": "cursor-agent:auto"}), \
@@ -693,15 +696,14 @@ class TestTheCallSites:
         report = (phase_dir / "report.md").read_text(encoding="utf-8")
         assert f"**Commit brief:** {plan.name}" in report
         assert f"[COMMIT_RANGE] {base[:7]}..{head[:7]} (1 commit, 1 file, +1 −1)" in report
-        if not reaggregate:
-            # The fan-out's --skip-validation report keeps its groups.
-            assert f"Introduced by `{head[:7]}` — c1: rewrite line three" in report
+        # A --skip-validation report keeps its groups, on the fan-out and on
+        # a reaggregate alike (docs/development/review-results.md, "The shared
+        # review lane").
+        assert f"Introduced by `{head[:7]}` — c1: rewrite line three" in report
         data = json.loads((phase_dir / "report_data.json").read_text(encoding="utf-8"))
         assert data["commitRange"]["head"] == head
-        # A --skip-validation reaggregate reports no groups (as for any plan),
-        # so only the fan-out's page carries a group to attribute.
-        assert list(data["commitRange"]["attribution"].values()) == (
-            [] if reaggregate else [{"introducedBy": head, "source": "blame"}])
+        assert list(data["commitRange"]["attribution"].values()) == [
+            {"introducedBy": head, "source": "blame"}]
 
     def test_a_plan_run_is_left_unattributed(self, commit_repo):
         root, base, head, record, plan = commit_repo
@@ -713,8 +715,8 @@ class TestTheCallSites:
             "pre_existing_changes": []}.get(key, default)
         with patch.object(cro, "parse_args", return_value=args), \
              patch.object(cro, "get_or_create_state", return_value=state), \
-             patch.object(cro, "resolve_models", return_value=["cursor-agent:auto"]), \
-             patch.object(cro, "is_model_valid", return_value=True), \
+             patch("utils.interactive.resolve_models", return_value=["cursor-agent:auto"]), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
              patch.object(cro, "validate_git_ref", side_effect=lambda ref: ref or "HEAD~1"), \
              patch.object(cro, "run_all_reviews", new=AsyncMock(return_value={
                  "cursor-agent:auto": (True, [dict(FINDING)], None)})):

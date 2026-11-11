@@ -54,6 +54,7 @@ from utils import landlock_dispatch  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
 from utils import run_status  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from utils import dispatch_spawn  # noqa: E402
 from utils.providers import codex as codex_module  # noqa: E402
 from utils.providers.base import (  # noqa: E402
     SANDBOX_CANARY_DENIED,
@@ -112,7 +113,6 @@ def jailed(tmp_path, monkeypatch):
     repo.mkdir()
     monkeypatch.chdir(repo)
     registry._config = None
-    registry._config_key = None
     executor.reset_version_cache()
     assert shutil.which("codex") == str(bin_dir / "codex")
     monkeypatch.setattr(
@@ -122,7 +122,7 @@ def jailed(tmp_path, monkeypatch):
     def no_model_calls(*args, **kwargs):
         raise AssertionError("doctor dispatched a model call")
 
-    monkeypatch.setattr(executor, "_spawn", no_model_calls)
+    monkeypatch.setattr(dispatch_spawn, "_spawn", no_model_calls)
     from utils import llm_client
 
     monkeypatch.setattr(llm_client, "invoke_with_provider", no_model_calls)
@@ -146,7 +146,6 @@ def jailed(tmp_path, monkeypatch):
     set_wrapper.codex_home = codex_home  # type: ignore[attr-defined]
     yield set_wrapper
     registry._config = None
-    registry._config_key = None
 
 
 def _run(capsys, *argv):
@@ -273,12 +272,25 @@ class TestDoctorWithAPassingJail:
         assert any(f.startswith("codex: sandbox") for f in data["failures"])
         assert data["exit"] == 3
 
-    def test_warn_only_moves_the_exit_and_nothing_else(self, jailed, capsys):
+    def test_warn_only_moves_the_exit_and_shortens_the_text(self, jailed, capsys):
+        """PERF-5: one line per problem, and the line still says what the next
+        run does on this machine, with the jail's grade and its open network
+        (Codex review of U28, point 4); the repair stays on a plain `doctor`."""
         jailed(passes=True)
         code, out = _run(capsys, "--warn-only")
         assert code == 0
-        assert "WARN: codex: sandbox" in out
-        assert doctor.REPAIR_HEADING_SYSTEM_ALTERNATIVE in out
+        warned = [ln for ln in out.splitlines() if ln.startswith("WARN: codex: sandbox")]
+        assert warned == [
+            "WARN: codex: sandbox — " + doctor.SANDBOX_FIX_SENTENCE
+            + " [sandbox_fallback: auto, read-only phases run on plugin-landlock,"
+            " writes run on plugin-landlock; plugin-landlock "
+            + doctor.INCIDENTAL_GRADE_WORDING + ", and the network is not confined]"
+        ]
+        assert doctor.REPAIR_HEADING_SYSTEM_ALTERNATIVE not in out
+        assert doctor.APPARMOR_LOAD_COMMAND not in out
+        code, out = _run(capsys, "--warn-only", "--json")
+        assert code == 0
+        assert json.loads(out)["repair_heading"] == doctor.REPAIR_HEADING_SYSTEM_ALTERNATIVE
 
     def test_a_newer_installed_codex_is_flagged(self, jailed, capsys, monkeypatch):
         """F1 item 3: the measured-through version rides the row beside the

@@ -82,6 +82,7 @@ from utils import host_capabilities  # noqa: E402
 from utils import unattended  # noqa: E402
 
 from tests.generated_distributions import CLAUDE, CODEX, DISTRIBUTIONS  # noqa: E402
+from tests.source_cache import python_files, source_tree  # noqa: E402
 
 
 def _scanned_files():
@@ -191,8 +192,11 @@ PLACEHOLDER_MANIFEST = {
     # +2 on all three (32 -> 34, 32 -> 34, 28 -> 30): the per-batch `util
     # batch-done` record, the native leg's progress record that a `--resume`
     # skips and `status` counts (reviewer finding 1, fix round 6, 2026-10-05).
-    "instructions/apply-code-fixes.md": (0, 34),
-    "instructions/apply-suggestions.md": (0, 34),
+    # 34 -> 28 on both: the revalidation runbook (its two recovery commands and
+    # its `util check-reply`) moved to `references/revalidation.md`, which a
+    # host reads only when a revalidation marker prints.
+    "instructions/apply-code-fixes.md": (0, 28),
+    "instructions/apply-suggestions.md": (0, 28),
     # 26 -> 28: the post-loop `util check-tasks` graph check (issue 10).
     "instructions/apply-task-suggestions.md": (0, 30),
     # 4 -> 6: the hand-rolled question-file dance (write the file, re-resolve the
@@ -244,7 +248,9 @@ PLACEHOLDER_MANIFEST = {
     # 24 -> 26: the per-task `util batch-done` record replaced the inline
     # `state["task_status"][task_id] = …` Python block the host used to retype
     # (reviewer finding 1, fix round 6, 2026-10-05).
-    "instructions/implement.md": (0, 26),
+    # 26 -> 22: step 0's prerequisite-marker handling, with its two `--skip`
+    # commands, moved to `references/implement-prerequisites.md`.
+    "instructions/implement.md": (0, 22),
     # 3 -> 2: the "substitute {SKILL_DIR} yourself" preamble is obsolete; the core
     # is served pre-substituted.
     "instructions/init-config.md": (0, 2),
@@ -267,9 +273,16 @@ PLACEHOLDER_MANIFEST = {
     # plan D2.6).
     # +2 each on review-code/-plan/-tasks: the `util check-reply` command run after
     # each validation batch is written (issue 11).
-    "instructions/review-code.md": (0, 32),
-    "instructions/review-plan.md": (0, 32),
-    "instructions/review-tasks.md": (0, 22),
+    # review-code 32 -> 26: the `--apply-fixes` branch (three `util metrics`
+    # commands) moved to `references/review-code-apply-fixes.md`. review-plan
+    # 32 -> 22: the optional consolidation pass (five commands) moved to
+    # `references/consolidation.md`. Conditional steps a clean run never takes
+    # live in `references/`, behind a trigger sentence the core keeps.
+    # +2 each on review-code/-plan/-tasks: the resume step runs `util
+    # resume-state` instead of walking the reference's case list by hand.
+    "instructions/review-code.md": (0, 28),
+    "instructions/review-plan.md": (0, 24),
+    "instructions/review-tasks.md": (0, 24),
     # The shared shim partials (D5). Authored once, interpolated into a rendered
     # shim by `install-host`, and still counted against that shim's rendered line
     # budget because an agent reads them. `poll-loop.md` carries the one `status`
@@ -308,6 +321,17 @@ PLACEHOLDER_MANIFEST = {
     # skill-dir placeholder of either spelling.
     "references/host-capabilities.md": (0, 0),
     "references/human-decision-batch.md": (0, 0),
+    # The conditional runbooks the cores name with a trigger sentence. A
+    # reference is read as it is, never through `render_instruction_text`, so
+    # it can carry no template token: its commands are spelled from the mode
+    # word on, behind a `<prefix>` the file defines as the core's own.
+    "references/apply-write-executor.md": (0, 0),
+    "references/consolidation.md": (0, 0),
+    "references/implement-prerequisites.md": (0, 0),
+    "references/implement-write-executor.md": (0, 0),
+    "references/interrupted-run-recovery.md": (0, 0),
+    "references/revalidation.md": (0, 0),
+    "references/review-code-apply-fixes.md": (0, 0),
     # Fix round 27: the one rule both write runbooks point to for a code
     # batch's own check; it names flags, never a command, so no token.
     "references/own-check.md": (0, 0),
@@ -1325,119 +1349,41 @@ class TestNegativeSpellings:
 
 
 # ===========================================================================
-# The legacy escape hatch
+# The removed legacy core
 # ===========================================================================
 
-class TestLegacyInstructionHatch:
-    """A way back from the ~5k-line rewrite that does not revert the Python work.
+class TestLegacyInstructionsRemoved:
+    """The frozen pre-refactor core is gone (docs/development/hosts.md). Its switch
+    is answered with one stderr line and the current core: a run never stops on it."""
 
-    The golden guard proves the modes its fixture exercises, not the interactive
-    corners a real user hits on day two — so the pre-refactor core is *moved*, not
-    deleted, and one environment variable switches the read path back to it.
-    """
+    NOTICE = "[LEGACY_INSTRUCTIONS]"
 
-    LEGACY = SKILL_ROOT / "legacy"
-
-    #: The modes that postdate the rewrite (plans/improve-plan-and-improve-code.md
-    #: §2.4, and the three commit modes of plans/review-commits.md §2.9): there
-    #: is no pre-refactor text to freeze, and a frozen copy of the new core would
-    #: go stale the first time the real one is fixed. The runtime already serves
-    #: the current core for them (`_legacy_instruction_path` returns None when no
-    #: copy exists), so the exemption is test-side only.
-    NO_FROZEN_COPY = {"improve-plan", "improve-code", "review-commits",
-                      "apply-commit-fixes", "improve-commits"}
-
-    def test_every_served_mode_has_a_frozen_copy(self):
-        without_copy = set()
-        for mode in mode_table.MODES:
-            if mode.instruction_file is None:
-                continue
-            if not (self.LEGACY / mode_table.instruction_path(mode.name)).exists():
-                without_copy.add(mode.name)
-            if mode.name in self.NO_FROZEN_COPY:
-                continue
-            assert (self.LEGACY / mode_table.instruction_path(mode.name)).exists(), (
-                f"no frozen pre-refactor copy for mode '{mode.name}'; the escape "
-                "hatch would silently serve the rewritten core instead"
-            )
-        # Exactly the exempt set: a new mode without a copy still fails above,
-        # and an exempt mode that gains a copy or leaves the table fails here.
-        assert without_copy == self.NO_FROZEN_COPY, (
-            f"served modes with no frozen copy {sorted(without_copy)} != the "
-            f"exempt set {sorted(self.NO_FROZEN_COPY)}"
-        )
-
-    @pytest.mark.parametrize("mode", sorted(NO_FROZEN_COPY))
-    def test_a_mode_with_no_frozen_copy_serves_the_current_core(
-        self, mode, monkeypatch, capsys
+    def test_the_variable_serves_the_current_core_with_one_notice(
+        self, monkeypatch, capsys
     ):
-        """With the hatch open, a mode that postdates the rewrite gets exactly
-        what it gets with the hatch closed, and no `[LEGACY_INSTRUCTIONS]`
-        notice: that notice is printed only when a frozen core is served."""
         monkeypatch.delenv(multi_llm.LEGACY_INSTRUCTIONS_ENV, raising=False)
-        assert multi_llm.main(["util", "instructions", mode]) == 0
+        assert multi_llm.main(["util", "instructions", "review-plan"]) == 0
         closed = capsys.readouterr()
         monkeypatch.setenv(multi_llm.LEGACY_INSTRUCTIONS_ENV, "1")
-        assert multi_llm.main(["util", "instructions", mode]) == 0
+        assert multi_llm.main(["util", "instructions", "review-plan"]) == 0
         opened = capsys.readouterr()
         assert opened.out == closed.out
-        assert "[LEGACY_INSTRUCTIONS]" not in opened.err
+        notices = [line for line in opened.err.splitlines() if self.NOTICE in line]
+        assert len(notices) == 1, opened.err
+        assert "removed" in notices[0]
+        assert "current instructions are served" in notices[0]
+        # stdout is the core a host may pipe into a prompt.
+        assert self.NOTICE not in opened.out
+        assert self.NOTICE not in closed.err
 
-    def test_the_frozen_copies_are_the_pre_refactor_text(self):
-        """They still name the host's tools — that is the point of keeping them."""
-        legacy = (self.LEGACY / "instructions" / "review-plan.md").read_text(
-            encoding="utf-8"
-        )
-        assert "${CLAUDE_SKILL_DIR}" in legacy
-        assert "AskUserQuestion" in legacy
-        assert "run_in_background" in legacy
-
-    def test_the_hatch_is_closed_by_default(self, monkeypatch, capsys):
-        monkeypatch.delenv(multi_llm.LEGACY_INSTRUCTIONS_ENV, raising=False)
-        assert multi_llm.main(["util", "instructions", "review-plan"]) == 0
-        captured = capsys.readouterr()
-        assert "${CLAUDE_SKILL_DIR}" not in captured.out
-        assert "AskUserQuestion" not in captured.out
-        assert "LEGACY_INSTRUCTIONS" not in captured.err
-
-    def test_the_hatch_serves_the_frozen_core_rendered(self, monkeypatch, capsys):
-        monkeypatch.setenv(multi_llm.LEGACY_INSTRUCTIONS_ENV, "1")
-        assert multi_llm.main(["util", "instructions", "review-plan"]) == 0
-        captured = capsys.readouterr()
-        assert "AskUserQuestion" in captured.out, "the legacy text was not served"
-        # Rendered, not raw: the renderer substitutes every spelling, so the
-        # legacy corpus's `${CLAUDE_SKILL_DIR}` arrives resolved too.
-        for token in FORBIDDEN_IN_RENDERED:
-            assert token not in captured.out, f"{token} survived legacy rendering"
-        assert str(cli_common.skill_dir()) in captured.out
-        # The notice goes to stderr: stdout is the core, and a host may pipe it
-        # straight into a prompt.
-        assert "[LEGACY_INSTRUCTIONS]" in captured.err
-
-    def test_an_unset_value_other_than_one_does_not_open_it(self, monkeypatch,
-                                                            capsys):
+    def test_any_other_value_prints_nothing(self, monkeypatch, capsys):
         for value in ("0", "", "true", "yes"):
             monkeypatch.setenv(multi_llm.LEGACY_INSTRUCTIONS_ENV, value)
             assert multi_llm.main(["util", "instructions", "review-plan"]) == 0
-            captured = capsys.readouterr()
-            assert "AskUserQuestion" not in captured.out, value
+            assert self.NOTICE not in capsys.readouterr().err, value
 
-    def test_legacy_is_outside_every_lint_and_manifest_scan(self):
-        """A frozen copy that had to pass the new rules would not be a copy."""
-        scanned = {_rel(p) for p in _scanned_files()}
-        assert not any(rel.startswith("legacy/") for rel in scanned), scanned
-        assert not any(
-            _rel(p).startswith("legacy/") for p in _lint_corpus_files()
-        )
-        assert not any(rel.startswith("legacy/") for rel in PLACEHOLDER_MANIFEST)
-
-    def test_the_hatch_is_documented(self):
-        readme = (self.LEGACY / "README.md").read_text(encoding="utf-8")
-        assert multi_llm.LEGACY_INSTRUCTIONS_ENV in readme
-        assert "Claude Code only" in readme
-        # The exempt modes are named, so nobody goes looking for their copy.
-        for mode in sorted(self.NO_FROZEN_COPY):
-            assert f"`{mode}`" in readme, mode
+    def test_no_frozen_core_ships(self):
+        assert not (SKILL_ROOT / "legacy").exists()
 
 
 # ===========================================================================
@@ -1861,12 +1807,26 @@ class TestTheWritePhasesDetachUnderTheExecutor:
         assert paragraph.index(native) < paragraph.index(executor)
         assert "With `--exec-subagents`" in paragraph
 
+    #: The reference each write core's executor trigger names, where the
+    #: executor's own flags are described.
+    EXECUTOR_REFERENCE = {
+        "apply-suggestions": "apply-write-executor.md",
+        "apply-task-suggestions": "apply-write-executor.md",
+        "apply-code-fixes": "apply-write-executor.md",
+        "implement": "implement-write-executor.md",
+    }
+
     @pytest.mark.parametrize("mode", sorted(WRITE_CORES))
     def test_the_detach_flag_note_says_it_is_step_2s_launch(self, mode):
         flat = self._flat(mode)
-        assert "it is how step 2 runs on this path" in flat
+        name = self.EXECUTOR_REFERENCE[mode]
+        assert f"references/{name}" in flat
+        reference = " ".join(
+            (SKILL_ROOT / "references" / name).read_text(encoding="utf-8").split())
+        assert "it is how step 2 runs on this path" in reference
         # The D5a rewrite left "on Claude host resolves *run detached* …" here.
         assert "on Claude host resolves" not in flat
+        assert "on Claude host resolves" not in reference
 
     @pytest.mark.parametrize("mode", ["improve-plan", "improve-code", "improve-commits"])
     def test_the_composites_end_an_executor_apply_on_its_detached_run(self, mode):
@@ -2872,10 +2832,11 @@ class TestLayerTwoPollLoop:
             "tense discriminator cannot tell the two runs apart"
         )
         assert "complete" in run_status.CHECKPOINT_TERMINAL_STEPS
+        # The review lanes open their round through the shared lane
+        # (`review_lane.open_round`); the ask lane opens its own.
         for src in (
-            "utils/review_orchestrator_base.py",
+            "utils/review_lane.py",
             "ask_orchestrator.py",
-            "code_review_orchestrator.py",
         ):
             body = (SKILL_ROOT / src).read_text(encoding="utf-8")
             assert 'step="fanout"' in body, (
@@ -3340,7 +3301,7 @@ def _production_python_files():
     excluded = {"tests", "__pycache__", ".venv"}
     return sorted(
         p
-        for p in SKILL_ROOT.rglob("*.py")
+        for p in python_files(SKILL_ROOT)
         if not any(part in excluded or part.startswith(".") for part in
                    p.relative_to(SKILL_ROOT).parts)
     )
@@ -3416,7 +3377,7 @@ class TestDispatchTargetsImportCleanly:
     def test_no_module_level_argparse_or_argv(self, module):
         """AST guard: argparse and argv stay inside ``main(argv)``."""
         path = SKILL_ROOT / (module.replace(".", "/") + ".py")
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        tree = source_tree(path)
         offenders = []
 
         def walk(node, inside_function):
@@ -3458,9 +3419,17 @@ class TestDispatchTargetsImportCleanly:
 
 
 def _is_main_guard(node) -> bool:
-    if not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare):
+    """``if __name__ == "__main__":``, or an ``and`` that requires it first: the
+    by-path guard ``__name__ == "__main__" and not __package__`` runs only as
+    ``__main__`` too (docs/development/dispatcher.md#import-safety)."""
+    if not isinstance(node, ast.If):
         return False
-    left, comparators = node.test.left, node.test.comparators
+    test = node.test
+    if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And):
+        test = test.values[0]
+    if not isinstance(test, ast.Compare):
+        return False
+    left, comparators = test.left, test.comparators
     names = {n.id for n in [left, *comparators] if isinstance(n, ast.Name)}
     consts = {n.value for n in [left, *comparators] if isinstance(n, ast.Constant)}
     return "__name__" in names and "__main__" in consts

@@ -1,17 +1,29 @@
 """Tests for JSON extractor utilities."""
 
 import json
+import random
+import re
+import subprocess
 import sys
+import textwrap
+import time
+import tracemalloc
 
 import pytest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from utils import json_extractor
 from utils.json_extractor import (
+    _balanced_spans,
+    _fenced_spans,
     build_unsanitize_map,
     describe_syntax_error,
     extract_json_from_text,
+    find_json_candidates,
+    first_fenced_block,
+    first_to_last_bracket,
     generate_output_path,
     has_salvageable_json,
     is_answer_shaped,
@@ -20,57 +32,19 @@ from utils.json_extractor import (
     sanitize_model_name,
 )
 from utils.providers.result_envelope import parse_result_envelope
+from tests.support.json_corpus import (
+    FIXTURES,
+    USAGE_CAP_ENVELOPE,
+    _FENCE_ALPHABETS,
+    _FENCE_EDGE_CASES,
+    _FIRST_READER_EDGE_CASES,
+    _WALK_ALPHABETS,
+    _document_mix,
+    _fence_mix,
+    _fenced_fixture_texts,
+)
 
 CLAUDE_CODE_FIXTURES = Path(__file__).parent / "fixtures" / "claude-code"
-
-#: The 2026-09-17 envelope, re-keyed. ``claude-code:claude-fable-5-1:high``
-#: reviewed for 491 s, spawned four subagents, spent $25.05 and 137 348 output
-#: tokens, and then hit the account's usage cap: ``api_error_status: 429`` with
-#: the vendor's sentence in ``result`` and **no** ``API Error:`` prefix, no
-#: ``429`` and no "rate limit" anywhere in the text — the text ladder cannot
-#: read it and only the status rung can. The session and event ids are fresh;
-#: nothing else is changed, because the bookkeeping shape (``iterations: []``,
-#: ``permission_denials: []``, the four-entry ``subagent_stats``) is what the
-#: gate misread. The top-level ``usage`` block being all zeros beside a
-#: populated ``modelUsage`` is measured too, not an edit.
-USAGE_CAP_ENVELOPE = (
-    '{"duration_api_ms":1738676,"stop_reason":"stop_sequence",'
-    '"session_id":"00000000-0000-4000-8000-000000000001",'
-    '"total_cost_usd":25.05318824999999,'
-    '"usage":{"output_tokens_details":{"thinking_tokens":0},"input_tokens":0,'
-    '"cache_creation_input_tokens":0,"cache_read_input_tokens":0,'
-    '"output_tokens":0,"server_tool_use":{"web_search_requests":0,'
-    '"web_fetch_requests":0},"service_tier":"standard",'
-    '"cache_creation":{"ephemeral_1h_input_tokens":0,'
-    '"ephemeral_5m_input_tokens":0},"inference_geo":"","iterations":[],'
-    '"speed":"standard"},'
-    '"modelUsage":{"claude-haiku-4-5-20251001":{"inputTokens":1944,'
-    '"outputTokens":13,"cacheReadInputTokens":0,"cacheCreationInputTokens":0,'
-    '"webSearchRequests":0,"costUSD":0.002009,"contextWindow":200000,'
-    '"maxOutputTokens":32000,"thinkingTokens":0,'
-    '"canonicalModel":"claude-haiku-4-5","provider":"firstParty",'
-    '"costBasis":"list"},"claude-fable-5-1":{"inputTokens":1936,'
-    '"outputTokens":137348,"cacheReadInputTokens":37205114,'
-    '"cacheCreationInputTokens":1065254,"webSearchRequests":0,'
-    '"costUSD":25.051179249999993,"contextWindow":1000000,'
-    '"maxOutputTokens":64000,"thinkingTokens":75679,'
-    '"canonicalModel":"claude-fable-5-1","provider":"firstParty",'
-    '"costBasis":"list"}},"permission_denials":[],'
-    '"terminal_reason":"api_error","fast_mode_state":"off",'
-    '"fast_mode_disabled_reason":"sdk_opt_in_required",'
-    '"origin":{"kind":"task-notification"},'
-    '"subagent_stats":{"spawned":4,"requested":{"background":4,'
-    '"foreground":0,"unset":0},"started_in_background":4,"max_depth":1,'
-    '"spawned_by_subagents":0,"completed":2,"failed":2,'
-    '"killed":{"parent":0,"user":0,"system":0},"refused":{"depth_limit":0,'
-    '"concurrency_limit":0,"budget":0},"by_type":{"general-purpose":4}},'
-    '"is_error":true,"num_turns":1,"subtype":"success","api_error_status":429,'
-    '"result":"You\'ve reached your Fable limit. Switch to another model, or '
-    'manage usage credits at claude.ai/settings/usage?from=cc_cli_limit_message, '
-    'to continue.","type":"result","duration_ms":409,'
-    '"uuid":"00000000-0000-4000-8000-000000000002","queued_turn_count":0,'
-    '"result_index":3}'
-)
 
 
 def _checkpoint(phase_dir: Path, **fields) -> Path:
@@ -786,7 +760,6 @@ class TestBuildUnsanitizeMapReportsStemCollisions:
         assert capsys.readouterr().err == ""
 
 
-
 class TestLooksLikeNdjson:
     """D2.4 (plans/ask-answer-recovery-and-false-success.md): the truncation
     marker, a torn last line and ``role`` no longer let a stream pass as prose.
@@ -962,3 +935,520 @@ class TestEnclosingSyntaxError:
 
     def test_a_reply_with_no_json_has_none(self):
         assert "enclosing_syntax_error" not in extract_json_from_text("")
+
+
+# ---------------------------------------------------------------------------
+# The balanced-run scan: one linear pass that must equal walking every opener
+# ---------------------------------------------------------------------------
+
+
+def _walk_each_opener(text, char_type="array"):
+    """The oracle: ``find_json_candidates`` as it was before it became linear.
+
+    Kept verbatim (only renamed) so the differential tests below compare the
+    one-pass scan against the walk it replaces, not against a restatement of it.
+    It walks from every opener to its match, so it is quadratic: keep the inputs
+    handed to it small.
+    """
+    candidates = []
+    chars = []
+
+    if char_type in ("array", "both"):
+        chars.append(("[", "]"))
+    if char_type in ("object", "both"):
+        chars.append(("{", "}"))
+
+    for start_char, end_char in chars:
+        i = 0
+        while i < len(text):
+            if text[i] == start_char:
+                depth = 1
+                in_string = False
+                escape_next = False
+                j = i + 1
+
+                while j < len(text) and depth > 0:
+                    c = text[j]
+                    if escape_next:
+                        escape_next = False
+                    elif c == "\\" and in_string:
+                        escape_next = True
+                    elif c == '"' and not escape_next:
+                        in_string = not in_string
+                    elif not in_string:
+                        if c == start_char:
+                            depth += 1
+                        elif c == end_char:
+                            depth -= 1
+                    j += 1
+
+                if depth == 0:
+                    candidates.append((i, text[i:j]))
+            i += 1
+
+    candidates.sort(key=lambda x: x[0])
+    return [c[1] for c in candidates]
+
+
+def _walk_spans(text, char_type):
+    """The oracle's spans, recovered the way the extractor used to: a
+    forward-only search for each candidate, since at most one run starts at
+    any index."""
+    spans = []
+    pos = 0
+    for candidate in _walk_each_opener(text, char_type):
+        start = text.find(candidate, pos)
+        assert start >= 0
+        spans.append((start, start + len(candidate), candidate))
+        pos = start + 1
+    return spans
+
+
+def _assert_scan_matches_walk(text):
+    for char_type in ("array", "object", "both"):
+        expected = _walk_spans(text, char_type)
+        assert find_json_candidates(text, char_type) == [c for _, _, c in expected], (
+            f"char_type={char_type!r} text={text!r}")
+        assert _balanced_spans(text, char_type) == [(s, e) for s, e, _ in expected], (
+            f"char_type={char_type!r} text={text!r}")
+
+
+#: Hand-written edges: escapes outside strings, runs of ``\\"``, unterminated
+#: strings, closers inside strings, mixed and crossed nesting, ANSI, newlines
+#: inside strings.
+_WALK_EDGE_CASES = [
+    "", "[", "]", '"', "\\", "[\\]", '["\\"]"]', '[\\"]', '"[1]"', '[" \\\\"]',
+    '["\\\\"]', '["a\\', '["\\u005d]"]', '[{"a":[1,2]},{"b":"]"}]', '{"a":"\\"}"}',
+    '{"a":"\\\\"}', "[1] [2] [3]", '{"x":[1,{"y":[2]}]}', "[\\\\]", '"\\"[1]"',
+    '[]"[]"[]', '["]"]', '["\\"]', '[["]]"]]', '\x1b[32mINFO\x1b[0m [12/400] "quoted\n',
+    'x\\"[1]', '["\\\\\\"]"]', "\\[1]", "[1]\\", '["\\\\"]"]', '{"a":"\\u0022}"}',
+    '[\n"\n]\n', '["\\\n"]', '[""]', '["""]', '[""""]', '["\\""]', '["\\"\\""]',
+    "{{}}{}", "[[[]]]", "[[]][[]]", '{"a":{"b":{}}}', "[{]}", "{[}]", "[}", "{]",
+    '["\\', '["\\"', "[\\", '{"a": "\U0001F600]"}', '{"a": [1, 2]} trailing [',
+]
+
+
+class TestBalancedScanMatchesTheWalk:
+    """``find_json_candidates`` solves the bracket walk in one pass. It must
+    return exactly what walking from every opener returns — the same
+    candidates in the same order — because "last document wins", the
+    contained-candidate rule and ``only_object`` all read that list."""
+
+    @pytest.mark.parametrize("text", _WALK_EDGE_CASES)
+    def test_hand_written_edges(self, text):
+        _assert_scan_matches_walk(text)
+
+    @pytest.mark.parametrize("alphabet_index", range(len(_WALK_ALPHABETS)))
+    def test_seeded_random_strings(self, alphabet_index):
+        rng = random.Random(20261108 + alphabet_index)
+        alphabet = _WALK_ALPHABETS[alphabet_index]
+        for _ in range(4000):
+            length = rng.choice(
+                [rng.randint(0, 12), rng.randint(0, 60), rng.randint(0, 160)])
+            _assert_scan_matches_walk(
+                "".join(rng.choice(alphabet) for _ in range(length)))
+
+    def test_seeded_document_mixes(self):
+        rng = random.Random(4242)
+        for _ in range(1500):
+            _assert_scan_matches_walk(_document_mix(rng))
+
+    def test_extraction_serves_the_same_document_either_way(self, monkeypatch):
+        """Downstream of the scan: the extractor and the salvage check give the
+        same answer on the oracle's spans as on the scan's."""
+        rng = random.Random(777)
+        texts = [_document_mix(rng) for _ in range(200)]
+
+        def results():
+            return [
+                (
+                    extract_json_from_text(text, prefer_arrays=True),
+                    extract_json_from_text(text, prefer_arrays=False),
+                    has_salvageable_json(text),
+                )
+                for text in texts
+            ]
+
+        scanned = results()
+        monkeypatch.setattr(
+            json_extractor,
+            "_balanced_spans",
+            lambda text, char_type: [(s, e) for s, e, _ in _walk_spans(text, char_type)],
+        )
+        assert results() == scanned
+
+
+class TestBalancedScanIsLinear:
+    """The walk from each opener was quadratic: a 112 KB coloured log took
+    about 10 s and 448 KB about 160 s, on a worker thread holding the GIL.
+    The one-pass scan does each input here in milliseconds, so the ceiling
+    leaves three orders of magnitude for a slow or loaded runner. The inputs
+    are sized so a quadratic scan fails in under a minute instead of hanging
+    the suite for an hour."""
+
+    CEILING_S = 5.0
+    LOG_LINE = '\x1b[32mINFO\x1b[0m compiling module foo.bar [12/400] "quoted\n'
+
+    @pytest.mark.parametrize("text", [
+        LOG_LINE * 2000,
+        "[ " * 20_000,
+        '{"a":' * 10_000,
+        '\\"[' * 15_000,
+    ], ids=["ansi-log-112KB", "unmatched-openers-40KB", "unclosed-objects-50KB",
+            "escaped-quotes-45KB"])
+    def test_a_large_unbalanced_reply_scans_in_linear_time(self, text):
+        started = time.perf_counter()
+        for char_type in ("array", "object", "both"):
+            find_json_candidates(text, char_type)
+        extract_json_from_text(text, prefer_arrays=True)
+        elapsed = time.perf_counter() - started
+        assert elapsed < self.CEILING_S, (
+            f"scanning {len(text)} characters took {elapsed:.1f}s, over the "
+            f"{self.CEILING_S}s ceiling: the balanced-run scan has gone "
+            f"quadratic again (see _balanced_spans in utils/json_extractor.py)"
+        )
+
+
+def _traced_peak(call):
+    """The most memory *call* held at once beyond what was held before it, by
+    ``tracemalloc``; an outer trace (``-X tracemalloc``) is left running."""
+    was_tracing = tracemalloc.is_tracing()
+    if not was_tracing:
+        tracemalloc.start()
+    try:
+        tracemalloc.reset_peak()
+        before = tracemalloc.get_traced_memory()[0]
+        call()
+        return tracemalloc.get_traced_memory()[1] - before
+    finally:
+        if not was_tracing:
+            tracemalloc.stop()
+
+
+class TestBalancedScanMemory:
+    """The scan keeps a few bytes per bracket of the pair it walks and nothing
+    per quote or backslash, and reads nothing before the first opener or after
+    the last closer. A reply made of quotes and backslashes, with no bracket or
+    with two, costs the scan no memory. Measured 2026-11-08: with a table entry
+    per quote and backslash, 8 MiB of ``"`` peaked at about 242 MiB and raised
+    ``MemoryError`` under a 256 MiB limit; walking each opener had needed about
+    22 MiB. These inputs cost about 25 MiB each that way, and about 2 KiB now."""
+
+    SIZE = 256 * 1024
+    SCAN_PEAK_BYTES = 64 * 1024
+    TEXTS = {
+        "quotes": '"' * SIZE,
+        "backslashes": "\\" * SIZE,
+        "escaped-quotes": '\\"' * (SIZE // 2),
+        "spaced-quotes": 'a"' * (SIZE // 2),
+        "one-array-of-quotes": "[" + '"' * SIZE + "]",
+        "one-object-of-escapes": '{"' + '\\"' * (SIZE // 2) + '"}',
+    }
+
+    @pytest.mark.parametrize("name", list(TEXTS))
+    def test_quotes_and_backslashes_cost_the_scan_nothing(self, name):
+        text = self.TEXTS[name]
+        peak = _traced_peak(
+            lambda: [_balanced_spans(text, kind) for kind in ("array", "object", "both")])
+        assert peak < self.SCAN_PEAK_BYTES, (
+            f"scanning {len(text)} characters of {name} held {peak} bytes: the "
+            f"scan is storing quotes or backslashes again (see _pair_runs)")
+
+    @pytest.mark.parametrize("name", list(TEXTS))
+    def test_the_readers_hold_no_more_than_a_copy_of_the_reply(self, name):
+        text = self.TEXTS[name]
+        peak = _traced_peak(lambda: (
+            extract_json_from_text(text, prefer_arrays=True),
+            extract_json_from_text(text, prefer_arrays=False),
+            has_salvageable_json(text),
+        ))
+        assert peak < 2 * len(text), (
+            f"reading {len(text)} characters of {name} held {peak} bytes")
+
+
+class TestCandidateBudget:
+    """Nested candidates add up to a quadratic length: 1 MiB of ``[`` then
+    ``]`` holds 256 GiB of them, and every reader slices and parses what it
+    tries. Past the budget only the outermost runs are returned — by nesting
+    level, then position, up to the first that does not fit — so a reply that
+    nests brackets thousands deep is still read, in bounded time and memory."""
+
+    @staticmethod
+    def _budget(monkeypatch, floor, per_char=0):
+        monkeypatch.setattr(json_extractor, "_CANDIDATE_BUDGET_FLOOR", floor)
+        monkeypatch.setattr(json_extractor, "_CANDIDATE_BUDGET_PER_CHAR", per_char)
+
+    NESTED = "[" * 6 + "]" * 6  # runs of 12, 10, 8, 6, 4 and 2: 42 in all
+
+    def test_within_the_budget_every_run_is_returned(self, monkeypatch):
+        self._budget(monkeypatch, 42)
+        assert len(_balanced_spans(self.NESTED, "array")) == 6
+
+    def test_past_it_the_outermost_levels_are_kept(self, monkeypatch):
+        self._budget(monkeypatch, 30)
+        assert _balanced_spans(self.NESTED, "array") == [(0, 12), (1, 11), (2, 10)]
+
+    def test_the_budget_grows_with_the_text(self, monkeypatch):
+        self._budget(monkeypatch, 0, per_char=2)
+        assert _balanced_spans(self.NESTED, "array") == [(0, 12), (1, 11)]
+
+    def test_a_level_that_does_not_fit_is_cut_at_its_first_run_that_does_not(
+        self, monkeypatch
+    ):
+        # Three runs of 5 at level 0 (15), three of 3 inside them at level 1.
+        self._budget(monkeypatch, 15 + 3 + 2)
+        assert _balanced_spans("[[1]] [[2]] [[3]]", "array") == [
+            (0, 5), (1, 4), (6, 11), (12, 17)]
+
+    def test_both_bracket_pairs_share_one_budget(self, monkeypatch):
+        self._budget(monkeypatch, 13 + 11)
+        assert _balanced_spans('[{"a": [{}]}]', "both") == [(0, 13), (1, 12)]
+
+    def test_the_readers_copy_only_the_candidate_they_parse(self):
+        # 2,048 levels: 4 MiB of candidates, all within the budget.
+        text = "[" * 2048 + "]" * 2048
+        peak = _traced_peak(lambda: (
+            extract_json_from_text(text, prefer_arrays=True),
+            extract_json_from_text(text, prefer_arrays=False),
+            has_salvageable_json(text),
+        ))
+        assert peak < 1024 * 1024, f"reading the nesting held {peak} bytes"
+
+    def test_the_document_after_deep_nesting_is_still_served(self, monkeypatch):
+        answer = '[{"title": "x"}]'
+        text = "[" * 40 + "]" * 40 + " " + answer
+        self._budget(monkeypatch, 200)
+        candidates = find_json_candidates(text)
+        assert sum(map(len, candidates)) <= 200
+        assert candidates[-1] == answer
+        assert extract_json_from_text(text)["data"] == [{"title": "x"}]
+
+    @pytest.mark.skipif(
+        not sys.platform.startswith("linux"),
+        reason="the child's address-space limit needs RLIMIT_AS and /proc",
+    )
+    def test_a_megabyte_of_nesting_reads_in_bounded_time_and_memory(self):
+        """The review's input, read by every reader, in a child process under
+        an address-space limit so a regression fails here rather than taking
+        the worker down. Its outer candidates are nested deeper than the JSON
+        parser's stack allows; the readers skip those rather than raise."""
+        script = textwrap.dedent(f"""
+            import json, resource, sys, time
+            sys.path.insert(0, {str(Path(__file__).parent.parent)!r})
+            from utils.json_extractor import (
+                extract_json_from_text, find_json_candidates, has_salvageable_json)
+            text = "[" * 524288 + "]" * 524288
+            with open("/proc/self/statm") as statm:
+                mapped = int(statm.read().split()[0]) * resource.getpagesize()
+            limit = mapped + 160 * 1024 * 1024
+            resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+            started = time.perf_counter()
+            extract_json_from_text(text, prefer_arrays=True)
+            extract_json_from_text(text, prefer_arrays=False)
+            has_salvageable_json(text)
+            chars = sum(map(len, find_json_candidates(text, "both")))
+            print(json.dumps({{"elapsed": time.perf_counter() - started, "chars": chars}}))
+        """)
+        try:
+            completed = subprocess.run(
+                [sys.executable, "-c", script], capture_output=True, text=True, timeout=60)
+        except subprocess.TimeoutExpired:
+            pytest.fail("reading 1 MiB of nesting took over 60 s: the candidate "
+                        "budget is not bounding the readers (see _balanced_spans)")
+        assert completed.returncode == 0, completed.stderr[-3000:]
+        result = json.loads(completed.stdout)
+        budget = max(json_extractor._CANDIDATE_BUDGET_FLOOR,
+                     json_extractor._CANDIDATE_BUDGET_PER_CHAR * 2 * 524288)
+        assert result["chars"] <= budget
+        assert result["elapsed"] < 30, result
+
+
+# ---------------------------------------------------------------------------
+# The fenced-block scan: one forward pass that must equal the fence pattern
+# ---------------------------------------------------------------------------
+
+
+def _fenced_spans_by_pattern(text):
+    """The oracle: strategy 1's fence search as it was before it became linear,
+    returning each match's first-group span instead of its text. Quadratic on
+    fences with no closing bracket after them: keep the inputs handed to it
+    small."""
+    return [
+        match.span(1)
+        for match in re.finditer(r"```(?:json)?\s*([\[\{][\s\S]*?[\]\}])\s*```", text)
+    ]
+
+
+def _assert_fences_match_pattern(text):
+    assert _fenced_spans(text) == _fenced_spans_by_pattern(text), f"text={text!r}"
+
+
+class TestFencedSpansMatchThePattern:
+    """Strategy 1 finds fenced blocks in one forward pass. It must return
+    exactly the blocks the fence pattern matched — the same blocks in the same
+    order — because the last fenced block that parses is the answer
+    (clause 4)."""
+
+    @pytest.mark.parametrize("text", _FENCE_EDGE_CASES)
+    def test_hand_written_edges(self, text):
+        _assert_fences_match_pattern(text)
+        _assert_fences_match_pattern(text.strip())
+
+    @pytest.mark.parametrize("alphabet_index", range(len(_FENCE_ALPHABETS)))
+    def test_seeded_random_strings(self, alphabet_index):
+        rng = random.Random(20261109 + alphabet_index)
+        alphabet = _FENCE_ALPHABETS[alphabet_index]
+        for _ in range(5000):
+            length = rng.choice(
+                [rng.randint(0, 8), rng.randint(0, 30), rng.randint(0, 100)])
+            _assert_fences_match_pattern(
+                "".join(rng.choice(alphabet) for _ in range(length)))
+
+    def test_seeded_fence_mixes(self):
+        rng = random.Random(9090)
+        for _ in range(2000):
+            _assert_fences_match_pattern(_fence_mix(rng))
+        for _ in range(500):
+            _assert_fences_match_pattern(_document_mix(rng))
+
+    def test_every_fixture(self):
+        texts = _fenced_fixture_texts()
+        assert texts, f"no fixture under {FIXTURES} holds a fence"
+        for text in texts:
+            _assert_fences_match_pattern(text)
+            _assert_fences_match_pattern(text.strip())
+
+    def test_extraction_serves_the_same_document_either_way(self, monkeypatch):
+        """Downstream of the scan: the extractor gives the same answer on the
+        pattern's spans as on the scan's."""
+        rng = random.Random(31337)
+        texts = [_fence_mix(rng) for _ in range(300)] + _fenced_fixture_texts()
+
+        def results():
+            return [
+                (extract_json_from_text(text, prefer_arrays=True),
+                 extract_json_from_text(text, prefer_arrays=False))
+                for text in texts
+            ]
+
+        scanned = results()
+        monkeypatch.setattr(json_extractor, "_fenced_spans", _fenced_spans_by_pattern)
+        assert results() == scanned
+
+
+class TestFencedSpansAreLinear:
+    """The fence pattern was quadratic: every fence with no closing bracket
+    after it searched the rest of the reply, so 80 KB of `````[`` took about
+    4 s and 1 MiB about 12 minutes. The scan does 1 MiB in milliseconds. It
+    runs in a child process under a timeout, so a regression fails here
+    instead of hanging the suite."""
+
+    def test_a_megabyte_of_unclosed_fences_reads_in_bounded_time(self):
+        script = textwrap.dedent(f"""
+            import json, sys, time
+            sys.path.insert(0, {str(Path(__file__).parent.parent)!r})
+            from utils.json_extractor import extract_json_from_text
+            size = 1024 * 1024
+            texts = [
+                "```[" * (size // 4),
+                "```json\\n{{" * (size // 9),
+                "```[" * (size // 8) + "] x" * (size // 6),
+                "```[" + ("]" + " " * 64 + "x") * (size // 66),
+            ]
+            started = time.perf_counter()
+            for text in texts:
+                for prefer_arrays in (True, False):
+                    extract_json_from_text(text, prefer_arrays=prefer_arrays)
+            print(json.dumps({{"elapsed": time.perf_counter() - started}}))
+        """)
+        try:
+            completed = subprocess.run(
+                [sys.executable, "-c", script], capture_output=True, text=True, timeout=60)
+        except subprocess.TimeoutExpired:
+            pytest.fail("reading 1 MiB of unclosed fences took over 60 s: the fence "
+                        "scan has gone quadratic again (see _fenced_spans)")
+        assert completed.returncode == 0, completed.stderr[-3000:]
+        assert json.loads(completed.stdout)["elapsed"] < 20
+
+
+#: The fence searches the readers outside this module ran, by *openers*:
+#: ``review_orchestrator_base.extract_json_array`` read array blocks only,
+#: ``schema_validator`` and ``suggestion_processor`` either kind.
+_FIRST_FENCE_PATTERNS = {
+    "[{": r"```(?:json)?\s*([\[\{][\s\S]*?[\]\}])\s*```",
+    "[": r"```(?:json)?\s*(\[[\s\S]*?\])\s*```",
+}
+#: The greedy searches they fell back to, by opening bracket.
+_FIRST_TO_LAST_PATTERNS = {"[": r"\[[\s\S]*\]", "{": r"\{[\s\S]*\}"}
+
+
+def _first_block_by_pattern(text, openers):
+    """The oracle for ``first_fenced_block``: the search it replaces.
+    Quadratic: keep the inputs handed to it small."""
+    match = re.search(_FIRST_FENCE_PATTERNS[openers], text)
+    return match.group(1) if match else None
+
+
+def _first_to_last_by_pattern(text, opener):
+    """The oracle for ``first_to_last_bracket``. Quadratic too."""
+    match = re.search(_FIRST_TO_LAST_PATTERNS[opener], text)
+    return match.group(0) if match else None
+
+
+def _assert_readers_match_patterns(text):
+    for openers in _FIRST_FENCE_PATTERNS:
+        assert first_fenced_block(text, openers) == _first_block_by_pattern(
+            text, openers), f"openers={openers!r} text={text!r}"
+        assert _fenced_spans(text, openers) == [
+            match.span(1)
+            for match in re.finditer(_FIRST_FENCE_PATTERNS[openers], text)
+        ], f"openers={openers!r} text={text!r}"
+    for opener in _FIRST_TO_LAST_PATTERNS:
+        assert first_to_last_bracket(text, opener) == _first_to_last_by_pattern(
+            text, opener), f"opener={opener!r} text={text!r}"
+
+
+class TestFirstReadersMatchTheSearches:
+    """``first_fenced_block`` and ``first_to_last_bracket`` serve the readers
+    outside this module that took the first fenced block, then everything from
+    the first opening bracket to the last closing one. They must return exactly
+    what those readers' searches returned."""
+
+    @pytest.mark.parametrize("text", _FENCE_EDGE_CASES + _FIRST_READER_EDGE_CASES)
+    def test_hand_written_edges(self, text):
+        _assert_readers_match_patterns(text)
+        _assert_readers_match_patterns(text.strip())
+
+    @pytest.mark.parametrize(
+        "alphabet", _FENCE_ALPHABETS + _WALK_ALPHABETS,
+        ids=lambda alphabet: "".join(alphabet)[:12].encode("unicode_escape").decode())
+    def test_seeded_random_strings(self, alphabet):
+        rng = random.Random(20261110 + len("".join(alphabet)))
+        for _ in range(3000):
+            length = rng.choice(
+                [rng.randint(0, 8), rng.randint(0, 30), rng.randint(0, 100)])
+            _assert_readers_match_patterns(
+                "".join(rng.choice(alphabet) for _ in range(length)))
+
+    def test_seeded_mixes(self):
+        rng = random.Random(6565)
+        for _ in range(1500):
+            _assert_readers_match_patterns(_fence_mix(rng))
+            _assert_readers_match_patterns(_document_mix(rng))
+
+    def test_every_fixture(self):
+        for text in _fenced_fixture_texts():
+            _assert_readers_match_patterns(text)
+
+    @pytest.mark.parametrize("value", [None, 5, ["```[1]```"], b"```[1]```", {"a": 1}])
+    def test_anything_but_a_string_raises_type_error_as_the_search_did(self, value):
+        for openers in _FIRST_FENCE_PATTERNS:
+            with pytest.raises(TypeError):
+                re.search(_FIRST_FENCE_PATTERNS[openers], value)
+            with pytest.raises(TypeError):
+                first_fenced_block(value, openers)
+        for opener in _FIRST_TO_LAST_PATTERNS:
+            with pytest.raises(TypeError):
+                re.search(_FIRST_TO_LAST_PATTERNS[opener], value)
+            with pytest.raises(TypeError):
+                first_to_last_bracket(value, opener)

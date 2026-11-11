@@ -15,12 +15,8 @@ from __future__ import annotations
 
 from typing import List, Tuple
 
-from tests.test_check_gate_fixture import (  # noqa: F401  (the fixture)
-    _check,
-    _first_run,
-    repo,
-)
-from tests.test_implement_stop_account import _implement
+from tests.support.gate_fixture import _check, _first_run
+from tests.support.implement_world import _implement
 
 POLICY = (
     "Write policy violation (pre-dispatch): src/vendor/stamp.js "

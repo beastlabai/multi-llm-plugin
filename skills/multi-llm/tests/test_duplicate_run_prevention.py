@@ -293,28 +293,38 @@ class TestPhaseCompletionGuard:
 # 3. Model-level skip (skip_existing)
 # ============================================================================
 
+def run_all_models(model_specs, plan_path, timeout, max_parallel, out_dir=None,
+                   prefix=None, skip_existing=True):
+    """review-plan's fan-out (``review_orchestrator_base.run_all_models``)."""
+    from utils import review_orchestrator_base as rob
+
+    return rob.run_all_models(
+        model_specs, plan_path, "{plan_path}", lambda _spec: {"plan_path": plan_path},
+        "review-plan", "plan_review", timeout, max_parallel,
+        out_dir=out_dir, prefix=prefix, skip_existing=skip_existing,
+    )
+
+
 class TestModelLevelSkipReviewPlan:
-    """Tests for model-level skip in review_plan_orchestrator's run_all_models()."""
+    """Tests for model-level skip in review-plan's fan-out (the shared run_all_models)."""
 
     def test_run_all_models_has_skip_existing_param(self):
         """run_all_models() accepts skip_existing parameter."""
         import inspect
-        from review_plan_orchestrator import run_all_models
-        sig = inspect.signature(run_all_models)
+        from utils.review_orchestrator_base import run_all_models as base_run_all_models
+        sig = inspect.signature(base_run_all_models)
         assert "skip_existing" in sig.parameters
         assert sig.parameters["skip_existing"].default is True
 
     def test_skips_model_with_existing_results(self, temp_plan_with_model_results):
         """Models with existing valid JSON results are skipped."""
-        from review_plan_orchestrator import run_all_models
-
         plan_path = str(temp_plan_with_model_results)
         phase_dir = get_phase_dir(temp_plan_with_model_results, 'review-plan')
         out_dir = str(temp_plan_with_model_results.parent / temp_plan_with_model_results.stem)
 
         # model-a and model-b have results; model-c does not
         # We mock run_single_model so only model-c would actually run
-        with patch('review_plan_orchestrator.run_single_model', new_callable=AsyncMock) as mock_run:
+        with patch('utils.review_orchestrator_base.run_single_model', new_callable=AsyncMock) as mock_run:
             mock_run.return_value = {
                 "success": True,
                 "output": json.dumps([{"title": "New finding", "desc": "test", "importance": "LOW", "type": "addition"}]),
@@ -343,12 +353,10 @@ class TestModelLevelSkipReviewPlan:
 
     def test_does_not_skip_when_force(self, temp_plan_with_model_results):
         """Models are NOT skipped when skip_existing=False (--force)."""
-        from review_plan_orchestrator import run_all_models
-
         plan_path = str(temp_plan_with_model_results)
         out_dir = str(temp_plan_with_model_results.parent / temp_plan_with_model_results.stem)
 
-        with patch('review_plan_orchestrator.run_single_model', new_callable=AsyncMock) as mock_run:
+        with patch('utils.review_orchestrator_base.run_single_model', new_callable=AsyncMock) as mock_run:
             mock_run.return_value = {
                 "success": True,
                 "output": json.dumps([]),
@@ -376,12 +384,10 @@ class TestModelLevelSkipReviewPlan:
 
     def test_corrupt_file_triggers_rerun(self, temp_plan_with_corrupt_result, capsys):
         """Corrupt JSON files cause the model to be re-run instead of skipped."""
-        from review_plan_orchestrator import run_all_models
-
         plan_path = str(temp_plan_with_corrupt_result)
         out_dir = str(temp_plan_with_corrupt_result.parent / temp_plan_with_corrupt_result.stem)
 
-        with patch('review_plan_orchestrator.run_single_model', new_callable=AsyncMock) as mock_run:
+        with patch('utils.review_orchestrator_base.run_single_model', new_callable=AsyncMock) as mock_run:
             mock_run.return_value = {
                 "success": True,
                 "output": json.dumps([]),
@@ -412,8 +418,6 @@ class TestModelLevelSkipReviewPlan:
 
     def test_empty_file_not_skipped(self, temp_plan):
         """Empty result files (0 bytes) are not skipped."""
-        from review_plan_orchestrator import run_all_models
-
         phase_dir = get_phase_dir(temp_plan, 'review-plan')
         phase_dir.mkdir(parents=True, exist_ok=True)
         (phase_dir / f"{sanitize_model_name('test:model-a')}.json").write_text("", encoding="utf-8")  # Empty file
@@ -421,7 +425,7 @@ class TestModelLevelSkipReviewPlan:
         plan_path = str(temp_plan)
         out_dir = str(temp_plan.parent / temp_plan.stem)
 
-        with patch('review_plan_orchestrator.run_single_model', new_callable=AsyncMock) as mock_run:
+        with patch('utils.review_orchestrator_base.run_single_model', new_callable=AsyncMock) as mock_run:
             mock_run.return_value = {
                 "success": True, "output": json.dumps([]),
                 "error": None, "prompt": "test",
@@ -444,8 +448,6 @@ class TestModelLevelSkipReviewPlan:
 
     def test_non_list_json_not_skipped(self, temp_plan):
         """JSON files containing non-list data (e.g., a dict) are not skipped."""
-        from review_plan_orchestrator import run_all_models
-
         phase_dir = get_phase_dir(temp_plan, 'review-plan')
         phase_dir.mkdir(parents=True, exist_ok=True)
         (phase_dir / f"{sanitize_model_name('test:model-a')}.json").write_text(json.dumps({"error": "not a list"}), encoding="utf-8")
@@ -453,7 +455,7 @@ class TestModelLevelSkipReviewPlan:
         plan_path = str(temp_plan)
         out_dir = str(temp_plan.parent / temp_plan.stem)
 
-        with patch('review_plan_orchestrator.run_single_model', new_callable=AsyncMock) as mock_run:
+        with patch('utils.review_orchestrator_base.run_single_model', new_callable=AsyncMock) as mock_run:
             mock_run.return_value = {
                 "success": True, "output": json.dumps([]),
                 "error": None, "prompt": "test",
@@ -476,8 +478,6 @@ class TestModelLevelSkipReviewPlan:
 
     def test_skipped_result_contains_correct_data(self, temp_plan_with_model_results):
         """Skipped model results contain expected fields and data."""
-        from review_plan_orchestrator import run_all_models
-
         plan_path = str(temp_plan_with_model_results)
         out_dir = str(temp_plan_with_model_results.parent / temp_plan_with_model_results.stem)
 
@@ -690,17 +690,39 @@ class TestPartialCompletionGuard:
         assert "Running code review" in result.stdout
         assert "ERROR: All models failed" in result.stdout
 
-    def test_auto_heals_when_report_and_validation_exist(self, temp_plan):
-        """Auto-heals legacy state when report + validation exist but phase not marked."""
-        phase_dir = get_phase_dir(temp_plan, 'code-review')
-        phase_dir.mkdir(parents=True, exist_ok=True)
-        (phase_dir / "validation_tasks.json").write_text(json.dumps({"tasks_schema_version": 2, "kind": "validation",
-                         "inputs": {"plan_sha256": "", "grouped_sha256": ""},
-                         "batches": []}), encoding="utf-8")
-        (phase_dir / "validation.json").write_text(json.dumps({"groups": []}), encoding="utf-8")
-        (phase_dir / "report.md").write_text("# Report\n\nNo issues found.", encoding="utf-8")
+    @staticmethod
+    def _round_files(phase_dir, round_id=None):
+        """A task file, validation.json and report.md, each recording
+        *round_id* when one is given (none: files from before round ids), the
+        report sealed to that validation.json as its writer seals it, and the
+        grouped.json both bind by digest, as their writers bind it."""
+        from utils import review_round
+        from utils.report_markdown import ESCAPED_TEXT_MARKER
+        from utils.subagent_tasks import file_content_hash
 
-        result = subprocess.run(
+        grouped_path = phase_dir / "grouped.json"
+        grouped_path.write_text(json.dumps({"groups": []}), encoding="utf-8")
+        grouped_sha256 = file_content_hash(str(grouped_path))
+        tasks = {"tasks_schema_version": 2, "kind": "validation",
+                 "inputs": {"plan_sha256": "", "grouped_sha256": grouped_sha256},
+                 "batches": []}
+        validation = {"groups": [], "metadata": {"grouped_sha256": grouped_sha256}}
+        report = "# Report\n\nNo issues found."
+        if round_id:
+            tasks["round_id"] = round_id
+            validation["metadata"]["round_id"] = round_id
+        (phase_dir / "validation_tasks.json").write_text(json.dumps(tasks), encoding="utf-8")
+        (phase_dir / "validation.json").write_text(json.dumps(validation), encoding="utf-8")
+        if round_id:
+            report = review_round.report_text(
+                review_round.Claim(str(phase_dir), round_id),
+                f"{ESCAPED_TEXT_MARKER}\n{report}",
+                review_round.verdicts_of((phase_dir / "validation.json").read_bytes()),
+            )
+        (phase_dir / "report.md").write_text(report, encoding="utf-8")
+
+    def _run_plain(self, temp_plan):
+        return subprocess.run(
             [
                 sys.executable, str(SKILL_DIR / "code_review_orchestrator.py"),
                 "--plan-file", str(temp_plan),
@@ -710,12 +732,40 @@ class TestPartialCompletionGuard:
             timeout=15,
             encoding="utf-8",
         )
+
+    def test_auto_heals_when_report_and_validation_exist(self, temp_plan):
+        """Auto-heals when this round's report + validation exist but the phase
+        is not marked: both record the round `.status.json` records."""
+        phase_dir = get_phase_dir(temp_plan, 'code-review')
+        phase_dir.mkdir(parents=True, exist_ok=True)
+        round_id = "0123456789abcdef"
+        self._round_files(phase_dir, round_id)
+        (phase_dir / ".status.json").write_text(json.dumps(
+            {"phase": "code-review", "state": "validation_pending", "round_id": round_id}
+        ), encoding="utf-8")
+
+        result = self._run_plain(temp_plan)
         assert result.returncode == 0
         assert "Auto-healed" in result.stdout
 
         # Verify state was actually marked complete
         state = StateManager(temp_plan)
         assert state.is_phase_completed("code-review")
+
+    def test_files_from_before_round_ids_never_auto_heal(self, temp_plan):
+        """Nothing ties a report and validation without a round id to the run
+        on record, so the guard sends the run to --force instead of recording
+        the phase complete on them (utils/review_round.py)."""
+        phase_dir = get_phase_dir(temp_plan, 'code-review')
+        phase_dir.mkdir(parents=True, exist_ok=True)
+        self._round_files(phase_dir)
+
+        result = self._run_plain(temp_plan)
+        assert result.returncode == 3
+        assert "Partial completion detected" in result.stdout
+        assert "Auto-healed" not in result.stdout
+        assert "--force" in result.stdout
+        assert not StateManager(temp_plan).is_phase_completed("code-review")
 
 
 # ============================================================================

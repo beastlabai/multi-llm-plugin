@@ -266,14 +266,14 @@ class TestAMergeInTheRange:
         assert [c["sha"] for c in record["commits"]] == [second_merge, first_merge, m1]
 
         walks = []
-        real = ca._run_git
+        real = ca.run_git
 
         def spy(*args, **kwargs):
             if "--ancestry-path" in args:
                 walks.append(args)
             return real(*args, **kwargs)
 
-        monkeypatch.setattr(ca, "_run_git", spy)
+        monkeypatch.setattr(ca, "run_git", spy)
         # Line 1 predates the range, so every group falls to the model's claim.
         groups = [group("a.py", [1, 1], claim=s0), group("a.py", [1, 1], claim=s0[:9]),
                   group("a.py", [1, 1], claim=s1[:7]), group(None, None, claim=s2),
@@ -515,7 +515,7 @@ class TestTheGroupHash:
         assert groups[0]["suggestions"][0]["desc"] == "One details"
 
     def test_two_models_that_disagree_still_group_together(self):
-        from utils import group_similar_suggestions
+        from utils.suggestion_processor import group_similar_suggestions
 
         issue = {"title": "Off by one", "desc": "The loop ends early.", "importance": "high",
                  "file": "a.py", "line_range": [3, 3], "type": "bug"}

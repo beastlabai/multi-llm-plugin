@@ -46,6 +46,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils import llm_client  # noqa: E402
 from utils.llm_client import ANSWER_TEXT_KEY, invoke_with_provider  # noqa: E402
 from tests.opencode_fixtures import PIN as _OPENCODE_PIN  # noqa: E402
+from tests.roster_check import assert_covers_registry  # noqa: E402
 from utils.provider_registry import get_provider  # noqa: E402
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -273,7 +274,14 @@ def test_every_adapter_family_has_a_row() -> None:
     from utils.provider_registry import _PROVIDERS
 
     covered = {row.split("-empty-")[0] for row, _ in ROWS}
-    assert covered == set(_PROVIDERS)
+    assert_covers_registry(
+        covered, "ROWS in tests/test_answer_text.py",
+        hint="A row plants a prose answer in the adapter's real stdout shape: "
+        "its committed success capture with the answer swapped (_CAPTURED and "
+        "_swap_answer), or a shape built by hand from what is committed. The "
+        "row id is the provider name.",
+        registry=_PROVIDERS,
+    )
 
 
 @pytest.mark.parametrize("provider", sorted(_CAPTURED))

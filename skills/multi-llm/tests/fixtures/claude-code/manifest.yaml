@@ -81,6 +81,7 @@ rows:
       wire never carries the alias — which is why `invalid-model` below names the
       resolved id and not the spec.
     expect:
+      lane_status: {lane_a: ok, lane_b: ok}
       success: true
       data:
         - {id: "S001", title: "Bound the retry ladder", severity: "high"}
@@ -114,6 +115,7 @@ rows:
       ever arrived — so the classifier's status rung defers and the cell below
       is still the text ladder's answer.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       success: false
       error_contains:
         - "terminal_reason: api_error"
@@ -144,6 +146,7 @@ rows:
       **exit 0** — so the ONLY thing separating this from a good run is that the
       answer is empty.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: runner_error}
       success: false
       error_contains: ["No valid JSON found in text"]
       raw_contains: ['"result":""', '"is_error":false', '"num_turns":2']
@@ -170,6 +173,7 @@ rows:
       before the parser ever sees them, and two documents inside that one string
       is the only form the selection rule can be exercised in.
     expect:
+      lane_status: {lane_a: ok, lane_b: ok}
       success: true
       data:
         - {id: "S001", title: "Bound the retry ladder", severity: "high"}
@@ -200,6 +204,7 @@ rows:
       transport succeeded — HTTP 200 — and the body was the problem), so the
       classification cell below is still the text ladder's.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       success: false
       error_contains:
         - "terminal_reason: api_error"
@@ -242,6 +247,7 @@ rows:
       what the text ladder already answered, so the map changes nothing here and
       its value is that it keeps answering when the sentence is reworded.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       success: false
       error_contains:
         - "terminal_reason: api_error"
@@ -262,7 +268,7 @@ rows:
       SERVER-side half of the shape is captured instead, as the extra
       `zero-byte-response` row below (failserver `--mode empty`: accept the
       request, write zero bytes, close), and `parse_output`'s own empty branch is
-      covered by unit assertion in test_providers.py.
+      covered by unit assertion in test_provider_claude_code.py.
 
   auth-error:
     stdout: auth-error.stdout.txt
@@ -287,6 +293,7 @@ rows:
       `tests/test_result_envelope_verdicts.py`, which is what stops the same
       cell being moved twice by two tasks.
     expect:
+      lane_status: {lane_a: auth_failed, lane_b: auth_failed}
       success: false
       error_contains:
         - "terminal_reason: api_error"
@@ -316,6 +323,7 @@ rows:
       already right, so the requirement on the map is that it must NOT change
       it.
     expect:
+      lane_status: {lane_a: rate_limited, lane_b: rate_limited}
       success: false
       error_contains:
         - "terminal_reason: api_error"
@@ -351,6 +359,7 @@ rows:
       `tests/test_result_envelope_verdicts.py` names it as such rather than
       leaving the disagreement between the two routes implicit.
     expect:
+      lane_status: {lane_a: invalid_model, lane_b: invalid_model}
       success: false
       error_contains:
         - "terminal_reason: api_error"
@@ -380,6 +389,7 @@ rows:
       context overflow from the rest and the status rung must stand aside for
       it.
     expect:
+      lane_status: {lane_a: context_length_exceeded, lane_b: context_length_exceeded}
       success: false
       error_contains:
         - "terminal_reason: api_error"
@@ -410,6 +420,7 @@ rows:
       text ladder's verdict, reached through the `API Error:` prefix exactly as
       before C5.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       success: false
       error_contains:
         - "terminal_reason: api_error"

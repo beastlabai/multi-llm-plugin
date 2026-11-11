@@ -35,32 +35,23 @@ SKILL_DIR = Path(__file__).resolve().parent.parent
 if str(SKILL_DIR) not in sys.path:
     sys.path.insert(0, str(SKILL_DIR))
 
-import implement_orchestrator  # noqa: E402
 import multi_llm  # noqa: E402
 from utils import cli_common, host_capabilities  # noqa: E402
 from utils import next_phase as np_  # noqa: E402
-from utils import provider_registry as registry  # noqa: E402
 from utils.state_manager import get_or_create_state  # noqa: E402
 
-from tests.test_human_task_answers import PLAN_WITH_CODE_DEPENDENT  # noqa: E402
-from tests.test_implement_stop_account import make_repo  # noqa: E402
+from tests.support.native_report_world import (  # noqa: E402
+    PLAN_ARG,
+    _emit,
+    _util,
+    native_repo,  # noqa: F401 - the repo fixture
+)
 
-PLAN_ARG = "plans/checked.md"
 MANUAL_TITLE = "Play through by hand"
 DEPENDENT_TITLE = "Edit: after the manual step"
 #: How T006, skipped with the manual T005, is named (fix round 17): implement
 #: runs it on the resume that records T005 done.
 WAITS = "(waits on T005: implement runs it once T005 is recorded done)"
-
-
-@pytest.fixture
-def repo(tmp_path, monkeypatch):
-    for name in ("MULTI_LLM_HOST", "MULTI_LLM_ROUTE"):
-        monkeypatch.delenv(name, raising=False)
-    obj = make_repo(tmp_path, monkeypatch, PLAN_WITH_CODE_DEPENDENT)
-    yield obj
-    registry._config = None
-    registry._config_key = None
 
 
 def _close_command(plan_arg: str, ids) -> str:
@@ -83,25 +74,6 @@ def _close_note(plan_arg: str, ids, waiting: int = 0) -> str:
 #: T006 waits on T005 (fix round 28: the note says so, never "No later phase
 #: waits for this manual task").
 LEAD = np_.manual_close_lead(1, waiting=1)
-
-
-def _emit(capsys, *flags: str, yes: bool = True):
-    assert multi_llm.main(
-        ["implement", PLAN_ARG, "--host", "claude-code",
-         *(["--yes"] if yes else ["--no-confirm"]), *flags]
-    ) == 0
-    out = capsys.readouterr().out
-    path = next(
-        line.split(": ", 1)[1] for line in out.splitlines()
-        if line.startswith("Output file: ")
-    )
-    return json.loads(Path(path).read_text(encoding="utf-8")), out
-
-
-def _util(capsys, *argv):
-    code = multi_llm.main(["util", *argv])
-    captured = capsys.readouterr()
-    return code, captured.out, captured.err
 
 
 def _finish_the_native_run(repo, capsys, handoff) -> None:

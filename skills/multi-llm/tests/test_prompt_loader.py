@@ -316,7 +316,7 @@ class TestReviewTemplatesCarryWorkingLimits:
 
     @pytest.mark.parametrize("name", sorted(_REVIEW_CONTEXT))
     def test_the_template_formats_without_a_key_error(self, name):
-        from utils.llm_client import STDOUT_OUTPUT_LOCATION, render_working_limits
+        from utils.prompt_channels import STDOUT_OUTPUT_LOCATION, render_working_limits
 
         from utils.scope_policy import reviewer_guidance
 

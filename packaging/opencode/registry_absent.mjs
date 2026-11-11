@@ -2,9 +2,9 @@
 /**
  * Row 9 — `opencode-multi-llm@<version>` must be ABSENT from the single
  * registry. The one implementation every row-9 site calls: the full gate
- * (`make opencode-package-check`, through `make opencode-registry-absent`), the
- * workflow's `gate`, `verify` and `publish` jobs, and the laptop first-release
- * target (`first_release.py`) immediately before upload.
+ * (`make opencode-package-check`, through `make opencode-registry-absent`) and
+ * the workflow's `gate`, `verify` and `publish` jobs, the last immediately
+ * before upload.
  *
  *     node packaging/opencode/registry_absent.mjs --registry <url>
  *         [--package-json <path>] [--out <json>]

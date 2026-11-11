@@ -33,7 +33,6 @@ import asyncio
 import json
 import os
 import shlex
-import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -50,6 +49,7 @@ from utils import cli_common, improve_workflow, next_phase, run_status, status_f
 from utils.cli_common import parse_result_line  # noqa: E402
 from utils.commit_review import BRIEF_END_MARKER, BRIEF_MARKER, output_dir_for_brief  # noqa: E402
 from utils.state_manager import StateManager  # noqa: E402
+from tests.support.gitrepo import git as _git  # noqa: E402
 
 BASE = "a1b2c3d4e5f6" + "0" * 28
 HEAD = "e4f5a6b7c8d9" + "1" * 28
@@ -88,11 +88,6 @@ def _clean(command: str) -> None:
         assert not any(t == flag or t.startswith(flag + "=") for t in tokens), command
     for word in ("review-code", "apply-code-fixes", "--review-code", "--apply-code-fixes"):
         assert word not in tokens, command
-
-
-def _git(root: Path, *args: str) -> str:
-    return subprocess.run(["git", *args], cwd=str(root), check=True,
-                          capture_output=True, text=True).stdout
 
 
 @pytest.fixture
@@ -367,6 +362,44 @@ class TestTheBuilder:
         out = capsys.readouterr().out
         assert f"[NEXT_COMMAND] {CC}--apply-commit-fixes {PINNED}" in out.splitlines()
         assert ctx.user_next_step["command"] == f"{CC}--apply-commit-fixes {PINNED}"
+
+
+class TestTheRoundFollowUp:
+    """review-code's ``--reaggregate`` follow-up (``CodeLane.round_follow_up``,
+    the command both of a round's hand-offs name): without a live invocation
+    record, the task file's stored ``replay_flags`` are replayed, then spelled
+    back like every other site, so a front door's flags never reach it."""
+
+    STORED = ["--base-ref", BASE, "--models", "cursor-agent:auto",
+              "--scope-policy", "expand"]
+
+    @staticmethod
+    def _lane(path: Path):
+        return code_review_orchestrator.CodeLane(
+            plan_path=path, phase_dir=path.parent / "code-review", prefix=path.stem)
+
+    def test_a_commit_review_keeps_the_stored_flags_in_its_own_spelling(self, here):
+        brief = _seed(here, **REVIEWED)
+        command = self._lane(brief).round_follow_up({"replay_flags": self.STORED},
+                                                    typed=True)
+        tokens = shlex.split(command)
+        assert tokens[tokens.index("review-commits") + 1] == PINNED, command
+        assert "--models cursor-agent:auto --scope-policy expand --reaggregate" in command
+        _clean(command)
+
+    def test_a_plan_keeps_every_stored_flag(self, here):
+        plan = _plan(here, head_ref=False)
+        command = self._lane(plan).round_follow_up({"replay_flags": self.STORED})
+        assert command.endswith(
+            f"review-code {plan} --base-ref {BASE} --models cursor-agent:auto "
+            f"--scope-policy expand --reaggregate"), command
+
+    def test_a_live_invocation_of_the_mode_wins(self, here):
+        plan = _plan(here, head_ref=False)
+        cli_common.record_invocation("review-code", ["--models", "codex:gpt-5.5"])
+        command = self._lane(plan).round_follow_up({"replay_flags": self.STORED})
+        assert "--models codex:gpt-5.5" in command
+        assert "--scope-policy" not in command, command
 
 
 class TestResumeAndPhaseCommands:

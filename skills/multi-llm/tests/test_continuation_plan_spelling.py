@@ -42,23 +42,11 @@ from utils.next_phase import (  # noqa: E402
 )
 from utils.output_handler import phase_dir_path  # noqa: E402
 
-from tests.test_generate_tasks_orchestrator import (  # noqa: E402
-    PLAN_BODY,
-    _valid_document,
-)
-from tests.test_next_command_emitters import (  # noqa: E402
-    PLUGIN,
-    _run,
-    _target,
-    build,
-    workdir,  # noqa: F401 - the fixture
-)
-from tests.test_next_phase import (  # noqa: E402
-    P,
-    RP_VALID,
-    UP_TO_TASKS,
-    S,
-)
+from tests.support.generate_tasks_world import PLAN_BODY, _valid_document  # noqa: E402
+from tests.support.next_command_world import PLUGIN, _target, build  # noqa: E402
+from tests.support.main_runs import _run  # noqa: E402
+from tests.support.next_phase_world import P, RP_VALID, S, UP_TO_TASKS  # noqa: E402
+from tests.support.gitrepo import git as _git  # noqa: E402
 
 SKILL_ROOT = Path(__file__).parent.parent
 TYPED = "plans/auth.md"
@@ -67,13 +55,6 @@ TYPED = "plans/auth.md"
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _git(repo, *args):
-    subprocess.run(
-        ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
-        cwd=repo, check=True, capture_output=True,
-    )
-
 
 def _dispatch(argv, repo, env):
     """``multi_llm.py <argv…>`` from *repo*, as the host's shell runs it."""

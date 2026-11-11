@@ -22,18 +22,13 @@ import re
 
 import pytest
 
-from tests.test_check_gate_fixture import (  # noqa: F401  (the fixture)
-    ALLOW,
-    FINDINGS,
-    _check,
-    _policy,
-    repo,
-)
-from tests.test_dispatch_counts import _emit, _etas, _util
-from tests.test_implement_stop_account import _implement, make_repo
+from tests.support.gate_fixture import ALLOW, FINDINGS, _check, _policy
+from tests.support.dispatch_world import _emit, _etas, _util
+from tests.support.implement_world import make_repo
 from utils import metrics
 from utils import provider_registry as registry
 from utils.state_manager import get_or_create_state
+from tests.support.dispatch_world import _run
 
 #: A check last, holding the last two tasks (the reviewer's repro).
 TRAILING_CHECK = """# Trailing check
@@ -93,12 +88,6 @@ def _eta_lines(text: str) -> list:
     return [line for line in text.splitlines() if line.startswith("[ETA] implement:")]
 
 
-def _run(repo, capsys, *flags) -> tuple:
-    code = _implement(repo, *flags)
-    captured = capsys.readouterr()
-    return code, captured.out + captured.err
-
-
 def _stored_total(repo) -> int:
     state = get_or_create_state(repo.plan).state
     return state["metrics_progress"]["implement"]["total_batches"]
@@ -120,7 +109,6 @@ def trailing(tmp_path, monkeypatch):
         {"passed": False, "findings": ["retries must be 3 (found 2)"]}))
     yield obj
     registry._config = None
-    registry._config_key = None
 
 
 @pytest.fixture
@@ -129,7 +117,6 @@ def two_edits(tmp_path, monkeypatch):
     monkeypatch.setenv("MOCK_LLM_WRITE_IDS", json.dumps(["T001", "T002"]))
     yield obj
     registry._config = None
-    registry._config_key = None
 
 
 class TestACheckThatHoldsTheLastTasks:
@@ -181,7 +168,6 @@ class TestTheOtherEndings:
             "driver:\n  subagent_runner: codex:gpt-5.5\n  verify_command: \"false\"\n",
             encoding="utf-8")
         registry._config = None
-        registry._config_key = None
         code, text = _run(two_edits, capsys)
         assert code == 3, text
         lines = _eta_lines(text)
@@ -270,12 +256,12 @@ class TestTheAbortHandlerPrintsIt:
     ):
         import signal as _signal
 
-        from utils import detach, process_control, status_file, stream_bootstrap
+        from utils import detach, process_control, run_record, status_file, stream_bootstrap
 
         monkeypatch.setattr(
             process_control, "install_worker_signal_handlers", lambda _cb: None)
         monkeypatch.setattr(stream_bootstrap, "streams_for_a_signal_handler", lambda: None)
-        monkeypatch.setattr(detach, "_ACTIVE", None)
+        monkeypatch.setattr(run_record, "_ACTIVE", None)
         monkeypatch.setattr(detach, "_sweep_live_clis", lambda: None)
         monkeypatch.setattr(detach, "_restore_codex_trust", lambda: None)
         plan = tmp_path / "plan.md"

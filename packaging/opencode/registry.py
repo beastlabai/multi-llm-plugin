@@ -81,4 +81,4 @@ if __name__ == "__main__":
         print(single_registry())
     except RegistryError as exc:
         print(f"REFUSING: {exc}", file=sys.stderr)
-        raise SystemExit(1)
+        raise SystemExit(1) from exc

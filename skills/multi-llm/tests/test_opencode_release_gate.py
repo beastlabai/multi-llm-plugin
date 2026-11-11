@@ -26,14 +26,17 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tarfile
 import textwrap
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
+from tests.source_cache import source_tree
 
 SKILL_ROOT = Path(__file__).parent.parent
 REPO_ROOT = SKILL_ROOT.parent.parent
@@ -242,12 +245,28 @@ def write_row8(root: Path, *, stamp: str, host: str, image_id: str = IMAGE_ID,
     return records
 
 
-@pytest.fixture(scope="module")
+class Built(NamedTuple):
+    """The session's one staged package, packed once, with that tarball's facts."""
+
+    package: Path
+    tarball: Path
+    facts: dict
+
+
+@pytest.fixture(scope="session")
 def built(tmp_path_factory):
-    """One staged package for the module; every :class:`GateRun` copies it."""
-    destination = tmp_path_factory.mktemp("opencode-gate") / "pkg"
-    pkg_build.build(destination=destination, allow_dirty=True)
-    return destination
+    """One staged package and its tarball for the whole session.
+
+    Nothing writes into these paths: every :class:`GateRun` copies the tree and
+    the tarball into its own directory, so a test that rewrites its package,
+    stamp or tarball only ever touches its own copy. Under ``-n`` each worker
+    builds its own.
+    """
+    root = tmp_path_factory.mktemp("opencode-gate")
+    package = root / "pkg"
+    pkg_build.build(destination=package, allow_dirty=True)
+    tarball = make_tarball(package, root / "built.tgz")
+    return Built(package, tarball, pkg_build.tarball_facts(tarball))
 
 
 class GateRun:
@@ -261,18 +280,24 @@ class GateRun:
     under development); everything else is real: HEAD, the pins, the registry.
     """
 
-    def __init__(self, tmp_path: Path, monkeypatch, built: Path | None = None):
+    def __init__(self, tmp_path: Path, monkeypatch, built: Built | None = None):
         monkeypatch.setattr(gate, "dirty_paths", lambda root=gate.REPO_ROOT: [])
         self.root = tmp_path
         self.dir = tmp_path / "gate"
         self.package = tmp_path / "pkg"
+        self.tarball = tmp_path / "opencode-multi-llm-gated.tgz"
         if built is not None:
-            shutil.copytree(built, self.package)
+            # The shared tarball was packed from this same tree, so copying it
+            # is the pack; the facts are the shared ones re-pointed at the copy.
+            shutil.copytree(built.package, self.package)
+            shutil.copy2(built.tarball, self.tarball)
+            self.facts = {**built.facts, "path": str(self.tarball),
+                          "files": list(built.facts["files"])}
         else:
             pkg_build.build(destination=self.package, allow_dirty=True)
+            make_tarball(self.package, self.tarball)
+            self.facts = pkg_build.tarball_facts(self.tarball)
         self.digest = (self.package / "dist" / "tree.sha256").read_text("utf-8").strip()
-        self.tarball = make_tarball(self.package, tmp_path / "opencode-multi-llm-gated.tgz")
-        self.facts = pkg_build.tarball_facts(self.tarball)
         self.host = gate.host_pin()
         self.registry = gate.single_registry()
         self.calls: list = []
@@ -392,7 +417,7 @@ class TestTheRows:
         for node in (n for row in gate.ROWS for n in row.nodes):
             path, *parts = node.split("::")
             if path not in defined:
-                tree = ast.parse((SKILL_ROOT / path).read_text(encoding="utf-8"))
+                tree = source_tree(SKILL_ROOT / path)
                 defined[path] = {
                     f"{cls.name}::{fn.name}" for cls in tree.body
                     if isinstance(cls, ast.ClassDef) for fn in cls.body
@@ -1128,7 +1153,7 @@ class TestExport:
     def test_the_default_export_stays_out_of_the_payload_prefix(self, tmp_path, monkeypatch, built):
         """records/ lies under skills/multi-llm/, the prefix the payload's
         dirty-tree refusal covers: an untracked record written there made
-        `--check-stamp` and `opencode-publish-first` refuse the candidate the
+        `--check-stamp` refuse the candidate the
         gate had just stamped (measured on the first green full gate). So the
         default lands in the gitignored evidence directory, and the record
         reaches records/ only in the post-fast-forward commit."""
@@ -1425,16 +1450,18 @@ class TestStep:
                 sent.append(sig)
             return real_killpg(pgid, sig)
 
-        monkeypatch.setattr(gate.os, "killpg", darwin_killpg)
+        from common import procgroup
+
+        monkeypatch.setattr(procgroup.os, "killpg", darwin_killpg)
         try:
-            gate._kill(child, grace=10.0)
+            procgroup.stop(child, grace=10.0, until="group")
         finally:
             if child.poll() is None:
                 child.kill()
                 child.wait()
         assert child.returncode is not None
         assert len(probes) >= 4, probes  # past the EPERM answers, to ESRCH
-        assert sent == [gate.signal.SIGTERM], sent
+        assert sent == [signal.SIGTERM], sent
 
     def test_the_grace_is_the_probes_sweep_bound_plus_a_margin(self):
         """Imported from the probe, never re-typed: a sweep that grows moves
@@ -1452,19 +1479,29 @@ class TestStep:
 
     @pytest.mark.skipif(os.name != "posix", reason="the release gate uses POSIX process groups")
     @pytest.mark.parametrize("cooperative", [False, True])
-    def test_a_parent_exiting_on_term_does_not_end_the_group_sweep(self, tmp_path, cooperative):
+    def test_a_parent_exiting_on_term_does_not_end_the_group_sweep(self, tmp_path, monkeypatch,
+                                                                    cooperative):
         """The launcher exits first; its child still needs either grace or KILL."""
+        import types
+
         marker = tmp_path / "descendant.pid"
         swept = tmp_path / "swept"
-        descendant = textwrap.dedent(f"""
-            import os, signal, sys, time
-            from pathlib import Path
+        # Files are published by rename, so a reader never sees a half-written one.
+        publish = textwrap.dedent("""
+            import os
+            def publish(path, text):
+                with open(path + ".tmp", "w") as out:
+                    out.write(text)
+                os.replace(path + ".tmp", path)
+        """)
+        descendant = publish + textwrap.dedent(f"""
+            import signal, sys, time
             def finish(*_args):
                 time.sleep(0.3)
-                Path({str(swept)!r}).write_text("done")
+                publish({str(swept)!r}, "done")
                 sys.exit(0)
             signal.signal(signal.SIGTERM, finish if {cooperative!r} else signal.SIG_IGN)
-            Path({str(marker)!r}).write_text(str(os.getpid()))
+            publish({str(marker)!r}, str(os.getpid()))
             time.sleep(60)
         """)
         parent = textwrap.dedent(f"""
@@ -1473,26 +1510,74 @@ class TestStep:
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             time.sleep(60)
         """)
-        try:
-            assert gate.run_step("descendant", [sys.executable, "-c", parent], timeout=2,
-                                 grace=0.8, directory=tmp_path) == 124
-            pid = int(marker.read_text())
-            for _ in range(50):
-                status = subprocess.run(["ps", "-p", str(pid), "-o", "stat="],
-                                        capture_output=True, text=True, timeout=5).stdout.strip()
+        launched, fired = [], []
+
+        class Launcher(subprocess.Popen):
+            """The step's launcher, kept for cleanup. Its first wait is the readiness
+            fixture: it returns once the descendant has published its marker (the
+            handler is installed by then) by raising the step's bound itself, so the
+            production termination path runs without any fixed wall-clock bound."""
+
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                launched.append(self)
+
+            def wait(self, timeout=None):
+                if fired:
+                    return super().wait(timeout)
+                fired.append(True)
+                limit = time.monotonic() + 60
+                while not marker.exists() and self.poll() is None and time.monotonic() < limit:
+                    time.sleep(0.02)
+                raise subprocess.TimeoutExpired(self.args, timeout)
+
+        monkeypatch.setattr(gate.common_gate, "subprocess", types.SimpleNamespace(
+            Popen=Launcher, PIPE=subprocess.PIPE, DEVNULL=subprocess.DEVNULL,
+            TimeoutExpired=subprocess.TimeoutExpired))
+        budget = 15.0  # one bound for the whole check, `ps` runs included
+
+        def wait_gone(pid):
+            """True once ``pid`` is gone, False when ``budget`` runs out. ``Z`` counts:
+            a zombie has terminated, which is what the sweep owes; reaping is its
+            parent's business."""
+            deadline = time.monotonic() + budget
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                try:
+                    status = subprocess.run(["ps", "-p", str(pid), "-o", "stat="],
+                                            capture_output=True, text=True,
+                                            timeout=remaining).stdout.strip()
+                except subprocess.TimeoutExpired:
+                    return False
                 if not status or status.startswith("Z"):
-                    break
-                time.sleep(0.02)
-            else:
-                pytest.fail("the TERM-ignoring descendant outlived the step's group sweep")
+                    return True
+                time.sleep(min(0.05, remaining))
+
+        try:
+            # The grace is wide because the cooperative descendant must finish inside it
+            # on a loaded machine; the wide grace still ends the step by SIGKILL when
+            # the descendant ignores TERM.
+            assert gate.run_step("descendant", [sys.executable, "-c", parent], timeout=60,
+                                 grace=3.0, directory=tmp_path) == 124
+            assert marker.exists(), "the descendant had not started when the bound fired"
+            pid = int(marker.read_text())
+            assert wait_gone(pid), "the TERM-ignoring descendant outlived the step's group sweep"
             if cooperative:
                 assert swept.read_text() == "done", "the descendant lost its shutdown grace"
         finally:
-            if marker.exists():
+            # The step leads its own group, whose id is the launcher's pid, so the group
+            # is signalled directly: it outlives a reaped leader, and the launcher handle
+            # exists even when the marker never appeared.
+            for child in launched:
                 try:
-                    os.kill(int(marker.read_text()), 9)
-                except ProcessLookupError:
-                    pass
+                    os.killpg(child.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass  # no member left (macOS answers EPERM for an all-zombie group)
+                child.poll()
+            if marker.exists():
+                wait_gone(int(marker.read_text()))
 
     @pytest.mark.skipif(os.name != "posix", reason="sessions and SIGTERM dispositions are "
                         "POSIX; the gate runs on Linux")
@@ -1612,7 +1697,7 @@ class TestTheGateRecipe:
     def test_the_steps_are_sequential_recipe_lines_in_order(self):
         makefile = MAKEFILE.read_text(encoding="utf-8")
         header = re.search(r"^opencode-package-check:(.*)$", makefile, re.M)
-        assert header and not header.group(1).strip(), (
+        assert header and not header.group(1).split("##")[0].strip(), (
             "the steps are recipe lines, never prerequisites: `make -j` would reorder them")
         lines = _raw_recipes()["opencode-package-check"]
         assert lines[0].startswith("@$(OPENCODE_GATE) begin"), lines[0]

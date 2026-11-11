@@ -6,21 +6,156 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 
 ## Contents
 
+- [Where the scheduler's helpers live](#where-the-schedulers-helpers-live)
 - [Write scheduler contract](#write-scheduler-contract)
+- [The verdict table](#the-verdict-table)
 - [Retry after edits](#retry-after-edits)
 - [Declined items and partial applications](#declined-items-and-partial-applications)
+- [One record writer for both legs](#one-record-writer-for-both-legs)
+- [A batch's records](#a-batchs-records)
 - [Dispatch counts](#dispatch-counts)
 - [Prior-batch context](#prior-batch-context)
+- [Prompt order](#prompt-order)
 - [Write reply extraction](#write-reply-extraction)
 - [Scope policy at the write seam](#scope-policy-at-the-write-seam)
+- [The host summary](#the-host-summary)
+
+## Where the scheduler's helpers live
+
+**`utils/write_batch_scheduler.py` is the loop; what both legs share, and the parts of the loop
+that stand on their own, live in twenty modules below it.** The scheduler holds `WriteBatchScheduler`,
+`SchedulerResult`, `run_write_phase` and the constants and helpers only the loop reads. The helpers
+that the executor's loop, `util write-prompt`, `util batch-done`, implement's native handoff and
+`status` all call live in the first seven modules, lowest first; `write_context` holds what the
+collaborators share, and the last twelve are the scheduler's collaborators (below the table). Each imports only the ones before it, and none
+imports the scheduler:
+
+| Module | What it owns |
+|--------|--------------|
+| `utils/commit_write_guard.py` | The commit write policy's write legs: what a batch of a commit review's apply is re-checked against before dispatch (`commit_guard_of`, `commit_recheck_failing`, `commit_stale_split`). |
+| `utils/check_records.py` | Check findings and a code batch's own check: the `[CHECK_FINDINGS]` and `[BATCH_CHECK_*]` lines, `rerunnable_checks`, `decomposition_graph` and the dependents a check with findings holds back, the accepted and repeated findings (`split_accepted_findings`, `repeated_findings_for`), and the id shape of implement's own tasks. |
+| `utils/verification_lines.py` | The tests line: `unverified_line` and its native twins, `implement_checks_ran`, `verify_command_candidate`. |
+| `utils/human_task_plan.py` | The failure strategies, `HumanTaskPlan` and its resolution from `--human-task` answers (`resolve_human_task_plan`), the manual gates (`plan_manual_gates`) and the labels an answered task is recorded under. |
+| `utils/stop_answers.py` | A stop's answers and the resume's why on both legs (`compose_stop_answers`, `native_stop_answers`, `compose_resume_why`, `native_resume_why`) and its headline (`fit_stop_headline`). |
+| `utils/batch_prompt.py` | The dispatched prompt: `bind_prior_changes`, `with_result_contract` and the contract texts it appends, where a dispatched prompt is kept, and the code write kinds. |
+| `utils/write_outcomes.py` | The partial-application and resume rules around the verdict table, pure over `TaskOutcome`: the outcome of a dispatch the table never saw (`classify_attempt`, `partial_when_bytes_moved`), whether a `--human-task <batch>=skip` answer can keep a stopped batch (`check_partial_skips`, `partial_skip_refusal`), and what a stop's plain `--resume` does (`resume_why` over a `ResumeContext`). The scheduler reads what is on disk and passes it in, lazily. |
+| `utils/write_context.py` | `RunContext`, the frozen record of one run a collaborator may read (kind, phase, folders, repository root, anchor, tasks, the run's `StateManager`, write policy, audit log, log, summary file, dry run), and `Refusals`, the tasks the run refused before any runner started and why, a field of the run's result (`result.refusals`). |
+| `utils/write_verify.py` | `VerifyStep`: whether a task of the phase applied an edit still owed a check (`phase_has_applied_batches`), `driver.verify_command` after the last batch (`run`, `verification_message`), the "nothing ran the tests" line on a stop (`note_unverified_on_stop`), and `tracked_files` after each batch and at the end (`record_batch_tracking`, `finalize_tracking`, `touched_files`). Stateless. `VerifyCommand`, the command's runner: its own process group or Job Object, the bounded output tail, the kill of the whole tree on a timeout and the note its verdict words, naming the command's processes left outside its group (`run`, `kill_tree`, `left_the_group`, `left_outside`, `env`, `_verify_timeout_note`, the `VERIFY_*` bounds; [When the verify command times out](#write-scheduler-contract)). |
+| `utils/write_sweep.py` | `ContainmentSweep`, the post-run containment sweep and its rollback store (D3l, [write safety](write-safety.md)): each dispatch's census, retained bytes and declared set (`begin`), the undeclared writes it closes with (`undeclared_writes`), the read-only peek (`moved_since_dispatch`), the audit rows of the paths it observed (`observed_with_undeclared`), the store's closing line and discard; `UndeclaredWrites` and the sweep's budgets (`SWEEP_MAX_FILES`, `SWEEP_RETAIN_MAX_BYTES`). Its state and lock are its own. |
+| `utils/write_eta.py` | `EtaLines`, the executor leg's `[ETA]` lines ([Dispatch counts](#dispatch-counts)): the baseline before the first dispatch (`start`), the tasks a line counts (`task_ids`, `progress`), each task's metric and line (`record`), what the run leaves (`left_out`) and the one closing line of every ending (`close`, `abort_line`, `finish`). Its counted sets are its own; the dispatch walk and the batch bookkeeping set them under `_effects_lock`. |
+| `utils/write_reports.py` | `WriteReports`, what the run leaves to read: the `write_subagents` mirror and its in-flight patch (`mirror_status`, `publish_in_flight`), `write_batch_report.json` with the executor's per-dispatch report (`write_report`, `WRITE_BATCH_REPORT_FILENAME`), `summary.md` (`write_summary`) and its reference in the plan, and the mirror of a refusal that ended the run (`record_refusal`). Read-only over the result; the mirror's writers never raise. |
+| `utils/write_stop.py` | `StopAccount`, how a stop is worded and recorded on the result: a failed batch (`record_stop`, `stop_message`), a refusal (`refusal_message`), a check's hold (`record_check_block`, `check_block_message`), a manual gate (`manual_gate`, `record_manual_gate`), the stop's headline, its `--human-task` answers and its resume reason (`stop_answers`, `stop_resume_why`), and a refused `--human-task <batch>=skip` answer (`record_answer_refusal`). Stateless. |
+| `utils/batch_prompt_builder.py` | `BatchPromptBuilder`, the prompt each dispatch is sent (`dispatched_prompt`), the scope refusal, the result contract and the known checks it lists, and the copy of the prompt kept beside the native leg's (`keep_dispatched_prompt`, the pinned phase dir). |
+| `utils/write_commit_leg.py` | `CommitGuardLeg`, the commit write policy's leg (plans/review-commits.md §2.7): the guard's protected set and context plan as the policy's exact-path deny layer (`protect`), each batch's pre-dispatch re-check and the batches it stopped (`recheck`, `stale`), the watched paths read before a dispatch and compared after it (`watch_begin`, `watch_after`, `restore_watched`, `protected_unclassified`), and the re-pin after a completed batch (`repin`). A no-op without a guard. |
+| `utils/write_check_holds.py` | `CheckHolds`, what implement's checks hold back: a check's dependents (`dependents_of`), the tasks a check with findings holds in this run or an earlier one (`check_holds`, `block_dependents_of_checks`, `hold_on_recorded_checks`), whether a resumed check runs again (`check_findings_rerun`, `unchanged_since_failure`, `tree_fingerprint`, `restamp_check_trees`), and the `[CHECK_FINDINGS]` and `[BATCH_CHECK_*]` lines (`check_findings_lines`, `check_findings_fate`, `batch_check_lines`). Stateless: a hold is on the result. |
+| `utils/write_resume.py` | `ResumeEvidence`, what an earlier run left: whether a result counts as done (`done_evidence`, `result_counts_as_done`, `sibling_results`, `retire_foreign_result`), the inputs binding (`task_fingerprint`, `record_fingerprint`, `WRITE_FINGERPRINT_FILENAME`), the earlier report's rows of this review cycle (`earlier_report_rows`, `review_completed_at`, `REVIEW_PHASE_BY_WRITE_KIND`), the `--human-task <batch>=skip` answers it can keep (`check_partial_skips`, `partial_skip_evidence`, `kept_at_request`, `refused_skips`), and the `resume: kept` line (`report_resume_tally`, `resume_kept_rows`, `resume_answered_ids`). Writes only its inputs binding. |
+| `utils/write_grant.py` | `WriteGrant`, what the phase does with its one grant (plan step 3, F1 "How a dispatch receives its grant"): the target and the request made at construction (`checked_write_target`, `build_jail_request`), the pre-dispatch check that a task declares exactly the grant (`grant_mismatch`), the runner preflight under the request and the rung it recorded (`preflight`, `recorded_rung`, `announce_rung`), the replaced-target check (`target_replacement`, `record_replaced_target`, `replaced_target_unclassified`), the jail's denials as the verdict reads them (`jail_facts`, `jail_scope_sentence`, `in_grant`) and the warn-only `[GIT_CONFIG_CHANGED]` line (`warn_git_metadata_changed`). Its per-dispatch records (`target_identity_before`, `jail_notes`, `jail_denials`, `jail_failed`, `replaced_targets`) are its own. |
+| `utils/write_snapshots.py` | `PreBatchSnapshots`, each dispatch's mandatory pre-batch snapshot, its rollback point (D3h): taken, or reused from the batch's first dispatch on a resume (`take`, `reusable`; another batch's or a previous review cycle's is set aside, never deleted), and, once per admitted group before any of its snapshots, whether a repo-wide phase's snapshots, rollback store and audit log must live outside the phase dir (`decide_rollback_storage`). The snapshots it took (`taken`) and which were reused (`reused`, read by the classification) are its own. |
+| `utils/write_dry_run.py` | `DryRunReport`, `--dry-run-subagents`' report (D3l): the phase's batches walked as the loop would, each task's runner, rendered argv with the prompt replaced by its hash (`redact.redact_argv`), prompt transport, co-schedule group, preflight under the grant and recorded rung, and the write policy's verdict, then the ceilings, written to `subagent_dry_run.json` (`write`). Starts no child and writes nothing else. |
+
+**The scheduler re-exports every moved name for reading only** (`write_batch_scheduler._MOVED`, the
+contract `git_utils` and `run_status` already follow): `write_batch_scheduler.X` returns the owner's
+current object, and a patch of `write_batch_scheduler.X` reaches no code. The scheduler and the
+helper modules read a moved name through its owner at each call (`_check_records.decomposition_graph`),
+never a copy, so one patch of the owner reaches them all. Patch the owner:
+`tests/test_write_batch_scheduler_moved_names.py` fails a test that patches a moved name on the
+scheduler, and holds the layering. `tests/test_import_layers.py` puts all of them at L3, and
+`utils/batch_ledger.py` beside them ([A batch's records](#a-batchs-records)).
+
+**The scheduler composes its collaborators; it does not share `self` with them** (WRITE-5). It
+builds one `RunContext` in `__init__` and hands it to each collaborator it owns: `self._verify`
+(`VerifyStep`), `self._verify_command` (`VerifyCommand`), `self._stop` (`StopAccount`),
+`self._eta` (`EtaLines`), `self._sweep` (`ContainmentSweep`), `self._reports` (`WriteReports`),
+`self._prompts` (`BatchPromptBuilder`), `self._commit` (`CommitGuardLeg`), `self._checks`
+(`CheckHolds`), `self._evidence` (`ResumeEvidence`), `self._grant` (`WriteGrant`),
+`self._snapshots` (`PreBatchSnapshots`) and `self._dry_run_report` (`DryRunReport`). The context holds the scheduler's own
+objects, not copies. Five rules hold across the split:
+
+- **One writer of `state.json`.** `ctx.state` is the run's one `StateManager`. A collaborator
+  writes through it under the lock the scheduler hands it (`VerifyStep` and `StopAccount` get
+  `_effects_lock`; `_record_batch_effects` calls `EtaLines` under it) and never reloads it;
+  `_finalize` still owns `_reload_state` after `finalize_tracking`. The apply guard is the live
+  dict inside it: `CommitGuardLeg` mutates it under `_effects_lock` and saves it back as the
+  scheduler did (`commit_apply.save_guard`, under `state_file_lock`), so the state's next save
+  writes the same decision. `ResumeEvidence` writes only its own inputs binding beside the results,
+  through its folder held below the plan's directory, as the scheduler's rewrites of a result it
+  persisted are (write-safety.md's [plan output containment](write-safety.md#plan-output-containment)).
+- **The order of the effects is the loop's.** The collaborators are called from the same places,
+  in the same order, as the methods they replace: `_record_batch_effects`, `_dispatch_one`'s
+  `finally` (`ContainmentSweep.abandon`), `_finalize` and `_end_run` are unchanged around them.
+- **The sweep's lock is the sweep's.** Census registration and closing stay atomic under it;
+  the scheduler reads in-flight dispatches through `in_flight()`, `has_census()` and
+  `clear_in_flight()`, never its dictionaries.
+- **What the collaborator calls back is named.** Each collaborator gets the methods it calls
+  as constructor arguments (`VerifyStep`: `VerifyCommand.run`, `_unverified_text`,
+  `_task_by_id` and `StopAccount.set_stop_headline`; `CommitGuardLeg`: `_refused`, which records
+  a batch its re-check stopped; `ResumeEvidence`: `CommitGuardLeg.guard`; `PreBatchSnapshots`:
+  `_runner_for`; `DryRunReport`: `_batch_runners_and_ceiling`, `_render_argv` and
+  `_ceiling_record`), callables bound at each call
+  (`WriteBatchScheduler._late`, which takes a dotted name such as `"_stop.accounting"` for
+  another collaborator's), so an instance or class patch of the method still applies; and
+  `ctx.log` reaches the scheduler's current `log`, so `_dispatch_walk`'s quieted log quiets them
+  too. `WriteReports` reads the sweep's in-flight dispatches and the `[ETA]` counts through those
+  collaborators.
+- **What a run refused is on its result.** `result.refusals` (`write_context.Refusals`) holds the
+  tasks refused before dispatch and the write-policy paths and rules that refused them; the
+  scheduler writes it where it refuses a task (`_refuse_before_dispatch`, the pre-dispatch policy
+  check in `_dispatch_one`), and the stop, the `[ETA]` lines, the summary and the mirror read it
+  from the result, never from the scheduler. A method that words one outcome
+  (`StopAccount.failure_sentence`, `_started_a_runner`) takes the record as an argument.
+
+A test drives the sweep on the collaborator (`scheduler._sweep.census()`, `.retain`,
+`.blob_path`, `.moved_since_dispatch`, `.discard_store`), and a patch belongs there too
+(`scheduler._sweep`, `write_sweep.ContainmentSweep`, `write_sweep.SWEEP_MAX_FILES`): the
+collaborator's own calls never pass through the scheduler, which keeps no forwarder for them. `_begin_sweep` and
+`_undeclared_writes` stay the scheduler's seams: `_begin_sweep` publishes the dispatch in flight
+after the census, and `_classify` calls `_undeclared_writes`, which
+`tests/test_write_verdict_table.py` stands in for (over a real `WriteGrant` and
+`PreBatchSnapshots`, the target's inode and the jail's path resolution traced on the grant).
+`PreBatchSnapshots` reads the preflight through the run's `WriteGrant` and an earlier run's
+results through its `ResumeEvidence`, and `DryRunReport` the preflight and the prompt through
+the `WriteGrant` and `BatchPromptBuilder`: the objects themselves, so a class or instance patch
+of either reaches them. A batch kept at the user's request is read by
+`ResumeEvidence.kept_outcome`, which writes nothing, and recorded by the scheduler's
+`_keep_at_request`, a step of a dispatch (the audit's completion line, the verdict stamp, the
+batch's effects, in that order); `_stop_on_manual_gate`, which calls the collaborators, stays on
+the scheduler too. A test
+calls a moved method on its collaborator (`scheduler._reports.mirror_status(result)`, `scheduler._verify_command.run(...)`,
+`scheduler._evidence.task_fingerprint(task)`, `scheduler._snapshots.take(task)`), a class patch
+goes on the collaborator's class (`write_check_holds.CheckHolds.tree_fingerprint`,
+`write_grant.WriteGrant.recorded_rung`), and a patch of a function it calls on the module that
+calls it (`write_grant.preflight_runner`): no collaborator has a forwarder on the scheduler.
+
+**The scheduler is built from one `SchedulerOptions`** (WRITE-5), a frozen keyword-only dataclass
+whose fields are the constructor's options and their documentation. The two orchestrators that
+drive a write phase build one and pass it (`WriteBatchScheduler(options)`); a test may pass the
+same fields as keywords, which builds the same record (`scheduler.options`), never both at once. A
+test stand-in for the scheduler takes the options object.
+
+**A run without a state holds a `NullState`** (`write_context.NullState`, WRITE-11), never `None`.
+Only a unit test leaves `state` unset; a real phase always has a `StateManager`. The null object
+writes nothing and reads as a missing state did: no `state.json` dict (`state`) or file
+(`state_file`), no task status, no phase started or completed, `get` gives the default (so the
+`check_records` readers find nothing on record), and it has none of the metric methods (so
+`EtaLines` prints no `[ETA]` line). The scheduler and its collaborators call it instead of asking
+whether there is a state. Two readers still ask, through `write_context.has_state`, because a
+missing state there is not an empty one: `CheckHolds.unchanged_since_failure` goes by the result
+file alone when there is no status to go by, and `StopAccount.manual_gate` has no record to gate
+on. A reader the native leg shares, which reads `state.json` on disk when it is handed `None`
+(`bind_prior_changes`, `known_check_commands`, the known checks' reports), is handed `None` for a
+run without one (`write_context.manager_or_none`). `VerifyStep.finalize_tracking` runs only with a
+state file to census. `tests/test_scheduler_null_state.py` holds the null object to the
+`StateManager`'s signatures and each reader to what `None` gave.
 
 ## Write scheduler contract
 
 **The write half is a *scheduler*, not a dispatcher (D3f/D3g/D3h/D3l/D3n).** `utils/write_batch_scheduler.py`
 drives the four write kinds (`apply_suggestions`, `apply_task_suggestions`, `apply_code_fixes`,
 `implement`, added to `subagent_tasks.KINDS` and the schema alongside the six read
-kinds), under `--exec-subagents` *and* — via `respond=` — under the simulated native
-invoker, so both paths schedule identically.
+kinds), under `--exec-subagents` *and* — through its one dispatch seam,
+`WriteBatchScheduler(dispatcher=...)`, defaulting to `_dispatch_executor` — under the
+simulated native invoker the equivalence tests inject (`tests/harness/native_invoker.py`), so
+both paths schedule identically. No shipped path passes a dispatcher.
 
 One loop: batches in ascending `batch_index` with each batch's verification **completed and
 recorded before the next dispatch**; `{prior_changes_context}` bound **late, in Python, per dispatch**
@@ -37,25 +172,25 @@ used to also embed a **frozen** `tasks_content[:3000]` excerpt of tasks.md, iden
 batches since every prompt is materialized up front — by the last few batches of an 11-batch run it
 showed a dependency-graph edge an earlier batch had already changed, so it is gone (F7, 2026-09-16):
 each prompt just tells the runner to read the live file first, which step 1 of its own instructions
-already said; the write-batch **result contract** appended at the same seam on both invokers
-(`_with_result_contract`: the `write_batch_result.schema.json` shape plus every `expected_ids` member
+already said; the write-batch **result contract** bound at the same seam on both invokers, around the batch
+prompt ([prompt order](#prompt-order); `BatchPromptBuilder.with_result_contract`: the `write_batch_result.schema.json` shape plus every `expected_ids` member
 spelled out in prompt order, because the prompt never names them and an omitted id reads as a
 partial application) — the batchers' prompts end in the prose "Return Format" the native markdown
 flow compresses into a summary line, and measured 2026-09-15 a real runner applied a batch, reported
 it exactly as asked, and was recorded `unparseable_result` four attempts running; a resumed batch
-**reuses** its pre-batch snapshot (`_reusable_snapshot`, same declared set and, when the manifest
+**reuses** its pre-batch snapshot (`PreBatchSnapshots.reusable`, same declared set and, when the manifest
 records them, the same `expected_ids` — after a selection change an apply id names other
 items, and the snapshot it holds is set aside as `pre_batch/<id>.items-<sha8>`, never deleted, while the
 new batch takes its own — and moved back into the slot when those items return to the id
 (`TaskSnapshot.reinstate`; a re-selected item used to re-snapshot the post-edit bytes) — never across
 review cycles: a slot or set-aside copy whose manifest `taken_at` predates the review
-this phase applies (`_review_completed_at`, the `earlier_rows` cutoff; the stamp is kept
+this phase applies (`ResumeEvidence.review_completed_at`, the `earlier_rows` cutoff; the stamp is kept
 across re-saves) is a previous cycle's rollback point, set aside and never reused, since restoring
 from it would roll that cycle's applied edit back too (2026-10-03); a renumbered batch whose items
 already landed is skipped on the earlier result's verdict stamp, which names its
-`expected_ids`, `task_id` and `inputs_fingerprint` (`_sibling_results`,
+`expected_ids`, `task_id` and `inputs_fingerprint` (`ResumeEvidence.sibling_results`,
 judged with the index it ran as), and a dispatch reusing a positional result name keeps another
-batch's result beside it as `apply_batch_N.items-<sha8>.json` first (`_retire_foreign_result`; adversarial
+batch's result beside it as `apply_batch_N.items-<sha8>.json` first (`ResumeEvidence.retire_foreign_result`; adversarial
 review, 2026-10-02)) so the rollback point stays the bytes from before the batch's *first* dispatch
 rather than the previous run's half-applied edits — measured 2026-09-15, four resumed runs each
 re-snapshotted the last run's partial edits and `util restore-batch` could no longer reach the
@@ -83,11 +218,12 @@ in the `.status.json` write mirror and as a `Verification` line in both summarie
 the command and its config layer are logged **before** it starts as well as after, which is what
 `docs/configuration.md`'s safety section promises of the one config key that executes; it is spawned
 with `Popen` in its own process group and a timeout kills that whole group through
-`process_control.kill_tree`, because `subprocess.run`'s timeout SIGKILLs only
+`process_control.kill_tree` (what it reports when the kill cannot confirm that: "When the verify
+command times out", below), because `subprocess.run`'s timeout SIGKILLs only
 `/bin/sh` and left the real `pnpm`/`node` running while
 the phase reported `exited 124` (F4/F3b, 2026-09-17), and its capture goes to a temp file
 read back to the last `VERIFY_OUTPUT_CAP_BYTES` rather than buffering a whole build in memory, under
-the environment `providers.base.build_child_env` composes for a spawn rather than a bare
+the environment `providers.child_env.build_child_env` composes for a spawn rather than a bare
 `os.environ` — before it, seven code fixes were applied to one file and the phase
 completed without any check, the runners' volunteered `node --check` being their initiative
 and not the phase's guarantee) + `metrics.finish` + `mark_phase_completed` +
@@ -95,18 +231,138 @@ and not the phase's guarantee) + `metrics.finish` + `mark_phase_completed` +
 `## Manual Tasks (Deferred)` / `## Dependency Override Warnings` / `## Cancelled` sections) +
 `insert_implementation_summary_reference`.
 
+**When the verify command times out.** `VerifyCommand.kill_tree` hands the command
+to `process_control.kill_tree` as an owned child (`child=proc`, no start time; runtime.md's
+[process primitives](runtime.md#process-primitives), "An owned child's kill"), and keeps the rule
+the executor's timeout kill keeps for its runner (`process_control.unconfirmed_kill`): only
+`killed` and `gone` confirm the command stopped. A `survived` that is only the command's own zombie
+becomes `killed` once `process_control.own_child_stopped` confirms its exit and an empty group.
+Every other outcome (`survived`, `unresolved`, `skipped`, `None` for a kill that raised, after which
+the command still gets a kill through its job or its `Popen`, or any other word) is returned as it
+is and logged as a `[write-subagents] warning:` that names the pid and group and says it may still
+be running. In a detached worker that records its launches (the command starts through
+`process_control.popen_tree`), `detach.note_left_running` also writes `run.cleanup` `incomplete`
+with that pid, so `status`, `status --sweep` and an abort see it ("When not everything is confirmed
+stopped" in the same runtime.md section); the warning says so when it did. The exit code is
+`VERIFY_EXIT_TIMEOUT` (124) for every verdict, and the output ends with a note from
+`_verify_timeout_note` that carries the verdict into `verification.output_tail`: `killed after Ns:
+SIGTERM then SIGKILL` for `killed` alone, "had already stopped" for `gone`, and for the rest the pid
+and "may still be running", never a kill. The signals sent are `kill_tree`'s; this only reports
+them. The verdict speaks for the command's process group alone: a child that left it (`setsid`, a
+daemon's double fork) is not in the group, and the group kill never reaches it (fable review F11,
+2026-11-10: a `setsid sleep` survived a `killed` note that said the whole group was killed). So
+before the kill `VerifyCommand.run` lists the command's descendants outside its group
+(`left_the_group`, through `process_control.descendants`, which follows parent links and so must run
+while the command is alive), and after it keeps those still running (`left_outside`, through
+`process_control.probe`: the same pid and start time, or one it cannot tell apart). Each is named in the note, whatever the verdict
+("N process(es) the command started outside its process group are out of the group kill's reach and
+still run: pid P (process group G)"), and in a `[write-subagents] warning:` that says nothing records
+them for `status --abort`. They are not signalled: a process that left the group on purpose is not
+the group kill's to end, and the user decides. What this cannot see: a descendant whose parent
+exited before the timeout belongs to init by then, and Windows lists none (the command's Job
+Object holds its whole tree). `tests/test_write_verify_kill_verdict.py` pins each verdict and the
+child outside the group.
+
 A run that dispatched every batch and produced none of those is a **failed** run.
 **`state.json` has exactly one writer per run, and it is the scheduler's
-`StateManager`** (F3/F4, 2026-09-16): `StateManager.save()` dumps its dict wholesale and
-never merges, so anything a *file-level* writer added between two saves is erased by the second one.
+`StateManager`** (F3/F4, 2026-09-16). Since STATE-7 (2026-11-08) `StateManager.save()` re-reads
+the file under `metrics.state_file_lock` and applies only what the manager changed since it last
+read or wrote it, so a record another writer (a file-level helper, a second phase of the same
+plan) made meanwhile survives. The merge builds a candidate document and leaves the manager's
+`state` alone; `state` adopts the candidate (top-level maps and lists updated in place, so a
+reference a caller holds stays live) only once the write succeeded. A failed write leaves
+`state`, the baseline and the journal as they were, and a retry merges afresh. A file still
+holding exactly the text the manager last read or wrote has nothing to merge, and is not parsed.
+The state lock is innermost: `save()` takes nothing while holding it. One deadline,
+`STATE_LOCK_TIMEOUT_S` (120 s) from entry, bounds the wait for another thread of the process
+(the thread lock is process-wide, so a thread saving another plan counts) and then for another
+process; past it `StateLockTimeout` is raised with nothing written and the changes kept in
+memory. A caller that saves a record it must not lose (the dirty-tree baseline) lets that error
+propagate rather than saving a fallback. One writer per run is still the rule; the merge is the
+backstop, not the design.
 
-Metrics therefore go through `state.record_metric`/`start_metrics_phase`/`finish_metrics_phase` —
-the in-memory twins `metrics.py` now exposes beside its CLI-facing file-level pair
-(`record_metric_in_state` and friends), with `start_metrics_phase` called once before the first
+**How a save knows its own changes.** Two sources, for every unit below:
+
+- *The journal.* Each `StateManager` mutator records the unit it wrote (the table's "Journaled
+  by" column). A domain module that writes its own record with a raw-dict helper journals it
+  through the generic `StateManager.journal_entry(key, entry_id)`, which takes an entry-merged
+  map only: the scope-policy writers live beside their records in `scope_policy`, `scope_apply`
+  and `scope_policy_runs`, so `state_manager` (L1) imports no domain module
+  ([import layers](dispatcher.md#import-layers)). A journaled unit is the saver's even when its
+  value equals what the saver loaded: a retry that records the same failure with the same
+  reason, a `--human-task` answer repeated after another writer consumed it, a scope record
+  repeated within the second its timestamp keeps, a clear of `metrics_left_out` this manager
+  never saw filled. Each is a
+  write, and what another writer recorded meanwhile does not win over it. A mutator that
+  writes nothing (`close_scope_run` on a closed record, `attach_scope_baseline` on a round that
+  has one, `finish_metrics_phase` with nothing to close) journals nothing. A save, `reload()`
+  and `record_commit_range()` (which reloads) empty the journal.
+- *The value comparison*, the fallback for code that edits `StateManager.state` directly or
+  through a raw-dict helper: a unit whose value differs from the file as the manager last read
+  or wrote it is the manager's change, and such a write that repeats the loaded value is
+  invisible to it. Every writer family whose repeated write means something has a journaled
+  mutator; the direct writers left are safe without one: the scheduler's per-task check maps
+  and `known_checks`' batch reports go with the journaled `update_task_status` of the same
+  task; a start-over's or `--task` rerun's clears of a task's check maps
+  (`state_manager.clear_task_verdict`, over `TASK_VERDICT_KEYS`) go with a fresh
+  `implement_task_reset_at` stamp; processed-item records (`record_batch_items_in_state`) and
+  `metrics` entries carry a full-precision timestamp; `move_check_repeats_in_state`, a
+  `--force` drop of a phase completion and `stage_scope_files_record`'s pop of
+  `review_scope_files` change what the manager just read; the commit guard an apply writes into
+  the pinned range is new, or the saved one reused as it is; `record_metric`'s
+  `named_out` note is derived from the progress entry it sits in; and the scheduler's
+  `set("tracked_files", …)` saves only a recomputed list that changed, the entries it carries
+  over unchanged being no write of their own. The file-level writers (`util batch-done`,
+  `util write-prompt`, `finalize_tracking`, `commit_apply.save_guard`, the `metrics` CLI) are
+  not managers: they re-read the file under the lock and write it back, with no stale view.
+
+**Merge units.** The merge never mixes the two writers' fields inside one record. The saver's
+changes are its own, whole, whatever the other writer did to them; every other unit is the
+file's:
+
+| Unit | Keys | Journaled by | Merged |
+|------|------|--------------|--------|
+| A task's record | its entry in `task_status`, `task_status_reasons`, the check maps (`task_check_findings`, `task_batch_check`, `task_own_text`, `task_own_check_note`, `task_batch_check_accepted`, `task_batch_check_repeats`, `task_check_trees`), `implement_task_reset_at`, `human_task_decisions`, `dependency_overrides` and `apply_fix_batch_checks`; its membership of `task_own_check_ran` | `update_task_status`, `record_dependency_override`, `record_human_task_answers` (each task it answers) | by task id, the record whole |
+| A phase's record | its entries in `phases_completed`, `phases_started`, `phases_skipped` | `mark_phase_completed`, `mark_phase_started`, `mark_phase_skipped`, `reopen_phase` | by phase |
+| An entry's record | one entry of `processed_<phase>`, `human_decisions_<phase>`, `human_decision_verdicts_<phase>`, `metrics_progress`, `metrics_left_out`, `metrics_set_aside`, `scope_policy` (by review phase), `scope_policy_runs` (by mode) | `mark_item_processed`, `record_human_decision`, `record_judge_verdicts` (each verdict); `start_metrics_phase`, `set_metrics_total`, `set_metrics_left_out`, `set_metrics_set_aside`, `finish_metrics_phase` (what it closed); through `journal_entry`: `scope_policy.record_scope_round`, `scope_policy.attach_scope_baseline`, `scope_policy.record_scope_apply_policy`, `scope_apply.record_scope_deferrals`, `scope_apply.record_scope_completion`, `scope_policy_runs.record_scope_run_start`, `scope_policy_runs.close_scope_run` | by entry id, the entry whole: never a fragment (`{"details": {"leg": …}}` with no status, which `processed_record_counts` would read as done) |
+| The decomposition | `task_titles`, `implement_task_ids`, `implement_human_task_ids`, `implement_task_depends_on` | `record_task_titles`, `set` of one of its keys | together |
+| The plan-change record | `plan_hash`, `plan_changed` | the load's plan-change check, `clear_plan_changed_flag`, `refresh_plan_hash`, `set` of either key | together, so a hash travels with its own flag. An edit only the saver's load detected gives way to a file that records the hash it detected: whoever wrote that saw the same plan, and the flag beside it (raised or consumed) stands |
+| `metrics` | one list per phase | (value comparison) | entry by entry: `record_metric_in_state` only appends or replaces an entry in place, so an entry the saver replaced replaces the file's when the file still holds the original, and every other entry it added goes in by `record_metric_in_state`'s identity rule (`metrics.merge_recorded_metric`): a second record of one event `(phase, run_id, label, batch_index)` collapses into the file's, with its `[METRICS_DUPLICATE]` or `[METRICS_CONFLICT]` line, instead of counting one batch twice. A list of another shape is the saver's |
+| `tracked_files` | one list | `track_file` (its path) | entry by entry, by path; a list that is not one entry per path is the saver's |
+| `state_resets` | one stamp per reset key | the clears (below) | by key |
+| Every other top-level key | `pre_existing_changes`, `head_before_implement`, `commit_range`, `head_ref`, `review_scope_files`, `human_task_strategy`, `plan_preamble`, `progress_<phase>`, `human_decision_unresolved_<phase>`, the composites' records (`full_workflow`, `improve_*`), legacy and custom keys | `set`, `save_human_task_strategy`, `record_processing_progress`, `mark_review_phase_completed`, `record_judge_verdicts` (the unresolved list) | one value: when both writers changed it, the saver's |
+
+**Explicit resets are authoritative.** `clear_processed_items`, `clear_human_decisions`,
+`clear_processing_progress` and `clear_key` (the clears `--fresh` makes) stamp the key in
+`state_resets`. A key the saver reset is the saver's whole, records another writer added to it
+meanwhile included; a key another writer reset since the saver loaded is the file's, the saver's
+own writes to it included, so a stale view cannot bring the cleared records back. `reset()` does
+the same for the whole document (`state_resets: {"*": …}`): the resetter's save writes its
+document whole, and a manager loaded before the reset takes the reset document on its next save,
+its own unsaved changes dropped (they predate the reset). A task's reset is its
+`implement_task_reset_at` stamp (a start-over, a `--task` rerun): a task the file's writer reset
+is the file's unless the saver reset it too. A `--force` that drops a phase completion, and
+`reopen_phase` (which journals the phase, so a completion another writer recorded after the
+manager loaded is dropped too), are ordinary changes to that phase's record, not barriers: a
+completion another writer records after them is kept.
+
+**Upgrading.** The merge holds only between writers that all merge. A `StateManager` from before
+STATE-7 still dumps its whole dict without the lock or a re-read, and when it saves last it
+erases every record newer writers made since it loaded, `state_resets` stamps included (Codex
+reproduced an old writer erasing a new completion and the reset stamps). Old and new writers
+must not run against the same plan concurrently: during an upgrade, let the running multi-llm
+commands of a plan finish (or stop them) before starting the new version on it. State files
+themselves need no migration: an old file loads and saves, and an old writer reads a new file
+(it ignores `state_resets`).
+
+Metrics therefore go through `state.record_metric`/`start_metrics_phase`/`finish_metrics_phase`
+(and `set_metrics_total`, `set_metrics_left_out`, `set_metrics_set_aside` for the stored total
+and the closing line's tails) — the in-memory twins `metrics.py` now exposes beside its
+CLI-facing file-level pair (`record_metric_in_state` and friends), with `start_metrics_phase` called once before the first
 dispatch so `metrics_progress` and the `[ETA]` line `instructions/implement.md` step 5
 describes exist on the executor path at all (the `batch_index`/`total_batches` that
-call passes are this run's own progress and dispatchable count — `_eta_progress`: the
-finished tasks of the set `_eta_task_ids` counts, and that set's size — never the plan's
+call passes are this run's own progress and dispatchable count — `EtaLines.progress`: the
+finished tasks of the set `EtaLines.task_ids` counts, and that set's size — never the plan's
 global decomposition index or the bare materialized count including a deferred human task, which is
 what made a resumed run's `[ETA]` line read `batch 7/6 … WARNING: batch_index > total_batches` from its first
 batch on, N1 2026-09-16; **both halves count tasks**, because `len(batches_dispatched) + 1` was a batch
@@ -114,7 +370,7 @@ ordinal against a task denominator and an `implement` dependency level with k ta
 one batch of k — every one of those k entries recorded the same ordinal, so a parallelizable plan
 ended at `batch 9/14`, never reached `N/N` and never printed
 `ALL BATCHES COMPLETE`, F3 2026-09-17 — and a resume skip counts too, the same way
-`_mirror_status` counts it in `completed`).
+`WriteReports.mirror_status` records it among its `tasks` rows).
 
 `metrics.finish_phase_in_state` **returns** `(elapsed_ms, line)` instead of printing the closing
 `[ETA] … phase complete` line, mirroring `record_metric_in_state`, so the CLI leg prints it and the
@@ -125,8 +381,8 @@ phase log **and** a message on the result, since `reload()` would otherwise keep
 `tracked_files` silently and `review-code` would review it (F4, 2026-09-17); that
 script's own state write is temp + `os.replace` now, as its comment always claimed — and
 the one remaining second writer, `finalize_tracking`, is followed immediately by
-`StateManager.reload()` (re-read the file, discarding anything unsaved — callers save first) so the
-closing `save()` carries its `tracked_files` instead of overwriting them.
+`StateManager.reload()` (re-read the file, discarding anything unsaved — callers save first), so
+the dict shows its `tracked_files` at once and a later in-memory change to them builds on the file's.
 
 Before this, an implement run whose log said `Tracked 1 implementation files: index.html` finalized with the two stale
 entries earlier phases had left, and three audited runs finished with no `metrics` key
@@ -157,7 +413,7 @@ function it described never existed, and a stamp from before the fix is re-dispa
 declared files unchanged while others moved is judged by the ids like any moved file, applied or
 partial), the **failed batch** (`failed` claimed, or a non-zero exit, and no bytes
 moved → `STATUS_BATCH_FAILED`, not `ok`: nothing to restore but the loop stops at
-the boundary and `--resume` re-dispatches it, and `_already_done` accepts only an
+the boundary and `--resume` re-dispatches it, and `ResumeEvidence.already_done` accepts only an
 `applied`/`no-op` result file, because a schema-valid
 `{"status": "failed"}` used to read as a clean failure at `status: ok` and the phase
 completed at exit 0 — and only one whose own `ids` intersect the task's
@@ -174,14 +430,16 @@ file attests to — the branch returned before every audit site, so the artifact
 answering "what did this phase do" said nothing about the five).
 
 The rename itself leaves the OLD positional files sitting beside the new ones with nothing to clean
-them up; `_warn_stale_result_files` (N6, scoped to `implement` — a positional kind's
+them up; `ResumeEvidence.warn_stale_result_files` (N6, scoped to `implement` — a positional kind's
 filenames have never been renamed) logs one warning naming any that match neither a current task's
 `output_name` nor any task id `state.json` has ever recorded a status for, and
 never deletes them.
 
 Resume reads the scheduler's **verdict**, never only the runner's claim (F1, 2026-09-16): every
 `_classify` branch ends by stamping `verdict: {write_outcome, status, ok}` onto the result file
-(`_stamp_verdict`; additive, the schema admits it), `_already_done` re-dispatches a
+(`_stamp_verdict`; additive, the schema admits it; written through the result's folder held below
+the plan's directory, as `persist_result` wrote it, so a phase folder swapped for a link in between is
+refused and the stamp is logged as not recorded), `ResumeEvidence.already_done` re-dispatches a
 file whose verdict is not `ok` or whose task `state.json` records
 `failed`, and the inputs fingerprint is recorded only for an `ok`
 outcome — a runner that printed `applied` with every id and then died mid-edit left a
@@ -192,7 +450,7 @@ A resume skip also moves the task's `task_status` to `completed` (reason
 `failed`/`in_progress` tasks beside `pending` ones (F2: a
 cleanly failed task was dropped from the resumed run and the phase completed without it), and
 `driver.verify_command` re-runs on a resume that dispatched nothing whenever `state.json`
-records an applied batch for the phase (`_phase_has_applied_batches`, F3: the `--resume` the
+records an applied batch for the phase (`VerifyStep.phase_has_applied_batches`, F3: the `--resume` the
 exit-3 message prescribes after a failed check used to stamp the phase completed without running
 it).
 
@@ -267,7 +525,7 @@ under the state home, racing run 4), so degradation toward the cap is visible be
 being skipped rather than only once they are, and the wording no longer claims the bytes are still
 there one statement after they are deleted (F12, 2026-09-16).
 
-That total is honest across an inherited store too (F12, 2026-09-16): `_store_blob` used to
+That total is honest across an inherited store too (F12, 2026-09-16): `ContainmentSweep.store_blob` used to
 return early for a blob already on disk — this run's own earlier copy, or one a killed run's store
 left behind — without adding its size to the running total, so a run that reused a killed run's
 store reported `0.1 MB of 64 MB` for a directory that measured 47 MB and the cap went
@@ -277,7 +535,7 @@ first.
 Adapters: `claude-code` `--permission-mode acceptEdits`, `codex`
 `--sandbox workspace-write`, `opencode` `--agent build`, each with a non-argv
 (`stdin`) transport and never a `--yolo`-class bypass;
-`tests/test_providers.py` cross-checks `agent-write` against `supports_file_edits` in both
+`tests/test_provider_contract.py` cross-checks `agent-write` against `supports_file_edits` in both
 directions. `utils/write_phase_bridge.py` is the one conversion from each phase's existing batch payload
 into materialized write tasks (stable `prior_changes_id`, declared file set, monotonic result
 names).
@@ -313,11 +571,19 @@ the bytes it was about to overwrite nowhere.
 
 The same mistake survived one level down until 2026-10-09: the phase dir and `state.json`
 outlive a review re-run, so cycle 1's records counted as cycle 2's progress. `_phase_has_recorded_progress`
-now dates each signal against the review's latest completion (`_review_completed_at`), strictly, as
-`_earlier_report_rows` does — a processed record by its `timestamp`, the report by its
+now dates each signal against the review's latest completion (`ResumeEvidence.review_completed_at`), strictly, as
+`ResumeEvidence.earlier_report_rows` does — a processed record by its `timestamp`, the report by its
 `written_at` (else its mtime), a batch result by its mtime — and an older one is an
 earlier cycle's; a missing date on either side keeps the signal, and `--resume` still
 counts on its own (mid-cycle it is the native leg's only signal).
+
+That rule is one function, `state_manager.predates_review`, with one stamp reader
+(`_parse_completion_time`) and one cutoff (`write_batch_scheduler.review_completed_at`), and
+every cycle check calls it: `ResumeEvidence.earlier_report_rows`, `TaskSnapshot.taken_before`,
+`_phase_has_recorded_progress`, `_fresh_target_refusal`, the improve summary's applied files and
+`check_workflow_prerequisites`. Two readers pass a parameter: the audit log and snapshot manifests
+are stamped to the second (`whole_seconds`), and a manifest with no date is set aside rather than
+trusted (`undated_predates`). `tests/test_review_cycle_rule.py` holds the table.
 
 Any re-stamp over a backup whose bytes differ keeps the earlier one aside first
 (`keep_backup_aside`, `backup.<sha8>.md`), so the plan from before cycle 1 survives cycle 2
@@ -387,13 +653,14 @@ before `--mark-completed`; the reporting reads (`status`, `util next-command`,
 writes and makes `save()` raise.
 
 **Steps 7 and 8 of the apply instructions run on this leg too** (`write_apply_summary_report`,
-`regenerate_decisions_overlay`, plus a `Decided by the judge agent` block in the RESULT output): the
+`regenerate_decisions_overlay`, both on `utils/apply_report.py`'s `ApplyPhaseReport`, plus a `Decided by the judge agent` block in the RESULT output): the
 `{phase}/summary.md` the instructions advertise and the decision badges on the review HTML lived
 only on the native leg, which `--exec-subagents` never reaches, so the first run that judged
 anything had no durable human-readable home for the decision. The overlay is called as a function,
 not shelled out as `util report regenerate-decisions`, and is a quiet no-op when the review predates
-`report_data.json`. The native leg keeps `print_text_summary` byte-for-byte: there it really
-is a plan of work the host is about to execute.
+`report_data.json`. The native leg keeps `print_text_summary`: there it really is a plan of work
+the host is about to execute, its counts and the two files that hold the rest
+([The host summary](#the-host-summary)).
 
 F10 (2026-09-16) gave `write_apply_summary_report` the per-fix detail its own template promises — each
 batch's own fix/suggestion titles and `file`/`line_range` from
@@ -417,16 +684,16 @@ file, F9, 2026-09-16), populated once in `_classify` right after the post-run
 `subagent_audit.jsonl` or the per-batch result file.
 
 **A stop accounts for every task and names a way forward that works** (racing re-run 3, 2026-10-05):
-`_record_stop` gives every materialized task the stop left undispatched a
+`StopAccount.record_stop` gives every materialized task the stop left undispatched a
 `not run — …` reason on its `pending` status and lists it in
 `SchedulerResult.not_run` (→ `write_batch_report.json`'s `not_run_tasks`/`stop`,
 the mirror's `not_run_task_ids`, `summary.md`'s accounting line and
 `## Cancelled` list, `status`'s `not run T012, T013`), and
-`_stop_message` names the failed task, what a check reported (`TaskOutcome.runner_notes`, the
+`StopAccount.stop_message` names the failed task, what a check reported (`TaskOutcome.runner_notes`, the
 runner's `notes`), whether anything is half-applied (only when a failed batch moved
 bytes, `stop.bytes_moved` — fix round 14; `status`'s resume line reads the mirror
 rows' `files_touched` the same way), the remedy in the host's own command spelling
-(`user_commands`, built by `implement_orchestrator._stop_user_commands` through `next_phase.phase_command`) and the
+(`user_commands`, built by `implement_orchestrator._stop_user_commands` through `next_phase_words.phase_command`) and the
 accept path; the one-line `stop["headline"]` is recorded as the result line's
 `error` (`cli_common.record_error`; the key is gated on the line's
 `state` word, `error`/`needs-human`, not the exit code, so a
@@ -453,7 +720,7 @@ reasons, `answered_done_on_record`, on both legs — the native handoff's `accep
 `ANSWERED_SKIP_PREFIX`, their chain — `HumanTaskPlan.declined()`, twinned in `StateManager._deferred_to_user`) is
 `skipped at your request` and `## Skipped at your request`, never a deferral (summary.md's
 `## Task Results` gives a task this run's answers settled one row, the answer as its outcome
-and the earlier run's outcome inside it, fix round 26); and `_unchanged_since_failure` refuses to
+and the earlier run's outcome inside it, fix round 26); and `CheckHolds.unchanged_since_failure` refuses to
 re-dispatch a failed verification-only task while `git_utils.worktree_fingerprint` (tracked +
 untracked-not-ignored files by size and mtime, the plugin's own trees excluded; stamped on the
 failed verdict as `tree_fingerprint`) still matches, producing a `not_rerun` outcome
@@ -461,6 +728,58 @@ with no metric and no new prior-changes line — the executor leg keeps stop-on-
 past a failed check with its independent siblings was judged unsafe to add under the single-stop
 resume contract; the native leg's instructions continue with independent tasks, a documented
 difference).
+
+## The verdict table
+
+`utils/write_verdict.py` decides which D3g outcome a schema-valid write reply lands on.
+`decide(WriteFacts) -> Verdict` is pure and reads its rows in order; the first that matches decides.
+`WriteBatchScheduler._classify` gathers the facts, asks it, and applies the verdict, and every side
+effect stays there: the containment sweep is consumed exactly once, a policy violation's files are
+restored, the jail's records are kept, and one audit line closes the dispatch. `reason_for` words each
+row; `status`, `summary.md` and the stop messages print the reason, so its wording is part of the contract.
+
+| Order | Row (`VerdictRule`) | When | Outcome |
+|---|---|---|---|
+| 1 | `POLICY_VIOLATION` | the post-run `WritePolicy.check` refuses a touched path: a declared file that moved, a write the sweep saw outside the declared set (the task's own, one a sibling also saw, one with no retained bytes), or a path the commit review's guard watches | policy violation; each path restored, put back from the guard's copy, or named as having no rollback point |
+| 2 | `REPLACED_TARGET` | on the plugin-landlock rung, the target's `(st_dev, st_ino)` differs from the one recorded at this dispatch's snapshot | failed; nothing is rolled back over the file now at the path |
+| 3 | `JAIL_PARTIAL`, `JAIL_FAILED` | a failed `file_change` or a command denial on an in-scope path (partial when any file moved), or a `replacement` denial while the target is unchanged | partial application, failed |
+| 4 | `CHECK_UNOBSERVED`, `CHECK_MOVED`, `CHECK_COULD_NOT_RUN`, `CHECK_FINDINGS`, `VERIFIED` | an implement task that declares no files: the sweep could not look; any path moved; its check did not run; its check listed findings; it passed | failed, partial application, failed, no-op, no-op |
+| 5 | `PARTIAL` | declared bytes moved, and the runner crashed, claimed `failed`, left an expected id unattested, or declined every item | partial application |
+| 6 | `APPLIED_NO_OP_CLAIMED` | declared bytes moved under a `no-op` claim | applied; the reason says whether the snapshot was reused from an earlier attempt |
+| 7 | `FAILED` | no declared byte moved, and a crash, or a `failed` claim that did not decline every item | clean failure |
+| 8 | `NO_OP` | no declared byte moved, and a `no-op` claim, or every item declined with no stray write of its own | no-op |
+| 9 | `PARTIAL_OUTSIDE`, `APPLIED_OUTSIDE` | no declared byte moved, but a code batch's own stray writes did: partial when an expected id is unaccounted for or every item was declined | partial application, applied |
+| 10 | `NOT_APPLIED` | success claimed and not one byte of the change moved | clean failure, `applied_without_changes` |
+| 11 | `APPLIED` | every other case, which is reachable only on a clean exit | applied |
+
+The order is the contract. The guards (rows 1 to 4) come before every claim row because the claim is
+never the verdict: codex ends a turn whose every write the jail refused on `turn.completed` with exit 0.
+A non-zero exit never lands on APPLIED (D3k): with declared bytes moved it is row 5, without them row 7,
+and a verification-only task's crash, or a `failed` reply whose check did not run, falls through to
+row 7 as well. `changed` is the declared set, compared before the sweep adopts the dispatch's undeclared
+writes into the snapshot; `files_touched` is the rollback set, and no row reads it. A plan or
+task-list batch is judged on its declared file alone, so its stray writes never reach row 9, and a
+stray write a sibling running at the same time also saw is never a task's own.
+
+`_classify` gathers each guard's facts only while no guard before it has matched
+(`write_verdict.guard`, the rows 1 to 3 that `decide` asks first): the target's inode is read and
+the replaced-target check's "before" spent only once the policy passed; the jail's denials are read
+only once the target was not replaced, and its paths resolved only for what its row words (the
+denied paths when a jail row decides, the note's when none does); the reply's `check`, the declined
+items' wording and the declared files' names (`DECLARED_NAMES_ROWS`) only past every guard. Reading
+a later fact can fail (a jail path that does not resolve), and must never stand between a matched
+guard and what its row does: a policy violation's files are restored, and its verdict and reason
+set, before its restore is audited and before anything a later row needs is read. A guard row reads
+only its own facts and those before it, so no fact skipped after it could change the verdict.
+
+`tests/test_write_verdict_table.py` drives the real `_classify` over the guards crossed with the
+claim inputs, each guard alone crossed with every verification-only row and reply shape, and every
+list a reason prints at the lengths around its cut (an empty batch, one item, five and six paths,
+three and four findings), and compares every verdict, its reason, its side effects and the order it
+first crossed each I/O boundary with `tests/golden/write_verdict_table.json`. It also checks that
+filling in the facts a matched guard skipped never changes `decide`'s verdict, which a row moved
+ahead of a guard would. Regenerate the golden file with `MULTI_LLM_UPDATE_GOLDEN=1` only for an
+intended change, and read the diff.
 
 ## Retry after edits
 
@@ -489,6 +808,10 @@ quietly).
 
 ## Declined items and partial applications
 
+Tests: `tests/test_write_outcomes.py` (the rules), `tests/test_write_batch_declined.py`,
+`tests/test_write_retry_redispatch.py`, `tests/test_write_resume_verdicts.py`,
+`tests/test_refused_answers.py`, `tests/test_resume_why.py`, `tests/test_stop_resume_wording.py`.
+
 **An apply batch may decline an item, and a partial application its resume would only repeat has a
 way out** (fix round 18, Codex racing run 7's 08/08b: a batch left a fix out on purpose, said so
 only in `notes`, and stopped on every resume). The three apply kinds' result contract
@@ -496,7 +819,7 @@ carries `declined: [{id, reason}]` beside `ids` (`with_result_contract`, the rep
 re-ask's shape, `write_batch_result.schema.json`; `implement` has none — a task its runner will not
 do is `failed`, and a reply declining its task is read so).
 
-`subagent_executor.declined_items` reads it leniently (a reason is recorded as the batch wrote it, closing stop
+`batch_reply.declined_items` reads it leniently (a reason is recorded as the batch wrote it, closing stop
 included, fix round 26; a line that ends the sentence after it adds a full stop only where the
 reason ends in no `.`, `?`, `!` or
 `…` of its own, `text_clip.with_closing_mark`, fix round 27): an expected id declined
@@ -510,7 +833,7 @@ entry without a reason is a missing id, i.e. a partial application with the prob
 mirror's `declined_items` (`status` names them; `items_applied` excludes
 them), summary.md's own `## Declined by their batch (not applied)` / `## Skipped at your request (not applied)` sections (fix round 22:
 never under an applied heading, on both legs — the executor's summary, the runbooks' template, the
-`[BATCH_DECLINED]`/`[BATCH_SKIPPED]` lines) and counts, and `ApplyOrchestratorBase.run_notes` (the
+`[BATCH_DECLINED]`/`[BATCH_SKIPPED]` lines) and counts, and `ApplyPhaseReport.run_notes` (the
 notice).
 
 On the executor leg a readable report that, after edits that moved bytes, leaves items out of both
@@ -521,11 +844,12 @@ moves a file is a partial application); a partial application whose readable rep
 least one item in `ids` (fix round 19) and leaves others out
 (`unapplied_ids`) offers `--resume --human-task <batch>=skip` (way-forward lines, headline,
 `stop.answers` → the tool routes' options), which the scheduler checks against the stopped
-verdict, the items, the inputs and the bytes on disk (`_check_partial_skips`, else exit 3 with
+verdict, the items, the inputs and the bytes on disk (`ResumeEvidence.check_partial_skips`, else exit 3 with
 nothing dispatched, recorded as an `answer-refused` stop whose headline is the result line's
 `error` and whose mirror drops the refused answer, fix round 19) and then keeps the
-batch as it stands (`_keep_at_request`: re-stamped verdict, audit completion line, prior-changes
-append, the left-out items as `skipped_items`, never counted as applied); an apply phase
+batch as it stands (`ResumeEvidence.kept_outcome`, then `_keep_at_request`: re-stamped verdict,
+audit completion line, prior-changes append, the left-out items as `skipped_items`, never counted
+as applied); an apply phase
 takes only `=skip`, only with `--resume` and `--exec-subagents`.
 
 On the native leg `util batch-done --declined <id>=<reason>` / `--skipped <id>` (refused when no item of the batch
@@ -546,14 +870,89 @@ batch from the result file under its own id, so the ids a stop's `=skip` names d
 move), and an earlier review's declined or skipped record drops nothing on either leg (offered
 again; an applied record still counts).
 
+## One record writer for both legs
+
+**A finished batch's per-task record in `state.json` has one writer,
+`write_record.record_batch_facts`, which both legs call.** The executor's scheduler
+(`WriteBatchScheduler._record_batch_effects`, and its resume skip) reads a `TaskOutcome` into
+`write_record.BatchFacts` (`_batch_facts`); `util batch-done` (`batch_done.record_batch`) reads the
+host's flags into the same facts. The writer records, in order: the task's status and reason (through
+the caller's status writer, so the executor's `StateManager.update_task_status` still journals it);
+for an implement task its check findings and check tree, its own failing check and own text, that
+its own check ran, the accepted and repeated findings split out of it, the code tasks a check's new
+findings move (`move_check_repeats_in_state`) and its note; an apply-code-fixes batch's check report
+(`known_checks.set_batch_check_report_in_state`); an apply batch's items in `processed_<phase>`.
+
+It is a pure mutation of the state dict: each leg keeps its own lock and save (the scheduler's
+effects lock over its in-memory `StateManager`, `util batch-done`'s `state_file_lock` over the
+file). Two rules hold whatever a leg read: a record other than `completed` clears every earlier
+verdict of the task, and an apply-code-fixes check report is written unless the executor refused
+the batch before dispatch and read it as done (`dispatched or kept or not ok`). A resumed batch
+(`BatchFacts.resumed`) gets its status and items only; its verdict stays as its earlier run recorded
+it. What only one leg does stays with that leg: the commit guard, completion stamp, held dependents,
+`[ETA]` total and `tracked_files` on the native leg; the verdict stamp, prior-changes line, metric
+and the moved repeats' rows and stamps on the executor.
+
+A new per-task fact is a `BatchFacts` field that both builders set, or that one leaves at its
+default for a reason `tests/test_write_record.py` (`LEG_DEFAULTS`) names; that test fails
+otherwise. `tests/test_write_legs_parity.py` runs one implement scenario through both legs from
+the same starting state and compares the whole `state.json`: every key equal, or named in its
+`ONE_LEG_KEYS` with the reason only one leg writes it, and the same ledger and tally.
+
+## A batch's records
+
+**One batch's outcome is recorded seven times, and `utils/batch_ledger.py` is where they are read
+together.** The result file's `verdict`, the audit log's `completed` line, `state.json`'s
+`task_status` and `processed_<phase>`, `write_batch_report.json`, `subagent_batch_report.json`
+and the `.status.json` write mirror each have a reason to exist, and each is written at its own
+time: the crash windows depend on the order (the result file lands before the batch's effects are
+recorded), so all seven stay.
+
+- **The verdict's round trip.** `verdict_record` builds the stamp `_stamp_verdict` writes on the
+  result file, and `outcome_from_verdict` reads it back for a resume skip, each field from the
+  verdict first, then the audit line, for a result file written before the verdict carried it.
+  `read_verdict_checks` is the part a kept-at-request batch reads too. `VERDICT_FIELDS` says, for
+  every `TaskOutcome` field, whether the stamp carries it and the skip reads it back, or why not;
+  `tests/test_batch_ledger.py` fails a field with no row, and a stamped field that does not
+  survive the round trip.
+- **What a phase changed.** `touched_files(rows, include_partial=...)` is the one reader of
+  `files_touched`, over report rows or `TaskOutcome`s, and its call states the filter:
+  `tracked_files` (`VerifyStep.touched_files`) and implement's handed-back files take the
+  `ok` rows only, so a stopped batch's half-applied edits are never recorded as the phase's code;
+  an apply's handed-back files (`ApplyPhaseReport.touched_files`, the improve workflow's summary)
+  include the partial applications, whose edits the stop keeps. `BatchLedger(phase_dir)` reads the
+  report's rows and its `written_at` for the latter.
+- **The agreement check.** `BatchLedger.disagreements(state)` names every record that differs from
+  the report on whether a batch finished or what its checks reported, and every record a batch
+  should have and lacks: this run's row in `subagent_batch_report.json` and in the write mirror;
+  the mirror row's check findings and own-check findings, which its rebuilt lists come from, and
+  the checks its `batch_check_accepted` and `batch_check_repeats` maps name; the audit's
+  `completed` line of a row a runner ran; the task's `task_status` entry, an apply batch's
+  `processed_<phase>` items and an implement task's four check-finding maps in `state.json`; and an
+  older mirror's id lists against its own rows. Its docstring names each record that may be
+  absent and why (an earlier run's row has no row in this run's executor report or mirror; a row
+  not `ok` has no check facts); nothing missing is skipped otherwise. It is for tests: the records a
+  characterisation run leaves when it ends must agree (`tests/test_batch_ledger.py`,
+  `tests/test_write_legs_parity.py`, whose second scenario puts accepted and repeated findings on
+  both legs).
+- **The write mirror is read one way.** It writes no id list its `tasks` rows already carry, nor
+  `completed`, `finalized` or `pending_human_task_ids`
+  ([status.md](status.md#status-parity-across-execution-paths)). A current reader renders an older
+  mirror, whose recorded lists it reads as they are; an older reader shows less of a current mirror,
+  since the lists it reads are gone. That is accepted, because one install writes and reads its own
+  mirrors, so the writer adds no transitional keys. The container golden bundles
+  (`tests/golden/container/*/bundle.json`) still carry the removed keys; they are regenerated in the
+  Docker lane, as a reviewed re-capture ([tests/container/README.md](../../skills/multi-llm/tests/container/README.md#the-golden-gate-and-how-to-move-it)),
+  never edited by hand.
+
 ## Dispatch counts
 
 **Implement's counts are what a run dispatches, on both legs** (fix round 18, run 7 #2/#3/#9).
 
 The executor's `Organized into …` line is the scheduler's own (`WriteBatchScheduler._dispatch_preview`, printed
 once the human-task plan is resolved, in the native emit's words, `dispatch_line`): the
-loop's own read-only tests with its log muted — resume evidence and `_check_findings_rerun` (a check
-after a task this run dispatched counts as run again), `_unchanged_since_failure` and the write policy,
+loop's own read-only tests with its log muted — resume evidence and `CheckHolds.check_findings_rerun` (a check
+after a task this run dispatched counts as run again), `CheckHolds.unchanged_since_failure` and the write policy,
 either of which stops the run so later tasks are not reached (the tasks dispatched in the same group
 beside it still count: the walk runs over `admit_disjoint_groups` under `write_ceiling()`, fix
 round 19) — and a task after a check this run dispatches counts, named as waiting on it; the
@@ -565,36 +964,36 @@ that task is recorded again unless a check with findings or a failed task upstre
 out, `_still_kept_out`, fix round 19) each handed-out task its record keeps from running — held
 by a check's findings, after a failed task, refused at `util write-prompt` — and
 `util metrics record` counts against that stored total whatever the host passes
-(`_settle_eta_total`, `metrics.withdraw_from_progress_in_state`); the executor's total (`_eta_total`)
+(`_settle_eta_total`, `metrics.withdraw_from_progress_in_state`); the executor's total (`EtaLines.total`)
 leaves out accepted, manual and held tasks and, since fix round 20 (run 8 #1: "5 task(s) to
 dispatch" beside `[ETA]` 1/7 … 4/6), starts from the dispatch walk's own set
-(`_dispatch_walk` → `_eta_scope`: a task refused before dispatch, the tasks after it
+(`_dispatch_walk` → `EtaLines.scope`: a task refused before dispatch, the tasks after it
 and a resume's kept tasks are never in it; a task that finishes without a runner leaves it and one
-dispatched against the walk joins it, `_eta_mark`; a stop short of the total logs
+dispatched against the walk joins it, `EtaLines.mark`; a stop short of the total logs
 `[ETA] implement: run stopped after task N/M · <what it left>` (fix round 22, live run 9 #1: implement's lines say `task`,
-the N/N line of a run about to stop claims no completion, `_eta_ends_short`, and both legs name
-each task left, `metrics.left_out_tail` over `_eta_left_out` / the native emit's
+the N/N line of a run about to stop claims no completion, `EtaLines.ends_short`, and both legs name
+each task left, `metrics.left_out_tail` over `EtaLines.left_out` / the native emit's
 `metrics_left_out` record and `withdrawn`; a run that dispatched nothing closes on
 `run stopped with nothing dispatched · …`, on the native leg through `util metrics finish` with or without a
 `start`, and a native task recorded `failed` ends on
 `run stopped` too, `metrics_progress.{phase}.failed`, written by `util batch-done` for every
 write kind since fix round 23, whose apply batch refused before dispatch leaves the count on both
-legs, `_eta_unrun`; an apply phase's closing words count `batch(es)`); since
-fix round 21 every ending of a write phase logs one closing line, `_eta_close` — a stop at
+legs, `EtaLines.unrun`; an apply phase's closing words count `batch(es)`); since
+fix round 21 every ending of a write phase logs one closing line, `EtaLines.close` — a stop at
 N/N too, a refusal, the tasks a check holds (`· T004, T005 not run: check T003 reported problems`), a failed
 `driver.verify_command`, an exception out of the loop, a foreground Ctrl-C, a detached worker's abort
 (`metrics.aborted_eta_line`, printed by the signal handler) — beside a finished phase's
 `phase complete`, and re-stamps `metrics_progress.{phase}.total_batches`; a check's held tasks leave the total
-from its own line on, `_eta_held`, and on the native leg `util metrics finish` after
+from its own line on, `EtaLines.held`, and on the native leg `util metrics finish` after
 records that kept tasks out says `run stopped after task N/M in … · <what it left>`), and the write mirror's
 `total`/`items_total` (`status`'s progress line, the OpenCode
-poll) count the same tasks (`_eta_task_ids`, fix round 19: a held T007 read "6/6 … ALL
+poll) count the same tasks (`EtaLines.task_ids`, fix round 19: a held T007 read "6/6 … ALL
 BATCHES COMPLETE" beside "6/7 batches ok"); the line still names a held task, with its check.
 
 The write mirror names a resume's kept tasks (`kept_task_ids`: since fix round 22 every task
-the `resume: kept` line names, `_resume_kept_rows`, where Codex 01b's
+the `resume: kept` line names, `ResumeEvidence.resume_kept_rows`, where Codex 01b's
 `status` said "1 kept" beside "kept 4"; since fix round 23 the ones kept on a
-`=done` answer too, `_resume_answered_ids`, a manual one also in
+`=done` answer too, `ResumeEvidence.resume_answered_ids`, a manual one also in
 `completed_by_hand_task_ids`), rendered `(<n> kept from an earlier run: <ids>)` on the progress line
 (`<kind>: nothing dispatched (…)` when the run dispatched nothing, and implement's `<ok>/<total> tasks ok`; a
 run record that ended with exit 3 heads its block `stopped and needs you (exit 3)`, `run_status._stopped_for_the_user`,
@@ -627,7 +1026,7 @@ the run is then bounded by the skip stamp and another review's newest record), n
 their count, no fall-back; `util write-prompt`'s context count and `[WRITE_PROMPT_ORDER]` read
 the same entries.
 
-The raw prompt (and so `_task_fingerprint`) moves only when the record leaves an entry out. Fix
+The raw prompt (and so `ResumeEvidence.task_fingerprint`) moves only when the record leaves an entry out. Fix
 round 24 (live run 10 #6: "Batch 1/2/3" beside `apply-fix-batch-0/1/2`, "- (T002): T002: …"): every
 list of earlier batches names each by the id of the batch that wrote it (`prior_changes.entry_line`,
 `- **apply-fix-batch-0** (index.html#a4d7fa43): …`, the entry id alone when they match), never a list number; the id is the
@@ -640,12 +1039,34 @@ Fix round 25: each is one plain line, its entry id through `prior_changes.plain_
 (`?` when it is not a plain id) and its summary through `plain_line`,
 in the record and its left-out ids too.
 
+## Prompt order
+
+**A write batch's dispatched prompt leads with the text every batch of the phase shares and ends
+with the batch's ids** (PERF-9, code-health 2026-11-07). `with_result_contract`, the one seam both
+invokers bind through (the scheduler's dispatch and `util write-prompt`), renders, in order: the
+`## Process safety`, `## Git` and `## Scratch files` blocks, the `## Result` shape and field
+list, the check contracts (`CHECK_RESULT_CONTRACT`, `WRITE_CHECK_CONTRACT` with the known-checks
+section, `IMPLEMENT_WHICH_CHECKS`); a `---` rule; the bound batch prompt with its scope block; and
+last `## Result ids`, the `ids` line spelling out `expected_ids` in prompt order (with
+`declined` for the apply kinds). Before, the batch prompt came first, so batches of one run
+shared about 20 characters of prefix; now they share the whole contract (about 2.1K characters for
+apply-suggestions, 4.6K for apply-code-fixes, 4.9K for an implement code task), which a provider
+can serve as a cached prefix. The known-checks section stays with the contract: its command list
+is the run's, and only an earlier batch's failing check makes it differ. The prompt still ends with
+what the reply must contain, so a runner reading the batch's own prose `Return Format` last is
+still told which ids its JSON object names.
+
+Only dispatched bytes moved. The task file's `prompt` (what `ResumeEvidence.task_fingerprint` and the snapshot
+binding's run hash cover) and the prompt file names are unchanged, so a run started before the
+change resumes as before; the audit log's `prompt_sha256` and a failed attempt's capture hash the
+dispatched text, and are records, never compared on resume.
+
 ## Write reply extraction
 
 **A write reply is read as its report object, and the records end a quoted sentence once** (fix
 round 28, live run 12 #4/#6/#7/#9). `json_extractor.extract_json_from_text` adds `only_object`, the reply's
 one JSON object outside every other document, whenever it serves something else, and both invokers
-read a kind whose result is an object (`subagent_executor.OBJECT_RESULT_KINDS`: the write kinds,
+read a kind whose result is an object (`task_result.OBJECT_RESULT_KINDS`: the write kinds,
 `task_generation`, `consolidation`, the judge) through `the_reply_object`: Codex's
 decline batch opened with prose and the array-preferring extraction served its report's
 `declined` array ("<root>: expected type object, got list", a re-ask); a reply holding
@@ -659,7 +1080,7 @@ once one names an item; `--json`'s
 each why on the line under its command, unbracketed (`run_status.why_line`; a why ending in a
 bracket read `(T006))`), the `=done` answer's why gives a check's
 findings after `; <check> reported:` without their closing stop, and the CHECK FINDINGS reason
-joins findings with `write_batch_scheduler.findings_clause` and ends the sentence once.
+joins findings with `write_verdict.findings_clause` and ends the sentence once.
 
 `util prior-changes append` refuses an empty or blank `--id` (exit 3, nothing written,
 naming the batches of the phase's `write_tasks.json`).
@@ -680,10 +1101,10 @@ both legs. A bound `selected_remedy` is the item's description (the formatters'
 `scope_annotate`; `format_fix_for_output(selected_remedy=)` concatenates nothing else), with the
 members' original text kept only as `scope.original_description` in `orchestrator_output.json`.
 Under `expand` none of this exists: no block, no added text, so the prompt, the task file and its
-`_task_fingerprint` are what they were (`tests/test_scope_policy_default_compat.py` pins them to a
+`ResumeEvidence.task_fingerprint` are what they were (`tests/test_scope_policy_default_compat.py` pins them to a
 pre-feature golden).
 
-`WriteBatchScheduler._scope_refusal` (executor dispatch, after the resume skip) and
+`BatchPromptBuilder.scope_refusal` (executor dispatch, after the resume skip) and
 `util write-prompt` (`render_write_prompt`) refuse a task whose materialized policy differs from the
 round's effective one (the scheduler's `scope_policy=` argument, else `state.json`), whose baseline
 or binding does not match, or that carries an item without a bound `in_scope` relation; a task
@@ -703,3 +1124,39 @@ executor's finished loop, the empty loop, the all-deferred exit and step 27 when
 remains) derives the blockers from `processed_<phase>` through `_scope_close`, so a `--resume`
 that drops the declined item stays blocked; only a completion that finds none (an `expand` apply)
 or a fresh review round clears it, never `persist_deferrals`.
+
+## The host summary
+
+A native apply host reads `orchestrator_summary.json` beside `orchestrator_output.json` instead of
+the output (`publish_orchestrator_views` in `utils/apply_output_helpers.py`): the outcome (`status`,
+`message`), the target files, `summary`, `needs_human_review`, `human_review_config`, the skipped
+items and `skipped_count`, and one entry per batch with its position, `section_key` or `file_key`,
+`executor_role` and `prior_changes_id`, its write task's `task_id`, `batch_index`, `task_title` and
+`expected_ids` (the ids `util write-prompt` and `util batch-done` are keyed on), and `detail_path`.
+That names the batch's detail file, `orchestrator_batches/<task_id>.json`: the batch's output record
+without its `prompt`, its suggestions or fixes with their targets. The host reads it before it
+binds the batch and again before it verifies the batch's edits, so two batches with the same titles
+and ids but opposite requested edits are told apart, and reads one batch's items at a time instead
+of all of them.
+
+The views follow the rule every derived view does
+([delegation.md](delegation.md#the-host-index)):
+
+- **Removed before the output changes.** `invalidate_orchestrator_views` removes the summary and
+  every detail file before `orchestrator_output.json` is rewritten, by `_write_outputs` and by
+  `write_and_emit_output`; one that cannot be removed stops the run with exit 3 naming it.
+- **Published after their sources are written.** On the native leg, once `write_tasks.json` is
+  written: the detail files first, then the summary that names them. An output with batches gets
+  no views unless each batch pairs with its write task, and a view that cannot be written leaves no
+  summary. `write_and_emit_output` writes outputs with no batch and publishes their summary at
+  once. The executor leg publishes none: its host runs no batch loop.
+- **Absence means the full files.** A host that finds no summary reads `orchestrator_output.json`
+  and `write_tasks.json`, the fallback each instruction names.
+
+The full output stays the source of truth: its batches carry the unbound `prompt` and every item
+record, `to_apply` repeats those records, and `util write-prompt`, `util batch-done`, the scheduler,
+`util decisions` and `--output-format json` read it. `RESERVED_OUTPUT_NAMES` holds
+`orchestrator_summary.json` and `orchestrator_batches`. `print_text_summary` prints the counts and
+the paths of the two files, never the batches: at 76 groups the old per-batch listing was 33 KB of
+output the host received as its command's result, and `util decisions` already shows the user every
+item (`detail_pointer_lines`).

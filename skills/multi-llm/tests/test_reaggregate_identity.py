@@ -54,79 +54,17 @@ from utils import review_orchestrator_base as rob  # noqa: E402
 from utils import run_status  # noqa: E402
 from utils import subagent_tasks as subagent_tasks_mod  # noqa: E402
 from utils.status_file import write_status  # noqa: E402
-
-
-def _suggestions(titles):
-    return [
-        {
-            "title": title,
-            "desc": f"Description for {title}",
-            "importance": "MEDIUM",
-            "reference": "Step 1",
-            "type": "addition",
-        }
-        for title in titles
-    ]
-
-
-def _phase(tmp_path, files, models_requested=None):
-    """A phase dir holding *files* (``stem -> suggestions``), ready to reaggregate.
-
-    ``models_requested`` is written through ``write_status`` exactly as a real run
-    writes its checkpoint; passing ``None`` writes no ``.status.json`` at all,
-    which is the hand-copied / pre-checkpoint dir.
-    """
-    plan = tmp_path / "plan.md"
-    plan.write_text("# Plan\n\nDo the thing.\n", encoding="utf-8")
-
-    out_dir = tmp_path / "out"
-    phase_dir = out_dir / "review-plan"
-    phase_dir.mkdir(parents=True)
-
-    for stem, suggestions in files.items():
-        (phase_dir / f"{stem}.json").write_text(
-            json.dumps(suggestions), encoding="utf-8"
-        )
-
-    if models_requested is not None:
-        write_status(str(phase_dir), {
-            "phase": "review-plan",
-            "state": "models_complete",
-            "started_at": "2026-01-01T00:00:00",
-            "models_requested": list(models_requested),
-            "models_completed": list(models_requested),
-            "models_failed": {},
-            "error": None,
-            "plan_hash": "deadbeefcafe",
-        })
-
-    return plan, out_dir, phase_dir
-
-
-def _args(**over):
-    base = dict(
-        skip_validation=False,
-        validation_model="auto",
-        timeout=None,
-        internal_validation=False,
-        force=False,
-    )
-    base.update(over)
-    return argparse.Namespace(**base)
-
-
-def _reaggregate(plan, out_dir, phase_dir):
-    return asyncio.run(
-        rob.reaggregate_from_existing_files(
-            prefix="plan",
-            out_dir=str(out_dir),
-            phase_dir=str(phase_dir),
-            phase_name="review-plan",
-            plan_path=str(plan),
-            args=_args(),
-            orchestrator_script="review_plan_orchestrator.py",
-        )
-    )
+from tests.support.reaggregate_world import (  # noqa: E402
+    _args,
+    _cro_phase,
+    _cro_report_md,
+    _phase,
+    _reaggregate,
+    _reported_results,
+    _run_cro_reaggregate,
+    _suggestions,
+)
+from utils import failure_capture  # noqa: E402
 
 
 def _aggregated_suggestions(phase_dir):
@@ -216,7 +154,7 @@ class TestReaggregatePromptSidecars:
         def cannot_write(*args):
             raise PermissionError("task file is locked")
 
-        monkeypatch.setattr(subagent_executor, "_atomic_write_json", cannot_write)
+        monkeypatch.setattr(failure_capture, "_atomic_write_json", cannot_write)
         with patch.object(rob, "dispatch_subagent_tasks") as dispatch:
             with pytest.raises(SystemExit) as exc:
                 _reaggregate(plan, out_dir, phase_dir)
@@ -475,32 +413,6 @@ class TestOneMalformedElementCannotStrandTheOtherModels:
 # to `{}` and still expects the model resolved from its stem.
 
 
-def _cro_phase(tmp_path, files, models_requested=None):
-    """A code-review phase dir holding *files* (``stem -> issues``)."""
-    plan = tmp_path / "plan.md"
-    plan.write_text("# Plan\n\nDo the thing.\n", encoding="utf-8")
-
-    phase_dir = tmp_path / "out" / "code-review"
-    phase_dir.mkdir(parents=True)
-
-    for stem, issues in files.items():
-        (phase_dir / f"{stem}.json").write_text(json.dumps(issues), encoding="utf-8")
-
-    if models_requested is not None:
-        write_status(str(phase_dir), {
-            "phase": "code-review",
-            "state": "models_complete",
-            "started_at": "2026-01-01T00:00:00",
-            "models_requested": list(models_requested),
-            "models_completed": list(models_requested),
-            "models_failed": {},
-            "error": None,
-            "plan_hash": "deadbeefcafe",
-        })
-
-    return plan, phase_dir
-
-
 def _issues(titles):
     return [
         {
@@ -514,81 +426,11 @@ def _issues(titles):
     ]
 
 
-def _run_cro_reaggregate(
-    plan, phase_dir, *, skip_validation=True, render_report=False, extra_patches=()
-):
-    """Drive the code-review reaggregate; return the patched report mock.
-
-    Everything patched here is git/state/report machinery the identity question
-    does not touch — ``build_unsanitize_map`` is deliberately NOT patched, since
-    the recorded checkpoint is the whole point.
-
-    ``render_report=True`` leaves the *real* ``generate_review_report`` in place,
-    which is the only way to assert on what ``report.md`` actually says about a
-    model; it is off by default so the identity tests keep asserting on the
-    ``results`` dict handed to the renderer rather than on rendered markdown.
-    ``extra_patches`` takes already-built ``patch`` objects (a spy on
-    ``check_task_file_inputs``, a ``group_similar_suggestions`` rigged to raise)
-    so a caller can pin what was *called* and not only what was written.
-    """
-    args = argparse.Namespace(
-        plan_file=str(plan),
-        models=["claude-code:sonnet"],
-        interactive=False,
-        quick=False,
-        timeout=None,
-        max_parallel=2,
-        base_ref=None,
-        skip_validation=skip_validation,
-        validation_model="auto",
-        apply_fixes=False,
-        force=False,
-        rerun_all=False,
-        reaggregate=True,
-        report_style="pr",
-    )
-
-    fake_state = MagicMock()
-    fake_state.get = MagicMock(
-        side_effect=lambda k, default=None: {
-            "tracked_files": [{"path": "src/a.py"}],
-            "head_at_start": "abc123",
-        }.get(k, default)
-    )
-    report = MagicMock(return_value="# report\n")
-
-    with contextlib.ExitStack() as stack:
-        stack.enter_context(
-            patch.object(cro, "get_or_create_state", return_value=fake_state))
-        stack.enter_context(
-            patch.object(cro, "get_phase_dir", return_value=phase_dir))
-        stack.enter_context(
-            patch.object(cro, "validate_git_ref", side_effect=lambda r: r or "HEAD~1"))
-        stack.enter_context(
-            patch.object(cro, "intent_to_add_untracked",
-                         side_effect=lambda files, **_: contextlib.nullcontext()))
-        if not render_report:
-            stack.enter_context(patch.object(cro, "generate_review_report", report))
-        for extra in extra_patches:
-            stack.enter_context(extra)
-        asyncio.run(
-            cro.reaggregate_from_existing_files(
-                "plan", plan.parent / "out", plan, args
-            )
-        )
-    return report
-
-
 def _issues_json_path(plan):
     """Where the code-review phase writes its raw issue list."""
     return cro.get_output_paths(
         plan, "code_review_issues", phase="code-review"
     ).with_suffix(".json")
-
-
-def _reported_results(report_mock):
-    """The ``results`` dict code-review reaggregate hands the report generator."""
-    return report_mock.call_args[0][1]
 
 
 class TestCodeReviewCopyReadsOneFilePerLogicalModel:
@@ -799,8 +641,8 @@ def _run_cro_fanout(tmp_path, issues_by_model, *, skip_validation=True,
         stack.enter_context(patch.object(cro, "parse_args", return_value=args))
         stack.enter_context(
             patch.object(cro, "get_or_create_state", return_value=_fanout_state()))
-        stack.enter_context(patch.object(cro, "resolve_models", return_value=models))
-        stack.enter_context(patch.object(cro, "is_model_valid", return_value=True))
+        stack.enter_context(patch("utils.interactive.resolve_models", return_value=models))
+        stack.enter_context(patch("utils.interactive.is_model_valid", return_value=True))
         stack.enter_context(
             patch.object(cro, "validate_git_ref", side_effect=lambda r: r or "HEAD~1"))
         stack.enter_context(
@@ -1169,9 +1011,10 @@ class TestReaggregateAttributesTheExecutorsOwnRunner:
         calls = []
         real_merge = cro.merge_validation_batches
 
-        def spy(phase_dir_arg, batch_metadata, grouped, validation_path):
+        def spy(phase_dir_arg, batch_metadata, grouped, validation_path, claim=None):
             calls.append((phase_dir_arg, validation_path, len(grouped)))
-            return real_merge(phase_dir_arg, batch_metadata, grouped, validation_path)
+            return real_merge(phase_dir_arg, batch_metadata, grouped, validation_path,
+                              claim=claim)
 
         _run_cro_reaggregate(
             plan, phase_dir, skip_validation=False,
@@ -1333,6 +1176,234 @@ class TestTheDocumentedValidateThenReaggregateFlowCompletes:
 
 
 # ---------------------------------------------------------------------------
+# REVIEW-3: an unfinished validation round is neither merged nor completed
+# ---------------------------------------------------------------------------
+#
+# The base lane counts `validation_batch_<n>.json` against the task file and
+# merges only a whole round; otherwise it dispatches (`--exec-subagents`) or
+# says how many are missing and returns. This lane's copy went straight to the
+# merge, which fills each missing batch's groups with `validation_failed`, and
+# then recorded the phase complete.
+
+
+def _drop_batches_after_the_first(phase_dir, tasks):
+    for batch in tasks["batches"][1:]:
+        (phase_dir / f"validation_batch_{batch['batch_index']}.json").unlink()
+
+
+def _status(phase_dir):
+    return json.loads((phase_dir / ".status.json").read_text(encoding="utf-8"))
+
+
+class TestReviewCodeReaggregateWaitsForTheWholeRound:
+    def test_a_partial_round_is_not_merged_and_the_phase_stays_open(
+        self, tmp_path, capsys
+    ):
+        plan, phase_dir, _exit_code = _fanout_with_validation(
+            tmp_path, _two_model_findings()
+        )
+        tasks = _complete_validation_batches(phase_dir)
+        assert tasks["total_batches"] >= 2
+        _drop_batches_after_the_first(phase_dir, tasks)
+        capsys.readouterr()
+        dispatch = MagicMock(return_value=False)
+        merge = MagicMock(side_effect=AssertionError("a partial round was merged"))
+        outcome = {}
+
+        report = _run_cro_reaggregate(
+            plan, phase_dir, skip_validation=False, outcome=outcome,
+            extra_patches=(
+                patch.object(cro, "dispatch_subagent_tasks", dispatch),
+                patch.object(cro, "merge_validation_batches", merge),
+            ),
+        )
+        out = capsys.readouterr().out
+
+        assert f"Only 1/{tasks['total_batches']} batch files found." in out
+        assert "Reaggregation complete!" not in out
+        dispatch.assert_called_once()
+        assert dispatch.call_args.kwargs["task_file"] == str(
+            phase_dir / "validation_tasks.json"
+        )
+        assert not (phase_dir / "validation.json").exists()
+        report.assert_not_called()
+        outcome["state"].mark_phase_completed.assert_not_called()
+        assert _status(phase_dir)["state"] == "validation_pending"
+        assert outcome["exit"] == cro.EXIT_OK
+
+    def test_a_partial_round_reopens_a_phase_skip_validation_completed(
+        self, tmp_path, capsys
+    ):
+        """`--reaggregate --skip-validation` completed the phase and kept the
+        round; a validating `--reaggregate` that finds it unfinished hands it
+        out again, so neither the checkpoint nor `state.json` may still say
+        complete."""
+        plan, phase_dir, _exit_code = _fanout_with_validation(
+            tmp_path, _two_model_findings()
+        )
+        tasks = _complete_validation_batches(phase_dir)
+        _drop_batches_after_the_first(phase_dir, tasks)
+        rob.update_status(str(phase_dir), {"state": "complete"})
+        cro.report_progress(str(phase_dir), step="complete")
+        state_record = {"phases_completed": {
+            "implement": "2026-11-01T10:00:00", "code-review": "2026-11-01T11:00:00",
+        }}
+        capsys.readouterr()
+        outcome = {}
+
+        _run_cro_reaggregate(
+            plan, phase_dir, skip_validation=False, outcome=outcome,
+            state_record=state_record,
+            extra_patches=(
+                patch.object(cro, "dispatch_subagent_tasks", MagicMock(return_value=False)),
+            ),
+        )
+
+        assert f"Only 1/{tasks['total_batches']} batch files found." in capsys.readouterr().out
+        status = _status(phase_dir)
+        assert status["state"] == "validation_pending"
+        assert status["progress"]["step"] == "validation_pending"
+        assert state_record["phases_completed"] == {"implement": "2026-11-01T10:00:00"}
+        outcome["state"].save.assert_called()
+        outcome["state"].mark_phase_completed.assert_not_called()
+        assert outcome["exit"] == cro.EXIT_OK
+
+    def test_exec_subagents_dispatches_the_rest_then_merges(self, tmp_path):
+        plan, phase_dir, _exit_code = _fanout_with_validation(
+            tmp_path, _two_model_findings()
+        )
+        tasks = _complete_validation_batches(phase_dir)
+        _drop_batches_after_the_first(phase_dir, tasks)
+
+        def dispatch(_args, *, phase_dir, **_kwargs):
+            _complete_validation_batches(Path(phase_dir))
+            return True
+
+        outcome = {}
+        _run_cro_reaggregate(
+            plan, phase_dir, skip_validation=False, outcome=outcome,
+            extra_patches=(patch.object(cro, "dispatch_subagent_tasks", dispatch),),
+        )
+
+        validation = json.loads((phase_dir / "validation.json").read_text())
+        assert validation["groups"]
+        assert all(group["status"] == "valid" for group in validation["groups"])
+        outcome["state"].mark_phase_completed.assert_called_once_with("code-review")
+
+    def test_a_whole_round_merges_without_a_dispatch(self, tmp_path):
+        plan, phase_dir, _exit_code = _fanout_with_validation(
+            tmp_path, _two_model_findings()
+        )
+        _complete_validation_batches(phase_dir)
+        dispatch = MagicMock(side_effect=AssertionError("nothing left to dispatch"))
+
+        _run_cro_reaggregate(
+            plan, phase_dir, skip_validation=False,
+            extra_patches=(patch.object(cro, "dispatch_subagent_tasks", dispatch),),
+        )
+
+        assert (phase_dir / "validation.json").exists()
+
+    def test_stale_prompt_pointers_are_persisted_before_the_hand_back(
+        self, tmp_path
+    ):
+        """A host re-dispatching the missing batch reads the JSON, so the
+        rebound `prompt_path` must be on disk (`ensure_prompt_sidecars`)."""
+        plan, phase_dir, _exit_code = _fanout_with_validation(
+            tmp_path, _two_model_findings()
+        )
+        tasks = _complete_validation_batches(phase_dir)
+        _drop_batches_after_the_first(phase_dir, tasks)
+        tasks_path = phase_dir / "validation_tasks.json"
+        stale = json.loads(tasks_path.read_text(encoding="utf-8"))
+        assert stale["batches"][1].get("prompt_path"), (
+            "the fixture must materialize prompt sidecars"
+        )
+        stale["batches"][1]["prompt_path"] = str(tmp_path / "moved.prompt.txt")
+        tasks_path.write_text(json.dumps(stale), encoding="utf-8")
+
+        _run_cro_reaggregate(plan, phase_dir, skip_validation=False)
+
+        repaired = json.loads(tasks_path.read_text(encoding="utf-8"))
+        for batch in repaired["batches"]:
+            assert Path(batch["prompt_path"]).parent == phase_dir
+            assert Path(batch["prompt_path"]).read_bytes() == batch["prompt"].encode(
+                "utf-8"
+            )
+
+
+# ---------------------------------------------------------------------------
+# REVIEW-2: the reaggregate ending records the HIGH groups and holds the gate
+# ---------------------------------------------------------------------------
+
+
+def _findings_with_two_high():
+    findings = _two_model_findings()
+    findings[_REAL_SPECS[0]][0]["importance"] = "high"
+    findings[_REAL_SPECS[1]][-1]["importance"] = "high"
+    return findings
+
+
+class TestReviewCodeReaggregateRecordsItsHighGroups:
+    def test_fail_on_high_exits_3_after_the_phase_is_recorded(
+        self, tmp_path, capsys
+    ):
+        plan, phase_dir, _exit_code = _fanout_with_validation(
+            tmp_path, _findings_with_two_high()
+        )
+        _complete_validation_batches(phase_dir)
+        capsys.readouterr()
+        outcome = {}
+
+        _run_cro_reaggregate(
+            plan, phase_dir, skip_validation=False, outcome=outcome,
+            args_over={"fail_on_high": True},
+        )
+        out = capsys.readouterr().out
+
+        assert "[HIGH_PRIORITY_ISSUES] 2" in out
+        assert outcome["exit"] == cro.EXIT_NEEDS_HUMAN
+        outcome["state"].mark_phase_completed.assert_called_once_with("code-review")
+        status = _status(phase_dir)
+        assert status["state"] == "complete"
+        assert status["high_priority_groups"] == {"count": 2}
+
+    def test_without_the_flag_the_count_is_recorded_and_the_exit_is_0(
+        self, tmp_path, capsys
+    ):
+        plan, phase_dir, _exit_code = _fanout_with_validation(
+            tmp_path, _findings_with_two_high()
+        )
+        _complete_validation_batches(phase_dir)
+        outcome = {}
+
+        _run_cro_reaggregate(
+            plan, phase_dir, skip_validation=False, outcome=outcome,
+        )
+
+        assert "[HIGH_PRIORITY_ISSUES] 2" in capsys.readouterr().out
+        assert outcome["exit"] == cro.EXIT_OK
+        assert _status(phase_dir)["high_priority_groups"] == {"count": 2}
+
+    def test_a_clean_reaggregate_clears_a_stale_count(self, tmp_path, capsys):
+        plan, phase_dir, _exit_code = _fanout_with_validation(
+            tmp_path, _two_model_findings()
+        )
+        _complete_validation_batches(phase_dir)
+        rob.update_status(str(phase_dir), {"high_priority_groups": {"count": 4}})
+        outcome = {}
+
+        _run_cro_reaggregate(
+            plan, phase_dir, skip_validation=False, outcome=outcome,
+            args_over={"fail_on_high": True},
+        )
+
+        assert "[HIGH_PRIORITY_ISSUES]" not in capsys.readouterr().out
+        assert outcome["exit"] == cro.EXIT_OK
+        assert _status(phase_dir).get("high_priority_groups") is None
+
+
+# ---------------------------------------------------------------------------
 # Plan review-run-scope-salvage-and-failure-visibility §5 (T5.1): the
 # reaggregate reads the failure map back
 # ---------------------------------------------------------------------------
@@ -1345,13 +1416,6 @@ class TestTheDocumentedValidateThenReaggregateFlowCompletes:
 
 _LOST_SPEC = _REAL_SPECS[1]
 _LOST_REASON = "cursor-agent timed out after 1200s"
-
-
-def _cro_report_md(plan):
-    """`report.md` where the code-review reaggregate writes it: the plan-derived
-    phase dir (`get_output_paths`), whatever `get_phase_dir` was patched to."""
-    path = cro.get_output_paths(plan, "code_review", phase="code-review")
-    return path.with_suffix(".md").read_text(encoding="utf-8")
 
 
 def _line_after_models(report):
@@ -1819,7 +1883,7 @@ def _run_cro_fanout_resolving_models(tmp_path, models):
         stack.enter_context(patch.object(cro, "parse_args", return_value=args))
         stack.enter_context(
             patch.object(cro, "get_or_create_state", return_value=_fanout_state()))
-        stack.enter_context(patch.object(cro, "is_model_valid", return_value=True))
+        stack.enter_context(patch("utils.interactive.is_model_valid", return_value=True))
         stack.enter_context(
             patch.object(cro, "validate_git_ref", side_effect=lambda r: r or "HEAD~1"))
         stack.enter_context(
@@ -2765,8 +2829,8 @@ class TestGroupedCoverageGap:
     """The pure comparison behind the branch, one case per way it must not lie."""
 
     def _grouped(self, issues_by_model):
-        from utils import group_similar_suggestions
         from utils.state_manager import stamp_stable_ids
+        from utils.suggestion_processor import group_similar_suggestions
 
         flat = []
         for model, issues in issues_by_model.items():
@@ -2943,7 +3007,7 @@ class TestRetireStaleValidationRound:
 
 class TestARetiredBatchIsNotValidationInProgress:
     def test_the_legacy_mtime_check_ignores_a_retired_batch(self, tmp_path):
-        """`stale_validation_reason`'s legacy leg counts batch files newer than
+        """`validation_source_decision`'s legacy leg counts batch files newer than
         a key-less `validation.json`; a retired one keeps its mtime and belongs
         to no round that file could have come from."""
         from utils import validation as validation_mod
@@ -2957,7 +3021,7 @@ class TestARetiredBatchIsNotValidationInProgress:
         _set_mtime(legacy, 1_700_000_000)
         _set_mtime(retired, 1_700_000_000 + 120)
 
-        assert validation_mod.stale_validation_reason(legacy, grouped) is None
+        assert validation_mod.validation_source_decision(legacy, grouped)[0] is None
 
 
 def _terminal(state, **over):
@@ -3370,7 +3434,7 @@ class TestFlippingALiveRowStopsItsClock:
 # 2026-09-17 run. The reaggregate path read `tracked_files` alone, so every
 # `report.md` that run's reaggregates wrote said `**Files Changed:** 0` over an
 # empty `## Changed Files` section. Nothing persists the list between the two
-# entry points; both now resolve it through `resolve_changed_files`.
+# entry points; both now resolve it through `resolve_review_scope`.
 
 
 def _state_without_tracked_files(pre_existing=()):
@@ -3462,7 +3526,7 @@ class TestResolveChangedFiles:
             "tracked_files": [{"path": "a.py"}, {"path": "b.py"}, {"path": "a.py"}, {}],
         }.get(k, d))
 
-        assert sorted(cro.resolve_changed_files(state, "abc123")) == ["a.py", "b.py"]
+        assert sorted(cro.resolve_review_scope(state, "abc123").paths) == ["a.py", "b.py"]
         # The count is the files used, not the raw entries (a duplicate and an
         # empty entry are not two more files under review).
         assert "Using 2 tracked files from implementation phase" in capsys.readouterr().out
@@ -3470,16 +3534,16 @@ class TestResolveChangedFiles:
     def test_no_tracked_files_and_no_base_ref_is_an_empty_list_with_a_warning(
         self, capsys
     ):
-        assert cro.resolve_changed_files(_state_without_tracked_files(), "") == []
+        assert cro.resolve_review_scope(_state_without_tracked_files(), "").paths == []
         assert "cannot discover changed files via git diff" in capsys.readouterr().err
 
     def test_the_diff_minus_the_baseline_otherwise(self, capsys):
         with patch.object(
             cro, "get_files_changed_since_ref", return_value=["x.py", "plans/p.md", "y.py"]
         ):
-            files = cro.resolve_changed_files(
+            files = cro.resolve_review_scope(
                 _state_without_tracked_files(pre_existing=["plans/"]), "abc123"
-            )
+            ).paths
         assert files == ["x.py", "y.py"]
         assert "Filtered out 1 pre-existing files" in capsys.readouterr().out
 
@@ -3512,7 +3576,6 @@ class TestResolveReviewScopeLabelsItsBranch:
         scope = cro.resolve_review_scope(state, "abc123")
 
         assert scope.source == "tracked_files"
-        assert sorted(scope.paths) == sorted(cro.resolve_changed_files(state, "abc123"))
         assert sorted(scope.paths) == ["a.py", "b.py", "c.py"]
         assert scope.task_ids == {"a.py": "T001", "b.py": "implementation"}
 
@@ -3522,17 +3585,15 @@ class TestResolveReviewScopeLabelsItsBranch:
             cro, "get_files_changed_since_ref", return_value=["x.py", "plans/p.md", "y.py"]
         ), patch.object(cro, "list_worktree_untracked_files", return_value=[]):
             scope = cro.resolve_review_scope(state, "abc123")
-            paths = cro.resolve_changed_files(state, "abc123")
 
         assert scope.source == "git_diff"
-        assert scope.paths == paths == ["x.py", "y.py"]
+        assert scope.paths == ["x.py", "y.py"]
         assert scope.task_ids == {}
 
     def test_the_none_branch(self, capsys):
         state = _state_without_tracked_files()
         scope = cro.resolve_review_scope(state, "")
         assert scope == cro.ReviewScope([], "none", {})
-        assert scope.paths == cro.resolve_changed_files(state, "")
 
     def test_a_recorded_files_scope_wins_over_tracked_files(self, capsys):
         """`--files` (decision 11.1) is checked first, whatever else state holds."""
@@ -3547,7 +3608,6 @@ class TestResolveReviewScopeLabelsItsBranch:
 
         assert scope == cro.ReviewScope(["b.py", "a.py"], "files_flag", {})
         assert "Using 2 files given with --files" in capsys.readouterr().out
-        assert cro.resolve_changed_files(state, "abc123") == ["b.py", "a.py"]
 
     def test_an_empty_recorded_files_scope_falls_through(self, capsys):
         state = _dict_state({

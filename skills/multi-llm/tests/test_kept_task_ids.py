@@ -20,13 +20,8 @@ import pytest
 
 import implement_orchestrator
 import multi_llm
-from tests.test_check_gate_fixture import _first_run, repo  # noqa: F401
-from tests.test_implement_stop_account import (
-    _check_fails,
-    _check_passes,
-    _implement,
-    make_repo,
-)
+from tests.support.gate_fixture import _first_run
+from tests.support.implement_world import _check_fails, _check_passes, _implement, make_repo
 from utils import provider_registry as registry
 
 
@@ -35,7 +30,6 @@ def manual_repo(tmp_path, monkeypatch):
     """The five-task plan with a manual task at the end (T005)."""
     yield make_repo(tmp_path, monkeypatch)
     registry._config = None
-    registry._config_key = None
 
 
 def _resume_line(text: str) -> tuple:

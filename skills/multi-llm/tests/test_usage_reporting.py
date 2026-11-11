@@ -1,7 +1,7 @@
 """Stage U — what a run spent travels from the envelope to every report.
 
 The adapter half (``parse_usage`` itself) is each adapter's own, covered in
-``tests/test_providers.py``. This file covers the *carriage*: adapter →
+``tests/test_provider_*.py``. This file covers the *carriage*: adapter →
 ``invoke_with_provider`` → ``invoke_with_file_output`` → the fan-out result
 records → ``.status.json`` → ``report.md`` / ``report.html`` /
 ``report_data.json`` → and back out again through ``--reaggregate``.
@@ -415,7 +415,14 @@ class TestFanOutResultRecords:
         assert results[FULL_SPEC]["success"] is True
         assert results[FULL_SPEC]["usage"] == EXPECTED_USAGE
 
-    def test_the_record_of_a_slot_that_failed_carries_it_as_well(self, tmp_path):
+    def test_the_record_of_a_slot_that_failed_carries_it_as_well(
+        self, tmp_path, monkeypatch
+    ):
+        # One attempt: an unrecognised non-zero exit is otherwise retried once,
+        # and a retried slot's sum is section 2b's.
+        monkeypatch.setattr(
+            "utils.review_orchestrator_base.get_subagent_retries", lambda **_kw: 0
+        )
         results = _fan_out(
             tmp_path, [FULL_SPEC],
             streams={"usagefull-cli": (MULTI_TURN_STREAM, 3)},
@@ -441,6 +448,8 @@ class TestFanOutResultRecords:
         assert set(results[NONE_SPEC]) == {
             "success", "output", "error", "prompt", "stdout", "stderr",
             "duration_seconds", "model_spec", "source",
+            # The slot's checks passed (review_lane.run_slot).
+            "checks_passed",
         }
 
 
@@ -736,7 +745,7 @@ class TestReaggregate:
             phase_name="review-plan", plan_path=str(plan),
             args=argparse.Namespace(
                 skip_validation=True, validation_model="auto", timeout=None,
-                internal_validation=False, force=False,
+                force=False,
             ),
             orchestrator_script="review_plan_orchestrator.py",
         ))
@@ -1023,9 +1032,7 @@ class TestTheConsolidatedReport:
             lambda *_a, **_k: ([dict(cg) for cg in self.CGS], {"count": 0}),
         )
 
-        rpo.reaggregate_consolidation_mode(
-            str(phase_dir), str(plan), "my-feature", [FULL_SPEC]
-        )
+        rpo.reaggregate_consolidation_mode(str(phase_dir), str(plan), "my-feature")
         html = (phase_dir / "consolidated-report.html").read_text(encoding="utf-8")
 
         assert EXPECTED_CLAUSE in html

@@ -85,30 +85,30 @@ class TestComputeMaxImportance:
         assert compute_max_importance(suggestions) == "MEDIUM"
 
     def test_missing_importance_key(self):
-        """Suggestions without 'importance' key should be treated as unknown."""
+        """A suggestion without 'importance' counts as MEDIUM, as its own
+        badge and apply read it (``importance.members_importance``)."""
         suggestions = [
             {"title": "No importance field"},
             {"title": "Also missing"},
         ]
-        assert compute_max_importance(suggestions) == ""
+        assert compute_max_importance(suggestions) == "MEDIUM"
 
     def test_none_importance_value(self):
-        """importance=None treated as unknown."""
+        """importance=None counts as MEDIUM."""
         suggestions = [{"importance": None}]
-        assert compute_max_importance(suggestions) == ""
+        assert compute_max_importance(suggestions) == "MEDIUM"
 
     def test_single_high(self):
         """Single HIGH suggestion returns HIGH."""
         assert compute_max_importance([{"importance": "HIGH"}]) == "HIGH"
 
-    def test_unrecognized_importance_ignored(self):
-        """Unrecognized importance values should not win over known ones."""
+    def test_unrecognized_importance_counts_as_medium(self):
+        """An unrecognised value counts as MEDIUM, so it outranks LOW."""
         suggestions = [
             {"importance": "CRITICAL"},  # Not a recognized value
             {"importance": "LOW"},
         ]
-        # LOW is recognized (rank 2), CRITICAL is unknown (rank 3)
-        assert compute_max_importance(suggestions) == "LOW"
+        assert compute_max_importance(suggestions) == "MEDIUM"
 
 
 # ============================================================================

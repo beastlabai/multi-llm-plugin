@@ -10,8 +10,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.plan_updater import (
     PlanUpdater,
-    update_plan_status,
-    extract_task_list,
     IMPL_START_MARKER,
     IMPL_END_MARKER,
     insert_implementation_summary_reference,
@@ -115,47 +113,6 @@ class TestPlanUpdater:
         statuses = updater.get_all_statuses()
         assert len(statuses) == 2
         assert statuses["T001"] == "completed"
-
-
-class TestUpdatePlanStatus:
-    """Tests for update_plan_status convenience function."""
-
-    def test_update_plan_status(self, sample_plan):
-        """Test the convenience function."""
-        statuses = {
-            "T001": "completed",
-            "T002": "in_progress"
-        }
-
-        content = update_plan_status(sample_plan, statuses, save=False)
-
-        assert "TASK_STATUS:T001:completed" in content
-        assert "TASK_STATUS:T002:in_progress" in content
-
-
-class TestExtractTaskList:
-    """Tests for extract_task_list function."""
-
-    def test_extract_tasks(self, sample_plan):
-        """Test extracting task list from plan."""
-        content = sample_plan.read_text(encoding="utf-8")
-        tasks = extract_task_list(content)
-
-        assert len(tasks) == 4
-        assert any(t["id"] == "T001" for t in tasks)
-
-    def test_extract_includes_status(self, sample_plan):
-        """Test that extracted tasks include status from markers."""
-        updater = PlanUpdater(sample_plan)
-        updater.update_task_status("T001", "completed")
-        updater.apply_updates()
-        updater.save()
-
-        content = sample_plan.read_text(encoding="utf-8")
-        tasks = extract_task_list(content)
-
-        t001 = next(t for t in tasks if t["id"] == "T001")
-        assert t001["status"] == "completed"
 
 
 @pytest.mark.parametrize("insert", [

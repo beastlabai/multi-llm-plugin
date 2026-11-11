@@ -1,0 +1,9 @@
+{"ts":"2026-10-09T17:17:53.869Z","type":"hook_event","hookEventName":"agent_start","agentId":"agent_c94b1788-761b-4474-b566-608cf81abd8d","taskId":"conv_1791566273858_v29pdo2","parentAgentId":null}
+{"ts":"2026-10-09T17:17:53.871Z","type":"agent_event","event":{"type":"iteration_start","iteration":1}}
+{"ts":"2026-10-09T17:17:53.894Z","type":"agent_event","event":{"type":"content_start","contentType":"text","text":"{\"raw\": \"hello\"}","accumulated":"{\"raw\": \"hello\"}"}}
+{"ts":"2026-10-09T17:17:53.897Z","type":"agent_event","event":{"type":"usage","inputTokens":0,"outputTokens":0,"totalInputTokens":0,"totalOutputTokens":0,"totalCost":0}}
+{"ts":"2026-10-09T17:17:53.897Z","type":"agent_event","event":{"type":"content_end","contentType":"text","text":"{\"raw\": \"hello\"}"}}
+{"ts":"2026-10-09T17:17:53.898Z","type":"agent_event","event":{"type":"iteration_end","iteration":1,"hadToolCalls":false,"toolCallCount":0}}
+{"ts":"2026-10-09T17:17:53.899Z","type":"hook_event","hookEventName":"agent_end","agentId":"agent_c94b1788-761b-4474-b566-608cf81abd8d","taskId":"conv_1791566273858_v29pdo2","parentAgentId":null}
+{"ts":"2026-10-09T17:17:53.899Z","type":"agent_event","event":{"type":"done","reason":"completed","text":"{\"raw\": \"hello\"}","iterations":1,"usage":{"inputTokens":0,"outputTokens":0,"totalCost":0}}}
+{"ts":"2026-10-09T17:17:53.907Z","type":"run_result","finishReason":"completed","iterations":1,"usage":{"inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0,"totalCost":0},"aggregateUsage":{"inputTokens":0,"outputTokens":0,"cacheReadTokens":0,"cacheWriteTokens":0,"totalCost":0},"durationMs":40,"text":"{\"raw\": \"hello\"}","model":{"id":"stub-model","provider":"openai-compatible"}}

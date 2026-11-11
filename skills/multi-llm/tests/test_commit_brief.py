@@ -166,7 +166,8 @@ class TestSizeLimits:
         assert cb.BRIEF_MAX_STAT_LINES == 100
         assert cb.TABLE_SUBJECT_CHARS == 72
         assert CONTEXT_PLAN_SNAPSHOT == "context-plan.md"
-        assert RESTART_KEEP == (".lock", ".status.lock", ".status.json", "orchestrator-run.log")
+        assert RESTART_KEEP == (".lock", ".status.lock", ".status.json", "orchestrator-run.log",
+                                ".views.lock")
 
     def test_one_over_the_commit_cap_lists_the_newest_and_names_the_rest(self, repo, monkeypatch):
         shas = [repo.commit(f"commit {index}") for index in range(5)]

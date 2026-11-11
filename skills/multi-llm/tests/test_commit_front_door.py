@@ -19,44 +19,45 @@ else replaced by the small stand-ins below: the brief writer
 
 from __future__ import annotations
 
-import fnmatch
 import hashlib
-import importlib
 import json
 import os
 import shutil
-import subprocess
 import sys
 import threading
 import time
 import types
 from collections import namedtuple
-from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import apply_code_fixes_orchestrator  # noqa: E402
 import code_review_orchestrator  # noqa: E402
 import multi_llm  # noqa: E402
-import utils  # noqa: E402
-from utils import cli_common, commit_review, detach, git_utils, improve_workflow  # noqa: E402
+from utils import cli_common, commit_review, detach, improve_workflow  # noqa: E402
 from utils import process_control, status_file  # noqa: E402
 from utils.cli_common import parse_result_line  # noqa: E402
-from utils.commit_review import (  # noqa: E402
-    BRIEF_END_MARKER,
-    BRIEF_MARKER,
-    CommitReviewError,
-    output_dir_for_brief,
-)
+from utils.commit_review import BRIEF_END_MARKER, BRIEF_MARKER, output_dir_for_brief  # noqa: E402
 from utils.state_manager import StateManager, compute_plan_hash  # noqa: E402
+from tests.support.commit_door import (
+    FOLDER,
+    _Counts,
+    _brief_of,
+    _commit,
+    _complete_review,
+    _door,
+    _git,
+    _init,
+    _review,
+    _sha,
+    door_fronted,  # noqa: F401 - the fronted fixture
+    door_repo,  # noqa: F401 - the repo fixture
+    door_seams,  # noqa: F401 - the seams fixture
+)
 
 HOST = ["--host", "claude-code"]
-FOLDER = "plans/commit-reviews"
 #: review-code's real ``main``, kept before the ``fronted`` fixture swaps it out.
 REVIEW_CODE_MAIN = code_review_orchestrator.main
 
@@ -66,217 +67,12 @@ REVIEW_CODE_MAIN = code_review_orchestrator.main
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class _Counts:
-    skips: int = 0
-    overrides: int = 0
-    edited: int = 0
-
-    def any(self) -> bool:
-        return bool(self.skips or self.overrides or self.edited)
-
-
-def _stand_in_commit_brief() -> types.ModuleType:
-    """The brief writer's contract (CONTRACTS.md), minimally."""
-    module = types.ModuleType("utils.commit_brief")
-    module.BRIEF_MAX_COMMITS = 100
-    module.CONTEXT_PLAN_SNAPSHOT = "context-plan.md"
-    module.STAGE_FILE_PATTERN = ".commit-stage-*"
-    module.ARCHIVE_PREFIX = "restarted-"
-    module.RESTART_KEEP = (".lock", ".status.lock", ".status.json", "orchestrator-run.log")
-    module.DecisionCounts = _Counts
-
-    def header_identity(*, base, head, focus, plan, plan_sha256):
-        identity = {"base": base, "head": head, "focus": focus or None,
-                    "plan": plan or None, "plan_sha256": plan_sha256 or None}
-        text = json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-        return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-    def render_brief_header(cr, *, cwd, focus, plan, plan_snapshot, plan_sha256):
-        lines = [BRIEF_MARKER, f"# Commit brief {cr.display}", ""]
-        lines += [f"- {c.sha[:12]} {c.date} {c.subject}" for c in cr.commits[:module.BRIEF_MAX_COMMITS]]
-        if cr.phrase:
-            lines.append(f"Phrase: {cr.phrase}")
-        if focus:
-            lines.append(f"Focus: {focus}")
-        if plan:
-            lines.append(f"Context plan: {plan} (snapshot {plan_snapshot}, {plan_sha256})")
-        lines.append(BRIEF_END_MARKER)
-        return "\n".join(lines) + "\n"
-
-    def split_brief(text):
-        lines = text.splitlines(keepends=True)
-        if not lines or lines[0].rstrip("\r\n") != BRIEF_MARKER:
-            return None, text
-        for index, line in enumerate(lines):
-            if line.rstrip("\r\n") == BRIEF_END_MARKER:
-                return "".join(lines[:index + 1]), "".join(lines[index + 1:])
-        return text, ""
-
-    def write_brief(path, header, *, exclusive=False):
-        path = Path(path)
-        if exclusive:
-            with open(path, "x", encoding="utf-8", newline="") as handle:
-                handle.write(header)
-            return
-        tail = ""
-        if path.exists():
-            tail = split_brief(path.read_text(encoding="utf-8"))[1]
-        path.write_text(header + tail, encoding="utf-8", newline="")
-
-    def normalize_plan_path(typed, *, cwd, root):
-        text = typed if os.path.isabs(typed) else os.path.join(cwd, typed)
-        return git_utils.git_path(os.path.normpath(text), repo_root=root)
-
-    def file_sha256(path):
-        try:
-            return hashlib.sha256(Path(path).read_bytes()).hexdigest()
-        except OSError:
-            return None
-
-    def snapshot_context_plan(source, out_dir, *, data=None):
-        data = Path(source).read_bytes() if data is None else data
-        Path(out_dir).mkdir(parents=True, exist_ok=True)
-        target = Path(out_dir) / module.CONTEXT_PLAN_SNAPSHOT
-        target.write_bytes(data)
-        return target, hashlib.sha256(data).hexdigest()
-
-    def count_decisions(phase_dir):
-        return _Counts()
-
-    def archive_round(phase_dir, *, keep_extra=()):
-        phase = Path(phase_dir)
-        keep = set(module.RESTART_KEEP) | {os.path.basename(os.fspath(k)) for k in keep_extra}
-        names = [n for n in sorted(os.listdir(phase))
-                 if n not in keep and not fnmatch.fnmatchcase(n, module.STAGE_FILE_PATTERN)
-                 and not (n.startswith(module.ARCHIVE_PREFIX) and (phase / n).is_dir())]
-        if not names:
-            return None
-        archive = phase / f"{module.ARCHIVE_PREFIX}{datetime.now():%Y%m%d-%H%M%S}"
-        while archive.exists():
-            archive = Path(f"{archive}.{datetime.now():%f}")
-        archive.mkdir()
-        for name in names:
-            os.rename(phase / name, archive / name)
-        return archive
-
-    for name, value in list(locals().items()):
-        if callable(value) and not name.startswith("_") and name != "module":
-            setattr(module, name, value)
-    return module
-
-
-def _stand_in_paths_changed_since(head, paths, *, cwd=None):
-    """The shared change test (§2.5 "Drift"), minimally: diff against head,
-    plus a path absent at head that is on disk."""
-    paths = list(paths)
-    if not paths:
-        return set()
-    out = subprocess.run(["git", "diff", "--name-only", "--no-renames", "-z", head, "--", *paths],
-                         cwd=cwd, capture_output=True, text=True, check=True).stdout
-    changed = {p for p in out.split("\0") if p}
-    listed = subprocess.run(["git", "ls-tree", "-r", "--name-only", "-z", head, "--", *paths],
-                            cwd=cwd, capture_output=True, text=True, check=True).stdout
-    at_head = {p for p in listed.split("\0") if p}
-    for path in paths:
-        if path not in at_head and os.path.lexists(os.path.join(cwd or ".", path)):
-            changed.add(path)
-    return changed
-
-
 Selection = namedtuple("Selection", "brief line payload")
-
-
-@pytest.fixture(autouse=True)
-def seams(monkeypatch):
-    """The brief writer, the change test and the apply lookups, as above."""
-    try:
-        brief_api = importlib.import_module("utils.commit_brief")
-    except ImportError:
-        brief_api = _stand_in_commit_brief()
-        monkeypatch.setitem(sys.modules, "utils.commit_brief", brief_api)
-        monkeypatch.setattr(utils, "commit_brief", brief_api, raising=False)
-    if not hasattr(git_utils, "paths_changed_since"):
-        monkeypatch.setattr(git_utils, "paths_changed_since", _stand_in_paths_changed_since,
-                            raising=False)
-    try:
-        apply_api = importlib.import_module("utils.commit_apply")
-    except ImportError:
-        apply_api = types.ModuleType("utils.commit_apply")
-        monkeypatch.setitem(sys.modules, "utils.commit_apply", apply_api)
-        monkeypatch.setattr(utils, "commit_apply", apply_api, raising=False)
-
-    def require_completed_review(brief, *, pinned, cwd):
-        state = output_dir_for_brief(brief) / "state.json"
-        try:
-            document = json.loads(state.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            document = {}
-        if not (document.get("phases_completed") or {}).get("code-review"):
-            raise CommitReviewError(f"[COMMIT_REVIEW_NOT_FOUND] {pinned}")
-
-    def select_review(*, cwd):
-        raise CommitReviewError("[COMMIT_REVIEW_NOT_FOUND] no completed commit review (stand-in)")
-
-    monkeypatch.setattr(apply_api, "require_completed_review", require_completed_review,
-                        raising=False)
-    monkeypatch.setattr(apply_api, "select_review", select_review, raising=False)
-    for name in ("MULTI_LLM_HOST", "MULTI_LLM_ROUTE"):
-        monkeypatch.delenv(name, raising=False)
-    cli_common.clear_invocation()
-    yield types.SimpleNamespace(brief=brief_api, apply=apply_api)
-    cli_common.clear_invocation()
 
 
 # ---------------------------------------------------------------------------
 # Repositories
 # ---------------------------------------------------------------------------
-
-
-def _git(root, *args) -> str:
-    return subprocess.run(["git", *args], cwd=str(root), check=True,
-                          capture_output=True, text=True).stdout
-
-
-def _commit(root: Path, path: str, text: str, message: str) -> str:
-    target = root / path
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(text, encoding="utf-8")
-    _git(root, "add", "-A")
-    _git(root, "commit", "--quiet", "-m", message)
-    return _git(root, "rev-parse", "HEAD").strip()
-
-
-def _init(root: Path) -> Path:
-    root.mkdir(parents=True, exist_ok=True)
-    _git(root, "init", "--quiet", "-b", "main")
-    _git(root, "config", "user.email", "test@example.com")
-    _git(root, "config", "user.name", "Test")
-    _git(root, "config", "commit.gpgsign", "false")
-    return Path(os.path.realpath(root))
-
-
-@pytest.fixture
-def repo(tmp_path, monkeypatch):
-    """Three commits (c1 a.py+b.py+docs, c2 b.py, c3 a.py); cwd is the root."""
-    root = _init(tmp_path / "repo")
-    (root / "docs").mkdir()
-    (root / "docs" / "x.md").write_text("# Context plan\n\nKeep errors loud.\n", encoding="utf-8")
-    (root / "src").mkdir()
-    (root / "src" / "keep.txt").write_text("keep\n", encoding="utf-8")
-    _commit(root, "a.py", "a = 1\n", "c1: start")
-    _commit(root, "b.py", "b = 2\n", "c2: add b")
-    _commit(root, "a.py", "a = 3\n", "c3: change a")
-    monkeypatch.chdir(root)
-    return root
-
-
-def _sha(root: Path, rev: str) -> str:
-    return _git(root, "rev-parse", rev).strip()
-
-
-def _brief_of(root: Path, base: Optional[str], head: str) -> Path:
-    return root / FOLDER / f"{'root' if base is None else base[:12]}-{head[:12]}.md"
 
 
 def _state(brief: Path) -> dict:
@@ -290,59 +86,6 @@ def _stage_files(root: Path):
 # ---------------------------------------------------------------------------
 # The fronted mains
 # ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def fronted(monkeypatch):
-    """Record each fronted call: argv, the invocation at that moment, and the
-    ``commit_range`` already in ``state.json`` (None when absent)."""
-    calls = []
-
-    def _snapshot(argv):
-        brief = cli_common.flag_value(argv, "--plan-file")
-        record = None
-        if brief:
-            state = output_dir_for_brief(Path(os.path.abspath(brief))) / "state.json"
-            if state.is_file():
-                record = json.loads(state.read_text(encoding="utf-8")).get("commit_range")
-        invocation = cli_common.invocation()
-        stage = cli_common.flag_value(argv, "--commit-stage")
-        staged = (json.loads(Path(stage).read_text(encoding="utf-8"))
-                  if stage and Path(stage).is_file() else None)
-        return {"argv": list(argv), "brief": brief, "record": record, "staged": staged,
-                "invocation": json.loads(json.dumps(invocation)) if invocation else None}
-
-    def review(argv):
-        calls.append({"target": "review-code", **_snapshot(argv)})
-        return calls[-1].get("exit", 0)
-
-    def apply(argv):
-        calls.append({"target": "apply-code-fixes", **_snapshot(argv)})
-        return 0
-
-    def entry_point(mode, argv):
-        calls.append({"target": f"entry_point:{mode}", **_snapshot(argv)})
-        return 0
-
-    monkeypatch.setattr(code_review_orchestrator, "main", review)
-    monkeypatch.setattr(apply_code_fixes_orchestrator, "main", apply)
-    monkeypatch.setattr(improve_workflow, "entry_point", entry_point)
-    return calls
-
-
-def _door(mode, *argv):
-    return commit_review.front_door(mode, list(argv))
-
-
-def _review(*argv):
-    return _door("review-commits", *argv)
-
-
-def _complete_review(brief: Path) -> None:
-    """Mark the brief's code-review phase completed (what apply requires)."""
-    manager = StateManager(brief)
-    manager.mark_phase_completed("code-review")
-    manager.save()
 
 
 # ===========================================================================
@@ -1617,7 +1360,12 @@ class TestStage:
         commit_review.apply_stage(stage)
         assert "code-review" not in _state(brief)["phases_completed"]
 
-    def test_the_worker_applies_the_stage_right_after_its_lock(self, repo, fronted):
+    def test_the_worker_applies_the_stage_right_after_its_lock(self, repo, fronted,
+                                                               monkeypatch):
+        from utils import commit_front_door
+
+        # The applier a worker's entry hands it (hand_worker_the_stage_applier).
+        monkeypatch.setattr(detach, "_COMMIT_STAGE_APPLIER", commit_front_door.apply_stage)
         stage = self._staged(repo, "--revs", "last 2 commits", "--focus", "X")
         brief = _brief_of(repo, _sha(repo, "HEAD~2"), _sha(repo, "HEAD"))
         handle = detach.RunHandle(str(output_dir_for_brief(brief) / "code-review"), run_id="r1",
@@ -1630,6 +1378,59 @@ class TestStage:
             handle._lock.release()
         assert _state(brief)["commit_range"]["focus"] == "X"
         assert not stage.exists()
+
+    def test_a_worker_with_no_applier_stops_before_it_changes_anything(
+            self, repo, fronted, monkeypatch):
+        """``detach`` sits below the front door and is handed its applier; a
+        stage that arrives without one stops the worker like a failed apply."""
+        monkeypatch.setattr(detach, "_COMMIT_STAGE_APPLIER", None)
+        stage = self._staged(repo, "--revs", "last 2 commits", "--focus", "X")
+        brief = _brief_of(repo, _sha(repo, "HEAD~2"), _sha(repo, "HEAD"))
+        phase = output_dir_for_brief(brief) / "code-review"
+        handle = detach.RunHandle(str(phase), run_id="r1", mode="review-code",
+                                  plan_file=str(brief), detached=False,
+                                  commit_stage=str(stage))
+        handle._acquire_lock()
+        with pytest.raises(detach.DetachError, match="could not apply the commit-review stage"):
+            handle._apply_commit_stage()
+        assert stage.exists()
+        assert not (output_dir_for_brief(brief) / "state.json").exists()
+        # The lock was given up with the refusal.
+        other = process_control.PhaseLock(detach.lock_path(str(phase)))
+        other.acquire({"run_id": "other", "pid": os.getpid(),
+                       "process_start_time": process_control.process_start_time(os.getpid())})
+        other.release()
+
+    def test_the_dispatcher_hands_a_worker_the_stage_applier(self, monkeypatch, capsys):
+        from utils import commit_front_door
+
+        monkeypatch.setattr(detach, "_COMMIT_STAGE_APPLIER", None)
+        monkeypatch.setattr(detach, "prepare_worker_output", lambda: None)
+        monkeypatch.setattr(multi_llm, "_dispatch", lambda argv, ctx: 0)
+        assert multi_llm.main(["review-code", "--internal-worker"]) == 0
+        assert detach._COMMIT_STAGE_APPLIER is commit_front_door.apply_stage
+        monkeypatch.setattr(detach, "_COMMIT_STAGE_APPLIER", None)
+        assert multi_llm.main(["review-code"]) == 0
+        assert detach._COMMIT_STAGE_APPLIER is None, "only a worker is handed it"
+        capsys.readouterr()
+
+    @pytest.mark.parametrize("argv", [None, ["--plan-file", "x.md"]],
+                             ids=["sys.argv", "argv"])
+    def test_only_a_worker_is_handed_the_stage_applier(self, monkeypatch, argv):
+        """The helper every staged worker's entry calls (the dispatcher and
+        the orchestrators the front doors run, entered directly)."""
+        from utils import commit_front_door
+
+        monkeypatch.setattr(detach, "_COMMIT_STAGE_APPLIER", None)
+        monkeypatch.setattr(sys, "argv", ["code_review_orchestrator.py", "--plan-file", "x.md"])
+        commit_front_door.hand_worker_the_stage_applier(argv)
+        assert detach._COMMIT_STAGE_APPLIER is None, "only a worker is handed it"
+        worker = ["--internal-worker", "--internal-run-id", "r1"]
+        if argv is None:
+            monkeypatch.setattr(sys, "argv", [*sys.argv, *worker])
+        commit_front_door.hand_worker_the_stage_applier(
+            None if argv is None else [*argv, *worker])
+        assert detach._COMMIT_STAGE_APPLIER is commit_front_door.apply_stage
 
     def test_a_worker_that_loses_the_lock_applies_nothing(self, repo, fronted):
         stage = self._staged(repo, "--revs", "last 2 commits", "--focus", "X")

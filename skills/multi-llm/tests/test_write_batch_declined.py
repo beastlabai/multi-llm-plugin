@@ -34,9 +34,19 @@ from utils import subagent_prompts  # noqa: E402
 from utils import subagent_tasks  # noqa: E402
 from utils.schema_validator import validate_with_schema_file  # noqa: E402
 from utils.write_batch_scheduler import with_result_contract  # noqa: E402
+from utils import write_batch_scheduler as wbs  # noqa: E402
+from tests.support.declined_world import (  # noqa: E402
+    CODEX_08_REPLY,
+    REASON,
+    SKIP_FLAGS,
+    _PairRig,
+    _codex_08_respond,
+    _codex_08_tasks,
+    _respond_with,
+    _two_item_task,
+)
 
 APPLY_KINDS = ("apply_suggestions", "apply_task_suggestions", "apply_code_fixes")
-REASON = "the implementation record says T011 removed the clamp on purpose"
 
 
 def _prompts(log: Path):
@@ -144,22 +154,6 @@ class TestTheReader:
 # ===========================================================================
 # The runner's reading: a declined item is neither applied nor missing
 # ===========================================================================
-
-def _two_item_task(env, index=0, ids=("s0", "s1"), **over):
-    return env.apply_task(index, expected_ids=list(ids), **over)
-
-
-def _respond_with(env, reply, *, edit=True):
-    seen = []
-
-    def respond(task, prompt):
-        seen.append(prompt)
-        if edit:
-            env.plan.write_text(env.plan.read_text() + f"edit {len(seen)}\n")
-        return dict(reply)
-
-    respond.seen = seen  # type: ignore[attr-defined]
-    return respond
 
 
 class TestABatchThatDeclinesAnItem:
@@ -395,42 +389,12 @@ class TestAResumeKeepsADeclinedBatch:
 # Every surface names a declined item and its reason (the real orchestrator)
 # ===========================================================================
 
-from tests.test_write_executor_orchestrators import (  # noqa: E402
-    APPLY_PLAN, _ApplyRig, _validation, repo,  # noqa: F401
+from tests.support.write_orchestrators import (  # noqa: E402,F401
+    APPLY_PLAN,
+    _ApplyRig,
+    _validation,
+    orchestrator_repo,  # noqa: F401 - the repo fixture
 )
-
-
-def _alpha_pair_groups():
-    """Two suggestions on one section (one batch) and one on another."""
-    def group(n, section, step):
-        return {"theme": f"theme {n}", "category": "c", "models": ["m"],
-                "suggestions": [{
-                    "title": f"suggestion {n}", "desc": f"Do {n}.",
-                    "type": "addition", "reference": f"## Step {step}: {section}",
-                    "importance": "MEDIUM", "source_model": "m",
-                }]}
-    return [group("A1", "Alpha", 1), group("A2", "Alpha", 1), group("B", "Beta", 2)]
-
-
-class _PairRig(_ApplyRig):
-    """The apply-suggestions orchestrator over a review whose first batch
-    holds two items."""
-
-    def _review_pair(self, repo):
-        from utils.state_manager import get_or_create_state
-
-        plan = repo.root / "plans" / "apply.md"
-        plan.write_text(APPLY_PLAN, encoding="utf-8")
-        review = repo.root / "plans" / "apply" / "review-plan"
-        review.mkdir(parents=True, exist_ok=True)
-        (review / "grouped.json").write_text(
-            json.dumps(_alpha_pair_groups()), encoding="utf-8")
-        (review / "validation.json").write_text(
-            json.dumps(_validation(["valid"] * 3)), encoding="utf-8")
-        state = get_or_create_state(plan)
-        state.mark_phase_completed("review-plan")
-        state.save()
-        return plan
 
 
 class TestADeclinedItemIsNamedOnEverySurface(_PairRig):
@@ -564,35 +528,11 @@ class TestTheNativeApplyEmitStampsItsBatchList(_PairRig):
 # The way forward from a partial application a resume would only repeat
 # ===========================================================================
 
-CODEX_08_REPLY = {
-    # Codex racing run 7, apply-code-fixes 08: fix 2 applied and attested,
-    # fix 1 left alone on purpose and said so only in `notes`.
-    "status": "applied", "ids": ["s1"], "files_touched": ["plans/p.md"],
-    "summary": "applied suggestion 2; kept the deliberate T011 decision",
-    "notes": "Suggestion 1: Not applied; T011 records it as deliberate. "
-             "Suggestion 2: applied.",
-}
-SKIP_FLAGS = ["--resume", "--human-task", "apply-batch-0=skip"]
 SKIP_WHY = (
     "keep what apply-batch-0 applied and go on without suggestion 1 (`s0`): "
     "it is recorded as not applied, skipped at your request, and the batches "
     "after it run"
 )
-
-
-def _codex_08_respond(env, calls):
-    def respond(task, prompt):
-        calls.append(task["task_id"])
-        env.plan.write_text(env.plan.read_text() + f"{task['task_id']}\n")
-        if task["task_id"] == "apply-batch-0":
-            return dict(CODEX_08_REPLY)
-        return {"status": "applied", "ids": ["s2"],
-                "files_touched": ["plans/p.md"], "summary": "applied s2"}
-    return respond
-
-
-def _codex_08_tasks(env):
-    return [_two_item_task(env), env.apply_task(1, expected_ids=["s2"])]
 
 
 class TestThePartialApplicationOffersAWayForward:
@@ -822,6 +762,76 @@ class TestThePartialApplicationOffersAWayForward:
             env.plan.write_text("# Plan\n\n## Step 1\nbody\n", encoding="utf-8")
 
 
+def _tree(root: Path):
+    """Every file under *root* with its bytes."""
+    return {str(p.relative_to(root)): p.read_bytes()
+            for p in sorted(root.rglob("*")) if p.is_file()}
+
+
+class TestKeepingABatchIsReadThenRecorded:
+    """``ResumeEvidence.kept_outcome`` reads the kept batch and writes nothing;
+    the scheduler's ``_keep_at_request`` records it, in the order it always
+    has: the audit's completion line, the verdict stamp, the batch's effects."""
+
+    def _resumed(self, env, state, **over):
+        calls = []
+        env.scheduler(
+            _codex_08_tasks(env), respond=_codex_08_respond(env, calls), state=state,
+        ).run()
+        scheduler = env.scheduler(
+            _codex_08_tasks(env), respond=_codex_08_respond(env, calls),
+            state=state, resume=True, partial_skips=["apply-batch-0"], **over,
+        )
+        assert scheduler._evidence.check_partial_skips() == []
+        assert list(scheduler._evidence.kept_at_request) == ["apply-batch-0"]
+        return scheduler
+
+    def test_reading_it_writes_nothing(self, env):
+        state = FakeState(env.tmp_path / "state.json")
+        scheduler = self._resumed(env, state)
+        before = _tree(env.tmp_path)
+
+        outcome = scheduler._evidence.kept_outcome(
+            _codex_08_tasks(env)[0], invoker=scheduler.invoker,
+            item_words=scheduler._declined_words,
+        )
+
+        assert _tree(env.tmp_path) == before
+        assert scheduler._evidence.kept_at_request == {}
+        assert outcome.ok and outcome.write_outcome == executor.WRITE_APPLIED
+        assert outcome.runner == scheduler.invoker
+        assert list(outcome.skipped_items) == ["s0"]
+        assert outcome.snapshot_dir == str(env.phase_dir / "pre_batch" / "apply-batch-0")
+        assert outcome.reason.startswith(
+            "KEPT AT YOUR REQUEST (--human-task apply-batch-0=skip)")
+        assert outcome.reason.endswith(" It was not dispatched again.")
+
+    def test_the_scheduler_records_it_in_order(self, env, monkeypatch):
+        state = FakeState(env.tmp_path / "state.json")
+        scheduler = self._resumed(env, state)
+        order = []
+        for owner, name in ((scheduler.audit, "completed"),
+                            (scheduler, "_stamp_verdict"),
+                            (scheduler, "_record_batch_effects")):
+            real = getattr(owner, name)
+
+            def traced(*args, _real=real, _name=name, **kwargs):
+                order.append(_name)
+                return _real(*args, **kwargs)
+
+            monkeypatch.setattr(owner, name, traced)
+        result = wbs.SchedulerResult(kind=scheduler.kind, phase=scheduler.phase)
+
+        outcome = scheduler._keep_at_request(_codex_08_tasks(env)[0], 0, result)
+
+        assert order == ["completed", "_stamp_verdict", "_record_batch_effects"]
+        assert scheduler.audit.completion_for(
+            "apply-batch-0", expected_ids=outcome.expected_ids)["reason"] == outcome.reason
+        stamped = json.loads((env.phase_dir / "apply_batch_0.json").read_text())
+        assert [e["id"] for e in stamped["verdict"]["skipped_items"]] == ["s0"]
+        assert state.get_task_status("apply-batch-0") == "completed"
+
+
 class TestTheCodex08ShapeThroughTheApplyPhase(_PairRig):
     """The whole loop on the real orchestrator: the batch leaves an item out
     of its report, the phase stops needs-human offering the answer (on the
@@ -1030,9 +1040,10 @@ class TestAReportThatLeavesItemsOutIsReAskedOnce:
 # The native leg: the host records a declined item, and a kept batch
 # ===========================================================================
 
-from tests.test_batch_done import (  # noqa: E402
-    INSTRUCTIONS, _materialize, _run, _state, _suggestion_batches, plan_dir,  # noqa: F401
+from tests.support.batch_done_world import (  # noqa: E402
+    INSTRUCTIONS, _materialize, _state, _suggestion_batches,
 )
+from tests.support.main_runs import _run  # noqa: E402
 from utils import batch_done  # noqa: E402
 from utils.schema_validator import validate_state_file  # noqa: E402
 from utils.state_manager import StateManager  # noqa: E402
@@ -1128,9 +1139,29 @@ class TestTheNativeLegRecordsADeclinedItem:
         assert (f"every item of {task_id} is declined or skipped, so by its "
                 f"report it applied nothing to keep") in err
         assert task_id not in (_state(out).get("task_status") or {})
+        # The native way back, never the executor's rollback, which holds
+        # nothing of a native batch (Fable review 2026-11-10, F8).
+        assert "Restore the batch (util restore-batch)" not in err
+        assert "util restore-batch holds nothing of a native batch's" in err
+        assert "[WRITE_SNAPSHOT]" in err and "copy it back by hand" in err
+
+    def test_a_code_fix_batch_that_applied_nothing_is_sent_to_undo_by_hand(self):
+        """apply-code-fixes' native loop takes no snapshot: the refusal says
+        so, as its instructions' partial-application step does."""
+        from utils import batch_done
+
+        with pytest.raises(batch_done.WritePromptError) as caught:
+            batch_done._not_applied_items(
+                "apply-fix-batch-0", {"expected_ids": ["F1", "F2"]},
+                "apply_code_fixes", "completed", None, ["F1", "F2"])
+        said = str(caught.value)
+        assert "applied nothing to keep" in said
+        assert "Restore the batch (util restore-batch)" not in said
+        assert "this loop takes no snapshot" in said
+        assert "git diff -- <the batch's files>" in said
 
     def test_implement_has_no_decline(self, plan_dir, capsys):
-        from tests.test_batch_done import _implement_batches
+        from tests.support.batch_done_world import _implement_batches
 
         plan, out = plan_dir
         StateManager(plan).save()
@@ -1152,7 +1183,7 @@ class TestTheNativeLegRecordsADeclinedItem:
     def test_each_apply_runbook_tells_the_host(self, name, record, append):
         text = (INSTRUCTIONS / name).read_text(encoding="utf-8")
         assert '"ids", "declined", "files_touched"' in text
-        assert "- **Declined items** (fix round 18)" in text
+        assert "- **Declined items**" in text
         assert '`--declined "{id}={reason}"`' in text
         assert "`[BATCH_DECLINED]`" in text
         assert (f"record it with step {record}'s `util batch-done` as "

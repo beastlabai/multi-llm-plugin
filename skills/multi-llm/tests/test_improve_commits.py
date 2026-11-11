@@ -33,7 +33,6 @@ import json
 import os
 import shlex
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -52,13 +51,14 @@ from utils import report_check  # noqa: E402
 from utils.commit_review import output_dir_for_brief  # noqa: E402
 from utils.state_manager import StateManager  # noqa: E402
 
-from tests.test_improve_orchestrator import (  # noqa: E402,F401
+from tests.support.improve_world import (  # noqa: E402
     APPLY_FLAGS,
     T,
     _argv_of,
     _live_run,
-    stub,
+    improve_stub,  # noqa: F401 - the stub fixture
 )
+from tests.support.commit_door import _commit, _git, _init  # noqa: E402
 
 IMPROVE = "improve-commits"
 FOLDER = "plans/commit-reviews"
@@ -83,29 +83,6 @@ def clean(monkeypatch):
     cli_common.clear_invocation()
     yield
     cli_common.clear_invocation()
-
-
-def _git(root: Path, *args: str) -> str:
-    return subprocess.run(["git", *args], cwd=str(root), check=True,
-                          capture_output=True, text=True).stdout
-
-
-def _commit(root: Path, path: str, text: str, message: str) -> str:
-    target = root / path
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(text, encoding="utf-8")
-    _git(root, "add", "-A")
-    _git(root, "commit", "--quiet", "-m", message)
-    return _git(root, "rev-parse", "HEAD").strip()
-
-
-def _init(root: Path) -> Path:
-    root.mkdir(parents=True, exist_ok=True)
-    _git(root, "init", "--quiet", "-b", "main")
-    _git(root, "config", "user.email", "test@example.com")
-    _git(root, "config", "user.name", "Test")
-    _git(root, "config", "commit.gpgsign", "false")
-    return Path(os.path.realpath(root))
 
 
 @pytest.fixture

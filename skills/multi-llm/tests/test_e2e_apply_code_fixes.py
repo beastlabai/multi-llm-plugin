@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from harness import (
     SkillRunner,
     FixtureManager,
+    FixturePlan,
     MockProvider,
     AssertionHelpers,
 )
@@ -274,10 +275,10 @@ class TestApplyFixesEditedDescriptions:
         _create_code_review_phase(plan, grouped_data, validation_data, report_content)
         fixture_manager.create_state_file(plan, phases_completed=["code-review"])
 
+        # The emitted payload: a dry run's object carries no edit log.
         result = skill_runner.run_orchestrator(
             "apply_fixes",
             plan.plan_path,
-            "--dry-run",
         )
 
         assert result.success, f"apply_fixes failed: {result.stderr}"
@@ -358,10 +359,10 @@ User edited this description completely.
         _create_code_review_phase(plan, grouped_data, validation_data, report_content)
         fixture_manager.create_state_file(plan, phases_completed=["code-review"])
 
+        # The emitted payload: a dry run's object carries no edit log.
         result = skill_runner.run_orchestrator(
             "apply_fixes",
             plan.plan_path,
-            "--dry-run",
         )
 
         assert result.success
@@ -718,21 +719,7 @@ class TestApplyFixesResumeState:
         _create_code_review_phase(plan, grouped_data, validation_data)
 
         # Create state with some items already processed
-        # The group_id is typically a hash - we need to match what the orchestrator generates
-        import hashlib
-
-        def generate_group_id(group):
-            """Generate stable group ID matching the orchestrator's logic."""
-            theme = group.get("theme", "")
-            suggestions = group.get("suggestions", [])
-            if suggestions:
-                first_title = suggestions[0].get("title", "")
-                first_desc = suggestions[0].get("desc", "")[:100]
-            else:
-                first_title = ""
-                first_desc = ""
-            key = f"{theme}|{first_title}|{first_desc}"
-            return hashlib.sha256(key.encode()).hexdigest()[:16]
+        from utils.state_manager import generate_group_id
 
         # Mark first two items as processed
         processed_items = {}
@@ -753,12 +740,11 @@ class TestApplyFixesResumeState:
             extra_state=extra_state,
         )
 
-        # Run with --resume
+        # Run with --resume; `resume_info` is in the emitted payload, not a dry run's.
         result = skill_runner.run_orchestrator(
             "apply_fixes",
             plan.plan_path,
             "--resume",
-            "--dry-run",
         )
 
         assert result.success, f"Resume should succeed: {result.stderr}"
@@ -932,11 +918,11 @@ class TestApplyFixesBulkApprovalOptions:
         _create_code_review_phase(plan, grouped_data, validation_data)
         fixture_manager.create_state_file(plan, phases_completed=["code-review"])
 
+        # The emitted payload: a dry run only reports what it would auto-approve.
         result = skill_runner.run_orchestrator(
             "apply_fixes",
             plan.plan_path,
             "--approve-all-low",
-            "--dry-run",
         )
 
         assert result.success
@@ -1038,11 +1024,11 @@ class TestApplyFixesBulkApprovalOptions:
         _create_code_review_phase(plan, grouped_data, validation_data)
         fixture_manager.create_state_file(plan, phases_completed=["code-review"])
 
+        # The emitted payload: a dry run only reports what it would auto-approve.
         result = skill_runner.run_orchestrator(
             "apply_fixes",
             plan.plan_path,
             "--approve-validation-failed",
-            "--dry-run",
         )
 
         assert result.success

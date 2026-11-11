@@ -266,18 +266,18 @@ class TestTheCheckClaimHoldsOnlyWhenTheResumeKeepsIt:
     @staticmethod
     def _no_tree(monkeypatch):
         """No tree on record: the fingerprint git could not take."""
-        from utils.write_batch_scheduler import WriteBatchScheduler
+        from utils.write_check_holds import CheckHolds
 
-        monkeypatch.setattr(WriteBatchScheduler, "_tree_fingerprint", lambda self: None)
+        monkeypatch.setattr(CheckHolds, "tree_fingerprint", lambda self: None)
 
     def test_a_check_with_findings_and_no_tree_runs_again(
         self, repo, capsys, monkeypatch,
     ):
         from tests.test_implement_stop_account import _dispatched_titles, _implement
 
-        from utils.write_batch_scheduler import WriteBatchScheduler
+        from utils.write_check_holds import CheckHolds
 
-        measured = WriteBatchScheduler._tree_fingerprint
+        measured = CheckHolds.tree_fingerprint
         self._no_tree(monkeypatch)
         _first_run(repo, capsys)
         report = json.loads((repo.phase_dir / "write_batch_report.json").read_text())
@@ -286,7 +286,7 @@ class TestTheCheckClaimHoldsOnlyWhenTheResumeKeepsIt:
             "on it); T005 stays refused until driver.write_paths changes "
             "(T006 waits on it)" + KEPT)
         # And the resume, on a tree it can measure, does what the why says.
-        monkeypatch.setattr(WriteBatchScheduler, "_tree_fingerprint", measured)
+        monkeypatch.setattr(CheckHolds, "tree_fingerprint", measured)
         _implement(repo, "--resume")
         capsys.readouterr()
         assert "Check the module" in _dispatched_titles(repo)
@@ -299,11 +299,11 @@ class TestTheCheckClaimHoldsOnlyWhenTheResumeKeepsIt:
         after T002 ran, and nothing re-stamps it at the stop) does not keep
         the check, and the why says it runs again."""
         from tests.test_implement_stop_account import _dispatched_titles, _implement
-        from utils.write_batch_scheduler import WriteBatchScheduler
+        from utils.write_check_holds import CheckHolds
 
-        restamp = WriteBatchScheduler._restamp_check_trees
+        restamp = CheckHolds.restamp_check_trees
         monkeypatch.setattr(
-            WriteBatchScheduler, "_restamp_check_trees", lambda self, result: None)
+            CheckHolds, "restamp_check_trees", lambda self, result: None)
         _first_run(repo, capsys)
         why = json.loads(
             (repo.phase_dir / "write_batch_report.json").read_text()
@@ -311,7 +311,7 @@ class TestTheCheckClaimHoldsOnlyWhenTheResumeKeepsIt:
         assert why.startswith(
             "runs the tasks that can run; T002's check runs again (T007 waits "
             "on it)"), why
-        monkeypatch.setattr(WriteBatchScheduler, "_restamp_check_trees", restamp)
+        monkeypatch.setattr(CheckHolds, "restamp_check_trees", restamp)
         _implement(repo, "--resume")
         capsys.readouterr()
         assert "Check the module" in _dispatched_titles(repo)
@@ -383,7 +383,6 @@ def native_repo(tmp_path, monkeypatch):
     monkeypatch.setenv("MOCK_LLM_WRITE_CHECK_IF_PROMPT_HAS", CHECK_GATE)
     yield obj
     registry._config = None
-    registry._config_key = None
 
 
 class TestTheNativeLeg:

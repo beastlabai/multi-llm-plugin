@@ -23,7 +23,7 @@ Three things can regress, and they are the §6.1 matrix's three ship-gate tests:
   refusal.
 
 Everything here is parametrized over `_registry_names()`. That helper is the
-local twin of `test_providers._registered_provider_names()`, forced by the same
+local twin of `provider_test_support._registered_provider_names()`, forced by the same
 parametrize-at-class-body-time problem, and its docstring is the requirement.
 """
 
@@ -54,7 +54,7 @@ def _registry_names():
 
     Resolved at class-definition time because `@pytest.mark.parametrize`
     evaluates its argument while the class body runs — the same constraint that
-    forces `test_providers.py`'s local twin at its own class bodies.
+    forces `provider_test_support.py`'s local twin at its own class bodies.
 
     **No test in this module may name an adapter or a count** (M0.a): the
     specifications M10 came from were written against thirteen adapters and the
@@ -436,7 +436,8 @@ class TestIsAvailableKeepsItsBoolContract:
         "relative",
         [
             "utils/llm_client.py",
-            "utils/subagent_executor.py",
+            "utils/runner_selection.py",
+            "utils/runner_preflight.py",
             "utils/provider_registry.py",
             "init_config.py",
             "utils/interactive.py",
@@ -534,6 +535,10 @@ class TestTheStatusConsumers:
             # fx mixes shell output into stderr, so an unqualified login
             # notice cannot identify the CLI's auth state. Use its own error.
             stdout, stderr = '{"error":"MissingCredentials"}', ""
+        elif name == "kilocode":
+            # kilocode's own diagnoses open with its bold-red `Error: ` paint;
+            # an unpainted line may be a tool's output, so it decides nothing.
+            stderr = "\x1b[91m\x1b[1mError: \x1b[0mnot logged in."
         assert (
             availability_from_failure(provider, stdout, stderr, 1)
             is Availability.NEEDS_AUTH

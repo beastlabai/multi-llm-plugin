@@ -430,49 +430,64 @@ class TestRecordPreExistingChanges:
 
 
 class TestRecordHeadBeforeImplement:
-    """Tests for head_before_implement capture in run_implement."""
+    """``load_task_list`` records ``head_before_implement`` once, before
+    implementation changes anything, so code-review diffs leave out commits
+    made before implement; a resume keeps the first value. Each test runs
+    the real stage over a real ``StateManager``."""
 
-    def test_records_head_when_absent(self, mock_state_manager):
-        """Test that head_before_implement is recorded when not already in state."""
-        mock_state_manager.get.side_effect = lambda key, *args: None
+    def _load(self, plan_path, state, **head):
+        import argparse
 
-        with patch('implement_orchestrator.head_or_empty_tree', return_value='abc123') as mock_head:
-            # Inline the logic under test (it's embedded in run_implement, not a separate function)
-            if mock_state_manager.get("head_before_implement") is None:
-                mock_state_manager.set("head_before_implement", mock_head())
-                mock_state_manager.save()
+        from implement_orchestrator import ImplementRun, load_task_list
 
-        mock_state_manager.set.assert_called_once_with("head_before_implement", "abc123")
-        mock_state_manager.save.assert_called()
+        run = ImplementRun(
+            args=argparse.Namespace(resume=False), unattended=False,
+            plan_path=plan_path, plan_content=plan_path.read_text(encoding="utf-8"),
+            state=state,
+        )
+        with patch('implement_orchestrator.record_pre_existing_changes'), \
+             patch('implement_orchestrator.head_or_empty_tree', **head) as mock_head:
+            assert load_task_list(run) is None
+        return run, mock_head
 
-    def test_skips_when_already_present(self, mock_state_manager):
-        """Test that head_before_implement is not overwritten on resume."""
-        mock_state_manager.get.side_effect = lambda key, *args: 'existing_sha' if key == 'head_before_implement' else None
+    def test_records_head_when_absent(self, sample_plan_with_tasks):
+        from utils.state_manager import StateManager
 
-        with patch('implement_orchestrator.head_or_empty_tree') as mock_head:
-            if mock_state_manager.get("head_before_implement") is None:
-                mock_state_manager.set("head_before_implement", mock_head())
-                mock_state_manager.save()
+        state = StateManager(sample_plan_with_tasks)
+        run, mock_head = self._load(sample_plan_with_tasks, state, return_value="abc123")
+
+        mock_head.assert_called_once_with()
+        assert state.get("head_before_implement") == "abc123"
+        # Saved, not only set: a later process reads it from state.json.
+        assert StateManager(sample_plan_with_tasks).get("head_before_implement") == "abc123"
+        assert [task.id for task in run.tasks] == ["T001", "T002", "T003"]
+
+    def test_skips_when_already_present(self, sample_plan_with_tasks):
+        """A second run (a resume) keeps the HEAD the first run recorded."""
+        from utils.state_manager import StateManager
+
+        self._load(sample_plan_with_tasks, StateManager(sample_plan_with_tasks),
+                   return_value="first_sha")
+        state = StateManager(sample_plan_with_tasks)
+        assert state.get("head_before_implement") == "first_sha"
+        _run, mock_head = self._load(sample_plan_with_tasks, state, return_value="new_sha")
 
         mock_head.assert_not_called()
-        mock_state_manager.set.assert_not_called()
+        assert StateManager(sample_plan_with_tasks).get("head_before_implement") == "first_sha"
 
-    def test_handles_git_error_gracefully(self, mock_state_manager):
-        """Test graceful handling when head_or_empty_tree fails."""
-        mock_state_manager.get.side_effect = lambda key, *args: None
+    def test_handles_git_error_gracefully(self, sample_plan_with_tasks, capsys):
+        from utils.state_manager import StateManager
 
-        with patch('implement_orchestrator.head_or_empty_tree', side_effect=Exception("Git error")):
-            # Replicate the try/except from the orchestrator
-            if mock_state_manager.get("head_before_implement") is None:
-                try:
-                    from implement_orchestrator import head_or_empty_tree
-                    mock_state_manager.set("head_before_implement", head_or_empty_tree())
-                    mock_state_manager.save()
-                except Exception:
-                    pass
+        state = StateManager(sample_plan_with_tasks)
+        run, mock_head = self._load(
+            sample_plan_with_tasks, state, side_effect=Exception("Git error"))
 
-        # set should not be called since head_or_empty_tree raised
-        mock_state_manager.set.assert_not_called()
+        mock_head.assert_called_once_with()
+        assert state.get("head_before_implement") is None
+        assert "Warning: Could not record head_before_implement: Git error" in (
+            capsys.readouterr().out)
+        # The stage goes on: the task list is still decomposed.
+        assert len(run.tasks) == 3
 
 
 class TestLoadImplementationPrompt:
@@ -580,7 +595,7 @@ class TestBuildTaskPromptAcceptanceCriteria:
         runner read them as its own checklist — 10 of an 11-minute task spent
         driving headless Chrome, an orphaned server left behind, and finally a
         `killall -9 … python3` that SIGKILLed the orchestrator. The frame goes
-        above the checklist so it survives `_enforce_token_budget`, which
+        above the checklist so it survives `_enforce_char_budget`, which
         truncates from the end."""
         from implement_orchestrator import (
             ACCEPTANCE_CRITERIA_FRAMING,
@@ -604,27 +619,26 @@ class TestBuildTaskPromptAcceptanceCriteria:
         assert result.index(ACCEPTANCE_CRITERIA_FRAMING) < result.index("- [ ] ")
         assert "do not attempt the browser or manual steps yourself" in result
 
-    def test_the_dispatched_prompt_forbids_signals_and_background_processes(self):
+    def test_the_dispatched_prompt_forbids_signals_and_background_processes(self, tmp_path):
         """The other half of F2: the shipped `## Constraints` block said
         nothing about killing processes, so nothing told the subagent that
         `killall` reaches the orchestrator that dispatched it.
 
         N3, 2026-09-16: the rule moved out of this template's own
-        `## Constraints` (it now duplicated `_with_result_contract`'s shared
+        `## Constraints` (it now duplicated `BatchPromptBuilder.with_result_contract`'s shared
         seam, and stranded the template's terminal "Proceed with the
         implementation." in the middle of the prompt). Every write kind's
         *dispatched* prompt still carries it — through the scheduler, not the
         raw template — so the assertion moves with it.
         """
         from implement_orchestrator import build_task_prompt
-        from utils.write_batch_scheduler import WriteBatchScheduler
+        from tests.scheduler_support import make_scheduler
 
         task = Task(id="T001", title="Test Task", description="Test description")
         prompt = build_task_prompt(task)
 
-        scheduler = WriteBatchScheduler.__new__(WriteBatchScheduler)
-        scheduler.kind = "implement"
-        dispatched = scheduler._with_result_contract({"expected_ids": ["T001"]}, prompt)
+        scheduler = make_scheduler(tmp_path, kind="implement")
+        dispatched = scheduler._prompts.with_result_contract({"expected_ids": ["T001"]}, prompt)
 
         for forbidden in ("`kill`", "`pkill`", "`killall`"):
             assert forbidden in dispatched, forbidden
@@ -637,7 +651,7 @@ class TestBuildTaskPromptAcceptanceCriteria:
 
     def test_the_raw_template_no_longer_duplicates_the_shared_seam(self):
         """The template itself should carry neither the process-safety rule
-        (it now lives once, in `_with_result_contract`) nor a stranded
+        (it now lives once, in `BatchPromptBuilder.with_result_contract`) nor a stranded
         "Proceed with the implementation." ahead of sections the scheduler
         still has to append."""
         from utils.prompt_loader import load_prompt
@@ -941,27 +955,27 @@ Connect Track.surfaceAt into the Game simulation step.
 
 
 class TestTokenBudgetEnforcement:
-    """Tests for _enforce_token_budget."""
+    """Tests for _enforce_char_budget."""
 
     def test_no_truncation_under_budget(self):
         """Test that sections are not truncated when under budget."""
-        from implement_orchestrator import _enforce_token_budget
+        from implement_orchestrator import _enforce_char_budget
 
         acceptance = "## Acceptance Criteria\n- [ ] Short\n"
         dependency = "## Preceding Tasks\n- **T001: Short**\n"
 
-        result_acc, result_dep = _enforce_token_budget(acceptance, dependency, budget=2000)
+        result_acc, result_dep = _enforce_char_budget(acceptance, dependency, budget=2000)
         assert result_acc == acceptance
         assert result_dep == dependency
 
     def test_truncates_dependency_first(self):
         """Test that dependency section is truncated first when over budget."""
-        from implement_orchestrator import _enforce_token_budget
+        from implement_orchestrator import _enforce_char_budget
 
         acceptance = "Short acceptance section"
         dependency = "X" * 3000  # Very long dependency section
 
-        result_acc, result_dep = _enforce_token_budget(acceptance, dependency, budget=200)
+        result_acc, result_dep = _enforce_char_budget(acceptance, dependency, budget=200)
 
         # Acceptance should be preserved or close to original
         # Dependency should be truncated
@@ -969,12 +983,12 @@ class TestTokenBudgetEnforcement:
 
     def test_truncates_acceptance_if_still_over_budget(self):
         """Test acceptance section is truncated if still over budget after dependency truncation."""
-        from implement_orchestrator import _enforce_token_budget
+        from implement_orchestrator import _enforce_char_budget
 
         acceptance = "A" * 3000
         dependency = ""
 
-        result_acc, result_dep = _enforce_token_budget(acceptance, dependency, budget=200)
+        result_acc, result_dep = _enforce_char_budget(acceptance, dependency, budget=200)
 
         # Combined should be within budget or acceptance truncated
         assert len(result_acc) + len(result_dep) <= 200 or result_acc == ""
@@ -1396,8 +1410,7 @@ class TestTaskProcessing:
 
         with patch('implement_orchestrator.parse_args') as mock_args, \
              patch('implement_orchestrator.get_or_create_state', return_value=mock_state_manager), \
-             patch('implement_orchestrator.record_pre_existing_changes'), \
-             patch('sys.exit', side_effect=SystemExit(1)) as mock_exit:
+             patch('implement_orchestrator.record_pre_existing_changes'):
 
             mock_args.return_value = MagicMock(
                 plan_file=str(sample_plan_with_tasks),
@@ -1414,10 +1427,7 @@ class TestTaskProcessing:
                 internal_worker=False,
             )
 
-            with pytest.raises(SystemExit):
-                main()
-
-        mock_exit.assert_called_with(1)
+            assert main() == 1
 
 
 class TestDependencyOrdering:
@@ -1606,8 +1616,7 @@ class TestDryRunOutput:
 
         with patch('implement_orchestrator.parse_args') as mock_args, \
              patch('implement_orchestrator.get_or_create_state', return_value=mock_state_manager), \
-             patch('implement_orchestrator.record_pre_existing_changes'), \
-             patch('sys.exit', side_effect=SystemExit(0)) as mock_exit:
+             patch('implement_orchestrator.record_pre_existing_changes'):
 
             mock_args.return_value = MagicMock(
                 plan_file=str(sample_plan_with_tasks),
@@ -1624,12 +1633,10 @@ class TestDryRunOutput:
                 internal_worker=False,
             )
 
-            with pytest.raises(SystemExit) as exc_info:
-                main()
+            # Exit 0: the dry run prints its summary and stops.
+            assert main() == 0
 
-        # Should exit with 0 (dry run prints summary and exits)
-        mock_exit.assert_called_with(0)
-        assert exc_info.value.code == 0
+        assert not output_path.exists()
 
     def test_dry_run_prints_summary(self, sample_plan_with_tasks, mock_state_manager, temp_dir, capsys):
         """Test that dry-run prints task summary."""
@@ -1709,8 +1716,7 @@ class TestPlanWithoutTasks:
         """Test that plan without tasks outputs TASKS_MISSING marker and exits with 0."""
         from implement_orchestrator import main
 
-        with patch('implement_orchestrator.parse_args') as mock_args, \
-             patch('sys.exit', side_effect=SystemExit(0)) as mock_exit:
+        with patch('implement_orchestrator.parse_args') as mock_args:
 
             mock_args.return_value = MagicMock(
                 plan_file=str(sample_plan_without_tasks),
@@ -1730,10 +1736,8 @@ class TestPlanWithoutTasks:
                 yes=False,
             )
 
-            with pytest.raises(SystemExit):
-                main()
+            assert main() == 0
 
-        mock_exit.assert_called_with(0)
         captured = capsys.readouterr()
         assert "[TASKS_MISSING]" in captured.out
         assert "No implementation tasks" in captured.out
@@ -1808,18 +1812,14 @@ class TestMissingExternalTasksFile:
                 internal_worker=False,
                 yes=False,
             )
-            with pytest.raises(SystemExit) as excinfo:
-                main()
-        return excinfo.value
+            return main()
 
     def test_a_missing_tasks_file_is_exit_three_not_a_re_parse_of_the_plan(
         self, sample_plan_with_tasks_reference, mock_state_manager, temp_dir, capsys
     ):
-        exit_info = self._run(
+        assert self._run(
             sample_plan_with_tasks_reference, mock_state_manager, temp_dir
-        )
-
-        assert exit_info.code == 3
+        ) == 3
         out = capsys.readouterr().out
         assert "TASKS_FILE_MISSING" in out
         assert "tasks/tasks.md" in out, "the message names the path it could not read"
@@ -1852,6 +1852,186 @@ class TestMissingExternalTasksFile:
             main()
 
         assert json.loads(output_path.read_text(encoding="utf-8"))["total_tasks"] >= 1
+
+
+class TestTaskListMarkerIsReadOneWay:
+    """Implement reads the plan's `TASKS_FILE` marker through
+    `tasks_file.read_task_list`, the resolver every phase uses: any spelling
+    review-tasks follows, inside the plan's directory only, and never the
+    plan's prose in place of a task list it names."""
+
+    PROSE = (
+        "# Rendering plan\n\n"
+        "## 1. Overview\nWhat the renderer does.\n\n"
+        "### 2.1 Rendering\nCall camera.update once per frame.\n\n"
+        "## Implementation Tasks\n\n{marker}\n"
+    )
+
+    def _plan(self, temp_dir, marker):
+        """`plans/render.md` with *marker*, a task list beside it in
+        `plans/tasks/` and another outside the plan's directory in `tasks/`."""
+        for tasks in (temp_dir / "plans" / "tasks" / "tasks.md",
+                      temp_dir / "tasks" / "tasks.md"):
+            tasks.parent.mkdir(parents=True, exist_ok=True)
+            tasks.write_text(
+                "# Tasks\n\n### T001: The real task\nDo the real thing.\n"
+                "- Depends on: none\n",
+                encoding="utf-8",
+            )
+        plan = temp_dir / "plans" / "render.md"
+        plan.write_text(self.PROSE.format(marker=marker), encoding="utf-8")
+        return plan
+
+    def _main(self, plan, mock_state_manager, output_path, *, exits=True):
+        from implement_orchestrator import main
+
+        with patch('implement_orchestrator.parse_args') as mock_args, \
+             patch('implement_orchestrator.get_or_create_state', return_value=mock_state_manager), \
+             patch('implement_orchestrator.record_pre_existing_changes'):
+            mock_args.return_value = MagicMock(
+                plan_file=str(plan),
+                output=str(output_path),
+                resume=False,
+                task=None,
+                dry_run=False,
+                exec_subagents=False,
+                dry_run_subagents=False,
+                detach=False,
+                internal_worker=False,
+                yes=False,
+            )
+            code = main()
+        if not exits:
+            assert code == 0
+            return None
+        return code
+
+    @pytest.mark.parametrize("marker", [
+        "<!--TASKS_FILE: tasks/tasks.md-->",
+        "<!--   TASKS_FILE: tasks/tasks.md   -->",
+        "<!--\nTASKS_FILE: tasks/tasks.md\n-->",
+    ])
+    def test_a_reformatted_marker_is_followed_not_parsed_as_plan_prose(
+        self, temp_dir, mock_state_manager, capsys, marker
+    ):
+        """Before the shared resolver, implement's own regex wanted exactly
+        `<!-- TASKS_FILE:`, missed these, and decomposed the plan instead:
+        tasks T1 ". Overview" and T2 ".1 Rendering"."""
+        plan = self._plan(temp_dir, marker)
+        output_path = temp_dir / "out.json"
+
+        self._main(plan, mock_state_manager, output_path, exits=False)
+
+        data = json.loads(output_path.read_text(encoding="utf-8"))
+        ids = [t["id"] for batch in data["batches"] for t in batch["tasks"]]
+        assert ids == ["T001"], "the task list the marker names, not the plan's headings"
+        assert "Loading tasks from:" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("marker, reason", [
+        ("<!-- TASKS_FILE: ../tasks/tasks.md -->", "climbs out with .."),
+        ("<!-- TASKS_FILE: {abs} -->", "absolute path"),
+    ])
+    def test_a_marker_outside_the_plan_directory_is_exit_three(
+        self, temp_dir, mock_state_manager, capsys, marker, reason
+    ):
+        """review-tasks refuses these (`find_tasks_file`); implement used to
+        open them. Same rule now, with implement's exit-3 block."""
+        outside = (temp_dir / "tasks" / "tasks.md").resolve()
+        plan = self._plan(temp_dir, marker.format(abs=outside))
+        output_path = temp_dir / "out.json"
+
+        assert self._main(plan, mock_state_manager, output_path) == 3
+        out = capsys.readouterr().out
+        assert "TASKS_FILE_MISSING" in out
+        assert "outside the plan's directory" in out
+        assert reason in out
+        assert "generate-tasks" in out
+        assert "Found " not in out, "nothing was decomposed"
+        assert not output_path.exists()
+
+    @pytest.mark.parametrize("marker", [
+        "<!-- TASKS_FILE:  -->",
+        "<!--TASKS_FILE:-->",
+        "<!-- TASKS_FILE:-->",
+        "<!--TASKS_FILE:\n-->",
+    ])
+    def test_a_marker_naming_nothing_is_exit_three_not_a_parse_of_the_plan(
+        self, temp_dir, mock_state_manager, capsys, marker
+    ):
+        """An empty marker is a marker however it is spaced: the plan is not
+        the legacy embedded-task format, so its prose is not decomposed. The
+        compact spellings used to read as no marker, and gave T1 ". Overview"."""
+        plan = self._plan(temp_dir, marker)
+        output_path = temp_dir / "out.json"
+
+        assert self._main(plan, mock_state_manager, output_path) == 3
+        out = capsys.readouterr().out
+        assert "TASKS_FILE_MISSING" in out
+        assert "Found " not in out
+        assert not output_path.exists()
+
+
+class TestAMarkerQuotedAsCodeIsNotTheTaskList:
+    """A plan that quotes the marker syntax (a fenced block, inline code)
+    carries examples, not its marker. The first match used to win, so an
+    example above the real marker made implement run the example's tasks."""
+
+    PROSE = TestTaskListMarkerIsReadOneWay.PROSE
+    _main = TestTaskListMarkerIsReadOneWay._main
+
+    def _plan(self, temp_dir, marker):
+        plan = TestTaskListMarkerIsReadOneWay._plan(self, temp_dir, marker)
+        (plan.parent / "example.md").write_text(
+            "# Example\n\n### T999: Not this plan's task\nDo nothing.\n"
+            "- Depends on: none\n",
+            encoding="utf-8",
+        )
+        return plan
+
+    @pytest.mark.parametrize("quoted", [
+        "```\n<!-- TASKS_FILE: example.md -->\n```",
+        "```markdown\n<!--TASKS_FILE: ../tasks/tasks.md-->\n```",
+        "Implement reads `<!-- TASKS_FILE: example.md -->` first.",
+    ])
+    @pytest.mark.parametrize("where", ["before", "after"])
+    def test_the_real_marker_is_followed_not_the_example(
+        self, temp_dir, mock_state_manager, capsys, quoted, where
+    ):
+        real = "<!-- TASKS_FILE: tasks/tasks.md -->"
+        marker = (
+            f"{quoted}\n\n{real}" if where == "before" else f"{real}\n\n{quoted}"
+        )
+        plan = self._plan(temp_dir, marker)
+        output_path = temp_dir / "out.json"
+
+        self._main(plan, mock_state_manager, output_path, exits=False)
+
+        data = json.loads(output_path.read_text(encoding="utf-8"))
+        ids = [t["id"] for batch in data["batches"] for t in batch["tasks"]]
+        assert ids == ["T001"], "the plan's own task list, not the quoted example's"
+        out = capsys.readouterr().out
+        assert f"Loading tasks from: {(plan.parent / 'tasks' / 'tasks.md').resolve()}" in out
+
+    def test_two_markers_naming_different_lists_are_exit_three(
+        self, temp_dir, mock_state_manager, capsys
+    ):
+        """Which list is current is the author's call: implement follows
+        neither, and says how to settle it."""
+        plan = self._plan(
+            temp_dir,
+            "<!-- TASKS_FILE: tasks/tasks.md -->\n\n<!--TASKS_FILE: example.md-->",
+        )
+        output_path = temp_dir / "out.json"
+
+        assert self._main(plan, mock_state_manager, output_path) == 3
+        out = capsys.readouterr().out
+        assert "TASKS_FILE_MISSING" in out
+        assert "naming different task lists" in out
+        assert "<!-- TASKS_FILE: tasks/tasks.md -->" in out
+        assert "<!-- TASKS_FILE: example.md -->" in out
+        assert "generate-tasks" in out
+        assert "Found " not in out, "nothing was decomposed"
+        assert not output_path.exists()
 
 
 class TestOutputFormat:
@@ -1983,8 +2163,7 @@ class TestPlanFileValidation:
         """Test that nonexistent plan file exits with error."""
         from implement_orchestrator import main
 
-        with patch('implement_orchestrator.parse_args') as mock_args, \
-             patch('sys.exit', side_effect=SystemExit(1)) as mock_exit:
+        with patch('implement_orchestrator.parse_args') as mock_args:
 
             mock_args.return_value = MagicMock(
                 plan_file=str(temp_dir / "nonexistent.md"),
@@ -2001,10 +2180,8 @@ class TestPlanFileValidation:
                 internal_worker=False,
             )
 
-            with pytest.raises(SystemExit):
-                main()
+            assert main() == 1
 
-        mock_exit.assert_called_with(1)
         captured = capsys.readouterr()
         assert "ERROR" in captured.out
         assert "not found" in captured.out
@@ -2473,7 +2650,7 @@ class TestImplementTasksFileIsStamped:
             outcomes = []
 
         class _FakeScheduler:
-            def __init__(self, **kwargs):
+            def __init__(self, options):
                 pass
 
             def run(self):
@@ -2541,7 +2718,7 @@ class TestImplementTasksFileIsStamped:
             outcomes = []
 
         class _FakeScheduler:
-            def __init__(self, **kwargs):
+            def __init__(self, options):
                 pass
 
             def run(self):

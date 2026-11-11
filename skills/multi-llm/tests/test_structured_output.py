@@ -32,6 +32,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import structured_output as so  # noqa: E402
+from tests.roster_check import assert_covers_registry, registered_names, row_for  # noqa: E402
 from utils.providers.base import (  # noqa: E402
     LLMProvider,
     PROFILE_AGENT_READONLY,
@@ -293,7 +294,7 @@ class TestClaudeJsonSchemaGate:
     def _help(text):
         """Patch the help read so the gate sees exactly ``text``."""
         return patch(
-            "utils.providers.base.read_help_tokens",
+            "utils.providers.version_gate.read_help_tokens",
             lambda binary, **_kwargs: frozenset(
                 token for token in text.split() if token.startswith("--")
             ),
@@ -346,7 +347,7 @@ class TestClaudeJsonSchemaGate:
     def test_an_undecidable_help_read_declines_the_flag_not_the_run(self, schema):
         provider = ClaudeCodeProvider()
         with patch("shutil.which", return_value="/usr/bin/claude"), patch(
-            "utils.providers.base.read_help_tokens",
+            "utils.providers.version_gate.read_help_tokens",
             lambda binary, **_kwargs: frozenset(),
         ):
             cmd = provider.build_command(self.PROMPT, "sonnet", schema=schema)
@@ -405,7 +406,7 @@ class TestSchemaKeywordIsInertWhenUnset:
 
     @staticmethod
     def _table():
-        from tests.test_providers import (
+        from tests.test_provider_timeouts import (
             PRE_L5_ARGV,
             PRE_L5_ARGV_MODELS,
             PRE_L5_ARGV_PROMPT,
@@ -413,59 +414,54 @@ class TestSchemaKeywordIsInertWhenUnset:
 
         return PRE_L5_ARGV, PRE_L5_ARGV_MODELS, PRE_L5_ARGV_PROMPT
 
+    @staticmethod
+    def _row(table, name):
+        """``table[name]`` from the shared pre-L5 tables, or where to add it."""
+        from tests.test_provider_timeouts import PRE_L5_ARGV_HINT
+
+        return row_for(
+            table, name, "PRE_L5_ARGV / PRE_L5_ARGV_MODELS in "
+            "tests/test_provider_timeouts.py", hint=PRE_L5_ARGV_HINT,
+        )
+
     def test_the_table_covers_every_registered_adapter(self):
-        from utils.provider_registry import _PROVIDERS
+        from tests.test_provider_timeouts import PRE_L5_ARGV_HINT, PRE_L5_ARGV_WHERE
 
         table, _models, _prompt = self._table()
-        assert set(table) == set(_PROVIDERS)
-        assert len(table) == 19
+        assert_covers_registry(
+            table, PRE_L5_ARGV_WHERE, what="a pinned argv row", hint=PRE_L5_ARGV_HINT
+        )
 
-    @pytest.mark.parametrize("name", sorted(so.__dict__.get("_ADAPTERS", ())) or [
-        "agy", "aider", "claude-code", "cline", "codex", "copilot", "cursor-agent", "fx",
-        "gemini",
-        "goose", "grok", "kilocode", "kimi", "muse", "omp", "opencode", "pi",
-        "qwen-code",
-        "vibe",
-    ])
+    @pytest.mark.parametrize("name", registered_names())
     def test_explicit_none_renders_the_pre_m7_argv(self, name):
         from utils.provider_registry import _PROVIDERS
 
         table, models, prompt = self._table()
         provider = _PROVIDERS[name]
 
-        assert provider.build_command(prompt, models[name], schema=None) == table[name]
+        model = self._row(models, name)
+        assert provider.build_command(prompt, model, schema=None) == self._row(table, name)
 
-    @pytest.mark.parametrize("name", [
-        "agy", "aider", "claude-code", "cline", "codex", "copilot", "cursor-agent", "fx",
-        "gemini",
-        "goose", "grok", "kilocode", "kimi", "muse", "omp", "opencode", "pi",
-        "qwen-code",
-        "vibe",
-    ])
+    @pytest.mark.parametrize("name", registered_names())
     def test_omitting_the_keyword_is_the_same_as_passing_none(self, name):
         from utils.provider_registry import _PROVIDERS
 
         _table, models, prompt = self._table()
         provider = _PROVIDERS[name]
 
-        assert provider.build_command(prompt, models[name]) == provider.build_command(
-            prompt, models[name], schema=None
+        model = self._row(models, name)
+        assert provider.build_command(prompt, model) == provider.build_command(
+            prompt, model, schema=None
         )
 
-    @pytest.mark.parametrize("name", [
-        "agy", "aider", "claude-code", "cline", "codex", "copilot", "cursor-agent", "fx",
-        "gemini",
-        "goose", "grok", "kilocode", "kimi", "muse", "omp", "opencode", "pi",
-        "qwen-code",
-        "vibe",
-    ])
+    @pytest.mark.parametrize("name", registered_names())
     def test_the_other_three_builders_are_inert_too(self, name):
         from utils.provider_registry import _PROVIDERS
         from utils.providers.base import PROFILE_GENERATE
 
         _table, models, prompt = self._table()
         provider = _PROVIDERS[name]
-        model = models[name]
+        model = self._row(models, name)
 
         for transport in ("argv", "stdin"):
             if transport != "argv" and not provider.supports_prompt_transport(transport):
@@ -514,9 +510,10 @@ class TestSchemaKeywordIsInertWhenUnset:
         for name, provider in _PROVIDERS.items():
             if provider.structured_output_support:
                 continue
+            model = self._row(models, name)
             assert provider.build_command(
-                prompt, models[name], schema=schema
-            ) == provider.build_command(prompt, models[name])
+                prompt, model, schema=schema
+            ) == provider.build_command(prompt, model)
 
 
 # --------------------------------------------------------------------------- #
@@ -534,7 +531,7 @@ class TestSplicePosition:
     def _gate_open(self):
         reset_flag_gate_cache()
         with patch("shutil.which", return_value="/usr/bin/claude"), patch(
-            "utils.providers.base.read_help_tokens",
+            "utils.providers.version_gate.read_help_tokens",
             lambda binary, **_kwargs: frozenset(
                 {"--json-schema", "--output-format", "--model", "--effort"}
             ),
@@ -749,7 +746,7 @@ class TestCallerLeg:
         table["generate-tasks"] = "probe.schema.json"
         table["task-decomposition"] = "probe.schema.json"
         with patch("shutil.which", return_value="/usr/bin/claude"), patch(
-            "utils.providers.base.read_help_tokens",
+            "utils.providers.version_gate.read_help_tokens",
             lambda binary, **_kwargs: frozenset({"--json-schema"}),
         ), patch.object(so, "SCHEMA_DIR", tmp_path), patch.object(
             so, "PHASE_SCHEMA_FILE", table

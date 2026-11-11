@@ -391,7 +391,7 @@ class TestTheContextPlan:
         assert guard["skipped"][ids[0]] == {"reason": "context_plan", "files": ["docs/x.md"]}
         assert guard["skipped"][ids[2]]["reason"] == "context_plan"
         assert guard["context_plan"] == "docs/x.md"
-        summary = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        summary = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "context plan docs/x.md is read-only in this review" in summary
         assert "**Files**: `docs/x.md`" in summary
 
@@ -658,10 +658,10 @@ class TestGroupGranularity:
         assert rc == 0
         block = _block(out)
         assert f"  skipped  1 (file changed since {head[:7]}: b.py)" in block
-        summary = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        summary = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert summary.count(f"**Group**: `{ab}`") == 1
         assert "**Files**: `b.py`" in summary
-        assert orch.regenerate_decisions_overlay() is not None
+        assert orch.phase_report().regenerate_decisions_overlay() is not None
         data = json.loads((review / "report_data.json").read_text(encoding="utf-8"))
         stamped = [g for g in data["groups"] if g.get("guardSkip")]
         assert len(stamped) == 1
@@ -815,11 +815,9 @@ def write_rig(ranged, monkeypatch, tmp_path):
     monkeypatch.setenv("MOCK_LLM_PLUGIN", str(plugin))
     monkeypatch.setenv("COMMIT_APPLY_CALLS", str(calls))
     registry._config = None
-    registry._config_key = None
     executor.reset_version_cache()
     yield ranged, calls
     registry._config = None
-    registry._config_key = None
 
 
 def _dispatched(calls: Path) -> List[List[str]]:
@@ -1309,7 +1307,6 @@ class TestSelectReview:
         _write(repo / ".multi-llm" / "providers.yaml",
                "code_review:\n  commit_reviews_dir: reviews/commits\n")
         registry._config = None
-        registry._config_key = None
         _complete(repo, s[1], s[4], "2026-10-26T12:00:00")  # plans/commit-reviews
         configured = _complete(repo, s[3], s[4], "2026-10-26T09:00:00",
                                folder="reviews/commits")
@@ -1877,11 +1874,13 @@ class TestASymlinkedContextPlan:
     def test_the_executor_denies_the_target_as_the_context_plan(self, repo):
         import types
 
-        from utils.write_batch_scheduler import WriteBatchScheduler
+        from utils.write_commit_leg import CommitGuardLeg
         from utils.write_safety import CONTEXT_PLAN_RULE, PolicyViolation, WritePolicy
 
         policy = WritePolicy(root=str(repo), allow=["**"], deny=[])
-        WriteBatchScheduler._commit_protect(types.SimpleNamespace(policy=policy), {
+        CommitGuardLeg(
+            types.SimpleNamespace(policy=policy), effects_lock=None, refused=None,
+        ).protect({
             "head": "0" * 40, "protected": {}, "context_plan": "docs/plan-link.md",
             "context_plan_targets": {"docs/plan.md": "id"},
         })

@@ -24,7 +24,6 @@ Now:
 from __future__ import annotations
 
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -32,17 +31,18 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-import multi_llm  # noqa: E402
-from utils import cli_common, detach  # noqa: E402
+from utils import cli_common  # noqa: E402
 from utils import next_phase as np_  # noqa: E402
 from utils.output_handler import output_dir_path  # noqa: E402
 from utils.state_manager import manual_task_gates  # noqa: E402
 
-from tests.test_write_executor_orchestrators import (  # noqa: E402,F401
+from tests.support.write_orchestrators import (  # noqa: E402
     IMPLEMENT_WRITE_IDS,
     _seed_generate_tasks,
-    repo,
+    orchestrator_repo,  # noqa: F401 - the repo fixture
 )
+from tests.support.main_runs import _clean_env, _run
+from tests.support.manual_gate import _manual
 
 #: The Codex racing 06 decomposition, as `state.json` recorded it.
 RACING_GRAPH = {
@@ -56,35 +56,6 @@ RACING_GRAPH = {
 RACING_MANUAL = ["T008", "T009", "T010"]
 RACING_WAITING = ["T001", "T002", "T003", "T004", "T005", "T006", "T007",
                   "T011", "T012"]
-
-
-def _run(argv, capsys):
-    code = multi_llm.main(list(argv))
-    captured = capsys.readouterr()
-    return code, captured.out, captured.err, cli_common.parse_result_line(captured.out)
-
-
-def _manual(repo, *task_ids):
-    """The repo fixture's chain T001 → T002 → T003 with *task_ids* manual."""
-    import implement_orchestrator
-
-    original = implement_orchestrator.TaskDecomposer
-
-    class SeededDecomposer(original):
-        def parse_plan(self, content):
-            tasks = super().parse_plan(content)
-            for task_id in task_ids:
-                self.tasks[task_id].executor_role = "human"
-                self.tasks[task_id].subagent_type = "human"
-            return tasks
-
-    repo.monkeypatch.setattr(implement_orchestrator, "TaskDecomposer", SeededDecomposer)
-
-
-def _clean_env(monkeypatch):
-    for name in ("MULTI_LLM_HOST", "MULTI_LLM_ROUTE", detach.PLAN_ARG_ENV,
-                 detach.WORKER_ENV):
-        monkeypatch.delenv(name, raising=False)
 
 
 def _state(repo) -> dict:
@@ -429,7 +400,7 @@ class TestTheNativeLegStops:
         # Never the generic "go on to step 7" of an emit with nothing left,
         # and no summary or second copy of the resume asked for.
         assert "Nothing to dispatch: every task is done" not in out
-        assert "Claude Code should now:" not in out
+        assert "The driving agent should now:" not in out
         assert "[MANUAL_TASK_NOTE]" not in out
         assert "Manual Tasks (Deferred) section" not in out
         assert "Tasks to dispatch:" not in out  # no `util metrics start` asked
@@ -465,7 +436,7 @@ class TestTheNativeLegStops:
         tasks, then end with the section `util next-command` prints. The
         Stop hook passes that report, and the resume command is in it once,
         in the section."""
-        from tests.test_report_check import Transcript, run_check
+        from tests.support.transcripts import Transcript, run_check
         from utils import report_check
 
         _code, emit, _err, _result = self._emit(repo, capsys)

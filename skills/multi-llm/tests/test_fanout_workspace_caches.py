@@ -188,7 +188,8 @@ def lane(tmp_path, monkeypatch):
         # The real adapter: the declaration under test is aider's own.
         "aider": registry.get_provider("aider"),
     }
-    monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+    from utils import subagent_executor
+    subagent_executor._SANDBOX_PROBE_CACHE.clear()
     monkeypatch.setattr(rob, "get_provider", lambda name: adapters.get(name))
     monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
     monkeypatch.setattr(cro, "get_project_root", lambda _p: str(tmp_path))
@@ -211,6 +212,7 @@ def _dispatch_writing(root: Path, *cache_dirs: str):
     return dispatch
 
 
+@pytest.mark.shell_probe
 class TestTheReviewPlanLane:
     """``run_single_model``: one ``ignore_prefixes`` for both snapshots and the
     comparison, computed in the slot's task where the roster lives."""
@@ -255,6 +257,7 @@ class TestTheReviewPlanLane:
         assert "fails closed" in result["error"]
 
 
+@pytest.mark.shell_probe
 class TestTheReviewCodeLane:
     """``run_single_review``: the before snapshot and the after check each
     compute the prefixes, and both take the roster-aware form."""

@@ -22,6 +22,7 @@ D7, D9, A2, A2a, A2b). The stdio server's behaviour is graded in
 from __future__ import annotations
 
 import ast
+import dataclasses
 import datetime
 import filecmp
 import json
@@ -48,9 +49,9 @@ for _path in (str(SKILL_ROOT), str(REPO_ROOT / "packaging"), str(CODEX_PKG)):
         sys.path.insert(0, _path)
 
 import modes as mode_table  # noqa: E402
-from utils import cli_common, host_install, unattended  # noqa: E402
+from utils import cli_common, env_vars, host_install, unattended  # noqa: E402
 
-from common import payload  # noqa: E402
+from common import payload, release_history  # noqa: E402
 from tests.generated_distributions import CLAUDE, CODEX, DISTRIBUTIONS  # noqa: E402
 
 # Imported under its own name: the opencode suite imports *its* build.py as
@@ -65,6 +66,11 @@ sys.modules["codex_build"] = codex_build
 _spec.loader.exec_module(codex_build)
 import ingestion_rules  # noqa: E402
 import release_gate  # noqa: E402
+from tests import env_read_scan  # noqa: E402
+from tests.env_read_scan import EnvScan, is_os_environ  # noqa: E402
+from tests.env_read_scan import module_constants as _module_constants  # noqa: E402
+from tests.env_read_scan import read_keys as _env_read_keys  # noqa: E402
+from tests.source_cache import source_tree  # noqa: E402
 
 #: Set by the package job: a row that would skip fails instead.
 REQUIRE_ROWS_ENV = "MLLM_REQUIRE_PACKAGE_ROWS"
@@ -221,9 +227,9 @@ class TestManifest:
 
         pins = _load(SKILL_ROOT / "tests" / "container" / "package.json")
         pinned = pins["dependencies"]["@openai/codex"]
-        assert codex_build._version_key(  # noqa: SLF001
+        assert release_history.version_key(
             ingestion_rules.SOURCE_CODEX_VERSION
-        ) >= codex_build._version_key(pinned), (  # noqa: SLF001
+        ) >= release_history.version_key(pinned), (
             f"the ingestion rules were restated against codex "
             f"{ingestion_rules.SOURCE_CODEX_VERSION}, but the container pins "
             f"{pinned}. Re-read validate_plugin.py, fix the rules, re-stamp."
@@ -264,8 +270,8 @@ class TestManifest:
             path = SCHEMA_DIR / name
             assert path.is_file(), f"{path} is tracked by provenance.json and missing"
             assert hashlib.sha256(path.read_bytes()).hexdigest() == record["sha256"]
-            assert codex_build._version_key(record["codex_version"]) >= (  # noqa: SLF001
-                codex_build._version_key(ingestion_rules.SOURCE_CODEX_VERSION)  # noqa: SLF001
+            assert release_history.version_key(record["codex_version"]) >= (
+                release_history.version_key(ingestion_rules.SOURCE_CODEX_VERSION)
             )
             datetime.date.fromisoformat(record["fetched"])
 
@@ -316,8 +322,8 @@ A2B_ENV_VARS = (
     "MULTI_LLM_GIT_CREDENTIAL_HELPER", "MULTI_LLM_HOST", "MULTI_LLM_UV",
     "MULTI_LLM_UV_RUN_ARGS", "MULTI_LLM_SKILL_DIR", "MULTI_LLM_MAX_DETACHED",
     "MULTI_LLM_HEARTBEAT_INTERVAL_S", "MULTI_LLM_HANDSHAKE_TIMEOUT_S",
-    "MULTI_LLM_REPLAY_FLAGS", "MULTI_LLM_LEGACY_INSTRUCTIONS",
-    "MULTI_LLM_CODEX_UNSANDBOXED_WRITES",
+    "MULTI_LLM_REPLAY_FLAGS", "MULTI_LLM_CODEX_UNSANDBOXED_WRITES",
+    "MULTI_LLM_VALIDATION_CONTEXT",
     "UV_PROJECT_ENVIRONMENT", "UV_CACHE_DIR", "UV_OFFLINE",
     "PWD",
 )
@@ -328,47 +334,37 @@ NON_MULTI_LLM_FORWARDED = frozenset({
     "CODEX_HOME", "UV_PROJECT_ENVIRONMENT", "UV_CACHE_DIR", "UV_OFFLINE", "PWD",
 })
 
-#: Real reads deliberately left out of the allowlist (D9).
-NOT_FORWARDED = frozenset({
-    # The server sets it per call from the turn metadata; a forwarded one would outlive the turn.
-    "MULTI_LLM_HOST_SESSION_MODEL",
-    # The same rule for the chat's sandbox posture (plan codex-sandbox-unavailable
-    # step 6, F5, 2026-09-30): set or removed on every call, never inherited —
-    # a forwarded one would hand F5's consent to a chat that never gave it.
-    "MULTI_LLM_HOST_SANDBOX_POSTURE",
-    # A test switch, but read by shipped code, so the walk finds it.
-    "MULTI_LLM_TEST_FAST_BACKOFF",
-    # The parent->worker handshake; an inherited stale one is a bug.
-    "MULTI_LLM_DETACHED_WORKER",
-    # The launcher supplies its own log per worker and the dispatcher consumes
-    # it before pre-flight; forwarding a host value could target a stale log.
-    "MULTI_LLM_WORKER_LOG",
-    # The same handshake's typed plan (plans/next-phase-command.md T5):
-    # `detach.child_env` sets it per launch for the worker alone, which pops it.
-    # The server spawns invokers, never workers, so a forwarded one could only
-    # be another launch's stale value.
-    "MULTI_LLM_PLAN_ARG",
-})
+#: Which ``MULTI_LLM_*`` names are forwarded, which are deliberately not, and
+#: which are not environment reads at all lives in ``utils/env_vars.py`` (one
+#: row per name, with the reason in its summary). This test pins the allowlist
+#: to that table and the table to the tree.
+ROW_HINT = (
+    "Add or change a row in skills/multi-llm/utils/env_vars.py "
+    "(ENV_VARS: name, kind, owner, forwarded_to_codex, summary)"
+)
 
-#: Protocol tokens and a comment-only mention — never environment reads, and
-#: asserted ABSENT from the walk so a real read of one fails loudly instead of
-#: being swept into the allowlist.
-NOT_ENVIRONMENT = frozenset({
-    "MULTI_LLM_RESULT", "MULTI_LLM_NESTED_EXEC_OK", "MULTI_LLM_DEBUG",
-})
-
-#: Files allowed to read an environment name the walk cannot resolve to a
-#: literal, each with its reason. A new file here is a decision, not a drift.
-DYNAMIC_READ_FILES = {
-    # `--question-env NAME`: the user names the variable per call.
-    "ask_orchestrator.py": "a per-call variable named on the command line",
-    # iterates a tuple of cursor's own profile variables (none MULTI_LLM_*).
-    "cursor_agent.py": "cursor's profile variables, iterated",
-    # `_truthy_env(name)`: every caller passes a module constant the walk
-    # already finds at its own read site.
-    "provider_registry.py": "a helper whose callers pass named constants",
-    # names read out of the generated surface (D3e), never spelled.
-    "mcp_server.py": "names read from dist/cli-surface.json",
+#: The functions allowed to read an environment name the walk cannot resolve,
+#: as ``file::qualified name``, each with its reason. Exact both ways: a new
+#: site is a decision, not a drift, and a site that now resolves leaves.
+DYNAMIC_READ_SITES = {
+    "skills/multi-llm/ask_orchestrator.py::resolve_question":
+        "`--question-env NAME`: the user names the variable per call",
+    # The server spells no name of its own (D3e): both arrive from the surface.
+    "packaging/codex/mcp_server.py::find_uv":
+        "the uv override's name, read from dist/cli-surface.json",
+    "packaging/codex/mcp_server.py::Server.export_session_model":
+        "the session-model variable's name, read from dist/cli-surface.json",
+    "skills/multi-llm/utils/host_routes/npm.py::_config_files":
+        "the host's `<HOST>_CONFIG` and `<HOST>_CONFIG_DIR`, built from its id",
+    "skills/multi-llm/utils/providers/child_env.py::_skill_environment_on_path":
+        "the PATH spellings the mapping carries",
+    "skills/multi-llm/utils/providers/child_env.py::build_child_env":
+        "a runner's removals, the skill's own environment names and the PATH "
+        "spellings, computed per dispatch",
+    "skills/multi-llm/utils/providers/opencode.py::_api_key_resolves.<lambda>":
+        "a `{env:NAME}` reference in the user's opencode config",
+    "skills/multi-llm/utils/providers/opencode.py::OpenCodeProvider.describe_unlisted_model":
+        "the provider's own removal list (get_remove_env)",
 }
 
 
@@ -382,86 +378,20 @@ def _shipped_python() -> list:
     return files
 
 
-def _module_constants(tree: ast.Module) -> dict:
-    found = {}
-    for node in tree.body:
-        targets, value = [], None
-        if isinstance(node, ast.Assign):
-            targets, value = node.targets, node.value
-        elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            targets, value = [node.target], node.value
-        if isinstance(value, ast.Constant) and isinstance(value.value, str):
-            for target in targets:
-                if isinstance(target, ast.Name):
-                    found[target.id] = value.value
+def shipped_trees() -> dict:
+    """``{path: parsed module}`` for the shipped tree (shared: never mutate)."""
+    return {path: source_tree(path) for path in _shipped_python()}
+
+
+def env_reads(parsed=None) -> EnvScan:
+    """Every environment read in *parsed* (default: the shipped tree), found
+    by :func:`tests.env_read_scan.scan` — an AST walk, never a text grep, so a
+    comment naming a variable, a protocol token and a test-only ``MLLM_*``
+    name are not reads (D9) — plus the names the server reads through the
+    surface (:func:`surface_env_names`)."""
+    found = env_read_scan.scan(shipped_trees() if parsed is None else parsed, REPO_ROOT)
+    found.names |= surface_env_names()
     return found
-
-
-def _is_environ(node) -> bool:
-    return (
-        isinstance(node, ast.Attribute) and node.attr == "environ"
-        and isinstance(node.value, ast.Name) and node.value.id == "os"
-    ) or (isinstance(node, ast.Name) and node.id == "environ")
-
-
-def _env_read_keys(tree: ast.Module):
-    """Every expression used as a *read* key: ``os.environ[k]`` (load context),
-    ``os.environ.get/setdefault/pop(k)`` and ``os.getenv(k)``."""
-    for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load)
-            and _is_environ(node.value)
-        ):
-            yield node.slice
-        elif isinstance(node, ast.Call) and node.args:
-            func = node.func
-            if (
-                isinstance(func, ast.Attribute)
-                and func.attr in ("get", "setdefault", "pop")
-                and _is_environ(func.value)
-            ):
-                yield node.args[0]
-            elif (
-                isinstance(func, ast.Attribute) and func.attr == "getenv"
-                and isinstance(func.value, ast.Name) and func.value.id == "os"
-            ) or (isinstance(func, ast.Name) and func.id == "getenv"):
-                yield node.args[0]
-
-
-def env_reads():
-    """``(names read, {file: unresolved count})`` over the shipped tree.
-
-    An AST walk, never a text grep: a comment naming a variable, a protocol
-    token and a test-only ``MLLM_*`` name are not reads (D9). A key resolves
-    when it is a string literal, a module-level constant assigned one (the
-    ``WORKER_ENV`` indirection in ``utils/detach.py``), or an attribute or
-    imported name whose target is such a constant somewhere in the tree.
-    """
-    parsed = {path: ast.parse(path.read_text(encoding="utf-8")) for path in _shipped_python()}
-    local = {path: _module_constants(tree) for path, tree in parsed.items()}
-    global_constants: dict = {}
-    for constants in local.values():
-        for name, value in constants.items():
-            global_constants.setdefault(name, set()).add(value)
-
-    names, unresolved = set(), {}
-    for path, tree in parsed.items():
-        for key in _env_read_keys(tree):
-            value = None
-            if isinstance(key, ast.Constant) and isinstance(key.value, str):
-                value = key.value
-            elif isinstance(key, ast.Name):
-                value = local[path].get(key.id)
-                if value is None and len(global_constants.get(key.id, ())) == 1:
-                    value = next(iter(global_constants[key.id]))
-            elif isinstance(key, ast.Attribute):
-                if len(global_constants.get(key.attr, ())) == 1:
-                    value = next(iter(global_constants[key.attr]))
-            if value is None:
-                unresolved[path.name] = unresolved.get(path.name, 0) + 1
-            else:
-                names.add(value)
-    return names | surface_env_names(), unresolved
 
 
 def surface_env_names() -> set:
@@ -471,7 +401,7 @@ def surface_env_names() -> set:
     override and the write-posture lever arrive as values of ``env`` /
     ``*_env`` keys in ``dist/cli-surface.json``, and the server reads them from
     its environment by those values — which is why ``mcp_server.py`` sits in
-    :data:`DYNAMIC_READ_FILES`. Read from the emitted surface, so a name the
+    :data:`DYNAMIC_READ_SITES`. Read from the emitted surface, so a name the
     emitter adds is discovered the same day.
     """
     from common import surface
@@ -493,36 +423,157 @@ def surface_env_names() -> set:
     return found
 
 
+def shipped_env_constants(parsed=None) -> set:
+    """Every ``MULTI_LLM_*`` name spelled as a whole string constant in *parsed*
+    (default: the shipped tree): one handed to a helper that reads it, which no
+    receiver rule sees, still has to be inventoried."""
+    parsed = shipped_trees() if parsed is None else parsed
+    found = set()
+    for tree in parsed.values():
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Constant) and isinstance(node.value, str)
+                and re.fullmatch(r"MULTI_LLM_[A-Z0-9_]+", node.value)
+            ):
+                found.add(node.value)
+    return found
+
+
+def _manifest_env_vars() -> list:
+    return _load(codex_build.MCP_SOURCE)["mcpServers"]["multi_llm"]["env_vars"]
+
+
+def _owner_ships(owner: str, shipped: set) -> bool:
+    """Whether a row's owner (skill- or repo-relative) is one of *shipped*."""
+    return any((root / owner).resolve() in shipped for root in (SKILL_ROOT, REPO_ROOT))
+
+
+def environment_problems(parsed=None, rows=None, allowlist=None,
+                         dynamic_read_sites=None) -> list:
+    """Every way the shipped tree, the Codex ``.mcp.json`` and
+    ``utils/env_vars.py`` disagree about ``MULTI_LLM_*`` names (D9), one line
+    each; empty when they agree. Defaults: the shipped tree, the table's rows
+    and the shipped allowlist, so a test can hand it an altered copy of any."""
+    parsed = shipped_trees() if parsed is None else parsed
+    rows = {row.name: row for row in (env_vars.ENV_VARS if rows is None else rows)}
+    allowlist = _manifest_env_vars() if allowlist is None else allowlist
+    scan = env_reads(parsed)
+    read = scan.names
+    problems = []
+
+    forwarded = {n for n in allowlist if n.startswith("MULTI_LLM_")}
+    table_forwarded = {n for n, row in rows.items() if row.forwarded_to_codex}
+    if forwarded != table_forwarded:
+        problems.append(
+            f"marked forwarded_to_codex but missing from the shipped .mcp.json "
+            f"env_vars: {sorted(table_forwarded - forwarded)}; in .mcp.json but not "
+            f"marked forwarded_to_codex: {sorted(forwarded - table_forwarded)}. A "
+            "name missing from .mcp.json is silently absent from the server's "
+            "environment (R12′). " + ROW_HINT
+        )
+    unlisted = sorted(
+        ({n for n in read if n.startswith("MULTI_LLM_")} | shipped_env_constants(parsed))
+        - set(rows)
+    )
+    if unlisted:
+        problems.append(f"{unlisted} appear in shipped code with no row. {ROW_HINT}")
+    for where in scan.own_unresolved:
+        problems.append(
+            f"{where} reads a MULTI_LLM_* name no rule resolves, so it can have no "
+            "row; spell it as a literal or a module constant"
+        )
+    not_reads = sorted(
+        n for n, row in rows.items() if row.kind in env_vars.NOT_READ_KINDS and n in read
+    )
+    if not_reads:
+        problems.append(
+            f"{not_reads} became real environment reads, but their rows say they "
+            "are not (marker or reserved); change the row's kind and decide "
+            "whether it is forwarded rather than sweeping it in. " + ROW_HINT
+        )
+    # The stale-read half: a forwarded row, and a row of a read kind whose owner
+    # ships, must still be read there. Plumbing rows are read by a child's own
+    # script, build and most test rows by code that never ships.
+    shipped = {Path(path).resolve() for path in parsed}
+    stale = sorted(
+        n for n, row in rows.items()
+        if n not in read and (
+            row.forwarded_to_codex
+            or (row.kind in env_vars.READ_KINDS and _owner_ships(row.owner, shipped))
+        )
+    )
+    if stale:
+        problems.append(
+            f"{stale} are no longer read by shipped code; drop the row, change its "
+            "kind, or drop forwarded_to_codex. " + ROW_HINT
+        )
+    sites = dynamic_read_sites if dynamic_read_sites is not None else DYNAMIC_READ_SITES
+    dynamic = sorted(set(scan.unresolved) - set(sites))
+    if dynamic:
+        problems.append(
+            f"unresolvable environment reads in {dynamic}; read a literal or a "
+            "module constant, or record the site in DYNAMIC_READ_SITES with its reason"
+        )
+    resolved = sorted(set(sites) - set(scan.unresolved))
+    if resolved:
+        problems.append(
+            f"{resolved} no longer read an unresolvable name; drop them from "
+            "DYNAMIC_READ_SITES"
+        )
+    return problems
+
+
+def _with_injection(module: str, function: str, statement: str) -> dict:
+    """The shipped trees, *statement* appended to *function* in a fresh parse
+    of *module* (repo-relative). The shared parse cache is never touched."""
+    parsed = dict(shipped_trees())
+    path = next(p for p in parsed if Path(p).as_posix().endswith(module))
+    tree = ast.parse(Path(path).read_text(encoding="utf-8"), filename=str(path))
+    target = next(
+        node for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function
+    )
+    target.body.extend(ast.parse(statement).body)
+    parsed[path] = ast.fix_missing_locations(tree)
+    return parsed
+
+
+def _with_read_removed(module: str, name: str) -> dict:
+    """The shipped trees, every read whose key is the module constant *name*
+    in *module* replaced by ``None``, in a fresh parse."""
+    parsed = dict(shipped_trees())
+    path = next(p for p in parsed if Path(p).as_posix().endswith(module))
+    tree = ast.parse(Path(path).read_text(encoding="utf-8"), filename=str(path))
+
+    class Drop(ast.NodeTransformer):
+        def visit_Call(self, node):
+            self.generic_visit(node)
+            func = node.func
+            if (
+                isinstance(func, ast.Attribute) and func.attr == "get"
+                and is_os_environ(func.value) and node.args
+                and isinstance(node.args[0], ast.Name) and node.args[0].id == name
+            ):
+                return ast.copy_location(ast.Constant(None), node)
+            return node
+
+    parsed[path] = ast.fix_missing_locations(Drop().visit(tree))
+    return parsed
+
+
 class TestEnvironment:
     def test_env_allowlist_matches_the_tree(self):
         """(src) Exact in both directions (D9): the ``MULTI_LLM_*`` subset of
-        the shipped ``env_vars`` equals the names shipped code reads minus
-        :data:`NOT_FORWARDED`, and the remainder equals the declared four."""
-        allowlist = _load(codex_build.MCP_SOURCE)["mcpServers"]["multi_llm"]["env_vars"]
-        names, unresolved = env_reads()
-
-        assert not (names & NOT_ENVIRONMENT), (
-            f"{sorted(names & NOT_ENVIRONMENT)} became real environment reads; "
-            "decide whether they are forwarded rather than sweeping them in"
-        )
-        assert NOT_FORWARDED <= names, (
-            f"{sorted(NOT_FORWARDED - names)} is no longer read; drop it from "
-            "NOT_FORWARDED"
-        )
-        read = {n for n in names if n.startswith("MULTI_LLM_")} - NOT_FORWARDED
+        the shipped ``env_vars`` equals the rows of ``utils/env_vars.py`` marked
+        ``forwarded_to_codex``; every name shipped code reads or spells has a
+        row; no marker or reserved row is read; every forwarded row, and every
+        row of a read kind owned by shipped code, is still read; and the
+        remainder equals the declared non-``MULTI_LLM_*`` names."""
+        allowlist = _manifest_env_vars()
+        assert environment_problems(allowlist=allowlist) == []
         forwarded = {n for n in allowlist if n.startswith("MULTI_LLM_")}
-        assert forwarded == read, (
-            f"read but not forwarded: {sorted(read - forwarded)}; forwarded but "
-            f"never read: {sorted(forwarded - read)}. A name missing from "
-            "env_vars is silently absent from the server's environment (R12′)."
-        )
         assert set(allowlist) - forwarded == NON_MULTI_LLM_FORWARDED
         assert len(allowlist) == len(set(allowlist))
-        assert set(unresolved) <= set(DYNAMIC_READ_FILES), (
-            f"unresolvable environment reads in {sorted(set(unresolved) - set(DYNAMIC_READ_FILES))}; "
-            "read a literal or a module constant, or record the file in "
-            "DYNAMIC_READ_FILES with its reason"
-        )
 
     def test_the_walk_sees_through_a_module_constant(self):
         """(src) The one indirection the tree carries (``WORKER_ENV``) resolves,
@@ -535,6 +586,153 @@ class TestEnvironment:
         keys = list(_env_read_keys(tree))
         assert len(keys) == 1 and isinstance(keys[0], ast.Name)
         assert _module_constants(tree)["WORKER"] == "MULTI_LLM_X"
+
+    def test_the_walk_sees_a_read_through_a_conditional_receiver(self):
+        """(src) A helper that takes an optional mapping and falls back to the
+        process environment still reads it: the walk must see the key, or a
+        name read only that way is silently dropped from ``env_vars``."""
+        tree = ast.parse(
+            'import os\nNAME = "MULTI_LLM_Y"\n'
+            'def f(environ=None):\n'
+            '    return (environ if environ is not None else os.environ).get(NAME, "")\n'
+            'def g(env=None):\n'
+            '    return (env or os.environ).get("MULTI_LLM_Z")\n'
+        )
+        keys = list(_env_read_keys(tree))
+        assert [type(k) for k in keys] == [ast.Name, ast.Constant]
+        assert keys[1].value == "MULTI_LLM_Z"
+
+    def test_the_walk_resolves_loops_closures_and_built_keys(self):
+        """(src) A loop over a constant tuple, a closure over an ``env``
+        parameter, a copy of it, an f-string and a ``+`` of constants all
+        resolve; a mapping parameter of another name is no receiver."""
+        tree = ast.parse(
+            'NAMES = ("MULTI_LLM_X", "MULTI_LLM_Y")\nSUFFIX = "Z"\n'
+            'def f(env):\n'
+            '    for name in NAMES:\n        env.get(name)\n'
+            '    def inner():\n        return env[f"MULTI_LLM_{SUFFIX}"]\n'
+            '    source = dict(env)\n'
+            '    return source.get("MULTI_LLM_" + "COMMENT")\n'
+            'def g(mapping):\n    return mapping.get("MULTI_LLM_UNLISTED_REVIEW")\n'
+        )
+        found = env_read_scan.scan({"m.py": tree})
+        assert found.names == {"MULTI_LLM_X", "MULTI_LLM_Y", "MULTI_LLM_Z", "MULTI_LLM_COMMENT"}
+        assert found.unresolved == {} and found.own_unresolved == []
+
+    def test_the_validation_context_switch_is_seen_and_forwarded(self):
+        """(src) ``MULTI_LLM_VALIDATION_CONTEXT`` is read through such a
+        receiver (``validation_sections.context_setting``); the walk finds it
+        and the manifest forwards it, so the switch reaches a Codex host."""
+        assert "MULTI_LLM_VALIDATION_CONTEXT" in env_reads().names
+        assert "MULTI_LLM_VALIDATION_CONTEXT" in _manifest_env_vars()
+
+    def test_mapping_reads_are_seen(self):
+        """(src) Reads through an environment *mapping* count: a local bound
+        to one (``utils/next_phase.py`` reads ``MULTI_LLM_ROUTE`` so) and an
+        ``environ``-defaulted helper (``MULTI_LLM_CODEX_SKIP_RUNG``)."""
+        names = env_reads().names
+        assert {"MULTI_LLM_ROUTE", "MULTI_LLM_CODEX_SKIP_RUNG",
+                "MULTI_LLM_HOST_SANDBOX_POSTURE"} <= names
+
+
+class TestEnvironmentGuarantee:
+    """The guarantee :func:`environment_problems` gives, each case injected
+    into an in-memory copy of a shipped module (nothing on disk changes)."""
+
+    #: The modules holding the two functions the cases inject into.
+    SANDBOX_RUNGS = "skills/multi-llm/utils/providers/sandbox_rungs.py"
+    CHILD_ENV = "skills/multi-llm/utils/providers/child_env.py"
+
+    def test_the_shipped_tree_is_clean(self):
+        assert environment_problems() == []
+
+    @pytest.mark.parametrize("statement", [
+        "env.get(f\"MULTI_LLM_{'UNLISTED_REVIEW'}\")",
+        "env.get('MULTI_LLM_' + 'UNLISTED_REVIEW')",
+        "os.environ.get(f\"MULTI_LLM_{'UNLISTED' + '_REVIEW'}\")",
+    ])
+    def test_a_new_name_behind_a_static_key_needs_a_row(self, statement):
+        """A key built from constants (an f-string, a ``+``) is read like the
+        literal it spells, so the name needs a row."""
+        problems = environment_problems(
+            _with_injection(self.SANDBOX_RUNGS, "skip_rung_requested", statement))
+        assert len(problems) == 1
+        assert "MULTI_LLM_UNLISTED_REVIEW" in problems[0] and "no row" in problems[0]
+
+    @pytest.mark.parametrize("module, function, statement", [
+        # a local bound to ``os.environ if environ is None else environ``
+        (SANDBOX_RUNGS, "skip_rung_requested", "env.get('MULTI_LLM_X')"),
+        # an ``env`` parameter
+        (CHILD_ENV, "skill_environment_names", "env['MULTI_LLM_X']"),
+        # a membership test is a read too
+        (SANDBOX_RUNGS, "skip_rung_requested", "'MULTI_LLM_X' in env"),
+    ])
+    def test_a_read_of_a_reserved_row_fails(self, module, function, statement):
+        """A read of a ``reserved`` row fails, through any receiver. The table
+        has no reserved row today, so the test adds a made-up one."""
+        rows = env_vars.ENV_VARS + (env_vars.EnvVar(
+            "MULTI_LLM_X", env_vars.RESERVED, "utils/providers/base.py", False,
+            "a made-up reserved name"),)
+        assert environment_problems(rows=rows) == []
+        problems = environment_problems(
+            _with_injection(module, function, statement), rows=rows)
+        assert len(problems) == 1
+        assert "['MULTI_LLM_X'] became real environment reads" in problems[0]
+
+    def test_a_mapping_read_is_classified(self):
+        """``MULTI_LLM_ROUTE`` is read only through a mapping
+        (``env.get(modes.ROUTE_ENV)``); its row's kind is checked all the same."""
+        rows = [
+            dataclasses.replace(row, kind=env_vars.RESERVED)
+            if row.name == env_vars.ROUTE else row
+            for row in env_vars.ENV_VARS
+        ]
+        problems = environment_problems(rows=rows)
+        assert len(problems) == 1
+        assert "['MULTI_LLM_ROUTE'] became real environment reads" in problems[0]
+
+    def test_a_dropped_read_leaves_its_row_stale(self):
+        """A row of a read kind whose owner ships goes stale with its only read
+        (``MULTI_LLM_LEGACY_INSTRUCTIONS``, read in ``multi_llm.py``)."""
+        problems = environment_problems(_with_read_removed(
+            "skills/multi-llm/multi_llm.py", "LEGACY_INSTRUCTIONS_ENV"))
+        assert len(problems) == 1
+        assert "['MULTI_LLM_LEGACY_INSTRUCTIONS'] are no longer read" in problems[0]
+
+    @pytest.mark.parametrize("statement", [
+        "env.get(f'MULTI_LLM_{value}')",
+        "env.get('MULTI_LLM_' + value)",
+        "env.get('MULTI_LLM_%s' % value)",
+        "name = 'MULTI_LLM_{}'.format(value)\nenv.get(name)",
+    ])
+    def test_an_unresolvable_key_of_ours_fails(self, statement):
+        """A ``MULTI_LLM_*`` key built at run time names a variable no row can
+        list; it fails by location, whatever DYNAMIC_READ_SITES says."""
+        problems = environment_problems(_with_injection(self.SANDBOX_RUNGS, "skip_rung_requested", statement))
+        assert len(problems) == 1
+        assert problems[0].startswith(self.SANDBOX_RUNGS + ":") and "no rule resolves" in problems[0]
+
+    def test_a_dynamic_key_elsewhere_needs_a_reason(self):
+        """A key that is neither ours nor resolvable is held to
+        DYNAMIC_READ_SITES by function, so the file's other sites excuse nothing."""
+        problems = environment_problems(
+            _with_injection(self.SANDBOX_RUNGS, "skip_rung_requested", "env.get(value)"))
+        assert problems == [
+            f"unresolvable environment reads in ['{self.SANDBOX_RUNGS}::skip_rung_requested']; "
+            "read a literal or a module constant, or record the site in "
+            "DYNAMIC_READ_SITES with its reason"
+        ]
+
+    def test_a_site_that_now_resolves_leaves_the_list(self):
+        """A listed site whose reads all resolve leaves the list (cursor's loop
+        over a constant tuple resolves)."""
+        stale = "skills/multi-llm/utils/providers/cursor_agent.py::user_pinned_profile_dirs"
+        problems = environment_problems(
+            dynamic_read_sites=dict(DYNAMIC_READ_SITES, **{stale: "iterated"}))
+        assert problems == [
+            f"['{stale}'] no longer read an unresolvable name; drop them from "
+            "DYNAMIC_READ_SITES"
+        ]
 
 
 # ===========================================================================
@@ -713,12 +911,21 @@ _ALLOWED_ABSOLUTE = {
     f"{PAYLOAD}/utils/detach.py": {"/usr/local", "/opt/local"},
     # (3) interpreter, shell and device spellings.
     "mcp/server.py": {"/bin/bash", "/dev/null"},
-    f"{PAYLOAD}/utils/write_batch_scheduler.py": {"/bin/sh"},
+    f"{PAYLOAD}/utils/write_verify.py": {"/bin/sh"},
     f"{PAYLOAD}/multi_llm.py": {"/dev/null"},
     f"{PAYLOAD}/utils/git_utils.py": {"/dev/null"},
+    f"{PAYLOAD}/utils/git_diff.py": {"/dev/null"},
+    # `/proc/self/exe`: the loader the executable names, the owned kill's ABI check;
+    # `/proc/self/stat`: whether `/proc` is there, for the identity kill;
+    # `/proc/self/ns/pid`: the PID namespace a recorded owner is judged in.
     f"{PAYLOAD}/utils/process_control.py": {
-        "/dev/fd", "/dev/null", "/proc", "/proc/self/fd"},
+        "/dev/fd", "/dev/null", "/proc", "/proc/self/fd", "/proc/self/exe",
+        "/proc/self/ns/pid", "/proc/self/stat"},
     f"{PAYLOAD}/utils/run_registry.py": {"/proc"},
+    # `/proc/self/fd`: the O_TMPFILE restore links its unnamed staging file
+    # through its own descriptor's entry (U87); the helper moved from
+    # write_safety into held_folder with the held walk (U89).
+    f"{PAYLOAD}/utils/held_folder.py": {"/proc/self/fd"},
     # `/dev/shm` beside `/tmp`: step 1b's denied toolchain paths, named in the
     # repo-wide developer message (plan codex-sandbox-unavailable step 1b).
     f"{PAYLOAD}/utils/providers/codex.py": {"/dev/null", "/tmp", "/dev/shm", "/dev/ptmx", "/dev/pts"},
@@ -741,7 +948,9 @@ _ALLOWED_ABSOLUTE = {
     f"{PAYLOAD}/utils/landlock_dispatch.py": {
         "/dev/null", "/dev/ptmx", "/dev/pts", "/dev/tty", "/tmp/multi-llm-slot-",
         "/tmp", "/dev/shm", "/bin/bash"},
-    f"{PAYLOAD}/utils/providers/base.py": {"/usr/bin/bwrap", "/dev/tty", "/tmp"},
+    f"{PAYLOAD}/utils/providers/base.py": {"/tmp"},
+    f"{PAYLOAD}/utils/providers/child_env.py": {"/dev/tty"},
+    f"{PAYLOAD}/utils/providers/failure_classifier.py": {"/usr/bin/bwrap"},
     # (5) the container image's paths, in provider docstrings.
     f"{PAYLOAD}/hosts/capabilities.yaml": {"/opt/mllm/opencode-plugin"},
     f"{PAYLOAD}/utils/providers/aider.py": {"/opt/mllm/real/aider", "C:\\Users"},
@@ -756,7 +965,7 @@ _ALLOWED_ABSOLUTE = {
     f"{PAYLOAD}/utils/cli_common.py": {"/tmp"},
     f"{PAYLOAD}/utils/llm_client.py": {"/tmp"},
     f"{PAYLOAD}/utils/providers/omp.py": {"/tmp"},
-    f"{PAYLOAD}/utils/subagent_executor.py": {"/private/tmp", "/tmp"},
+    f"{PAYLOAD}/utils/task_result.py": {"/private/tmp", "/tmp"},
     f"{PAYLOAD}/utils/providers/gemini.py": {"/tmp/mllm-inv", "/tmp/mllm-inv/gemini-"},
     f"{PAYLOAD}/utils/providers/kilocode.py": {"/tmp/mllm-inv"},
     f"{PAYLOAD}/utils/provider_registry.py": {"/home/me/repo/.git"},
@@ -788,7 +997,7 @@ def _json_strings(node, keys=()):
 
 def _server_payload_inventory() -> tuple:
     """The server's own call-time ``PAYLOAD_INVENTORY``, read by AST."""
-    tree = ast.parse(codex_build.SERVER_SOURCE.read_text(encoding="utf-8"))
+    tree = source_tree(codex_build.SERVER_SOURCE)
     for node in tree.body:
         if (isinstance(node, ast.Assign) and len(node.targets) == 1
                 and isinstance(node.targets[0], ast.Name)
@@ -1066,7 +1275,7 @@ class TestBuild:
 
     def test_payload_manifest(self):
         """(tree) What the Git route installs: the required set present, and
-        nothing else — no symlink, no test/legacy/plan file, a clean sweep."""
+        nothing else — no symlink, no test or plan file, a clean sweep."""
         files = _files(PLUGIN_DIR)
         for required in codex_build.PLUGIN_FILES:
             assert required in files, required
@@ -1076,7 +1285,7 @@ class TestBuild:
         assert not links, links
         for relative in files:
             inner = relative[len(PAYLOAD) + 1:] if relative.startswith(PAYLOAD + "/") else ""
-            assert not inner.startswith(("tests/", "legacy/", "plans/")), relative
+            assert not inner.startswith(("tests/", "plans/")), relative
             assert inner not in ("AGENTS.md", "CLAUDE.md"), relative
         payload_files = {
             name[len(PAYLOAD) + 1:] for name in files if name.startswith(PAYLOAD + "/")
@@ -1249,6 +1458,21 @@ class TestVersioning:
                 )
             return
         assert codex_build.bump_history_problems() == ()
+
+    def test_release_tags_order_pre_releases_numerically(self, tmp_path):
+        """``rc.10`` follows ``rc.2`` and a release follows its own
+        pre-releases; plain versions keep their numeric order."""
+        repo = tmp_path / "repo"
+        _git(tmp_path, "init", "-q", str(repo))
+        _git(repo, "commit", "-q", "--allow-empty", "-m", "base")
+        names = ["0.1.0", "0.1.0-rc.10", "0.1.0-rc.2", "0.0.9", "0.10.0", "0.2.0"]
+        for name in names:
+            _git(repo, "tag", f"codex-v{name}")
+        assert codex_build.release_tags(repo) == tuple(
+            f"codex-v{name}" for name in (
+                "0.0.9", "0.1.0-rc.2", "0.1.0-rc.10", "0.1.0", "0.2.0", "0.10.0",
+            )
+        )
 
     def test_the_bump_rule_reads_git_both_ways(self, tmp_path):
         """The rule itself, over a throwaway repository: digest moved under an
@@ -1472,7 +1696,8 @@ class TestMake:
         for target in self.TARGETS:
             assert target in recipes, target
             assert re.search(rf"(?<![\w-]){re.escape(target)}(?![\w-])", phony), target
-            assert f"make {target}" in makefile, f"{target} has no help line"
+            assert re.search(rf"^{re.escape(target)}:[^\n]*## \S", makefile, re.M), (
+                f"{target} has no `## ` help description")
         assert "codex-stage" not in recipes, "the tree is committed; nothing stages it"
 
     def test_codex_package_pytest_names_this_route_s_suite(self):
@@ -1504,13 +1729,16 @@ class TestMake:
         and the stamp is the last step, after all three tiers and the bump."""
         makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
         header = re.search(r"^codex-package-check:(.*)$", makefile, re.M)
-        assert header and not header.group(1).strip(), (
+        assert header and not header.group(1).split("##")[0].strip(), (
             "the tiers are recipe lines, never prerequisites: `make -j` would "
             "reorder the reset after a tier")
         lines = _makefile_recipes()["codex-package-check"]
-        steps = [line.split()[-1] for line in lines if line.startswith("$(MAKE)")]
+        steps = [next(word for word in reversed(line.split()) if "=" not in word)
+                 for line in lines if line.startswith("$(MAKE)")]
         assert steps == ["codex-gate-reset", "codex-package-check-ci",
                          "codex-gate-pinned", "codex-gate-minimum", "codex-gate-ceiling"]
+        assert "$(MAKE) --no-print-directory codex-package-check-ci PLAIN_ROWS=all" in lines, (
+            "the full gate runs every plain row, whatever PLAIN_ROWS the maintainer typed")
         recipe = "\n".join(lines)
         assert "$(CODEX_GATE) begin" in "\n".join(_makefile_recipes()["codex-gate-reset"])
         assert "REFUSING (rows 6b, 14)" not in makefile
@@ -1535,9 +1763,40 @@ class TestMake:
             assert "|| exit 1" in recipe, f"{target}: a failed version lookup must stop"
             assert "codex-gate-derived" in recipe, target
         derived = "\n".join(recipes["codex-gate-derived"])
-        assert "- < $(CODEX_VERSION_DOCKERFILE)" in derived, (
-            "the derived image is built with no context")
+        assert "--stdin $(CODEX_VERSION_DOCKERFILE)" in derived and "-t $(CODEX_IMAGE) -" in derived, (
+            "the derived image is built with no context: `-`, the Dockerfile on stdin")
         assert "--build-arg BASE_IMAGE=$(IMAGE)" in derived
+
+    def test_every_tier_step_that_can_hang_is_bounded(self):
+        """A hung ``docker build`` or container row ends at its bound instead of
+        holding the maintainer's gate forever: the image builds and the rows
+        are ``release_gate.py step``s with a ``--timeout``, never bare commands
+        or prerequisites."""
+        makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
+        assert "CODEX_GATE_STEP := $(CODEX_GATE) step" in makefile
+        recipes = _makefile_recipes()
+        joined = {target: " ".join(recipes[target]).replace("\\ ", " ")
+                  for target in ("codex-gate-pinned", "codex-gate-minimum",
+                                 "codex-gate-ceiling", "codex-gate-derived")}
+        for target in ("codex-gate-pinned", "codex-gate-minimum", "codex-gate-ceiling"):
+            header = re.search(rf"^{target}:(.*)$", makefile, re.M).group(1)
+            assert not header.split("##")[0].strip(), (
+                f"{target}: the image is a bounded step, not a prerequisite")
+            first = recipes[target][0]
+            assert first.startswith("$(CODEX_GATE_STEP) ") and "--timeout" in first, target
+            assert first.endswith("-- $(MAKE) --no-print-directory e2e-image"), target
+        for target in ("codex-gate-pinned", "codex-gate-derived"):
+            recipe = joined[target]
+            assert re.search(r"\$\(CODEX_GATE_STEP\) \S+-rows --timeout \d+ -- \$\(CODEX_GATE_PYTEST\)",
+                             recipe), target
+        assert re.search(r"\$\(CODEX_GATE_STEP\) \$\(TIER\)-image --timeout \d+ "
+                         r"--stdin \$\(CODEX_VERSION_DOCKERFILE\) -- +docker build",
+                         joined["codex-gate-derived"])
+        for target, recipe in joined.items():
+            assert recipe.count("$(CODEX_GATE_PYTEST)") == recipe.count("-- $(CODEX_GATE_PYTEST)"), (
+                f"{target}: a container pytest outside a bounded step")
+            assert recipe.count("docker build") == len(re.findall(r"-- +docker build", recipe)), (
+                f"{target}: a docker build outside a bounded step")
 
     def test_the_gate_pytest_runs_no_credentialed_row(self):
         makefile = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
@@ -1549,6 +1808,13 @@ class TestMake:
                      "not live_next_command"):
             assert mark in block, mark
         assert "test_container_host_lane.py" in block
+
+    def test_the_publish_workflow_runs_every_plain_row(self):
+        """Only the PR ``package`` job may leave the plain rows to the ``test``
+        job; the publish workflow's gate runs the CI tier whole."""
+        text = (REPO_ROOT / ".github" / "workflows" / "publish-codex-plugin.yml").read_text("utf-8")
+        assert "make codex-package-check-ci" in text
+        assert "PLAIN_ROWS" not in text
 
     def test_ci_runs_the_codex_tier_beside_opencode(self):
         workflow = (REPO_ROOT / ".github" / "workflows" / "test.yml").read_text("utf-8")

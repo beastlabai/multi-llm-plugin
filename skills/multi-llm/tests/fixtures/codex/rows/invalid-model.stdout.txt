@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"01a1c333-0da1-7de3-91dd-aadc97fb33c0"}
+{"type":"turn.started"}
+{"type":"error","message":"The model `gpt-5.5` does not exist or you do not have access to it."}
+{"type":"turn.failed","error":{"message":"The model `gpt-5.5` does not exist or you do not have access to it."}}

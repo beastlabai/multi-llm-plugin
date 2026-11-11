@@ -72,7 +72,8 @@ def _completed(stdout, returncode=0, stderr=""):
 
 
 def _pin_uncontained(monkeypatch):
-    monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+    from utils import subagent_executor
+    subagent_executor._SANDBOX_PROBE_CACHE.clear()
     verdict = SandboxProbeResult(
         "unavailable", BWRAP_LINE, "unsandboxed",
         (("landlock", "retired"), ("unsandboxed", "taken")),
@@ -109,7 +110,7 @@ def _run_review_plan(tmp_path, monkeypatch, *, prior_served=None):
     with patch("shutil.which", return_value="/usr/bin/codex"), \
          patch("utils.llm_client.subprocess.run",
                side_effect=lambda cmd, **kw: _completed(_stream())), \
-         patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0), \
+         patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0), \
          pytest.raises(SystemExit) as exited:
         # The one slot failed, so the run is D6 row 3's exit 3 — which is also
         # the path that used to skip the `models_served` write entirely.

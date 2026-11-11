@@ -28,129 +28,37 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_implement_stop_account import (  # noqa: E402
-    _dispatched_titles,
-    _implement,
-    _statuses,
-    make_repo,
+from tests.support.implement_world import (  # noqa: E402
+    _dispatched_titles, _implement, _statuses, make_repo,
 )
 
 import multi_llm  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
 from utils.state_manager import get_or_create_state  # noqa: E402
-
-#: The fixture's graph. Every edit task patches src/main.py (the mock's one
-#: edit); T005 also declares the file the policy denies.
-PLAN = """# Check gate
-
-## Overview
-The check-gate fixture's shape.
-
-## Tasks
-
-### T001: Edit: create the configuration file
-Create the configuration.
-- Depends on: none
-- Files to modify: src/main.py
-
-### T002: Check the module
-Run the release check. Read-only.
-- Depends on: T001
-- Files to modify: none
-
-### T003: Edit: add the greeting module
-Add the greeting.
-- Depends on: T001
-- Files to modify: src/main.py
-
-### T004: Edit: add the command-line entry point
-Add the entry point.
-- Depends on: T003
-- Files to modify: src/main.py
-
-### T005: Edit: add the build stamp module
-Add the stamp.
-- Depends on: T004
-- Files to modify: src/main.py, src/vendor/stamp.js
-
-### T006: Edit: print the build stamp
-Print it.
-- Depends on: T005
-- Files to modify: src/main.py
-
-### T007: Edit: write the release note
-Write the note.
-- Depends on: T002
-- Files to modify: src/main.py
-"""
-
-CHECK_GATE = "Title: Check the module"
-FINDINGS = ["retries must be 3 (found 2)"]
-DENY = (
-    "driver:\n  subagent_runner: codex:gpt-5.5\n  write_paths:\n"
-    "    allow: ['**']\n    deny: ['.git/**', '.multi-llm/**', 'src/vendor/**']\n"
+from tests.support.gate_fixture import (
+    ALLOW,
+    CHECK_GATE,
+    DENY,
+    DENY_CLAUSE,
+    FINDINGS,
+    NOTE,
+    PLAN,
+    PRINT,
+    STAMP,
+    _check,
+    _dispatched_prompt,
+    _first_run,
+    _policy,
 )
-ALLOW = (
-    "driver:\n  subagent_runner: codex:gpt-5.5\n  write_paths:\n"
-    "    allow: ['**']\n    deny: ['.git/**', '.multi-llm/**']\n"
-)
-#: The way past T005's refusal (fix round 21): a deny hit names the deny
-#: rule to narrow, since the deny list wins over `allow` and "allow it in
-#: driver.write_paths" resumed into the same refusal (live run 8's case).
-DENY_CLAUSE = (
-    "if you want src/vendor/stamp.js written, remove or narrow the deny rule "
-    "`src/vendor/**` in driver.write_paths (.multi-llm/providers.yaml) so the "
-    "rule no longer covers it"
-)
-STAMP = "Edit: add the build stamp module"
-NOTE = "Edit: write the release note"
-PRINT = "Edit: print the build stamp"
+from tests.support import gate_fixture as _gate
 
 
-def _policy(repo, text: str) -> None:
-    (repo.tmp_path / "driver.yaml").write_text(text, encoding="utf-8")
-    registry._config = None
-    registry._config_key = None
-
-
-@pytest.fixture
-def repo(tmp_path, monkeypatch):
-    obj = make_repo(tmp_path, monkeypatch, PLAN)
-    _policy(obj, DENY)
-    monkeypatch.setenv("MOCK_LLM_WRITE_IDS", json.dumps(
-        [f"T00{n}" for n in range(1, 8)]))
-    monkeypatch.setenv("MOCK_LLM_WRITE_CHECK_IF_PROMPT_HAS", CHECK_GATE)
-    yield obj
-    registry._config = None
-    registry._config_key = None
-
-
-def _check(repo, *, passed: bool, reply_status=None) -> None:
-    repo.monkeypatch.setenv("MOCK_LLM_WRITE_CHECK", json.dumps(
-        {"passed": passed, "findings": [] if passed else FINDINGS}))
-    if reply_status:
-        repo.monkeypatch.setenv("MOCK_LLM_WRITE_CHECK_STATUS", reply_status)
-    else:
-        repo.monkeypatch.delenv("MOCK_LLM_WRITE_CHECK_STATUS", raising=False)
-
-
-def _first_run(repo, capsys, reply_status=None) -> str:
-    _check(repo, passed=False, reply_status=reply_status)
-    assert _implement(repo) == 3
-    captured = capsys.readouterr()
-    repo.log.unlink(missing_ok=True)
-    return captured.out + captured.err
-
-
-def _dispatched_prompt(repo, title: str) -> str:
-    """The last prompt the mock runner was handed for the task titled *title*."""
-    found = ""
-    for line in repo.log.read_text().splitlines():
-        prompt = json.loads(line).get("prompt") or ""
-        if f"Title: {title}\n" in prompt:
-            found = prompt
-    assert found, f"no dispatch of {title!r} in the mock log"
-    return found
+def __getattr__(name):
+    # `repo` moved to tests/support/gate_fixture.py; test_resume_why.py still
+    # imports it from here.
+    if name == "repo":
+        return _gate.repo
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def _reason(repo, task_id: str) -> str:
@@ -349,9 +257,10 @@ class TestTheAcceptPath:
         assert "do not wait for that check to pass" in prompt
         assert "say in your `summary` what you left out and why" in prompt
         assert f'  - "{FINDINGS[0]}"' in prompt
-        # After the prior-batch context, before the task's instructions.
-        assert prompt.index("## Check findings the user accepted") < prompt.index(
-            "## Result (required")
+        # After the prior-batch context, before the task's instructions (the
+        # result contract leads the prompt: write-scheduler.md "Prompt order").
+        assert prompt.index("## Result (required") < prompt.index(
+            "## Check findings the user accepted") < prompt.index("## Instructions")
 
     def test_the_summary_says_the_findings_were_accepted_and_who_ran(
         self, repo, capsys,
@@ -762,7 +671,7 @@ class TestTheNativeLeg:
         host described `T005=skip` and `=done` as options the plugin never
         printed, and the fix path had no T005-only command. It now lists the
         same six answers, each below its why."""
-        from tests.test_stop_results_surface import FIRST_STOP_FLAGS
+        from tests.support.stop_results import FIRST_STOP_FLAGS
 
         self._native_first_stop(repo, capsys)
         code, out, err = self._util(

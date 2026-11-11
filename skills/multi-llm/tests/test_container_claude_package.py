@@ -232,8 +232,7 @@ class TestThePublishedSpellingResolves:
 
 
 class TestTheDispatcherRunsFromTheCache:
-    @pytest.mark.parametrize("leg", ["help", "instructions", "legacy_instructions", "doctor",
-                                     "install_host_check"])
+    @pytest.mark.parametrize("leg", ["help", "instructions", "doctor", "install_host_check"])
     def test_the_leg_succeeded(self, dispatch_row, leg):
         result = _record(dispatch_row)[leg]
         assert result["exit"] == 0, json.dumps(result, indent=2)[:3000]
@@ -245,12 +244,6 @@ class TestTheDispatcherRunsFromTheCache:
         text = record["instructions"]["stdout"]
         assert record["skill_dir"] in text, text[:1000]
         assert "/opt/mllm/skill" not in text, "the core resolved to the image's source tree"
-
-    def test_the_legacy_switch_serves_the_frozen_core(self, dispatch_row):
-        """A shipped switch, with a shipped directory behind it the generator must keep."""
-        result = _record(dispatch_row)["legacy_instructions"]
-        assert "[LEGACY_INSTRUCTIONS]" in result["stdout"] + result["stderr"], (
-            json.dumps(result)[:2000])
 
     def test_status_reads_the_workflow(self, dispatch_row):
         """Exit 2 is the documented "nothing to do": no phase of this plan has run yet."""

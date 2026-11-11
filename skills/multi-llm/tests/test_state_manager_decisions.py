@@ -1024,6 +1024,63 @@ class TestStampStableIdsTellsSameContentGroupsApart:
         assert second["suggestion_hash"] == legacy == generate_suggestion_id(second, 1)
         assert groups[0]["suggestions"][0]["suggestion_hash"] == generate_suggestion_id(second)
 
+    def test_twelve_models_returning_one_suggestion_get_twelve_ids(self):
+        """The collision loop used to give up after 10 rehashes, so the 12th
+        model to return a word-identical suggestion raised `ValueError` at the
+        grouping step, after the whole fan-out had been paid for."""
+        from utils.state_manager import generate_suggestion_id, stamp_stable_ids
+
+        def _groups():
+            same = _finding("Missing error handling", "a.py")
+            return [{
+                "theme": "Missing error handling",
+                "suggestions": [dict(same, source_model=f"m{i}") for i in range(20)],
+            }]
+
+        groups = _groups()
+        stamp_stable_ids(groups)
+        members = groups[0]["suggestions"]
+        # The n-th same-content suggestion keeps discriminator n-1, so the
+        # first eleven ids are the ones the capped loop already stamped.
+        assert [s["suggestion_hash"] for s in members] == [
+            generate_suggestion_id(s, n) for n, s in enumerate(members)
+        ]
+        assert len({s["suggestion_hash"] for s in members}) == 20
+        assert len({s["display_hash"] for s in members}) == 20
+        assert [s["display_label"] for s in members][-1] == "G1S20"
+
+        again = _groups()
+        stamp_stable_ids(again)
+        assert [s["suggestion_hash"] for s in again[0]["suggestions"]] == [
+            s["suggestion_hash"] for s in members
+        ]
+
+    def test_one_finding_in_twelve_files_gets_twelve_group_ids(self):
+        """The grouper never merges across files, so one boilerplate finding in
+        twelve files is twelve same-content groups; the group loop had the same
+        cap of 10."""
+        from utils.state_manager import (
+            generate_group_id, match_issues_to_suggestions, stamp_stable_ids,
+        )
+
+        files = [f"mod{i}.py" for i in range(12)]
+        groups = [
+            {"theme": "Missing error handling",
+             "suggestions": [_finding("Missing error handling", f)]}
+            for f in files
+        ]
+        stamp_stable_ids(groups)
+        assert [g["group_hash"] for g in groups] == [
+            generate_group_id(g, n) for n, g in enumerate(groups)
+        ]
+        assert len({g["group_hash"] for g in groups}) == 12
+        assert len({g["suggestions"][0]["suggestion_hash"] for g in groups}) == 12
+        # Each issue still joins to the group for its own file.
+        issues = [_finding("Missing error handling", f) for f in reversed(files)]
+        assert match_issues_to_suggestions(issues, groups) == {
+            n: (13 - n, 1) for n in range(1, 13)
+        }
+
     def test_a_group_sharing_a_hash_with_a_suggestion_is_not_discriminated(self):
         """Groups and suggestions are two namespaces, as before."""
         from utils.state_manager import generate_group_id, stamp_stable_ids

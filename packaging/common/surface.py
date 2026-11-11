@@ -43,8 +43,9 @@ if str(SKILL_DIR) not in sys.path:
 import modes as mode_table  # noqa: E402
 import multi_llm  # noqa: E402  (side-effect free at import: main() does the work)
 from utils import (  # noqa: E402
-    cli_common, commit_range, commit_review, detach, host_capabilities,
-    next_phase, provider_registry, subagent_executor, subagent_tasks, unattended,
+    cli_common, commit_front_door, commit_range, detach, host_capabilities,
+    next_phase, positionals, provider_registry, subagent_executor, subagent_tasks,
+    unattended,
 )
 
 #: The token a generated artifact carries in place of an absolute skill dir.
@@ -237,7 +238,7 @@ _RESULT_LINES_KEY = "lines"
 def _context_plan_flag() -> str:
     """:data:`_CONTEXT_PLAN_FLAG`, once the front door's parser defines it."""
     parser = argparse.ArgumentParser(add_help=False)
-    commit_review.add_commit_options(parser)
+    commit_front_door.add_commit_options(parser)
     if _CONTEXT_PLAN_FLAG not in parser._option_string_actions:
         raise RuntimeError(
             f"the commit front door no longer defines {_CONTEXT_PLAN_FLAG}; the "
@@ -303,16 +304,16 @@ def _revs_block() -> Dict[str, Any]:
     """The surface's ``revs`` block (schema v6): everything a server needs to
     compose and read the commit modes' range, so it spells none of it."""
     return {
-        # `multi_llm._RANGE_COUNT_WORD`: on a range mode a word that fully
+        # `positionals.RANGE_COUNT_WORD`: on a range mode a word that fully
         # matches this continues the leading bare-word run instead of ending
         # it, so it is the one range word a server lets start with "-".
-        "count_word": multi_llm._RANGE_COUNT_WORD.pattern,
-        # `multi_llm._COMMIT_BRIEF_SUFFIX`: a commit brief's path ends in it
-        # (`_names_a_commit_brief` asks no other word), so a `revs` value that
+        "count_word": positionals.RANGE_COUNT_WORD.pattern,
+        # `positionals.COMMIT_BRIEF_SUFFIX`: a commit brief's path ends in it
+        # (`names_a_commit_brief` asks no other word), so a `revs` value that
         # ends in it travels as one argv element and a brief path holding a
         # space still reaches the dispatcher as the one word it turns into
         # `--plan-file`.
-        "brief_suffix": multi_llm._COMMIT_BRIEF_SUFFIX,
+        "brief_suffix": positionals.COMMIT_BRIEF_SUFFIX,
         "plan_refusal": _revs_plan_refusal(),
         "pinned": _pinned_shape(),
         "range_key": _RESULT_RANGE_KEY,
@@ -1028,6 +1029,47 @@ def cli_surface(host_id: str) -> Dict[str, Any]:
         "runbook": {
             "core_end_marker": multi_llm.CORE_END_MARKER,
             "banner_opening": multi_llm.TRUNCATION_BANNER_OPENING,
+            # How a server pages the runbook it attaches (docs/development/
+            # hosts.md, "Paged delivery on the Codex tool route"): each page
+            # framed by `util instructions --page`'s two lines, the rule in
+            # `rule`/`rule_one` with `again`/`floor` as its `{again}`, and a
+            # call whose `extra_flags` carry `option` or `size_option`
+            # answered with one page alone, before anything runs. Additive
+            # within v7 (no bump): the tool's arguments are unchanged, and a
+            # server whose surface lacks it attaches the runbook whole.
+            "pages": {
+                "option": multi_llm.TOOL_PAGE_OPTION,
+                "size_option": multi_llm.TOOL_PAGE_SIZE_OPTION,
+                # `{mode}`, `{page}`, `{pages}`, `{sha}` (and the header's
+                # `{bytes}`), filled by plain substitution.
+                "header": multi_llm.CORE_PAGE_HEADER,
+                "end": multi_llm.CORE_PAGE_END,
+                "sha_chars": multi_llm.CORE_PAGE_SHA_CHARS,
+                "size_default": multi_llm.CORE_PAGE_SIZE_DEFAULT,
+                "size_min": multi_llm.CORE_PAGE_SIZE_MIN,
+                "rule": multi_llm.TOOL_PAGES_RULE,
+                "rule_one": multi_llm.TOOL_PAGES_RULE_ONE,
+                "again": multi_llm.TOOL_PAGES_AGAIN,
+                "floor": multi_llm.TOOL_PAGES_FLOOR,
+                "served": multi_llm.TOOL_PAGES_SERVED,
+            },
+            # The line a server opens a runbook with when it names a
+            # `references/<file>.md`, `{dir}` filled with the server's own skill
+            # directory's `references` folder: the scrub removes every line that
+            # named the skill directory. Additive within v7, like `pages`; a
+            # server whose surface lacks it attaches the runbook as before.
+            "references": multi_llm.TOOL_REFERENCES_LINE,
+            # The file form, for a package that attaches the core to a tool result
+            # whose host caps it (the OpenCode package): `option` added to the
+            # fetch prints one `marker` line naming the file, and the result
+            # carries that line and `read` (`{mode}`, `{lines}`) instead of the
+            # core. A printed core, the fallback when the file cannot be written,
+            # is attached only whole. Additive within v7, like `pages`.
+            "core_file": {
+                "option": multi_llm.TOOL_CORE_FILE_OPTION,
+                "marker": multi_llm.CORE_FILE_MARKER,
+                "read": multi_llm.TOOL_CORE_FILE_READ,
+            },
         },
     }
 

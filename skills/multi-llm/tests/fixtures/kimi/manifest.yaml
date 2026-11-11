@@ -1,0 +1,272 @@
+schema_version: 1
+provider: kimi
+cli_version: "2.5.2"
+captured: "2026-11-10"
+method: >-
+  §6 step 5, captured 2026-11-10 by tests/fixtures/row_capture/ (its README is
+  the recipe; `batch.sh kimi` reruns this set, $0) in the pinned image built
+  from tests/container/Dockerfile at the cli-versions.lock pins
+  (`mllm-e2e:local`, image sha256:e3c989b495cf…, `kimi --version` = 2.5.2), one
+  container per row, `--network none`, uid 10001, read-only root, and NO
+  credential: the only key anywhere is the PATH wrapper's per-exec
+  `mllm-stub-<id>` in KIMI_MODEL_API_KEY, meaningful only on 127.0.0.1. The
+  server ran inside the container on 127.0.0.1:8099: `/rig/stub_server.py` with
+  the kit's `success` or `empty-answer` scenario, the kit's `scriptserver.py`
+  for `multi-assistant`, and `/rig/failserver.py --mode <m>` for every failure
+  row. The CLI was driven through the PATH wrapper (`/opt/mllm/bin/kimi` IS
+  wrapper.py), so redirect.yaml's kimi row applied itself: the KIMI_MODEL_*
+  family (`KIMI_MODEL_BASE_URL` at the stub's `/s/<id>/v1` session prefix,
+  `KIMI_MODEL_NAME=stub-model`, `KIMI_MODEL_PROVIDER_TYPE=openai`,
+  `KIMI_MODEL_MAX_TOKENS=8192`, `KIMI_LOOP_MAX_ATTEMPTS_PER_STEP=1`, the
+  update and telemetry opt-outs) and a per-invocation KIMI_CODE_HOME. argv is
+  `KimiProvider.build_command`'s output for a 230 s dispatch timeout, verbatim
+  (`argv.json`, held there by tests/test_row_capture_kit.py): `kimi
+  --output-format stream-json -p <4,844-byte review prompt>`. stdin /dev/null,
+  cwd a git repository holding plans/auth-feature.md, never wrapped in
+  timeout(1). The bytes are raw; `requests` counts the POSTs the server logged.
+notes: >-
+  The rows live in `rows/`. The top-level captures beside this file are the
+  2.1.1 set `TestKimiProvider` (test_provider_kimi.py) asserts on, and the
+  salvage table in test_salvage_text.py labels; they stay as they are. 2.5.2 is
+  newer than `verified_version` (2.1.1); every row below parsed and classified
+  with no adapter change. The shape of every row: stdout opens with a
+  `system.version` meta record (58 bytes) and carries an assistant record only
+  when the model answered; every failure exits 1 with stdout holding nothing
+  but that record and stderr holding one classified line, `error: failed to
+  run prompt: <class>: <detail>`, plus a `See log:` line naming the
+  per-invocation home inside the container.
+rows:
+  success:
+    stdout: rows/success.stdout.txt
+    stderr: rows/success.stderr.txt
+    exit_code: 0
+    wall_s: 1.07
+    requests: 1
+    notes: >-
+      Three records: `system.version`, the assistant record whose `content` is
+      the answer, and the trailing `session.resume_hint` meta record, which
+      also carries a `content` key (`To resume this session: kimi -r …`).
+      stderr is 0 bytes. The parser takes the last `role: assistant` record,
+      never the resume hint.
+    expect:
+      lane_status: {lane_a: ok, lane_b: ok}
+      salvage: answer
+      success: true
+      data:
+        - {id: "S001", title: "Bound the retry ladder", severity: "high"}
+        - {id: "S002", title: "Strip the vendor token", severity: "medium"}
+      raw_contains: ['"type":"session.resume_hint"', '"version":"2.5.2"']
+      classify_failure: null
+
+  truncated:
+    stdout: rows/truncated.stdout.txt
+    stderr: rows/truncated.stderr.txt
+    exit_code: 1
+    wall_s: 1.07
+    requests: 1
+    notes: >-
+      failserver `--mode trunc`. One request (the pinned
+      `KIMI_LOOP_MAX_ATTEMPTS_PER_STEP=1`); kimi reports the cut stream as
+      `provider.api_error: The API returned an empty response (no content, no
+      tool calls)`, the same words as `error-envelope`. Nothing classifies it.
+    expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
+      salvage: none
+      success: false
+      error_contains: ["no assistant record"]
+      raw_contains: ["The API returned an empty response (no content, no tool calls)"]
+      classify_failure: null
+
+  ephemeral-only:
+    stdout: rows/ephemeral-only.stdout.txt
+    stderr: rows/ephemeral-only.stderr.txt
+    exit_code: 1
+    wall_s: 1.07
+    requests: 1
+    notes: >-
+      The stub answered the empty string (the kit's `empty-answer` scenario).
+      kimi refuses it, exit 1: stdout is the `system.version` record alone, an
+      all-noise stream, and stderr says `The API returned an empty response …
+      Provider stop details: finishReason=completed, rawFinishReason=stop`. The
+      parser reports no assistant record rather than an empty success.
+    expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
+      salvage: none
+      success: false
+      error_contains: ["no assistant record"]
+      raw_contains: ["finishReason=completed, rawFinishReason=stop"]
+      classify_failure: null
+
+  multi-assistant:
+    stdout: rows/multi-assistant.stdout.txt
+    stderr: rows/multi-assistant.stderr.txt
+    exit_code: 0
+    wall_s: 1.37
+    requests: 2
+    notes: >-
+      Captured, not synthesized (the top-level 2.1.1 file is the synthesized
+      one): the kit's `scriptserver.py` answered the first turn with a decoy
+      text and a `Read` call of plans/auth-feature.md, and the request
+      carrying its result with the findings. Five records: `system.version`;
+      an assistant record whose `content` is the decoy (`FIRST ANSWER (must
+      NOT be selected)` and a D999 array) beside its `tool_calls`; the `tool`
+      record with the file; the assistant record with the findings; the
+      resume hint. The parser takes the LAST assistant record.
+    expect:
+      lane_status: {lane_a: ok, lane_b: ok}
+      salvage: answer
+      success: true
+      data:
+        - {id: "S001", title: "Bound the retry ladder", severity: "high"}
+        - {id: "S002", title: "Strip the vendor token", severity: "medium"}
+      raw_contains: ["FIRST ANSWER (must NOT be selected)", '"role":"tool"']
+      classify_failure: null
+
+  error-envelope:
+    stdout: rows/error-envelope.stdout.txt
+    stderr: rows/error-envelope.stderr.txt
+    exit_code: 1
+    wall_s: 1.02
+    requests: 1
+    notes: >-
+      failserver `--mode errbody`: HTTP 200 whose body is an error object
+      carrying the 401 wording. kimi reports `The API returned an empty
+      response`; the vendor's words are lost, so an auth failure delivered this
+      way is not classifiable (the limitation the 2.1.1 class records).
+    expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
+      salvage: none
+      success: false
+      error_contains: ["no assistant record"]
+      raw_contains: ["The API returned an empty response"]
+      classify_failure: null
+
+  exit-zero-failure:
+    not_applicable: >-
+      The exit code is authoritative in every shape measured: `trunc`,
+      `errbody`, `500`, `401`, `429`, `404`, `ctx`, `empty` and an empty answer
+      all exit **1** (the `exit_code` cells of this manifest), and the adapter
+      declares no exit-zero markers.
+
+  stdout-error:
+    not_applicable: >-
+      The inverse holds on every failure: stdout is the 58-byte
+      `system.version` record and nothing else, and the whole diagnosis is the
+      `error: failed to run prompt: …` line on stderr (nine failure captures
+      here).
+
+  empty:
+    not_applicable: >-
+      kimi writes the `system.version` record before its first request, so
+      stdout is never empty: 58 bytes is the smallest stdout in this set, on
+      every failure row. All eleven runs exited on their own within 1.4 s.
+
+  auth-error:
+    stdout: rows/auth-error.stdout.txt
+    stderr: rows/auth-error.stderr.txt
+    exit_code: 1
+    wall_s: 1.07
+    requests: 1
+    notes: >-
+      failserver `--mode 401`. One request; stderr names kimi's own class,
+      `provider.auth_error:`, ahead of the vendor sentence, which classifies
+      it.
+    expect:
+      lane_status: {lane_a: auth_failed, lane_b: auth_failed}
+      salvage: none
+      success: false
+      error_contains: ["no assistant record"]
+      raw_contains: ["provider.auth_error: Incorrect API key provided: sk-stub***"]
+      classify_failure: "auth_failed"
+
+  rate-limit:
+    stdout: rows/rate-limit.stdout.txt
+    stderr: rows/rate-limit.stderr.txt
+    exit_code: 1
+    wall_s: 1.12
+    requests: 1
+    notes: >-
+      failserver `--mode 429`, fail-forever. One request: kimi retries a 429
+      only within its attempts per step, pinned to 1 (the declared envelope).
+      `provider.rate_limit:` and the vendor sentence.
+    expect:
+      lane_status: {lane_a: rate_limited, lane_b: rate_limited}
+      salvage: none
+      success: false
+      error_contains: ["no assistant record"]
+      raw_contains: ["provider.rate_limit: Rate limit reached for stub-model"]
+      classify_failure: "rate_limited"
+
+  invalid-model:
+    stdout: rows/invalid-model.stdout.txt
+    stderr: rows/invalid-model.stderr.txt
+    exit_code: 1
+    wall_s: 1.17
+    requests: 1
+    notes: >-
+      failserver `--mode 404`, naming the model. kimi files it under
+      `provider.api_error:`, but the vendor sentence classifies it.
+    expect:
+      lane_status: {lane_a: invalid_model, lane_b: invalid_model}
+      salvage: none
+      success: false
+      error_contains: ["no assistant record"]
+      raw_contains: ["The model `stub-model` does not exist or you do not have access to it."]
+      classify_failure: "invalid_model"
+
+  context-overflow:
+    stdout: rows/context-overflow.stdout.txt
+    stderr: rows/context-overflow.stderr.txt
+    exit_code: 1
+    wall_s: 1.22
+    requests: 4
+    notes: >-
+      failserver `--mode ctx`. Four requests: kimi compacts and retries before
+      it gives up with `compaction.failed: APIContextOverflowError:` and the
+      vendor sentence.
+    expect:
+      lane_status: {lane_a: context_length_exceeded, lane_b: context_length_exceeded}
+      salvage: none
+      success: false
+      error_contains: ["no assistant record"]
+      raw_contains: ["compaction.failed: APIContextOverflowError"]
+      classify_failure: "context_length_exceeded"
+
+  server-error:
+    stdout: rows/server-error.stdout.txt
+    stderr: rows/server-error.stderr.txt
+    exit_code: 1
+    wall_s: 1.07
+    requests: 1
+    notes: >-
+      Not a canonical row. failserver `--mode 500`, fail-forever: one request,
+      `provider.api_error: The server had an error while processing your
+      request.` kimi's `api_error` is underscored, so the `\bapi error\b`
+      marker does not match it, and the verdict comes from the shared row for
+      OpenAI's sentence: `server_error`, on the same transport-retry statuses
+      as before in both lanes.
+    expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
+      salvage: none
+      success: false
+      error_contains: ["no assistant record"]
+      raw_contains: ["provider.api_error: The server had an error while processing your request."]
+      classify_failure: "server_error"
+
+  zero-body:
+    stdout: rows/zero-body.stdout.txt
+    stderr: rows/zero-body.stderr.txt
+    exit_code: 1
+    wall_s: 1.07
+    requests: 1
+    notes: >-
+      Not a canonical row. failserver `--mode empty` (the socket closed with
+      zero bytes): one request, `provider.connection_error: Connection error.`,
+      which classifies `connection_error`.
+    expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
+      salvage: none
+      success: false
+      error_contains: ["no assistant record"]
+      raw_contains: ["provider.connection_error: Connection error."]
+      classify_failure: "connection_error"

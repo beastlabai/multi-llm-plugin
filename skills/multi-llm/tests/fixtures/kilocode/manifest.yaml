@@ -1,0 +1,342 @@
+schema_version: 1
+provider: kilocode
+cli_version: "7.8.27"
+captured: "2026-11-10"
+method: >-
+  §6 step 5, captured 2026-11-10 by tests/fixtures/row_capture/ (its README is
+  the recipe; `batch.sh kilocode` reruns this set, $0) in the pinned image
+  built from tests/container/Dockerfile at the cli-versions.lock pins
+  (`mllm-e2e:local`, image sha256:e3c989b495cf…, `@kilocode/cli` 7.8.27), one
+  container per row, `--network none`, uid 10001, read-only root, and NO
+  credential: the only key anywhere is the PATH wrapper's per-exec
+  `mllm-stub-<id>` in the seeded provider block, meaningful only on 127.0.0.1.
+  The server ran inside the container on 127.0.0.1:8099: `/rig/stub_server.py`
+  with the kit's `success` or `empty-answer` scenario, the kit's
+  `scriptserver.py` for `multi-assistant`, and `/rig/failserver.py --mode <m>`
+  for every failure row. The CLI was driven through the PATH wrapper
+  (`/opt/mllm/bin/kilocode` IS wrapper.py), so redirect.yaml's kilocode row
+  applied itself: a per-invocation HOME seeded with
+  `home_seed/kilocode/.config/kilo/kilo.jsonc` (a `stub` provider,
+  `@ai-sdk/openai-compatible`, baseURL at the stub's `/s/<id>/v1` session
+  prefix), `KILO_DISABLE_AUTOUPDATE=1` and `KILO_TELEMETRY_LEVEL=off`. argv is
+  `KiloCodeProvider.build_command`'s output for a 230 s dispatch timeout,
+  verbatim (`argv.json`, held there by tests/test_row_capture_kit.py):
+  `kilocode run --auto -m stub/stub-model <4,844-byte review prompt>`. stdin
+  /dev/null, cwd a git repository holding plans/auth-feature.md, never wrapped
+  in timeout(1). The bytes are raw; `requests` counts the POSTs the server
+  logged.
+notes: >-
+  kilocode's first capture pairs (its directory held only its model catalog).
+  The shape of every row: stdout is the answer as plain text and nothing else
+  (`answer_framing = "plain"`); stderr carries the run banner `> code ·
+  stub-model` between ANSI resets, a tool trace line per tool call, and on a
+  failure one painted line `ESC[91mESC[1mError: ESC[0m<cause>`. Every failure
+  exits 1 with zero bytes on stdout. `KiloCodeProvider.vendor_text` gives the
+  classification and its quote only that painted line, colour off: never
+  stdout (the model's answer) nor the banner and tool trace (which names what
+  the model read), and the stored streams stay as captured. The colour comes
+  off because the reset `ESC[0m` sits flush against the cause's first word,
+  where a word-anchored pattern cannot see a boundary; `auth-error` also needs
+  the adapter's own `Incorrect API key provided` auth pattern, and
+  `server-error` the shared row for OpenAI's 500 sentence.
+rows:
+  success:
+    stdout: rows/success.stdout.txt
+    stderr: rows/success.stderr.txt
+    exit_code: 0
+    wall_s: 4.73
+    requests: 1
+    notes: >-
+      stdout is the model's reply verbatim, 151 bytes; stderr only the banner.
+      One request: under `--network none` the models.dev catalog fetch fails
+      quietly and no title pre-turn was made (redirect.yaml measured two
+      requests on 7.4.19).
+    expect:
+      lane_status: {lane_a: ok, lane_b: ok}
+      salvage: answer
+      success: true
+      data:
+        - {id: "S001", title: "Bound the retry ladder", severity: "high"}
+        - {id: "S002", title: "Strip the vendor token", severity: "medium"}
+      raw_contains: ["> code · stub-model"]
+      classify_failure: null
+
+  truncated:
+    stdout: rows/truncated.stdout.txt
+    stderr: rows/truncated.stderr.txt
+    exit_code: 1
+    wall_s: 4.82
+    requests: 1
+    notes: >-
+      failserver `--mode trunc`. No retry; kilocode reports the cut stream as
+      `run ended without an assistant message; the model returned no output`,
+      the same line as `empty-answer` and `error-envelope`, so the three are
+      indistinguishable from the bytes.
+    expect:
+      lane_status: {lane_a: runner_error, lane_b: runner_error}
+      salvage: none
+      success: false
+      error_contains: ["Empty output"]
+      raw_contains: ["run ended without an assistant message; the model returned no output"]
+      classify_failure: null
+
+  ephemeral-only:
+    not_applicable: >-
+      kilocode's stdout carries no records to be noise: it is the reply text
+      and nothing else, written only when there is a reply. The nearest shape,
+      a run whose model answered the empty string, exits 1 with zero bytes on
+      stdout and `run ended without an assistant message` on stderr; it is
+      graded as the extra `empty-answer` row.
+
+  multi-assistant:
+    stdout: rows/multi-assistant.stdout.txt
+    stderr: rows/multi-assistant.stderr.txt
+    exit_code: 0
+    wall_s: 4.82
+    requests: 2
+    notes: >-
+      Captured, not synthesized: the kit's `scriptserver.py` answered the
+      first turn with a decoy text and a `read` call of plans/auth-feature.md,
+      and the request carrying its result with the findings. **kilocode prints
+      BOTH messages' text on stdout, concatenated**: the decoy (`FIRST ANSWER
+      (must NOT be selected)` and a D999 array), then the findings; stderr
+      carries the tool trace `→ Read plans/auth-feature.md`. This is the muse
+      trap on a plain-text channel, and the parser survives it: the extractor
+      returns the last JSON document.
+    expect:
+      lane_status: {lane_a: ok, lane_b: ok}
+      salvage: answer
+      success: true
+      data:
+        - {id: "S001", title: "Bound the retry ladder", severity: "high"}
+        - {id: "S002", title: "Strip the vendor token", severity: "medium"}
+      raw_contains: ["FIRST ANSWER (must NOT be selected)", "Read plans/auth-feature.md"]
+      classify_failure: null
+
+  error-envelope:
+    stdout: rows/error-envelope.stdout.txt
+    stderr: rows/error-envelope.stderr.txt
+    exit_code: 1
+    wall_s: 9.71
+    requests: 1
+    notes: >-
+      failserver `--mode errbody`: HTTP 200 whose body is an error object
+      carrying the 401 wording. kilocode drops the vendor text and reports
+      `run ended without an assistant message`, as for an empty answer.
+      Nothing in the capture says what the server said.
+    expect:
+      lane_status: {lane_a: runner_error, lane_b: runner_error}
+      salvage: none
+      success: false
+      error_contains: ["Empty output"]
+      raw_contains: ["run ended without an assistant message"]
+      classify_failure: null
+
+  exit-zero-failure:
+    not_applicable: >-
+      Measured on every failure the rig can produce: `trunc`, `errbody`, `500`,
+      `401`, `429`, `404`, `ctx`, `empty` and an empty answer all exit **1**
+      (the `exit_code` cells of this manifest), so no failure exits 0. The
+      adapter is not `EXIT0_CLASSIFIABLE` anyway: an exit-0 stdout is plain
+      model text.
+
+  stdout-error:
+    not_applicable: >-
+      The inverse holds on every failure: stdout is zero bytes and the
+      diagnosis is the painted `Error:` line on stderr (nine failure captures
+      here, every one with `stdout` 0 bytes).
+
+  empty:
+    not_applicable: >-
+      stderr is never empty: kilocode prints its run banner (`> code ·
+      stub-model` between resets, 31 bytes) before the first request, so the
+      smallest capture in this set is `success`'s 31 bytes of stderr, and every
+      failure adds its `Error:` line. All eleven runs exited on their own, the
+      longest after 78 s.
+
+  auth-error:
+    stdout: rows/auth-error.stdout.txt
+    stderr: rows/auth-error.stderr.txt
+    exit_code: 1
+    wall_s: 4.27
+    requests: 1
+    notes: >-
+      failserver `--mode 401`. One request, no retry, and the vendor sentence
+      reaches stderr verbatim. It classifies `auth_failed` on the adapter's own
+      `incorrect api key provided` pattern (cline and gemini declare the same
+      wording), read once `vendor_text` has taken the reset off `Incorrect` (see
+      the manifest's notes). Both lanes stop the batch on it as a dead key.
+    expect:
+      lane_status: {lane_a: auth_failed, lane_b: auth_failed}
+      salvage: none
+      success: false
+      error_contains: ["Empty output"]
+      raw_contains: ["Incorrect API key provided: sk-stub***"]
+      classify_failure: "auth_failed"
+
+  rate-limit:
+    stdout: rows/rate-limit.stdout.txt
+    stderr: rows/rate-limit.stderr.txt
+    exit_code: 1
+    wall_s: 70.48
+    requests: 6
+    notes: >-
+      failserver `--mode 429`, fail-forever. kilocode retries internally (6
+      requests over 70.5 s) and then prints the vendor sentence, `Rate limit
+      reached for stub-model …`, with the reset flush against `Rate`
+      (`ESC[0mRate`). `vendor_text` strips it, so the base `rate limit` pattern
+      sees its word boundary and the row classifies `rate_limited`. This chain
+      is why the adapter declares `internal_retries` with `retries_rate_limit`:
+      the ladder stops the slot here rather than backing off into the same
+      6-request chain again.
+    expect:
+      lane_status: {lane_a: rate_limited, lane_b: rate_limited}
+      salvage: none
+      success: false
+      error_contains: ["Empty output"]
+      raw_contains: ["\e[0mRate limit reached for stub-model"]
+      classify_failure: "rate_limited"
+
+  invalid-model:
+    stdout: rows/invalid-model.stdout.txt
+    stderr: rows/invalid-model.stderr.txt
+    exit_code: 1
+    wall_s: 4.42
+    requests: 1
+    notes: >-
+      failserver `--mode 404`, naming the model. One request; the sentence
+      reaches stderr verbatim and classifies `invalid_model`.
+    expect:
+      lane_status: {lane_a: invalid_model, lane_b: invalid_model}
+      salvage: none
+      success: false
+      error_contains: ["Empty output"]
+      raw_contains: ["The model `stub-model` does not exist or you do not have access to it."]
+      classify_failure: "invalid_model"
+
+  context-overflow:
+    stdout: rows/context-overflow.stdout.txt
+    stderr: rows/context-overflow.stderr.txt
+    exit_code: 1
+    wall_s: 4.47
+    requests: 3
+    notes: >-
+      failserver `--mode ctx`. kilocode tries to compact and retry (3
+      requests), then prints two `Error:` lines: the vendor's `maximum context
+      length` sentence and its own `Session too large to compact`.
+    expect:
+      lane_status: {lane_a: context_length_exceeded, lane_b: context_length_exceeded}
+      salvage: none
+      success: false
+      error_contains: ["Empty output"]
+      raw_contains: ["maximum context length is 8192 tokens", "Session too large to compact"]
+      classify_failure: "context_length_exceeded"
+
+  empty-answer:
+    stdout: rows/empty-answer.stdout.txt
+    stderr: rows/empty-answer.stderr.txt
+    exit_code: 1
+    wall_s: 4.43
+    requests: 1
+    notes: >-
+      Not a canonical row (see `ephemeral-only`). The stub answered the empty
+      string: exit 1, zero bytes on stdout, `run ended without an assistant
+      message; the model returned no output` on stderr.
+    expect:
+      lane_status: {lane_a: runner_error, lane_b: runner_error}
+      salvage: none
+      success: false
+      error_contains: ["Empty output"]
+      raw_contains: ["the model returned no output"]
+      classify_failure: null
+
+  server-error:
+    stdout: rows/server-error.stdout.txt
+    stderr: rows/server-error.stderr.txt
+    exit_code: 1
+    wall_s: 78.18
+    requests: 6
+    notes: >-
+      Not a canonical row. failserver `--mode 500`, fail-forever: 6 requests
+      over 78 s, then the vendor sentence `The server had an error while
+      processing your request.`, which the shared server table reads as
+      `server_error`. Both lanes keep `runner_error`, one transport retry: the
+      fan-out puts `server_error` on that rung and the executor forwards no
+      server verdict.
+    expect:
+      lane_status: {lane_a: runner_error, lane_b: runner_error}
+      salvage: none
+      success: false
+      error_contains: ["Empty output"]
+      raw_contains: ["The server had an error while processing your request."]
+      classify_failure: "server_error"
+
+  zero-body:
+    stdout: rows/zero-body.stdout.txt
+    stderr: rows/zero-body.stderr.txt
+    exit_code: 1
+    wall_s: 68.03
+    requests: 6
+    notes: >-
+      Not a canonical row. failserver `--mode empty` (the socket closed with
+      zero bytes): 6 requests over 68 s, then `Connection reset by server`,
+      which classifies `connection_error`; both lanes' ladder status is
+      `runner_error` all the same.
+    expect:
+      lane_status: {lane_a: runner_error, lane_b: runner_error}
+      salvage: none
+      success: false
+      error_contains: ["Empty output"]
+      raw_contains: ["Connection reset by server"]
+      classify_failure: "connection_error"
+
+  # ----- synthetic: shapes no capture shows yet ----------------------------- #
+
+  rate-limit-no-color:
+    stdout: rows/rate-limit.stdout.txt
+    stderr: rows/rate-limit-no-color.stderr.txt
+    exit_code: 1
+    synthesized: true
+    provenance: >-
+      SYNTHETIC, built 2026-11-10 from `rate-limit`'s own stderr with every ANSI
+      escape removed: kilocode under `NO_COLOR` (child_env passes it to the
+      child), had 7.8.27 honoured it, which was not measured. stdout is
+      `rate-limit`'s, zero bytes.
+    notes: >-
+      Uncoloured, kilocode's own `Error:` line cannot be told from a tool's
+      output or a multi-line tool argument, so `vendor_text` keeps no line
+      (`kilocode._error_lines` reads only the paint) and the run is classified
+      by its exit alone: no verdict, one bounded retry on each lane, until a
+      capture shows how kilocode frames an error without colour.
+    expect:
+      lane_status: {lane_a: runner_error, lane_b: runner_error}
+      salvage: none
+      success: false
+      error_contains: ["Empty output"]
+      raw_contains: ["\nError: Rate limit reached for stub-model"]
+      classify_failure: null
+
+  provider-error-429-body:
+    stdout: rows/rate-limit.stdout.txt
+    stderr: rows/provider-error-429-body.stderr.txt
+    exit_code: 1
+    synthesized: true
+    provenance: >-
+      SYNTHETIC, built 2026-11-10: `rate-limit`'s banner lines as captured, then
+      the painted `Error: ` with OpenRouter's wrapper sentence `Provider
+      returned error` as the cause and the gateway's JSON body on the next line
+      (`{"error":{"message":"Rate limit exceeded: free-models-per-min. ","code":429,…}}`),
+      the shape the code-health review constructed for an upstream 429 through
+      the `openrouter/` backend. stdout is `rate-limit`'s, zero bytes.
+    notes: >-
+      The sentence alone names no cause; the body's structured code does. A
+      painted `Provider returned error` followed by a body whose code is 429
+      reads `rate_limited` (`KiloCodeProvider.classify_failure`), and nothing in
+      the body's message or metadata reaches a text table.
+    expect:
+      lane_status: {lane_a: rate_limited, lane_b: rate_limited}
+      salvage: none
+      success: false
+      error_contains: ["Empty output"]
+      raw_contains: ['"code":429']
+      classify_failure: "rate_limited"

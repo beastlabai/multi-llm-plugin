@@ -55,7 +55,7 @@ Five facts govern every row:
 | `rate-limit` | 429-forever → **10 requests over ~230 s**, each announced as `Attempt N failed with status 429. Retrying with backoff...`, exit **173**. The §6.1.1 measurement for this CLI, and the reason §7.5 rule 6(b) forbids an identical re-dispatch |
 | `invalid-model` | 404 **naming the model** — `gemini-2.5-flash`, correct only because failserver now reads the model from the PATH (see "A second rig fix" below). One of only four categories this CLI's failures reach |
 | `context-overflow` | 400 context-length, passed through unedited, so `maximum context length` reaches the classifier. Exit **144**, and the one envelope carrying a real status rather than `code: 1` |
-| `server-error` | beyond §6.2's twelve: 5xx-forever, **10 requests / ~200 s**, exit **244**, 14 KB on stderr and 0 on stdout — and classified as **nothing** (defect 5) |
+| `server-error` | beyond §6.2's twelve: 5xx-forever, **10 requests / ~200 s**, exit **244**, 14 KB on stderr and 0 on stdout — classified `server_error` (defect 5, fixed) |
 | `zero-byte-response` | beyond §6.2's twelve, and the measurement behind the `empty` cell: a server writing zero bytes leaves 13,669 bytes of stderr, whose words are undici's generic `exception TypeError: fetch failed sending request`. Retried on the 10-request ladder since 0.63.0 (~233 s; one request and 1,582 bytes at 0.25.2) |
 
 ## Two rows that are "not applicable, because …"
@@ -188,11 +188,12 @@ been fixed in the shared extractor, and its entry records what changed.
    last-wins rule generalised from the envelope to the text inside it, so
    claude-code, grok and gemini now select the answer instead of the decoy. The
    row moved with the fix and still carries the decoy in `raw_contains`.
-5. **A 5xx classifies as `None`.** gemini surfaces *"The server had an error
-   while processing your request"*, which matches no `SERVER_ERROR_MARKERS` entry
-   (the phrase `server error` never appears, and the `5\d{2}` pattern wants the
-   status adjacent to the word). 10 requests and 232 s of the CLI's own retrying
-   are then followed by the harness treating the run as transport-shaped.
+5. **A 5xx classified as `None` — FIXED.** gemini surfaces *"The server had an
+   error while processing your request"*, which matched no `SERVER_ERROR_MARKERS`
+   entry (the phrase `server error` never appears, and the `5\d{2}` pattern wants
+   the status adjacent to the word). The table now carries that OpenAI sentence
+   as its own row, and the row reads `server_error`. The ladder is unmoved: a
+   server error and an unrecognised failure take the same transport retry.
 
 ## Reproducing
 

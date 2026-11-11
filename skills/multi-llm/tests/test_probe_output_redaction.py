@@ -6,7 +6,7 @@ stdout/stderr into their message so a human can see *why* the runner was
 refused. Those messages are printed to a terminal and to
 ``orchestrator-run.log``; they reach **neither** of §4.5.3's redacting write
 sinks (``subagent_batch_report.json``'s ``_redact_json``, ``failure_summary``'s
-``_redact``), because a ``RunnerRejected`` is raised before any batch report
+``redact_text``), because a ``RunnerRejected`` is raised before any batch report
 exists. They were the one path that quoted a probe verbatim.
 
 M13 made that concrete: ``cursor-agent status --format json`` answers with an
@@ -29,6 +29,7 @@ The standard these tests hold the fix to is M13's, not "drop the tail":
 """
 
 import ast
+import importlib
 import json
 import subprocess
 import sys
@@ -40,13 +41,17 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import subagent_executor  # noqa: E402
+from utils import attempt_classifier, dispatch_spawn, runner_preflight  # noqa: E402
+from utils import failure_capture  # noqa: E402
+from tests.conftest import stand_in  # noqa: E402
 from utils.providers.cursor_agent import (  # noqa: E402
     CURSOR_ABOUT_IDENTITY_KEYS,
     CURSOR_ABOUT_KEYS,
     redact_probe_output,
 )
 from utils.retry_ladder import STATUS_AUTH_FAILED  # noqa: E402
-from utils.write_safety import redact_text  # noqa: E402
+from utils.redact import redact_text  # noqa: E402
+from tests.source_cache import source_tree
 
 # ---------------------------------------------------------------------------
 # The envelope. Values are synthetic; the shape and the key set are not.
@@ -162,7 +167,7 @@ def _capture(stdout="", stderr=""):
 def _detect_auth_refusal(monkeypatch, stream, *, on_stderr=False):
     """Drive `_detect_auth` to its `not_authenticated` refusal."""
     monkeypatch.setattr(
-        subagent_executor, "get_provider", lambda name: _Provider()
+        runner_preflight, "get_provider", lambda name: _Provider()
     )
     completed = subprocess.CompletedProcess(
         args=list(_Provider.auth_check),
@@ -170,7 +175,7 @@ def _detect_auth_refusal(monkeypatch, stream, *, on_stderr=False):
         stdout="" if on_stderr else stream,
         stderr=stream if on_stderr else "",
     )
-    monkeypatch.setattr(subagent_executor, "_run_probe", lambda argv: completed)
+    monkeypatch.setattr(runner_preflight, "_run_probe", stand_in(lambda argv: completed))
     with pytest.raises(subagent_executor.RunnerRejected) as excinfo:
         subagent_executor._detect_auth(
             "cursor-agent",
@@ -186,12 +191,12 @@ def _nested_refusal(monkeypatch, stream, *, reason_code):
     """Drive `_probe_nested_exec` to its credentials or network refusal."""
     failure = STATUS_AUTH_FAILED if reason_code == "nested_exec_credentials" else None
     monkeypatch.setattr(
-        subagent_executor,
+        runner_preflight,
         "get_provider",
         lambda name: _Provider(failure=failure),
     )
     monkeypatch.setattr(
-        subagent_executor, "_spawn", lambda **kwargs: _capture(stderr=stream)
+        dispatch_spawn, "_spawn", lambda **kwargs: _capture(stderr=stream)
     )
     with pytest.raises(subagent_executor.RunnerRejected) as excinfo:
         subagent_executor._probe_nested_exec(
@@ -258,7 +263,7 @@ class TestTheProbeTailHelper:
         def _boom(_text):
             raise RuntimeError("write_safety is unavailable")
 
-        monkeypatch.setattr(subagent_executor, "_redact", _boom)
+        monkeypatch.setattr(failure_capture, "redact_text", _boom)
         tail = subagent_executor._redact_probe_tail(PROBE_ENVELOPE, 500)
         assert tail == "<redacted:probe-output>"
         for value in IDENTITY_VALUES:
@@ -309,8 +314,8 @@ class TestTheNotAuthenticatedRefusal:
         self, monkeypatch
     ):
         monkeypatch.setattr(
-            subagent_executor,
-            "_redact",
+            failure_capture,
+            "redact_text",
             lambda _text: (_ for _ in ()).throw(RuntimeError("no redactor")),
         )
         message = _detect_auth_refusal(monkeypatch, PROBE_ENVELOPE)
@@ -346,17 +351,17 @@ class TestTheNestedExecCredentialsRefusal:
         self, monkeypatch
     ):
         # `_classify_failed_run` is stubbed rather than driven: it has its own
-        # `_redact` call, whose message reaches only §4.5.3's redacting sinks,
+        # `redact_text` call, whose message reaches only §4.5.3's redacting sinks,
         # and letting a raising redactor abort *there* would test a different
         # site than the refusal boundary this asserts.
         monkeypatch.setattr(
-            subagent_executor,
+            attempt_classifier,
             "_classify_failed_run",
             lambda provider, capture, model="": (STATUS_AUTH_FAILED, "stubbed"),
         )
         monkeypatch.setattr(
-            subagent_executor,
-            "_redact",
+            failure_capture,
+            "redact_text",
             lambda _text: (_ for _ in ()).throw(RuntimeError("no redactor")),
         )
         message = _nested_refusal(
@@ -386,8 +391,8 @@ class TestTheNestedExecNetworkRefusal:
         self, monkeypatch
     ):
         monkeypatch.setattr(
-            subagent_executor,
-            "_redact",
+            failure_capture,
+            "redact_text",
             lambda _text: (_ for _ in ()).throw(RuntimeError("no redactor")),
         )
         stream = f"{NETWORK_DENIAL}\n{PROBE_ENVELOPE}"
@@ -406,12 +411,37 @@ class TestTheNestedExecNetworkRefusal:
 # ---------------------------------------------------------------------------
 
 
-#: The only ``_tail(...)`` call in ``subagent_executor`` allowed to be handed
+#: The executor and every module split out of it (its ``_MOVED`` table), so a
+#: refusal or a tail that moved with its function stays in this gate's view.
+_EXECUTOR_MODULES = (subagent_executor, *(
+    importlib.import_module(f"utils.{owner}") for owner in subagent_executor._MOVED
+))
+
+
+def _executor_trees():
+    """``(path, tree)`` for each of :data:`_EXECUTOR_MODULES`."""
+    return [(module.__file__, source_tree(module.__file__)) for module in _EXECUTOR_MODULES]
+
+
+def _callee(func):
+    """The name a call reaches: ``f`` for ``f(...)`` and for an owner-qualified
+    ``_<owner>.f(...)`` (the split modules spell each other's names that way)."""
+    if isinstance(func, ast.Name):
+        return func.id
+    if (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)
+            and func.value.id.startswith("_")
+            and func.value.id[1:] in subagent_executor._MOVED):
+        return func.attr
+    return None
+
+
+#: The only ``_tail(...)`` call in ``subagent_executor`` (or a module split out
+#: of it, :data:`_EXECUTOR_MODULES`) allowed to be handed
 #: an unredacted stream, keyed by ``(enclosing function, ``ast.unparse``
 #: rendering)`` and valued by how many times that exact site occurs. It builds
-#: ``outcome.reason`` in ``dispatch_task``, which is written through §4.5.3's
-#: redacting sinks — ``BatchReport.write``'s ``_redact_json`` and
-#: ``failure_summary``'s ``_redact`` — never straight to a terminal, which is
+#: ``outcome.reason`` in ``task_dispatch.finish_ok``, which is written through
+#: §4.5.3's redacting sinks — ``BatchReport.write``'s ``_redact_json`` and
+#: ``failure_summary``'s ``redact_text`` — never straight to a terminal, which is
 #: what separates it from the three refusals above. An entry earns its place by
 #: naming the sink that redacts it; a new bare tail with no such sink is the
 #: leak this module exists to stop.
@@ -429,7 +459,7 @@ class TestTheNestedExecNetworkRefusal:
 #: message — with no test change at all, and the enclosing name alone would
 #: wave through a different tail added to the same function.
 _TAIL_WITHOUT_REDACTION_ALLOWLIST = {
-    ("dispatch_task", "_tail(capture.stderr, 2000)"): 1,
+    ("finish_ok", "_failure_capture._tail(capture.stderr, 2000)"): 1,
 }
 
 
@@ -445,51 +475,49 @@ class TestNoRefusalQuotesAStreamRaw:
 
     @staticmethod
     def _tail_calls_without_redaction():
-        """``(lineno, enclosing function, rendering)`` per bare ``_tail`` call.
+        """``(file:lineno, enclosing function, rendering)`` per bare ``_tail`` call.
 
         The enclosing name is half a site's identity: the rendering on its own
         cannot tell two allowlisted calls apart from a third that happens to be
         spelled the same way.
         """
-        source = Path(subagent_executor.__file__).read_text(encoding="utf-8")
-        tree = ast.parse(source)
-        # `ast.walk` is breadth-first, so an inner `def` is visited after the
-        # one enclosing it and its assignment wins: every node ends up owned by
-        # the *nearest* function around it.
-        owner_of = {}
-        for function in ast.walk(tree):
-            if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            for node in ast.walk(function):
-                owner_of[id(node)] = function.name
         found = []
-        for node in ast.walk(tree):
-            # `_redact_probe_tail` is the boundary itself: its own `_tail` runs
-            # on text `_redact` has already returned, one statement earlier,
-            # which no single-expression rule can see.
-            owner = owner_of.get(id(node), "<module>")
-            if owner == "_redact_probe_tail":
-                continue
-            if not isinstance(node, ast.Call):
-                continue
-            if not (isinstance(node.func, ast.Name) and node.func.id == "_tail"):
-                continue
-            if not node.args:
-                continue
-            first = node.args[0]
-            redacted = (
-                isinstance(first, ast.Call)
-                and isinstance(first.func, ast.Name)
-                and first.func.id.startswith("_redact")
-            )
-            if not redacted:
-                found.append((node.lineno, owner, ast.unparse(node)))
+        for path, tree in _executor_trees():
+            # `ast.walk` is breadth-first, so an inner `def` is visited after the
+            # one enclosing it and its assignment wins: every node ends up owned by
+            # the *nearest* function around it.
+            owner_of = {}
+            for function in ast.walk(tree):
+                if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                for node in ast.walk(function):
+                    owner_of[id(node)] = function.name
+            for node in ast.walk(tree):
+                # `_redact_probe_tail` is the boundary itself: its own `_tail` runs
+                # on text `redact_text` has already returned, one statement
+                # earlier, which no single-expression rule can see.
+                owner = owner_of.get(id(node), "<module>")
+                if owner == "_redact_probe_tail":
+                    continue
+                if not isinstance(node, ast.Call):
+                    continue
+                if _callee(node.func) != "_tail":
+                    continue
+                if not node.args:
+                    continue
+                first = node.args[0]
+                redacted = isinstance(first, ast.Call) and (
+                    (_callee(first.func) or "").startswith("_redact")
+                    or _callee(first.func) == "redact_text"
+                )
+                if not redacted:
+                    found.append((f"{path}:{node.lineno}", owner, ast.unparse(node)))
         return found
 
     def test_every_bare_tail_is_a_declared_and_covered_one(self):
         offenders = [
-            f"{subagent_executor.__file__}:{lineno}: {owner}: {text}"
-            for lineno, owner, text in self._tail_calls_without_redaction()
+            f"{where}: {owner}: {text}"
+            for where, owner, text in self._tail_calls_without_redaction()
             if (owner, text) not in _TAIL_WITHOUT_REDACTION_ALLOWLIST
         ]
         assert not offenders, (
@@ -544,32 +572,30 @@ class TestNoRefusalQuotesAStreamRaw:
         understands the inline spelling would go green on a refactor that
         reintroduced the leak one line higher.
         """
-        source = Path(subagent_executor.__file__).read_text(encoding="utf-8")
-        tree = ast.parse(source)
         owners = []
-        for function in ast.walk(tree):
-            if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                continue
-            raises_it = any(
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id == "RunnerRejected"
-                and any(
-                    keyword.arg == "reason_code"
-                    and isinstance(keyword.value, ast.Constant)
-                    and keyword.value.value == reason_code
-                    for keyword in node.keywords
+        for _path, tree in _executor_trees():
+            for function in ast.walk(tree):
+                if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                raises_it = any(
+                    isinstance(node, ast.Call)
+                    and _callee(node.func) == "RunnerRejected"
+                    and any(
+                        keyword.arg == "reason_code"
+                        and isinstance(keyword.value, ast.Constant)
+                        and keyword.value.value == reason_code
+                        for keyword in node.keywords
+                    )
+                    for node in ast.walk(function)
                 )
-                for node in ast.walk(function)
-            )
-            if raises_it:
-                owners.append(function)
+                if raises_it:
+                    owners.append(function)
         assert owners, f"no RunnerRejected raises {reason_code!r} any more"
         for function in owners:
             called = {
-                node.func.id
+                _callee(node.func)
                 for node in ast.walk(function)
-                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                if isinstance(node, ast.Call)
             }
             assert "_redact_probe_tail" in called, (
                 f"{function.name} raises {reason_code!r} while quoting a probe "

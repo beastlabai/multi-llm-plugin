@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import review_orchestrator_base as rob  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from utils import sandbox_walk  # noqa: E402
 from utils.providers import base as base_module  # noqa: E402
 from utils.providers import codex as codex_module  # noqa: E402
 from utils.providers.base import (  # noqa: E402
@@ -519,12 +520,14 @@ class TestTheRungArgvInvariants:
 class TestTheWalkTable:
     """One test per row of the plan's walk table."""
 
+    @pytest.mark.shell_probe
     def test_canary_denied_takes_the_rung(self):
         verdict = executor.sandbox_verdict(_Ladder(landlock=CANARY_DENIED), PROFILE_GENERATE)
         assert (verdict.state, verdict.rung) == ("unavailable", "landlock")
         assert BWRAP_LINE in verdict.tail
         assert verdict.walk == (("landlock", "taken"),)
 
+    @pytest.mark.shell_probe
     def test_a_canary_whose_write_landed_rejects_the_rung_and_moves_on(self):
         verdict = executor.sandbox_verdict(_Ladder(landlock=CANARY_LANDED), PROFILE_GENERATE)
         assert verdict.rung == "unsandboxed"
@@ -533,6 +536,7 @@ class TestTheWalkTable:
         )
 
     @pytest.mark.parametrize("script", [USAGE_EXIT_0, BARE_EXIT_0])
+    @pytest.mark.shell_probe
     def test_an_exit_0_without_the_canary_marker_is_not_containment(self, script):
         """Exit 0 is not containment: a CLI that exits 0 without running the
         canary to completion never measured a boundary, so the rung is not
@@ -543,6 +547,7 @@ class TestTheWalkTable:
             ("landlock", "absent"), JAIL_ABSENT, ("unsandboxed", "taken"),
         )
 
+    @pytest.mark.shell_probe
     def test_an_echoed_canary_script_cannot_forge_the_marker(self):
         """A CLI that prints its argv (the canary's source) and exits 0 ran
         nothing: whatever else it reads as, the landlock rung is not taken."""
@@ -553,6 +558,7 @@ class TestTheWalkTable:
         assert verdict.walk[0][0] == "landlock"
         assert verdict.walk[0][1] != "taken"
 
+    @pytest.mark.shell_probe
     def test_a_real_sandbox_failure_moves_on(self):
         verdict = executor.sandbox_verdict(_Ladder(landlock=SANDBOX_BROKEN), PROFILE_GENERATE)
         assert verdict.rung == "unsandboxed"
@@ -560,6 +566,7 @@ class TestTheWalkTable:
             ("landlock", "unavailable"), JAIL_ABSENT, ("unsandboxed", "taken"),
         )
 
+    @pytest.mark.shell_probe
     def test_an_inconclusive_tail_skips_that_rung_only(self):
         """An older codex that does not know the flag reaches rung 2 — today."""
         verdict = executor.sandbox_verdict(_Ladder(landlock=FLAG_UNKNOWN), PROFILE_GENERATE)
@@ -568,6 +575,7 @@ class TestTheWalkTable:
             ("landlock", "absent"), JAIL_ABSENT, ("unsandboxed", "taken"),
         )
 
+    @pytest.mark.shell_probe
     def test_a_timeout_stops_the_walk_with_no_rung(self):
         verdict = executor.sandbox_verdict(
             _Ladder(landlock=HANGS), PROFILE_GENERATE, timeout=0.5,
@@ -576,6 +584,7 @@ class TestTheWalkTable:
         assert verdict.rung is None
         assert verdict.walk == (("landlock", "unprobed"),)
 
+    @pytest.mark.shell_probe
     def test_a_spawn_failure_stops_the_walk_with_no_rung(self, monkeypatch):
         real = executor._run_sandbox_probe
 
@@ -584,7 +593,7 @@ class TestTheWalkTable:
                 return None
             return real(argv, **kwargs)
 
-        monkeypatch.setattr(executor, "_run_sandbox_probe", unspawnable_rung)
+        monkeypatch.setattr(sandbox_walk, "_run_sandbox_probe", unspawnable_rung)
         verdict = executor.sandbox_verdict(_Ladder(landlock=CANARY_DENIED), PROFILE_GENERATE)
         assert verdict.rung is None
         assert verdict.walk == (("landlock", "unknown"),)
@@ -599,6 +608,7 @@ class TestTheWalkTable:
             probe_workdir=codex_module.LANDLOCK_CANARY_WORKDIR,
         )
 
+    @pytest.mark.shell_probe
     def test_the_walk_sets_the_canary_dir_up_outside_and_removes_what_it_made(
         self, tmp_path
     ):
@@ -612,6 +622,7 @@ class TestTheWalkTable:
         assert (rung, walk) == ("landlock", (("landlock", "taken"),))
         assert list(tmp_path.iterdir()) == []
 
+    @pytest.mark.shell_probe
     def test_the_walk_leaves_a_pre_existing_canary_dir_alone(self, tmp_path):
         (tmp_path / ".multi-llm" / "tmp").mkdir(parents=True)
         rung, _ = executor._walk_fallback_rungs(
@@ -656,6 +667,7 @@ class TestTheWalkTable:
         assert rung is None
         assert walk == (("landlock", "unknown"),)
 
+    @pytest.mark.shell_probe
     def test_an_in_sandbox_setup_failure_is_never_taken(self):
         """The canary's own setup-failure exit carries no marker: not taken."""
         script = (
@@ -669,6 +681,7 @@ class TestTheWalkTable:
     @pytest.mark.parametrize("profile_probe, state", [
         ("exit 0", "ok"), (FLAG_UNKNOWN, "unknown"),
     ])
+    @pytest.mark.shell_probe
     def test_no_walk_unless_the_profile_probe_said_unavailable(
         self, profile_probe, state, monkeypatch
     ):
@@ -679,13 +692,14 @@ class TestTheWalkTable:
             calls.append(list(argv))
             return real(argv, **kwargs)
 
-        monkeypatch.setattr(executor, "_run_sandbox_probe", counting)
+        monkeypatch.setattr(sandbox_walk, "_run_sandbox_probe", counting)
         verdict = executor.sandbox_verdict(
             _Ladder(profile_probe=profile_probe), PROFILE_GENERATE,
         )
         assert (verdict.state, verdict.rung, verdict.walk) == (state, None, ())
         assert len(calls) == 1
 
+    @pytest.mark.shell_probe
     def test_the_write_profile_walks_the_jail_alone_and_never_falls_through(self):
         """Rewritten 2026-09-30 (plan step 3): the write profile walks its
         one-rung write ladder. Where the jail is absent (the suite's guard
@@ -701,6 +715,7 @@ class TestTheWalkTable:
 
 
 class TestTheVerdictShape:
+    @pytest.mark.shell_probe
     def test_a_two_value_unpack_raises_instead_of_dropping_the_rung(self):
         verdict = executor.sandbox_verdict(_Ladder(), PROFILE_GENERATE)
         with pytest.raises(ValueError):
@@ -727,6 +742,7 @@ class TestTheWalkSharesOneDeadline:
                "child, which holds the probe's pipes, so the probe overruns "
                "its budget (measured 5.8 s of a 1 s budget)",
     )
+    @pytest.mark.shell_probe
     def test_a_slow_first_probe_leaves_the_rung_unprobed_inside_one_budget(self):
         """The profile probe spends most of the budget; the rung probe gets
         only what is left of it, and the whole call stays inside one budget."""
@@ -747,7 +763,7 @@ class TestTheWalkSharesOneDeadline:
     def test_a_rung_with_no_time_left_is_not_started(self, monkeypatch):
         started = []
         monkeypatch.setattr(
-            executor, "_run_sandbox_probe",
+            sandbox_walk, "_run_sandbox_probe",
             lambda argv, **kwargs: started.append(argv),
         )
         rung, walk = executor._walk_fallback_rungs(
@@ -767,8 +783,8 @@ class TestTheWalkSharesOneDeadline:
             seen.append(timeout)
             return subprocess.CompletedProcess(argv, 1, "", BWRAP_LINE)
 
-        monkeypatch.setattr(executor, "_run_sandbox_probe", recording)
-        monkeypatch.setattr(executor, "SANDBOX_PROBE_TIMEOUT_S", 10.0)
+        monkeypatch.setattr(sandbox_walk, "_run_sandbox_probe", recording)
+        monkeypatch.setattr(sandbox_walk, "SANDBOX_PROBE_TIMEOUT_S", 10.0)
         executor.sandbox_verdict(_Ladder(landlock=SANDBOX_BROKEN), PROFILE_GENERATE)
         assert seen[0] == 10.0
         assert 0 < seen[2] <= seen[1] <= 10.0
@@ -783,10 +799,10 @@ class TestTheWalkSharesOneDeadline:
 @pytest.fixture
 def executor_gate(monkeypatch):
     """`_detect_sandbox` with a stand-in adapter and a clean cache."""
-    monkeypatch.setattr(executor, "_SANDBOX_DECISIONS", {})
+    executor._SANDBOX_DECISIONS.clear()
 
     def run(adapter, profile=PROFILE_AGENT_READONLY, request=None):
-        monkeypatch.setattr(executor, "get_provider", lambda _name: adapter)
+        monkeypatch.setattr(sandbox_walk, "get_provider", lambda _name: adapter)
         return executor._detect_sandbox(
             "fakecodex", key="driver.subagent_runner", spec="fakecodex:m",
             profile=profile,
@@ -795,6 +811,7 @@ def executor_gate(monkeypatch):
     return run
 
 
+@pytest.mark.shell_probe
 class TestTheExecutorGate:
     def test_auto_takes_the_contained_rung_and_records_its_id(self, executor_gate, capsys):
         state = executor_gate(_Ladder(policy="auto"))
@@ -840,7 +857,7 @@ class TestTheExecutorGate:
         assert "[SANDBOX_BYPASSED]" not in out and "[SANDBOX_FALLBACK]" not in out
 
     def test_a_stopped_walk_refuses_under_auto_and_says_why(self, executor_gate, monkeypatch):
-        monkeypatch.setattr(executor, "SANDBOX_PROBE_TIMEOUT_S", 0.5)
+        monkeypatch.setattr(sandbox_walk, "SANDBOX_PROBE_TIMEOUT_S", 0.5)
         with pytest.raises(executor.RunnerRejected) as excinfo:
             executor_gate(_Ladder(policy="auto", landlock=HANGS))
         assert "'landlock' was unprobed" in str(excinfo.value)
@@ -867,7 +884,7 @@ class TestTheExecutorGate:
         assert executor._SANDBOX_DECISIONS == {}
 
     def test_agent_write_takes_the_jail_under_auto(self, executor_gate, tmp_path, monkeypatch):
-        from tests.test_plugin_landlock_executor import install_fake_wrapper
+        from tests.support.landlock_world import install_fake_wrapper
 
         install_fake_wrapper(tmp_path / "wrapper", monkeypatch, probe="deny")
         repo = tmp_path / "repo"
@@ -884,12 +901,13 @@ class TestTheExecutorGate:
 @pytest.fixture
 def fanout_gate(monkeypatch):
     def run(adapter):
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+        executor._SANDBOX_PROBE_CACHE.clear()
         monkeypatch.setattr(rob, "get_provider", lambda _name: adapter)
         return rob.sandbox_refusal("fakecodex", None)
     return run
 
 
+@pytest.mark.shell_probe
 class TestTheFanoutGate:
     def test_auto_takes_the_contained_rung_which_is_not_a_bypass(self, fanout_gate):
         verdict = fanout_gate(_Ladder(policy="auto"))
@@ -1016,9 +1034,10 @@ class TestTheRungSurvivesTheCarriers:
         assert calls == ["landlock"] * 4
         assert argv[3] == "read-only" and argv.count(FLAG_VALUE) == 1
 
+    @pytest.mark.shell_probe
     def test_the_preflight_rung_reaches_the_spawn_as_its_id(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(executor, "_SANDBOX_DECISIONS", {})
-        monkeypatch.setattr(executor, "get_provider", lambda _name: _Ladder())
+        executor._SANDBOX_DECISIONS.clear()
+        monkeypatch.setattr(sandbox_walk, "get_provider", lambda _name: _Ladder())
         executor._detect_sandbox(
             "codex", key="k", spec="codex:gpt-5.5", profile=PROFILE_AGENT_READONLY,
         )

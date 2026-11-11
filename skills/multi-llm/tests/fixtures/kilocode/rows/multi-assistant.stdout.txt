@@ -1,0 +1,8 @@
+FIRST ANSWER (must NOT be selected)
+[
+  {"id": "D999", "title": "Decoy", "severity": "low"}
+]
+[
+  {"id": "S001", "title": "Bound the retry ladder", "severity": "high"},
+  {"id": "S002", "title": "Strip the vendor token", "severity": "medium"}
+]

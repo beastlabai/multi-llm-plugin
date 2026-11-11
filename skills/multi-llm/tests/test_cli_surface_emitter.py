@@ -48,6 +48,7 @@ import modes as mode_table  # noqa: E402
 import multi_llm  # noqa: E402
 from common import surface  # noqa: E402
 from utils import host_capabilities, subagent_tasks, unattended  # noqa: E402
+from tests.source_cache import source_tree  # noqa: E402
 
 #: Every host a package route ships this surface for.
 HOSTS = ("opencode", "codex")
@@ -106,14 +107,12 @@ def test_uninstall_command_is_the_owners_line_with_the_default_flags(
 
 def test_the_emitter_reads_no_environment():
     """No ``os.environ``/``getenv`` read and no ``uv_run_args()`` call."""
-    source = (REPO_ROOT / "packaging" / "common" / "surface.py").read_text(
-        encoding="utf-8"
-    )
+    surface_path = REPO_ROOT / "packaging" / "common" / "surface.py"
     # Parsed rather than grepped: the module docstring names both to explain
     # the rule, and a docstring is not a read.
     offenders = [
         f"line {node.lineno}: {name}"
-        for node in ast.walk(ast.parse(source))
+        for node in ast.walk(source_tree(surface_path))
         for name in [
             node.attr if isinstance(node, ast.Attribute)
             else node.id if isinstance(node, ast.Name) else None
@@ -197,7 +196,46 @@ def test_v4_keys_are_present_and_non_empty(host):
     assert rendered["runbook"] == {
         "core_end_marker": multi_llm.CORE_END_MARKER,
         "banner_opening": multi_llm.TRUNCATION_BANNER_OPENING,
+        # The tool route's runbook pages (additive within v7).
+        "pages": {
+            "option": "--page",
+            "size_option": "--page-size",
+            "header": multi_llm.CORE_PAGE_HEADER,
+            "end": multi_llm.CORE_PAGE_END,
+            "sha_chars": multi_llm.CORE_PAGE_SHA_CHARS,
+            "size_default": multi_llm.CORE_PAGE_SIZE_DEFAULT,
+            "size_min": multi_llm.CORE_PAGE_SIZE_MIN,
+            "rule": multi_llm.TOOL_PAGES_RULE,
+            "rule_one": multi_llm.TOOL_PAGES_RULE_ONE,
+            "again": multi_llm.TOOL_PAGES_AGAIN,
+            "floor": multi_llm.TOOL_PAGES_FLOOR,
+            "served": multi_llm.TOOL_PAGES_SERVED,
+        },
+        # Where a scrubbed runbook's references are (additive within v7).
+        "references": multi_llm.TOOL_REFERENCES_LINE,
+        # The file form a package route attaches instead of the core.
+        "core_file": {
+            "option": "--to-file",
+            "marker": multi_llm.CORE_FILE_MARKER,
+            "read": multi_llm.TOOL_CORE_FILE_READ,
+        },
     }
+    assert "{dir}" in rendered["runbook"]["references"]
+    core_file = rendered["runbook"]["core_file"]
+    assert core_file["option"] in multi_llm._INSTRUCTIONS_OPTIONS
+    for token in ("{mode}", "{lines}"):
+        assert token in core_file["read"]
+    pages = rendered["runbook"]["pages"]
+    # The page options are the ones `util instructions` itself takes, and every
+    # template carries the tokens the server fills.
+    for option in (pages["option"], pages["size_option"]):
+        assert option in multi_llm._INSTRUCTIONS_OPTIONS
+    for key in ("rule", "rule_one"):
+        for token in ("{mode}", "{sha}", "{size}", "{again}"):
+            assert token in pages[key], (key, token)
+    assert "{smaller}" in pages["again"] and "{size}" in pages["floor"]
+    for token in ("{page}", "{pages}", "{mode}"):
+        assert token in pages["served"]
 
     # The keys D3 rule 3 composes an argv out of.
     assert rendered["baked_flags"] == ["--host", host, "--yes", "--exec-subagents"]

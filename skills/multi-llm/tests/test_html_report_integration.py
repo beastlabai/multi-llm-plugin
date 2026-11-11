@@ -13,6 +13,7 @@ To run these tests:
 import json
 import os
 import sys
+from functools import partial
 from pathlib import Path
 from typing import Dict, List
 
@@ -22,10 +23,14 @@ import pytest
 SKILL_DIR = Path(__file__).parent.parent
 sys.path.insert(0, str(SKILL_DIR))
 
-from review_plan_orchestrator import aggregate_results
+from utils import review_orchestrator_base as rob  # noqa: E402
+
+#: review-plan's aggregation, as its fan-out calls it.
+aggregate_results = partial(rob.aggregate_results, phase_name="review-plan")
 from code_review_orchestrator import generate_review_report
 from utils.report_parser import load_html_selections, merge_selections
 from utils.html_report_generator import generate_html_report, write_html_report
+from utils.report_view import hydrate_views
 
 
 class TestFixtures:
@@ -785,7 +790,8 @@ class TestReportParserIntegration:
 
 
 def _extract_report_data(html_content: str) -> dict:
-    """Extract the embedded reportData JSON from HTML content."""
+    """Extract the embedded reportData JSON from HTML content, with its views
+    rebuilt from ``groups`` as the page's ``hydrateViews`` does."""
     start_marker = 'const reportData = '
     start_idx = html_content.find(start_marker)
     if start_idx == -1:
@@ -819,7 +825,7 @@ def _extract_report_data(html_content: str) -> dict:
                 break
 
     json_str = html_content[json_start:end_idx]
-    return json.loads(json_str)
+    return hydrate_views(json.loads(json_str))
 
 
 class TestStableIDCompatibility:

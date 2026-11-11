@@ -335,10 +335,12 @@ class TestHangingHelper:
             assert process_control.process_alive(helper_pid)
 
             # Group teardown, then reap — the order `_kill_timed_out` +
-            # `_drain_after_kill` use. Without the reap the leader lingers as a
-            # zombie and `process_alive` keeps answering True for it, which is an
-            # artifact of this test being the parent, not of the kill.
-            verdict = process_control.kill_tree(proc.pid, pgid=pgid, escalate_after_s=2.0)
+            # `_drain_after_kill` use, with the same `child`: git is this
+            # test's own unreaped child, which is what lets the kill signal its
+            # group (docs/development/runtime.md, "An owned child's kill"); a
+            # kill by identity alone would reach git and leave the helper.
+            verdict = process_control.kill_tree(proc.pid, pgid=pgid, escalate_after_s=2.0,
+                                                child=proc)
             assert verdict != "skipped", verdict
             proc.communicate(timeout=10)
             assert proc.poll() is not None, "the leader must be gone after teardown"
@@ -349,7 +351,8 @@ class TestHangingHelper:
                 "process-group teardown must take the helper down with git"
         finally:
             if proc.poll() is None:
-                process_control.kill_tree(proc.pid, pgid=pgid, escalate_after_s=1.0)
+                process_control.kill_tree(proc.pid, pgid=pgid, escalate_after_s=1.0,
+                                          child=proc)
                 try:
                     proc.communicate(timeout=10)
                 except Exception:  # noqa: BLE001 - teardown must not mask the failure

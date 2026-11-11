@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.test_check_findings_hold_dependents import repo  # noqa: F401 - fixture
+from tests.support.implement_world import implement_repo  # noqa: F401 - the repo fixture
 from tests import test_write_executor
 from tests.test_write_executor import FakeState
 

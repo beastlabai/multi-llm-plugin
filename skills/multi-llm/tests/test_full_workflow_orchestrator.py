@@ -38,21 +38,11 @@ import multi_llm  # noqa: E402
 from harness import SkillRunner  # noqa: E402
 from mocks.mock_llm import echo_subagent_answer  # noqa: E402
 from utils import unattended as un  # noqa: E402
-from utils.cli_common import parse_result_line, record_next  # noqa: E402
+from utils.cli_common import parse_result_line  # noqa: E402
 from utils.state_manager import StateManager  # noqa: E402
-from utils.subagent_executor import simulate_native_invoker  # noqa: E402
+from tests.harness.native_invoker import simulate_native_invoker  # noqa: E402
+from tests.support.full_workflow_world import _plan
 
-PLAN_BODY = """# Full Workflow Plan
-
-## Overview
-Add a foundation module and wire it into the entry point.
-
-## Step 1
-Create `src/foundation.py`.
-
-## Step 2
-Call it from `src/main.py`.
-"""
 
 #: The phases the loop drives, in order, with the phase word each records.
 EXPECTED_ORDER = [
@@ -70,11 +60,6 @@ EXPECTED_ORDER = [
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _plan(tmp_path: Path, name: str = "wf-plan") -> Path:
-    plan = tmp_path / f"{name}.md"
-    plan.write_text(PLAN_BODY, encoding="utf-8")
-    return plan
 
 
 def _complete(plan: Path, *phases: str) -> None:
@@ -139,43 +124,6 @@ def _persist_generation(plan: Path, document) -> Path:
     return phase_dir / gto.RESULT_NAME
 
 
-@pytest.fixture
-def stub_phases(monkeypatch):
-    """Stub every mode-dispatched phase; return the call log.
-
-    ``configure(fail={...}, silent={...})`` shapes the stub:
-    ``fail`` maps a mode word to the exit code it returns (nothing recorded), and
-    ``silent`` names modes that return 0 *without* recording a completion — the
-    native-invoker case a real fan-out produces when it stops at its own pending
-    marker.
-    """
-    calls = []
-    state = {"fail": {}, "silent": set()}
-
-    def run_mode(self, mode_word, extra):
-        calls.append((mode_word, list(extra)))
-        if mode_word in state["fail"]:
-            return state["fail"][mode_word]
-        if mode_word in state["silent"]:
-            record_next(f"<follow-up for {mode_word}>")
-            return 0
-        phase = mode_table.phase_for(mode_word) or mode_word
-        manager = StateManager(self.plan_path)
-        manager.mark_phase_completed(phase)
-        manager.save()
-        return 0
-
-    monkeypatch.setattr(fwo.FullWorkflow, "run_mode", run_mode)
-
-    def configure(fail=None, silent=None):
-        state["fail"] = dict(fail or {})
-        state["silent"] = set(silent or ())
-        return calls
-
-    configure()
-    return configure
-
-
 def _modes_called(calls):
     return [mode for mode, _flags in calls]
 
@@ -202,10 +150,8 @@ def exec_env(tmp_path, mock_provider, monkeypatch):
     for key, value in env.items():
         monkeypatch.setenv(key, value)
     registry._config = None
-    registry._config_key = None
     yield
     registry._config = None
-    registry._config_key = None
 
 
 # ---------------------------------------------------------------------------
@@ -1290,7 +1236,7 @@ class TestEachStepsResultIsKept:
     def _run(self, tmp_path, monkeypatch, capsys, recorded, *, detached=True):
         from types import SimpleNamespace
 
-        from utils import cli_common, detach
+        from utils import cli_common, run_record
 
         def run_mode(self, mode_word, extra):
             notice, counts = recorded.get(mode_word, (None, None))
@@ -1310,7 +1256,7 @@ class TestEachStepsResultIsKept:
         ctx = cli_common.activate_result(cli_common.ResultContext())
         try:
             if detached:
-                monkeypatch.setattr(detach, "_ACTIVE", SimpleNamespace(
+                monkeypatch.setattr(run_record, "_ACTIVE", SimpleNamespace(
                     phase_dir=str(workflow.run_dir), run_id="run-full-1"))
             assert workflow.run() == 0
         finally:

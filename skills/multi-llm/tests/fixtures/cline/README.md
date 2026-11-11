@@ -125,11 +125,12 @@ records what changed rather than being deleted.
    3.0.55, 3.0.69 and 3.0.70. The markers still earn their place as the last-resort classifier, but
    the adapter comment's premise ("the exit code carries no verdict") is now
    false for this CLI and should be re-worded rather than trusted.
-3. **A 5xx classifies as `runner_error`, not `server_error`.** OpenAI's
-   *"The server had an error while processing your request"* matches no member of
-   `base.SERVER_ERROR_MARKERS`, whose entries all want the literal "server
-   error", "internal server error" or "api error". Both categories are retryable
-   so the ladder still behaves; the `Reason:` line a user acts on is wrong.
+3. **A 5xx classified as `runner_error`, not `server_error` — FIXED.** OpenAI's
+   *"The server had an error while processing your request"* matched no member of
+   `base.SERVER_ERROR_MARKERS`, whose entries all wanted the literal "server
+   error", "internal server error" or "api error". The table now carries that
+   sentence as its own row, so `server-error` reads `server_error`. Both
+   categories are retryable, so the ladder is unmoved; the `Reason:` line is right.
 4. **`ECONNRESET` classified as `runner_error`, not `connection_error` —
    FIXED.** `CONNECTION_ERROR_MARKERS` matched `connection (?:refused|reset|
    closed|…)` as one token and cline writes *"connection was closed"*, so the

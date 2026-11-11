@@ -55,6 +55,7 @@ rows:
       `["ok"]`) and returns the array; `classify_failure` is None, the assertion
       that catches an adapter reading its own happy path as a failure.
     expect:
+      lane_status: {lane_a: ok, lane_b: ok}
       success: true
       data: ["ok"]
       raw_contains:
@@ -105,6 +106,7 @@ rows:
       thing this row now protects — a status rung that swallowed the text ladder
       would take this CLI's only failure signal with it.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       success: false
       error_contains: ["is_error: true"]
       raw_contains: ['"is_error":true']
@@ -208,3 +210,27 @@ rows:
       real model. `failserver.py --mode ctx` serves the OpenAI/Anthropic/Gemini
       surfaces, none of which cursor-agent ever calls, so the free path to this
       row does not exist at any effort.
+
+  parsed-raw-wrapper:
+    stdout: parsed-raw-wrapper.stdout.txt
+    stderr: success.stderr.txt
+    exit_code: 0
+    synthesized: true
+    provenance: >-
+      ONE EDIT to the harvested `success` envelope: its `result` string `["ok"]`
+      became `{"raw":"hello"}`; every other byte is the live capture. It stands
+      for a model that answered with valid JSON that is not an answer, which
+      no request can be made to produce on demand.
+    notes: >-
+      A clean exit-0 envelope whose answer parses (`parse_output` returns the
+      dict) but is a bare `raw` wrapper, which `invoke_with_file_output`
+      (`_is_valid_parsed_data`) and the executor's extraction both reject. The
+      file-output layer carries `unparseable_result` back for it, the
+      executor's status for the same rejection, so both lanes retry it once;
+      before, the fan-out saw no category and stopped.
+    expect:
+      lane_status: {lane_a: unparseable_result, lane_b: unparseable_result}
+      success: true
+      data: {raw: "hello"}
+      raw_contains: ['"is_error":false', '\"raw\"']
+      classify_failure: null

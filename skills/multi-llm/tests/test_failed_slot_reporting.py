@@ -31,7 +31,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import code_review_orchestrator as cro
-from tests.test_json_extractor import USAGE_CAP_ENVELOPE
+from tests.support.json_corpus import USAGE_CAP_ENVELOPE
 from utils import llm_client
 from utils.provider_registry import get_provider
 from utils.providers.base import STATUS_RATE_LIMITED, classify_streams
@@ -137,13 +137,13 @@ class TestClaudeCodeDescribeFailure:
         """Diagnostics, never classification: still the status rung's answer."""
         assert provider.classify_failure(USAGE_CAP_ENVELOPE, "", 1) == STATUS_RATE_LIMITED
 
-    def test_the_ladder_lane_reads_the_composed_error_string(self, provider):
-        """`run_single_model` classifies ``invoke_with_provider``'s error text.
+    def test_the_composed_error_line_names_the_same_rung(self, provider):
+        """``invoke_with_provider``'s error line agrees with the verdict.
 
-        With the sentence and status on it, the text ladder lands on the same
-        rung the envelope's status rung does; before, the bare exit code
-        classified as nothing and the slot was "never retried" for no reason
-        anyone could read.
+        The ladder takes ``details["failure_category"]`` on a non-zero exit;
+        the line is what a human (and a reader of ``.status.json``) sees, and
+        with the sentence and status on it, it names the same rung the
+        envelope's status rung does rather than a bare exit code.
         """
         composed = f"claude-code exited with code 1: {provider.describe_failure(USAGE_CAP_ENVELOPE, '')}"
         assert classify_streams(composed, "") == STATUS_RATE_LIMITED
@@ -180,7 +180,7 @@ class TestCursorAgentDescribeFailure:
     def test_resource_exhausted_is_a_rate_limit(self, provider):
         assert provider.classify_failure("", KIMI_STDERR, 1) == STATUS_RATE_LIMITED
 
-    def test_the_ladder_lane_reads_the_composed_error_string(self, provider):
+    def test_the_composed_error_line_names_the_same_rung(self, provider):
         composed = f"cursor-agent exited with code 1: {provider.describe_failure('', KIMI_STDERR)}"
         assert classify_streams(composed, "") == STATUS_RATE_LIMITED
 
@@ -202,7 +202,7 @@ class TestResourceExhaustedInTheSharedTable:
 
     def test_a_bare_exit_code_still_classifies_as_nothing(self):
         """The marker is in the table; it is `describe_failure` that gets it
-        onto the string the ladder lane reads."""
+        onto the error line."""
         assert classify_streams("cursor-agent exited with code 1", "") is None
 
 
@@ -262,7 +262,9 @@ class TestTheFanoutCarriesWhatAFailedSlotSpent:
         assert result["success"] is False
         assert result["error"] == (
             f"claude-code exited with code 1: {USAGE_LIMIT_TAG} HTTP 429: {FABLE_SENTENCE}"
+            " [rate_limited]"
         )
+        assert result["details"]["failure_category"] == STATUS_RATE_LIMITED
         assert result["details"]["usage"]["output_tokens"] == 137361
         assert result["details"]["usage"]["cost_usd"] == pytest.approx(25.05, abs=0.01)
 

@@ -18,13 +18,9 @@ from __future__ import annotations
 
 import pytest
 
-from tests.test_next_command_emitters import (
-    PLUGIN,
-    _run,
-    build,
-    workdir,  # noqa: F401 - the fixture
-)
-from tests.test_next_phase import CR_FINDING, P, RP_VALID, S, UP_TO_CODE_REVIEW
+from tests.support.next_command_world import PLUGIN, build
+from tests.support.main_runs import _run
+from tests.support.next_phase_world import CR_FINDING, P, RP_VALID, S, UP_TO_CODE_REVIEW
 from utils.review_orchestrator_base import already_completed_lines
 
 

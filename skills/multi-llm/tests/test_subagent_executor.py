@@ -20,9 +20,11 @@ Test groups map onto the design items:
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -36,6 +38,11 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import subagent_executor as executor  # noqa: E402
+from utils import dispatch_spawn, runner_preflight, task_batch, task_dispatch  # noqa: E402
+from utils import task_file_runner  # noqa: E402
+from utils import runner_selection, sandbox_walk, task_result  # noqa: E402
+from tests.conftest import stand_in  # noqa: E402
+from tests.harness.native_invoker import simulate_native_invoker  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
 from utils.providers.base import (  # noqa: E402
     PROFILE_AGENT_READONLY,
@@ -43,20 +50,15 @@ from utils.providers.base import (  # noqa: E402
     PROFILE_GENERATE,
     ProfileUnsupported,
 )
-from utils.subagent_tasks import (  # noqa: E402
-    READ_KINDS,
-    WRITE_KINDS,
-    build_inputs,
-    make_task,
-    make_task_file,
-    write_task_file,
-)
-from tests.mock_launchers import (  # noqa: E402
-    MOCK_LLM,
-    install_mock_llm,
-    mock_path,
-    remove_launcher,
-    write_launcher,
+from utils.subagent_tasks import READ_KINDS, WRITE_KINDS, make_task, make_task_file  # noqa: E402
+from tests.mock_launchers import MOCK_LLM, remove_launcher, write_launcher  # noqa: E402
+from tests.source_cache import source_text, source_tree
+from tests.support.subagent_world import (
+    _inputs,
+    _install_launcher,
+    _pid_alive,
+    _validation_batch,
+    _write_validation_task_file,
 )
 
 #: What codex's sandbox probe runs inside `codex sandbox --`: `sh`, except on
@@ -84,125 +86,6 @@ ELIGIBLE_RUNNERS = [
 # ---------------------------------------------------------------------------
 # Harness
 # ---------------------------------------------------------------------------
-
-def _install_launcher(bin_dir: Path, name: str) -> Path:
-    """Put a mock provider CLI called ``name`` on a temp PATH."""
-    return install_mock_llm(bin_dir, name)
-
-
-@pytest.fixture
-def runner_env(tmp_path, monkeypatch):
-    """A temp PATH carrying mock `codex`/`opencode`/`claude` plus a driver config.
-
-    Returns a small helper object so each test can pick its runner and its echo
-    kind without repeating the wiring.
-    """
-    bin_dir = tmp_path / "bin"
-    for name in ("codex", "opencode", "claude"):
-        _install_launcher(bin_dir, name)
-    # PATH is REPLACED, not prepended: this suite spawns real subprocesses, and a
-    # test that unlinks a mock launcher (the spawn_failed rung) would otherwise
-    # fall through to a developer's real `codex`/`claude` and make a live API
-    # call. Only the mock bin dir, an interpreter's own dir and where git lives
-    # (node too, on Windows) are on it.
-    monkeypatch.setenv("PATH", mock_path(bin_dir, ("codex", "opencode", "claude")))
-    monkeypatch.setenv("MULTI_LLM_TEST_MODE", "1")
-    monkeypatch.setenv("MULTI_LLM_TEST_FAST_BACKOFF", "1")
-    for name in ("codex", "opencode", "claude"):
-        resolved = shutil.which(name)
-        assert resolved and resolved.startswith(str(bin_dir)), (
-            f"{name} resolves to {resolved!r}, outside the mock bin dir — this "
-            f"suite must never be able to reach a real provider CLI"
-        )
-    executor.reset_version_cache()
-
-    class Env:
-        bin_dir = None
-        config_path = None
-
-        def use(self, runner: str = "codex:gpt-5.5", **driver):
-            body = {"subagent_runner": runner, **driver}
-            lines = ["driver:"]
-            for key, value in body.items():
-                rendered = "null" if value is None else (
-                    "true" if value is True else
-                    "false" if value is False else str(value)
-                )
-                lines.append(f"  {key}: {rendered}")
-            path = tmp_path / "driver-config.yaml"
-            path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-            monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(path))
-            registry._config = None
-            registry._config_key = None
-            self.config_path = path
-            return path
-
-        def echo(self, kind: str):
-            monkeypatch.setenv("MOCK_LLM_ECHO", kind)
-
-    env = Env()
-    env.bin_dir = bin_dir
-    yield env
-    registry._config = None
-    registry._config_key = None
-
-
-def _inputs(phase_dir: Path):
-    """The `inputs` block the schema requires for a grouped-suggestion kind."""
-    return build_inputs(grouped_file=str(Path(phase_dir) / "grouped.json"))
-
-
-def _validation_batch(phase_dir: Path, batch_index: int = 0, hashes=("aaaa000000000000",)):
-    """One materialized validation task, exactly as `utils/validation.py` writes it."""
-    records = [
-        {"index": i, "group_hash": h, "group_id": h, "theme": f"Theme {i}",
-         "category": "reliability", "models": ["model-a"],
-         "suggestions": [{"title": f"S{i}", "desc": "d", "importance": "MEDIUM",
-                          "type": "addition"}]}
-        for i, h in enumerate(hashes)
-    ]
-    prompt = (
-        "You are validating review suggestions.\n\n"
-        + json.dumps(records, indent=2)
-        + "\n\nPrint ONE JSON object and nothing else."
-    )
-    return make_task(
-        kind="validation",
-        task_id=f"validation-batch-{batch_index}",
-        prompt=prompt,
-        output_name=f"validation_batch_{batch_index}.json",
-        inputs=_inputs(phase_dir),
-        phase_dir=str(phase_dir),
-        extra={
-            "batch_index": batch_index,
-            "group_indices": list(range(len(hashes))),
-            "group_ids": list(hashes),
-            "groups_count": len(hashes),
-        },
-    )
-
-
-def _write_validation_task_file(phase_dir: Path, tasks) -> Path:
-    document = make_task_file(
-        kind="validation",
-        tasks=tasks,
-        inputs=_inputs(phase_dir),
-        task_list_key="batches",
-        extra={"total_batches": len(tasks), "phase_dir": str(phase_dir)},
-    )
-    path = phase_dir / "validation_tasks.json"
-    write_task_file(str(path), document)
-    return path
-
-
-def _pid_alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except OSError:
-        return True
-    return True
 
 
 class _NeverFinishingPopen:
@@ -355,7 +238,7 @@ class TestOutputContainment:
         assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == []
 
     def test_rejects_an_oversized_result_rather_than_truncating(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(executor, "MAX_RESULT_BYTES", 128)
+        monkeypatch.setattr(task_result, "MAX_RESULT_BYTES", 128)
         task = _validation_batch(tmp_path)
         with pytest.raises(executor.ResultRejected):
             executor.persist_result(task, str(tmp_path), {"groups": ["x" * 500]})
@@ -536,7 +419,7 @@ class TestParseBeforeExtract:
         assert excinfo.value.status == executor.STATUS_UNPARSEABLE
 
     def test_an_oversized_stream_is_refused_not_truncated(self, monkeypatch):
-        monkeypatch.setattr(executor, "MAX_STREAM_BYTES", 16)
+        monkeypatch.setattr(task_result, "MAX_STREAM_BYTES", 16)
         provider = registry.get_provider("codex")
         with pytest.raises(executor.ResultRejected) as excinfo:
             executor.extract_result(provider, "x" * 64, "", prefer_arrays=False)
@@ -747,6 +630,9 @@ class TestFailureLadder:
                 f"""\
                 #!/bin/sh
                 case "$1" in --version|-V) echo "opencode 9.9.9"; exit 0;; esac
+                # The adapter's `run --help` capability probe is not the dispatch
+                # under test: answer it, or it spends its own 5 s timeout first.
+                case "$*" in *--help*) echo "usage: opencode run"; exit 0;; esac
                 # A tool child that inherits stdout and outlives its parent.
                 sh -c 'echo $$ > "{marker}"; sleep 30' &
                 sleep 30
@@ -778,6 +664,163 @@ class TestFailureLadder:
         while time.time() < deadline and _pid_alive(pid):
             time.sleep(0.1)
         assert not _pid_alive(pid), "the runner's tool child survived the kill"
+
+    def _wrap_codex(self, runner_env, body):
+        """Put a shell wrapper in front of the mock codex; *body* runs around
+        ``"$real" "$@"`` and must end with its exit status."""
+        real_dir = runner_env.bin_dir / "real"
+        real_dir.mkdir(exist_ok=True)
+        real = real_dir / "codex"
+        (runner_env.bin_dir / "codex").rename(real)
+        wrapper = runner_env.bin_dir / "codex"
+        wrapper.write_text(
+            "#!/bin/sh\n"
+            f'case "$1" in --version|-V) exec "{real}" "$@";; esac\n'
+            + textwrap.dedent(body).replace("$real", str(real)),
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o755)
+
+    def test_a_runner_that_exits_while_a_grandchild_holds_its_pipe_returns_its_result(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """PROV-4 and SP-1: the runner prints its result and exits 0, and a
+        process it started keeps the inherited stdout open. The dispatch
+        returns with the result once the runner is gone (plus the drain),
+        never at the deadline; what the runner left holding its pipe is
+        stopped before the dispatch returns to the checks, and the row says
+        so."""
+        if os.name == "nt":  # pragma: no cover - a POSIX shell wrapper
+            pytest.skip("the wrapper is a POSIX shell script")
+        runner_env.use("codex:gpt-5.5")
+        runner_env.echo("validation")
+        marker = tmp_path / "holder.pid"
+        self._wrap_codex(runner_env, f"""\
+            sleep 30 &
+            echo $! > "{marker}"
+            "$real" "$@"
+            exit $?
+            """)
+        monkeypatch.setattr(dispatch_spawn, "TIMEOUT_DRAIN_S", 1.0)
+        holder = None
+        try:
+            started = time.monotonic()
+            outcome = self._dispatch(tmp_path, runner_env, timeout=60, retries=0)
+            elapsed = time.monotonic() - started
+            holder = int(marker.read_text(encoding="utf-8").strip())
+            assert outcome.status == executor.STATUS_OK, outcome.reason
+            assert (tmp_path / "validation_batch_0.json").exists()
+            assert elapsed < 15, f"{elapsed:.1f}s: the dispatch waited on the held pipe"
+            # Its new parent reaps it: give that a moment, never the dispatch.
+            gone_by = time.time() + 5
+            while time.time() < gone_by and _pid_alive(holder):
+                time.sleep(0.05)
+            assert not _pid_alive(holder), "the pipe's holder outlived the dispatch"
+            assert "its process group was stopped before the task's checks" in (
+                outcome.reason or "")
+            assert "(kill verdict killed)" in outcome.reason
+        finally:
+            if holder is not None and _pid_alive(holder):
+                os.kill(holder, signal.SIGKILL)
+
+    def test_a_holder_outside_the_runs_group_ends_the_dispatch_as_a_timeout(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """F03 (coordinator's design): the runner answers and exits 0, but a
+        helper it started in a session of its own keeps its output open. The
+        run's group is stopped as at a timeout, the pipe stays held, so the
+        dispatch ends as the timeout it was at the base, saying what holds the
+        output and how to look for it; the helper, outside the run's group,
+        is never signalled."""
+        if os.name == "nt":  # pragma: no cover - a POSIX shell wrapper
+            pytest.skip("the wrapper is a POSIX shell script")
+        runner_env.use("codex:gpt-5.5")
+        runner_env.echo("validation")
+        holder = tmp_path / "holder.pid"
+        self._wrap_codex(runner_env, f"""\
+            setsid sleep 30 &
+            echo $! >> "{holder}"
+            "$real" "$@"
+            exit $?
+            """)
+        monkeypatch.setattr(dispatch_spawn, "TIMEOUT_DRAIN_S", 0.5)
+        pids = []
+        try:
+            outcome = self._dispatch(tmp_path, runner_env, timeout=60, retries=0)
+            pids = [int(line) for line in holder.read_text(encoding="utf-8").split()]
+            assert outcome.status == executor.STATUS_TIMEOUT, outcome.reason
+            assert len(outcome.attempts) == 1
+            reason = outcome.reason or ""
+            assert "a process outside the run's process group holds it" in reason
+            assert "ended as a timeout" in reason and "pgrep -l -s" in reason
+            assert all(_pid_alive(pid) for pid in pids), "the outside holder was signalled"
+        finally:
+            for pid in pids:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+
+    def test_a_survivor_cannot_write_after_a_write_dispatch_returned(
+        self, tmp_path, monkeypatch
+    ):
+        """SP-1, the write lane's case: an ``agent-write`` runner prints its
+        result and exits 0 while a helper it started (inheriting its stdio)
+        writes into the working tree two seconds later. The dispatch keeps the
+        runner's own answer and exit code, and stops the helper before it
+        returns, so the per-task checks that follow see every write it made:
+        none lands afterwards."""
+        if os.name == "nt":  # pragma: no cover - a POSIX shell script
+            pytest.skip("POSIX shell")
+        from utils.providers.codex import CodexProvider
+
+        provider = CodexProvider()
+        late = tmp_path / "late_write.txt"
+        script = (f'(sleep 2; echo late > "{late}") & '
+                  "echo '{\"status\":\"done\"}'; exit 0")
+        monkeypatch.setattr(type(provider), "build_agent_command_for_transport",
+                            lambda self, *a, **k: (["bash", "-c", script], None))
+        monkeypatch.setattr(dispatch_spawn, "TIMEOUT_DRAIN_S", 0.5)
+        started = time.monotonic()
+        capture = executor._spawn_in_context(
+            provider=provider, model="gpt-5.5", prompt="p", profile=PROFILE_AGENT_WRITE,
+            transport="argv", timeout=30, cwd=str(tmp_path))
+        elapsed = time.monotonic() - started
+        assert elapsed < 2, f"{elapsed:.1f}s: the dispatch waited on the helper"
+        assert capture.exit_code == 0 and not capture.timed_out
+        assert capture.stdout == '{"status":"done"}\n'
+        assert capture.pipe_held and capture.pipe_held_verdict == "killed"
+        assert "stopped before the task's checks" in dispatch_spawn.pipe_held_note(capture)
+        time.sleep(3)
+        assert not late.exists(), "the helper wrote after the dispatch returned"
+
+    def test_a_stdout_past_the_capture_bound_is_refused_at_rung_5(
+        self, tmp_path, runner_env, monkeypatch, capsys
+    ):
+        """PROV-11: the capture keeps at most ``MAX_STREAM_BYTES`` of a stream,
+        and a stdout that passed it is refused with the executor's wording,
+        never parsed from its head."""
+        if os.name == "nt":  # pragma: no cover - a POSIX shell wrapper
+            pytest.skip("the wrapper is a POSIX shell script")
+        runner_env.use("codex:gpt-5.5")
+        runner_env.echo("validation")
+        self._wrap_codex(runner_env, """\
+            "$real" "$@"
+            status=$?
+            head -c 20000 /dev/zero | tr '\\0' 'x'
+            exit $status
+            """)
+        monkeypatch.setattr(task_result, "MAX_STREAM_BYTES", 4096)
+        outcome = self._dispatch(tmp_path, runner_env, timeout=60, retries=0)
+        assert outcome.status == executor.STATUS_UNPARSEABLE
+        assert outcome.rung == 5
+        assert (
+            "the runner produced more than 4096 bytes on stdout; refusing to parse it"
+            in (outcome.reason or "")
+        )
+        assert not (tmp_path / "validation_batch_0.json").exists()
+        # The capture itself stopped keeping bytes at the bound.
+        assert "[STREAM_CAP]" in capsys.readouterr().err
 
     def test_windows_drain_does_not_close_a_pipe_held_by_a_reader(self, monkeypatch):
         """Closing a Windows communicate reader's pipe can wait forever."""
@@ -835,7 +878,7 @@ class TestFailureLadder:
                     retries_rate_limit=False,
                 )
 
-        monkeypatch.setattr(executor, "RetryLadder", Ladder)
+        monkeypatch.setattr(task_dispatch, "RetryLadder", Ladder)
 
         def oversleep(_seconds):
             clock["t"] += 30.0
@@ -1168,18 +1211,14 @@ class TestBatchOutcome:
         (tmp_path / "validation_batch_0.json").write_text(json.dumps(result), encoding="utf-8")
         assert executor.task_is_complete(task, str(tmp_path)) is True
 
-    def test_the_report_is_invisible_to_the_reaggregation_glob(self):
-        """A non-model JSON file in a phase dir must be excluded everywhere."""
-        base = Path(__file__).parent.parent
-        for source in ("utils/review_orchestrator_base.py", "code_review_orchestrator.py"):
-            text = (base / source).read_text(encoding="utf-8")
-            for line in text.splitlines():
-                if "exclude_patterns = [" in line or "exclude = [" in line:
-                    assert "subagent_batch_report" in line, (
-                        f"{source}: {line.strip()} does not exclude the executor's "
-                        f"batch report, so reaggregation would parse it as a model "
-                        f"result"
-                    )
+    def test_the_report_is_invisible_to_the_reaggregation_glob(self, tmp_path):
+        """A non-model JSON file in a phase dir must be excluded everywhere: every
+        reader takes the names from ``result_files.model_result_paths``."""
+        from utils.result_files import model_result_paths
+
+        (tmp_path / executor.BATCH_REPORT_FILENAME).write_text("{}", encoding="utf-8")
+        (tmp_path / "m_a.json").write_text("[]", encoding="utf-8")
+        assert [Path(p).name for p in model_result_paths(tmp_path)] == ["m_a.json"]
 
 
 # ---------------------------------------------------------------------------
@@ -1392,7 +1431,7 @@ class TestResultContractEquivalence:
                 provider, completed.stdout, completed.stderr, prefer_arrays=False
             )
 
-        native_report = executor.simulate_native_invoker(
+        native_report = simulate_native_invoker(
             [native_task], phase_dir=str(native_dir), respond=respond,
             kind="validation",
         )
@@ -1406,7 +1445,7 @@ class TestResultContractEquivalence:
         """Neither invoker has an inline-json path; both refuse the task."""
         task = _validation_batch(tmp_path)
         task["result_channel"] = "inline-json"
-        report = executor.simulate_native_invoker(
+        report = simulate_native_invoker(
             [task], phase_dir=str(tmp_path), respond=lambda t: {"groups": []},
             kind="validation",
         )
@@ -1436,7 +1475,7 @@ class TestResultContractEquivalence:
                     [task], phase_dir=str(phase_dir), kind="validation"
                 ).ok
             else:
-                executor.simulate_native_invoker(
+                simulate_native_invoker(
                     [task], phase_dir=str(phase_dir), kind="validation",
                     respond=lambda t: {
                         "groups": [
@@ -1557,6 +1596,9 @@ class TestEveryKindReachesItsConsumer:
 
             def record_human_decision(self, **kwargs):
                 recorded.update(kwargs)
+
+            def record_judge_verdicts(self, phase, verdicts, unresolved=()):
+                pass
 
         # The judge is the runner the executor actually dispatched.
         judges = judge_labels(str(tmp_path), ingest.sources)
@@ -1731,7 +1773,7 @@ class TestEveryKindReachesItsConsumer:
             task_list_key="batches",
             extra={"total_batches": 1, "phase_dir": str(validation_dir)},
         )
-        assert executor.simulate_native_invoker(
+        assert simulate_native_invoker(
             [task], phase_dir=str(validation_dir), kind="validation",
             respond=lambda t: {
                 "groups": [{"group_index": 0, "group_hash": "aaaa000000000000",
@@ -1761,7 +1803,7 @@ class TestEveryKindReachesItsConsumer:
                        {"group_index": 1, "status": "validation_failed"},
                    ]},
         )
-        assert executor.simulate_native_invoker(
+        assert simulate_native_invoker(
             [reval_task], phase_dir=str(reval_dir), kind="revalidation",
             respond=lambda t: {
                 "groups": [{"group_index": 0, "group_hash": "aaaa000000000000",
@@ -1788,7 +1830,7 @@ class TestEveryKindReachesItsConsumer:
         judge_document = build_judge_tasks(
             items=[judge_item_from_group(group)], phase_dir=str(judge_dir)
         )
-        assert executor.simulate_native_invoker(
+        assert simulate_native_invoker(
             judge_document["tasks"], phase_dir=str(judge_dir),
             kind="human_decision_judge",
             respond=lambda t: {
@@ -1825,7 +1867,7 @@ class TestEveryKindReachesItsConsumer:
             extra={"total_batches": 1, "phase_dir": str(cons_dir),
                    "singleton_sections": {}},
         )
-        assert executor.simulate_native_invoker(
+        assert simulate_native_invoker(
             [cons_task], phase_dir=str(cons_dir), kind="consolidation",
             respond=lambda t: {
                 "verification": "passed", "clusters": [],
@@ -1897,7 +1939,7 @@ class TestEveryKindReachesItsConsumer:
     def test_the_native_invoker_refuses_a_schema_invalid_reply(self, tmp_path):
         """The native path validates too — it is not a trusted write channel."""
         task = _validation_batch(tmp_path)
-        report = executor.simulate_native_invoker(
+        report = simulate_native_invoker(
             [task], phase_dir=str(tmp_path), kind="validation",
             respond=lambda t: {"groups": [{"status": "valid"}]},  # no group_hash
         )
@@ -2094,7 +2136,7 @@ class TestSalvageFoundNothing:
         task_file = self._salvage_task_file(tmp_path)
         tasks = tasks_of(json.loads(Path(task_file).read_text(encoding="utf-8")))
 
-        report = executor.simulate_native_invoker(
+        report = simulate_native_invoker(
             tasks, phase_dir=str(tmp_path), kind="salvage",
             respond=lambda _t: self._sentinel(),
         )
@@ -2105,7 +2147,7 @@ class TestSalvageFoundNothing:
         assert not (tmp_path / "codex_gpt-5_5.json").exists()
 
         # ... and it still persists the two answers that ARE results.
-        assert executor.simulate_native_invoker(
+        assert simulate_native_invoker(
             tasks, phase_dir=str(tmp_path), kind="salvage", respond=lambda _t: [],
         ).ok
         assert json.loads(
@@ -2230,7 +2272,7 @@ class TestSalvageFoundNothing:
         tasks = tasks_of(json.loads(Path(task_file).read_text(encoding="utf-8")))
 
         for envelope in (self.PROVIDER_ERROR_BODY, self.EVENT_ENVELOPE):
-            report = executor.simulate_native_invoker(
+            report = simulate_native_invoker(
                 tasks, phase_dir=str(tmp_path), kind="salvage",
                 respond=lambda _t, body=envelope: body,
             )
@@ -2242,7 +2284,7 @@ class TestSalvageFoundNothing:
 
         # ... and a genuine recovery still lands on the model's result path, so
         # the rule is not simply refusing everything this lane hands it.
-        assert executor.simulate_native_invoker(
+        assert simulate_native_invoker(
             tasks, phase_dir=str(tmp_path), kind="salvage", respond=lambda _t: [],
         ).ok
         assert json.loads(
@@ -2307,7 +2349,7 @@ class TestATimedOutRunsEmptySalvageIsRefused:
 
         task_file = self._salvage_task_file(tmp_path, timed_out=timed_out)
         tasks = tasks_of(json.loads(Path(task_file).read_text(encoding="utf-8")))
-        return executor.simulate_native_invoker(
+        return simulate_native_invoker(
             tasks, phase_dir=str(tmp_path), kind="salvage",
             respond=lambda _t: response,
         )
@@ -2382,7 +2424,12 @@ class TestATimedOutRunsEmptySalvageIsRefused:
 
         assert executor.salvage_failure_of(task, str(tmp_path)) == "timeout"
         (tmp_path / "salvage_codex_gpt-5_5.json").unlink()
-        assert executor.salvage_failure_of(task, str(tmp_path)) is None
+        # A request the task binds, gone: its failure kind is unknown, read as
+        # a timeout; a task that binds none keeps the old reading.
+        assert executor.salvage_failure_of(task, str(tmp_path)) == "timeout"
+        unbound = {**task, "inputs": {
+            k: v for k, v in task["inputs"].items() if k != "salvage_request_sha256"}}
+        assert executor.salvage_failure_of(unbound, str(tmp_path)) is None
         assert executor.salvage_failure_of(
             {**task, "kind": "validation"}, str(tmp_path)) is None
 
@@ -2434,16 +2481,16 @@ class TestAdditiveUntilAsked:
         """F5's second half: `grouping` stood for the whole validation dispatch,
         so a poll could not tell a phase that had eleven batches in flight from
         one that had finished grouping and stalled (measured 2026-09-16)."""
-        from utils import detach as detach_module
+        from utils import run_record
         from utils.review_orchestrator_base import dispatch_subagent_tasks
 
         seen = []
         monkeypatch.setattr(
-            detach_module, "report_progress",
+            run_record, "report_progress",
             lambda phase_dir, **updates: seen.append((str(phase_dir), updates)),
         )
         monkeypatch.setattr(
-            executor, "continue_past_marker",
+            task_file_runner, "continue_past_marker",
             lambda *a, **k: (seen.append(("dispatched", {})), True)[1],
         )
         args = type("Args", (), {"exec_subagents": True, "yes": True})()
@@ -2533,20 +2580,13 @@ class TestLongestFirstDispatch:
         same reason. Preflight still runs against the real mock CLI, so the
         batch reaches the gate exactly as a real one does.
         """
-        from utils import review_orchestrator_base as rob
-
         runner_env.use("codex:gpt-5.5", max_concurrent_subagents=1)
-        # Tasks reach the one lane in the order their stagger sleeps end, and
-        # the stagger is ``index * PROVIDER_STAGGER_DELAY``. FAST_BACKOFF
-        # flattens it to 10 ms for every index, which only orders the tasks
-        # while the loop clock can tell two timers apart: Windows' ticks every
-        # 15.6 ms, so those timers tie and wake in heap order, not file order
-        # (Windows CI: tasks 3 and 4 swapped). Keep the index-proportional
-        # shape at a tenth of a second per index instead.
-        monkeypatch.setattr(rob, "get_backoff_delay", lambda delay: delay / 20)
+        # codex declares no launch stagger, so no timer orders the tasks: they
+        # reach the one lane in file order.
         tasks = self._sized_batches(tmp_path)
         dispatched = []
 
+        @stand_in
         def recording_dispatch(task, *, phase_dir, runner, anchor=None, cwd=None):
             dispatched.append(task["task_id"])
             return executor.TaskOutcome(
@@ -2557,7 +2597,7 @@ class TestLongestFirstDispatch:
                 output_path=str(Path(phase_dir) / task["output_name"]),
             )
 
-        monkeypatch.setattr(executor, "dispatch_task", recording_dispatch)
+        monkeypatch.setattr(task_dispatch, "dispatch_task", recording_dispatch)
         report = executor.run_tasks(
             tasks, phase_dir=str(tmp_path), kind="validation", resume=False,
         )
@@ -2595,6 +2635,131 @@ class TestLongestFirstDispatch:
             index = task["batch_index"]
             assert task["task_id"] == f"validation-batch-{index}"
             assert task["output_path"].endswith(f"validation_batch_{index}.json")
+
+
+class TestTheBatchDeadline:
+    """The batch deadline cancels the gather, whose result map then comes back
+    empty. A task that settled before it keeps its outcome; one whose file
+    landed after it is not reported as having none."""
+
+    HASHES = ("aaaa000000000000", "bbbb000000000000", "cccc000000000000")
+
+    def _run(self, tmp_path, runner_env, monkeypatch, *, resume=True):
+        from utils import review_orchestrator_base as rob
+
+        runner_env.use("codex:gpt-5.5", max_concurrent_subagents=3)
+        # Three tasks at a 0.1 s budget: the batch cap is 2 x 3 x 0.1 s, no stagger.
+        for module in (task_batch, task_dispatch):
+            monkeypatch.setattr(module, "get_subagent_timeout", lambda *_a, **_k: 0.1)
+        monkeypatch.setattr("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0)
+        tasks = [_validation_batch(tmp_path, i, hashes=(h,)) for i, h in enumerate(self.HASHES)]
+
+        def write_reply(task, phase_dir):
+            reply = {"groups": [{"group_index": 0, "group_hash": task["group_ids"][0],
+                                 "status": "valid", "reason": "r", "confidence": 0.9}]}
+            path = Path(phase_dir) / task["output_name"]
+            path.write_text(json.dumps(reply), encoding="utf-8")
+            return str(path)
+
+        @stand_in
+        def dispatch(task, *, phase_dir, runner, anchor=None, cwd=None):
+            index = task["batch_index"]
+            if index:
+                time.sleep(1.5)  # still running when the deadline fires
+            if index == 2:
+                return executor.TaskOutcome(
+                    task_id=task["task_id"], kind=task["kind"], runner=runner,
+                    status=executor.STATUS_TIMEOUT, reason="its own deadline",
+                )
+            path = write_reply(task, phase_dir)
+            return executor.TaskOutcome(
+                task_id=task["task_id"], kind=task["kind"], runner=runner,
+                status=executor.STATUS_OK, output_path=path,
+                # As the real dispatch records it: the hash of what it wrote.
+                result_sha256=hashlib.sha256(Path(path).read_bytes()).hexdigest(),
+            )
+
+        monkeypatch.setattr(task_dispatch, "dispatch_task", dispatch)
+        return executor.run_tasks(
+            tasks, phase_dir=str(tmp_path), kind="validation", resume=resume,
+        )
+
+    def test_a_task_settled_before_the_deadline_keeps_its_outcome(
+        self, tmp_path, runner_env, monkeypatch, capsys
+    ):
+        report = self._run(tmp_path, runner_env, monkeypatch)
+        assert "Total subagent batch timeout" in capsys.readouterr().out
+        ids = [f"validation-batch-{i}" for i in range(3)]
+        assert [o.task_id for o in report.outcomes] == ids
+        first, late, absent = report.outcomes
+        assert first.status == executor.STATUS_OK and not first.skipped
+        assert first.runner == "codex:gpt-5.5" and first.reason is None
+        # Credited: its own dispatch recorded writing those bytes.
+        assert report.batch_provenance[ids[0]]["runner"] == "codex:gpt-5.5"
+        # Landed after the deadline: it counts, but no runner is credited.
+        assert late.status == executor.STATUS_OK and late.skipped
+        assert late.reason.startswith("its result file exists and validates")
+        assert ids[1] not in report.batch_provenance
+        assert absent.status == executor.STATUS_INCOMPLETE
+        assert absent.reason.endswith("; no result file exists")
+        assert not report.ok
+        document = json.loads(
+            (tmp_path / "subagent_batch_report.json").read_text(encoding="utf-8")
+        )
+        assert [row["status"] for row in document["tasks"]] == [
+            executor.STATUS_OK, executor.STATUS_OK, executor.STATUS_INCOMPLETE,
+        ]
+
+    def test_the_cap_holds_when_backpressure_narrows_the_provider_to_one_slot(
+        self, tmp_path, runner_env, monkeypatch, capsys
+    ):
+        """Two rate limits narrow the provider from four slots to one, so the
+        rest of the batch runs one task at a time, each inside its own budget.
+        The cap allows one budget per task; sized by the starting four lanes'
+        waves (2 x 4 x 0.15 s), it cancelled the tail."""
+        from utils import review_orchestrator_base as rob
+
+        runner_env.use("codex:gpt-5.5", max_concurrent_subagents=4)
+        budget = 0.15
+        for module in (task_batch, task_dispatch):
+            monkeypatch.setattr(module, "get_subagent_timeout", lambda *_a, **_k: budget)
+        monkeypatch.setattr("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0)
+        tasks = [_validation_batch(tmp_path, i, hashes=(f"{i:04d}" + "0" * 12,))
+                 for i in range(16)]
+
+        @stand_in
+        def dispatch(task, *, phase_dir, runner, anchor=None, cwd=None):
+            if task["batch_index"] < 2:
+                return executor.TaskOutcome(
+                    task_id=task["task_id"], kind=task["kind"], runner=runner,
+                    status=executor.STATUS_RATE_LIMITED, reason="429",
+                )
+            time.sleep(budget - 0.01)
+            reply = {"groups": [{"group_index": 0, "group_hash": task["group_ids"][0],
+                                 "status": "valid", "reason": "r", "confidence": 0.9}]}
+            path = Path(phase_dir) / task["output_name"]
+            path.write_text(json.dumps(reply), encoding="utf-8")
+            return executor.TaskOutcome(
+                task_id=task["task_id"], kind=task["kind"], runner=runner,
+                status=executor.STATUS_OK, output_path=str(path),
+            )
+
+        monkeypatch.setattr(task_dispatch, "dispatch_task", dispatch)
+        report = executor.run_tasks(tasks, phase_dir=str(tmp_path), kind="validation")
+        out = capsys.readouterr().out
+        assert "narrowing it to 1 in-flight slot(s)" in out
+        assert "Total subagent batch timeout" not in out
+        statuses = [o.status for o in report.outcomes]
+        assert statuses == [executor.STATUS_RATE_LIMITED] * 2 + [executor.STATUS_OK] * 14
+        assert not any(o.skipped for o in report.outcomes)
+
+    def test_without_resume_a_late_file_is_not_taken(self, tmp_path, runner_env, monkeypatch):
+        report = self._run(tmp_path, runner_env, monkeypatch, resume=False)
+        first, late, absent = report.outcomes
+        assert first.status == executor.STATUS_OK
+        assert late.status == executor.STATUS_INCOMPLETE
+        assert "a valid result file is on disk, but this batch ran without resume" in late.reason
+        assert absent.reason.endswith("; no result file exists")
 
 
 class TestUsageMetrics:
@@ -2861,7 +3026,7 @@ class TestRunnerAuthPreflight:
 
     def test_an_unreadable_probe_never_blocks(self, tmp_path, runner_env, monkeypatch):
         """A probe that cannot run at all is `unknown`, not a refusal."""
-        monkeypatch.setattr(executor, "_run_probe", lambda argv: None)
+        monkeypatch.setattr(runner_preflight, "_run_probe", stand_in(lambda argv: None))
         runner_env.use("codex:gpt-5.5")
         info = executor.preflight_runner("codex:gpt-5.5")
         assert info["auth"] == "unknown"
@@ -2980,7 +3145,6 @@ class TestStructuralModelSpecRefusal:
         )
         monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(config))
         registry._config = None
-        registry._config_key = None
 
         with pytest.raises(executor.RunnerRejected) as excinfo:
             executor.preflight_runner(
@@ -3002,7 +3166,7 @@ class TestStructuralModelSpecRefusal:
         def _unreadable(*_args, **_kwargs):
             raise RuntimeError("catalog unreadable")
 
-        monkeypatch.setattr(executor, "is_model_valid", _unreadable)
+        monkeypatch.setattr(runner_preflight, "is_model_valid", _unreadable)
 
         with pytest.raises(executor.RunnerRejected) as excinfo:
             executor.preflight_runner(
@@ -3139,7 +3303,7 @@ class TestNestedExecPreflight:
             return self._Capture(**capture)
 
         monkeypatch.setenv("MULTI_LLM_HOST", host)
-        monkeypatch.setattr(executor, "_spawn", fake_spawn)
+        monkeypatch.setattr(dispatch_spawn, "_spawn", fake_spawn)
         executor.reset_version_cache()
         try:
             state = executor._detect_nested_exec(
@@ -3272,7 +3436,7 @@ class TestNestedExecPreflight:
         spawned = []
         monkeypatch.setenv("MULTI_LLM_HOST", "codex")
         monkeypatch.setattr(
-            executor, "_spawn",
+            dispatch_spawn, "_spawn",
             lambda **kwargs: spawned.append(kwargs) or self._Capture(stdout="ok"),
         )
         executor.reset_version_cache()
@@ -3361,7 +3525,6 @@ class TestDriverConfig:
         path.write_text(textwrap.dedent(body), encoding="utf-8")
         monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(path))
         registry._config = None
-        registry._config_key = None
         return path
 
     def test_base_ships_a_fully_populated_block(self):
@@ -3679,7 +3842,7 @@ def test_fx_step_budget_is_terminal_in_dispatch(tmp_path, runner_env, monkeypatc
     runner_env.use("fx:test/model", subagent_retries=2)
     # Exercise the shared dispatch machinery using fx's supported generate
     # profile; this does not add a read-only runner profile to the adapter.
-    monkeypatch.setattr(executor, "profile_for_kind", lambda kind: "generate")
+    monkeypatch.setattr(runner_selection, "profile_for_kind", lambda kind: "generate")
     calls = []
 
     def spawn(**kwargs):
@@ -3689,7 +3852,7 @@ def test_fx_step_budget_is_terminal_in_dispatch(tmp_path, runner_env, monkeypatc
             stderr="Agent step limit reached\n", exit_code=1,
         )
 
-    monkeypatch.setattr(executor, "_spawn_child", spawn)
+    monkeypatch.setattr(dispatch_spawn, "_spawn_child", spawn)
     outcome = executor.dispatch_task(
         _validation_batch(tmp_path), phase_dir=str(tmp_path), runner="fx:test/model",
         sleep=lambda seconds: pytest.fail("terminal budget must not back off"),
@@ -3807,7 +3970,7 @@ class TestInvalidModelIsFatal:
             spawned.append(kwargs)
             return self._Capture(_INVALID_MODEL_STDOUT, _INVALID_MODEL_STDERR)
 
-        monkeypatch.setattr(executor, "_spawn", fake_spawn)
+        monkeypatch.setattr(dispatch_spawn, "_spawn", fake_spawn)
         with pytest.raises(executor.RunnerRejected) as excinfo:
             executor._detect_nested_exec(
                 "opencode", "opencode/sonnet",
@@ -4272,7 +4435,6 @@ def _no_driver_layer(monkeypatch):
     """Leave every explicit config layer silent about `driver.subagent_runner`."""
     monkeypatch.delenv("MULTI_LLM_PROVIDERS_CONFIG", raising=False)
     registry._config = None
-    registry._config_key = None
 
 
 class TestModelCatalogPreflight:
@@ -4328,6 +4490,36 @@ class TestModelCatalogPreflight:
         assert report.ok
         assert "could not confirm" in capsys.readouterr().err
 
+    def test_a_type_error_inside_the_catalog_read_is_never_retried(
+            self, tmp_path, runner_env, monkeypatch):
+        """Every adapter takes ``profile``, so a TypeError is the adapter's own
+        bug: one call, read as an unknown catalog, never a second call without
+        the keyword that could mask it (U86, from U55's review)."""
+        from utils.providers import opencode as oc
+
+        runner_env.use("opencode:opencode/big-pickle")
+        calls = []
+
+        def broken(self, model, *, anchor=None, profile="agent-readonly"):
+            calls.append((model, profile))
+            raise TypeError("a bug inside the adapter")
+
+        monkeypatch.setattr(oc.OpenCodeProvider, "describe_unlisted_model", broken)
+        info = executor.preflight_runner("opencode:opencode/big-pickle")
+        assert len(calls) == 1
+        assert info["model_catalog"] == "unknown"
+
+    def test_every_adapter_takes_the_catalog_keywords(self):
+        """The preflight calls every adapter with ``anchor`` and ``profile``; one
+        that drops either would read as an unknown catalog on every run."""
+        import inspect
+
+        from utils.provider_registry import _PROVIDERS
+
+        for name, adapter in sorted(_PROVIDERS.items()):
+            method = type(adapter).describe_unlisted_model
+            inspect.signature(method).bind(adapter, "m", anchor=None, profile=None)
+
     def test_adapters_without_a_catalog_answer_unknown_silently(
         self, tmp_path, runner_env, monkeypatch, capsys
     ):
@@ -4353,7 +4545,7 @@ class TestModelCatalogPreflight:
         executor.reset_version_cache()
         nested = []
         monkeypatch.setattr(
-            executor, "_detect_nested_exec",
+            runner_preflight, "_detect_nested_exec",
             lambda *a, **k: nested.append(a) or "unknown",
         )
         with pytest.raises(executor.RunnerRejected) as excinfo:
@@ -4450,7 +4642,6 @@ class TestModelCatalogPreflight:
                 registry, "_find_project_config", lambda anchor=None: project
             )
             registry._config = None
-            registry._config_key = None
         elif layer == "host capabilities":
             monkeypatch.setattr(
                 registry, "_find_project_config", lambda anchor=None: None
@@ -4467,15 +4658,15 @@ class TestModelCatalogPreflight:
                 registry, "host_default_runner",
                 lambda tier="full", host_id=None: None,
             )
-            real_driver = registry.get_driver_config()
-            monkeypatch.setattr(
-                registry, "get_driver_config",
-                lambda anchor=None: {**real_driver, "subagent_runner": _UNLISTED_SPEC},
-            )
-            monkeypatch.setattr(
-                registry, "get_driver_provenance",
-                lambda key, anchor=None: "base",
-            )
+            real_base = registry._load_base_config
+
+            def base_naming_the_spec():
+                base = real_base()
+                base["driver"]["subagent_runner"] = _UNLISTED_SPEC
+                return base
+
+            monkeypatch.setattr(registry, "_load_base_config", base_naming_the_spec)
+            registry._config = None
         spec, reported = registry.resolve_subagent_runner("full")
         assert (spec, reported) == (_UNLISTED_SPEC, layer)
 
@@ -4504,7 +4695,7 @@ class TestModelCatalogPreflight:
         def _boom(*args, **kwargs):
             raise AssertionError("status reached a probe")
 
-        monkeypatch.setattr(executor, "_run_probe", _boom)
+        monkeypatch.setattr(runner_preflight, "_run_probe", _boom)
         monkeypatch.setattr(oc, "_list_models", _boom)
         monkeypatch.setattr(subprocess, "run", _boom)
         monkeypatch.setattr(subprocess, "Popen", _boom)
@@ -4740,7 +4931,7 @@ class TestCredentialFreeModels:
             args=["opencode", "auth", "list"], returncode=0,
             stdout=self._ZERO_CREDENTIALS, stderr="",
         )
-        monkeypatch.setattr(executor, "_run_probe", lambda argv: completed)
+        monkeypatch.setattr(runner_preflight, "_run_probe", stand_in(lambda argv: completed))
 
     def test_the_default_declares_the_measured_id_and_nothing_else(self):
         provider = registry.get_provider("opencode")
@@ -4802,7 +4993,7 @@ class TestCredentialFreeModels:
             args=["opencode", "auth", "list"], returncode=fixture["exit"],
             stdout=fixture["stdout"], stderr=fixture["stderr"],
         )
-        monkeypatch.setattr(executor, "_run_probe", lambda argv: completed)
+        monkeypatch.setattr(runner_preflight, "_run_probe", stand_in(lambda argv: completed))
         executor.reset_auth_cache()
         with pytest.raises(executor.RunnerRejected) as excinfo:
             executor._detect_auth(
@@ -4826,7 +5017,7 @@ class TestCredentialFreeModels:
             stdout="┌  Credentials\n│\n●  OpenRouter api\n│\n└  1 credentials\n",
             stderr="",
         )
-        monkeypatch.setattr(executor, "_run_probe", lambda argv: completed)
+        monkeypatch.setattr(runner_preflight, "_run_probe", stand_in(lambda argv: completed))
         executor.reset_auth_cache()
         state = executor._detect_auth(
             "opencode", "opencode/big-pickle",
@@ -4892,7 +5083,7 @@ class TestSandboxUnavailable:
     def _no_dispatch(monkeypatch):
         def boom(**kwargs):
             raise AssertionError("a child was dispatched past a refused preflight")
-        monkeypatch.setattr(executor, "_spawn", boom)
+        monkeypatch.setattr(dispatch_spawn, "_spawn", boom)
 
     # -- step 4: the classifier row ---------------------------------------
 
@@ -4941,7 +5132,7 @@ class TestSandboxUnavailable:
             spawned.append(kwargs)
             return self._Capture("", _BWRAP_BROKEN_LINE + "\n")
 
-        monkeypatch.setattr(executor, "_spawn", fake_spawn)
+        monkeypatch.setattr(dispatch_spawn, "_spawn", fake_spawn)
         with pytest.raises(executor.RunnerRejected) as excinfo:
             executor._detect_nested_exec(
                 "codex", "gpt-5.5",
@@ -5035,6 +5226,7 @@ class TestSandboxUnavailable:
         blocked = probe[:-1] + [_WINDOWS_WRITE_PROBE.replace("os.getpid()", "0")]
         assert subprocess.run(blocked, cwd=tmp_path).returncode == 1
 
+    @pytest.mark.shell_probe
     def test_a_read_only_batch_is_refused_when_the_sandbox_cannot_start(
         self, tmp_path, runner_env, monkeypatch, capsys
     ):
@@ -5082,7 +5274,6 @@ class TestSandboxUnavailable:
             encoding="utf-8",
         )
         registry._config = None
-        registry._config_key = None
 
     @staticmethod
     def _broken_probe_for(profile):
@@ -5092,6 +5283,7 @@ class TestSandboxUnavailable:
             return [_SH, "-c", f"echo '{_BWRAP_BROKEN_LINE}' >&2; exit 1"]
         return command
 
+    @pytest.mark.shell_probe
     def test_a_read_only_batch_dispatches_unsandboxed_by_default(
         self, tmp_path, runner_env, monkeypatch, capsys
     ):
@@ -5132,7 +5324,7 @@ class TestSandboxUnavailable:
             spawned.append(kwargs)
             return self._Capture("", "boom\n", exit_code=1)
 
-        monkeypatch.setattr(executor, "_spawn", fake_spawn)
+        monkeypatch.setattr(dispatch_spawn, "_spawn", fake_spawn)
         phase_dir = tmp_path / "phase"
         phase_dir.mkdir()
         task = _validation_batch(phase_dir)
@@ -5186,7 +5378,7 @@ class TestSandboxUnavailable:
         return JailRequest(str(repo), "apply_suggestions", "plan-file", str(plan))
 
     def _arrange_write_leg(self, leg, tmp_path, runner_env, monkeypatch):
-        from tests.test_plugin_landlock_executor import install_fake_wrapper
+        from tests.support.landlock_world import install_fake_wrapper
         from utils.providers import codex as codex_module
 
         if leg == "off":
@@ -5198,6 +5390,7 @@ class TestSandboxUnavailable:
         return install_fake_wrapper(tmp_path / "wrapper", monkeypatch, probe="absent")
 
     @pytest.mark.parametrize("leg", ["off", "opt-in-off", "landlock-absent"])
+    @pytest.mark.shell_probe
     def test_a_write_batch_is_refused_under_each_leg_the_jail_cannot_serve(
         self, tmp_path, runner_env, monkeypatch, capsys, leg
     ):
@@ -5233,6 +5426,7 @@ class TestSandboxUnavailable:
         if leg == "opt-in-off":
             assert provider.sandbox_fallback_policy(PROFILE_AGENT_WRITE) is None
 
+    @pytest.mark.shell_probe
     def test_a_write_batch_takes_the_plugin_landlock_rung(
         self, tmp_path, runner_env, monkeypatch, capsys
     ):
@@ -5240,7 +5434,7 @@ class TestSandboxUnavailable:
         step-3 opt-in and a jail that passes its self-test, the write batch's
         preflight records `plugin-landlock` for its scope — never `bypassed` —
         and the scheduler's per-batch line names the scope and the target."""
-        from tests.test_plugin_landlock_executor import install_fake_wrapper
+        from tests.support.landlock_world import install_fake_wrapper
 
         runner_env.use("codex:gpt-5.5")
         monkeypatch.chdir(tmp_path)
@@ -5266,6 +5460,7 @@ class TestSandboxUnavailable:
         assert "scope plan-file" in line and "plan.md" in line
 
     @pytest.mark.parametrize("leg", ["off", "opt-in-off", "landlock-absent"])
+    @pytest.mark.shell_probe
     def test_a_codex_session_model_write_falls_to_the_floor_which_is_refused_too(
         self, tmp_path, runner_env, monkeypatch, capsys, leg
     ):
@@ -5284,12 +5479,11 @@ class TestSandboxUnavailable:
             path.write_text("providers:\n  codex:\n    sandbox_fallback: off\n", encoding="utf-8")
             monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(path))
             registry._config = None
-            registry._config_key = None
         elif leg == "opt-in-off":
             from utils.providers import codex as codex_module
 
             monkeypatch.setattr(codex_module, "WRITE_RUNG_OPT_IN", False)
-        from tests.test_plugin_landlock_executor import install_fake_wrapper
+        from tests.support.landlock_world import install_fake_wrapper
 
         install_fake_wrapper(tmp_path / "wrapper", monkeypatch, probe="absent")
         provider = registry.get_provider("codex")
@@ -5317,6 +5511,7 @@ class TestSandboxUnavailable:
         ) in capsys.readouterr().out
         assert "unsandboxed" not in executor._SANDBOX_DECISIONS.values()
 
+    @pytest.mark.shell_probe
     def test_an_unknown_verdict_never_widens_under_auto(
         self, tmp_path, runner_env, monkeypatch, capsys
     ):
@@ -5331,7 +5526,7 @@ class TestSandboxUnavailable:
             return [_SH, "-c", "sleep 5"] if requested == PROFILE_AGENT_READONLY else None
 
         monkeypatch.setattr(type(provider), "sandbox_probe_command", slow)
-        monkeypatch.setattr(executor, "SANDBOX_PROBE_TIMEOUT_S", 0.2)
+        monkeypatch.setattr(sandbox_walk, "SANDBOX_PROBE_TIMEOUT_S", 0.2)
         info = executor.preflight_runner("codex:gpt-5.5", profile=PROFILE_AGENT_READONLY)
         assert info["sandbox"] == "unknown"
         assert not executor.sandbox_bypassed("codex:gpt-5.5", PROFILE_AGENT_READONLY)
@@ -5339,6 +5534,7 @@ class TestSandboxUnavailable:
         assert "[SANDBOX_BYPASSED]" not in captured.out
         assert "recording sandbox 'unknown'" in captured.err
 
+    @pytest.mark.shell_probe
     def test_off_refuses_a_read_only_batch_exactly_as_before(
         self, tmp_path, runner_env, monkeypatch, capsys
     ):
@@ -5360,6 +5556,7 @@ class TestSandboxUnavailable:
         assert excinfo.value.reason_code == "sandbox_unavailable"
         assert "[SANDBOX_BYPASSED]" not in capsys.readouterr().out
 
+    @pytest.mark.shell_probe
     def test_a_failing_self_test_refuses_before_dispatch(
         self, tmp_path, runner_env, monkeypatch, capsys
     ):
@@ -5382,6 +5579,7 @@ class TestSandboxUnavailable:
         # A refusal is never cached.
         assert executor._SANDBOX_DECISIONS == {}
 
+    @pytest.mark.shell_probe
     def test_a_passing_self_test_dispatches_and_is_probed_once(
         self, tmp_path, runner_env, monkeypatch
     ):
@@ -5398,7 +5596,7 @@ class TestSandboxUnavailable:
             runs.append(list(argv))
             return real(argv, **kwargs)
 
-        monkeypatch.setattr(executor, "_run_sandbox_probe", counting)
+        monkeypatch.setattr(sandbox_walk, "_run_sandbox_probe", counting)
         info = executor.preflight_runner("codex:gpt-5.5", profile=PROFILE_AGENT_WRITE)
         assert info["sandbox"] == "ok"
         assert len(runs) == 1
@@ -5413,6 +5611,7 @@ class TestSandboxUnavailable:
         assert readonly["sandbox"] == "not-required"
         assert len(runs) == 1
 
+    @pytest.mark.shell_probe
     def test_a_self_test_that_times_out_dispatches_with_unknown(
         self, tmp_path, runner_env, monkeypatch, capsys
     ):
@@ -5422,7 +5621,7 @@ class TestSandboxUnavailable:
         monkeypatch.setattr(
             type(provider), "sandbox_probe_command", self._fake_command("sleep 5"),
         )
-        monkeypatch.setattr(executor, "SANDBOX_PROBE_TIMEOUT_S", 0.2)
+        monkeypatch.setattr(sandbox_walk, "SANDBOX_PROBE_TIMEOUT_S", 0.2)
         started = time.monotonic()
         info = executor.preflight_runner("codex:gpt-5.5", profile=PROFILE_AGENT_WRITE)
         assert time.monotonic() - started < 4.0
@@ -5431,6 +5630,7 @@ class TestSandboxUnavailable:
         assert "recording sandbox 'unknown'" in err
         assert "Dispatching anyway" in err
 
+    @pytest.mark.shell_probe
     def test_the_windows_probe_kills_a_grandchild_holding_its_pipes(
         self, tmp_path, monkeypatch
     ):
@@ -5510,10 +5710,9 @@ class TestSandboxUnavailable:
         lives in this module and nowhere a sub-second command imports."""
         import ast
 
-        source = (Path(executor.__file__).parent / "provider_registry.py").read_text(
-            encoding="utf-8"
-        )
-        tree = ast.parse(source)
+        registry_path = Path(executor.__file__).parent / "provider_registry.py"
+        source = source_text(registry_path)
+        tree = source_tree(registry_path)
         imported = {
             alias.name for node in ast.walk(tree) if isinstance(node, ast.Import)
             for alias in node.names
@@ -5521,6 +5720,7 @@ class TestSandboxUnavailable:
         assert "subprocess" not in imported
         assert "sandbox_probe_command" not in source
 
+    @pytest.mark.shell_probe
     def test_a_cli_that_does_not_understand_the_probe_dispatches_with_unknown(
         self, tmp_path, runner_env, monkeypatch, capsys
     ):
@@ -5601,7 +5801,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         """Lane A with the probing adapter bound and no dispatch permitted."""
         from utils import review_orchestrator_base as rob
 
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+        executor._SANDBOX_PROBE_CACHE.clear()
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._Probed())
         monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
 
@@ -5612,6 +5812,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         monkeypatch.setattr(rob, "invoke_with_provider", no_dispatch)
         return rob
 
+    @pytest.mark.shell_probe
     def test_the_fanout_refuses_a_slot_whose_sandbox_cannot_start(
         self, fanout, tmp_path, capsys
     ):
@@ -5631,6 +5832,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         # stream for a salvage request to ask a repair pass about.
         assert fanout.failure_output_from_result(result) == ""
 
+    @pytest.mark.shell_probe
     def test_the_probe_runs_once_for_two_slots_of_the_same_provider(
         self, fanout, tmp_path, monkeypatch
     ):
@@ -5641,7 +5843,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
             runs.append(list(argv))
             return real(argv, **kwargs)
 
-        monkeypatch.setattr(executor, "_run_sandbox_probe", counting)
+        monkeypatch.setattr(sandbox_walk, "_run_sandbox_probe", counting)
         first = self._run_slot(fanout, tmp_path, "fakebwrap:m1")
         second = self._run_slot(fanout, tmp_path, "fakebwrap:m2")
         assert len(runs) == 1
@@ -5659,8 +5861,8 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
 
         from utils import review_orchestrator_base as rob
 
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_KEY_LOCKS", {})
+        executor._SANDBOX_PROBE_CACHE.clear()
+        executor._SANDBOX_PROBE_KEY_LOCKS.clear()
         monkeypatch.setattr(rob, "get_provider", lambda name: name)
         probing = threading.Event()
         release = threading.Event()
@@ -5672,7 +5874,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
                 return executor.SandboxProbeResult("ok", "")
             return executor.SandboxProbeResult("not-required", "")
 
-        monkeypatch.setattr(executor, "sandbox_verdict", verdict)
+        monkeypatch.setattr(sandbox_walk, "sandbox_verdict", verdict)
 
         slow = threading.Thread(
             target=rob._fanout_sandbox_verdict, args=("slowbwrap", None)
@@ -5705,12 +5907,12 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         """`not-required` spawns nothing and the slot dispatches as before."""
         from utils import review_orchestrator_base as rob
 
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+        executor._SANDBOX_PROBE_CACHE.clear()
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._Unprobed())
         monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
         runs = []
         monkeypatch.setattr(
-            executor, "_run_sandbox_probe",
+            sandbox_walk, "_run_sandbox_probe",
             lambda argv, **kwargs: runs.append(list(argv)),
         )
         monkeypatch.setattr(rob, "invoke_with_file_output", lambda **kwargs: {
@@ -5745,10 +5947,11 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
             f"the model's shell and this machine)"
         )
 
+    @pytest.mark.shell_probe
     def test_the_verdict_is_three_way_and_never_truthy_by_accident(self, monkeypatch):
         from utils import review_orchestrator_base as rob
 
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+        executor._SANDBOX_PROBE_CACHE.clear()
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._AutoFallback())
         verdict = rob.sandbox_refusal("fakebwrap", None)
         assert verdict.verdict == rob.SANDBOX_DISPATCH_UNSANDBOXED
@@ -5757,7 +5960,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         assert verdict.rung == "unsandboxed"
         assert rob.sandbox_fallback_kwargs(verdict) == {"sandbox_fallback": "unsandboxed"}
 
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+        executor._SANDBOX_PROBE_CACHE.clear()
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._FallbackOff())
         verdict = rob.sandbox_refusal("fakebwrap", None)
         assert verdict.verdict == rob.SANDBOX_REFUSE
@@ -5765,19 +5968,20 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         assert verdict.reason.startswith("[SANDBOX_UNAVAILABLE]")
         assert rob.sandbox_fallback_kwargs(verdict) == {}
 
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+        executor._SANDBOX_PROBE_CACHE.clear()
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._Unprobed())
         verdict = rob.sandbox_refusal("fakeplain", None)
         assert verdict.verdict == rob.SANDBOX_DISPATCH
         assert verdict.reason is None
         assert not verdict.refused and not verdict.bypass
 
+    @pytest.mark.shell_probe
     def test_the_fanout_dispatches_unsandboxed_with_the_flag_and_the_marker(
         self, tmp_path, monkeypatch, capsys
     ):
         from utils import review_orchestrator_base as rob
 
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+        executor._SANDBOX_PROBE_CACHE.clear()
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._AutoFallback())
         monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
         seen = []
@@ -5800,10 +6004,11 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         assert f"[fakebwrap:m1] {self._bypass_line('fakebwrap')}" in out
         assert "[SANDBOX_UNAVAILABLE]" not in out
 
+    @pytest.mark.shell_probe
     def test_off_refuses_exactly_as_before(self, tmp_path, monkeypatch, capsys):
         from utils import review_orchestrator_base as rob
 
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+        executor._SANDBOX_PROBE_CACHE.clear()
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._FallbackOff())
         monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
 
@@ -5824,11 +6029,11 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         slot runs as before, and the override does not fire on it."""
         from utils import review_orchestrator_base as rob
 
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+        executor._SANDBOX_PROBE_CACHE.clear()
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._AutoFallback())
         monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
         # The probe could not be run at all → `unknown`.
-        monkeypatch.setattr(executor, "_run_sandbox_probe", lambda argv, **kw: None)
+        monkeypatch.setattr(sandbox_walk, "_run_sandbox_probe", lambda argv, **kw: None)
         seen = []
 
         def dispatch(**kwargs):
@@ -5854,6 +6059,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         subprocess.run(["git", "add", "tracked.txt"], cwd=root, check=True, env=env)
         subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=root, check=True, env=env)
 
+    @pytest.mark.shell_probe
     def test_a_bypassed_slot_that_writes_outside_its_contract_is_failed_by_path(
         self, tmp_path, monkeypatch, capsys
     ):
@@ -5863,7 +6069,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         from utils import review_orchestrator_base as rob
 
         self._git_repo(tmp_path)
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+        executor._SANDBOX_PROBE_CACHE.clear()
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._AutoFallback())
         monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
 
@@ -5893,6 +6099,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         assert (tmp_path / "leak.md").exists()
         assert (tmp_path / "tracked.txt").read_text(encoding="utf-8") == "v2\n"
 
+    @pytest.mark.shell_probe
     def test_the_plugins_own_artifact_trees_are_not_blamed_on_the_model(
         self, tmp_path, monkeypatch
     ):
@@ -5903,7 +6110,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         from utils.output_handler import output_dir_path
 
         self._git_repo(tmp_path)
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+        executor._SANDBOX_PROBE_CACHE.clear()
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._AutoFallback())
         monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
         plan_out = output_dir_path(tmp_path / "plan.md")
@@ -5971,6 +6178,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         assert not rob.porcelain_check_applies(V(rob.SANDBOX_DISPATCH, None))
         assert not rob.porcelain_check_applies(V(rob.SANDBOX_REFUSE, "x"))
 
+    @pytest.mark.shell_probe
     def test_a_rung_two_slot_in_a_fanout_fails_naming_the_boundaryless_count(
         self, tmp_path, monkeypatch, capsys
     ):
@@ -5991,7 +6199,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
             "fakeplain": self._Unprobed(),
             "fakeoff": self._FallbackOff(),
         }
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+        executor._SANDBOX_PROBE_CACHE.clear()
         monkeypatch.setattr(rob, "get_provider", lambda name: adapters[name])
         monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
 
@@ -6590,7 +6798,6 @@ class TestHostSinksNeverSeeTheReadonlyChildsConfigContent:
             encoding="utf-8",
         )
         registry._config = None
-        registry._config_key = None
         script = _install_opencode_capture(
             runner_env.bin_dir, _DENIED_STDOUT, _DENIED_STDERR, exit_code=0
         )
@@ -6695,3 +6902,57 @@ class TestOpenCodeDeniedTurnIsRecorded:
             capture = json.loads(Path(attempt.capture_path).read_text(encoding="utf-8"))
             assert capture["status"] == executor.STATUS_RUNNER_ERROR
             assert capture["error"] == _DENIED_SENTENCE
+
+
+class TestEveryAttemptTakesALaunchTurn:
+    """PERF-6: inside a task fan-out slot, every attempt is spaced, retries too.
+
+    The retry loop runs on a worker thread, so it takes the turn through the
+    slot that `asyncio.to_thread` copied into it; the spawn is instant here, so
+    any gap between the two spawns is the launch spacing alone.
+    """
+
+    INTERVAL = 0.3
+
+    class _Capture:
+        stdout = ""
+        stderr = "boom"
+        exit_code = 1
+        duration = 0.0
+        timed_out = False
+        launch_error = None
+        argv: list = []
+
+    def _dispatch(self, tmp_path):
+        return executor.dispatch_task(
+            _validation_batch(tmp_path), phase_dir=str(tmp_path),
+            runner="codex:gpt-5.5", sleep=lambda _s: None, retries=1,
+        )
+
+    def test_a_retry_waits_for_its_providers_turn(self, tmp_path, runner_env, monkeypatch):
+        import asyncio
+        from utils.launch_limiter import LaunchLimiter
+
+        runner_env.use("codex:gpt-5.5")
+        spawned = []
+
+        def fake_spawn(**_kwargs):
+            spawned.append(time.monotonic())
+            return self._Capture()
+
+        monkeypatch.setattr(dispatch_spawn, "_spawn", fake_spawn)
+        limiter = LaunchLimiter({"codex": self.INTERVAL})
+
+        async def in_a_slot():
+            async with limiter.slot("codex", label="t0 codex:gpt-5.5"):
+                return await asyncio.to_thread(self._dispatch, tmp_path)
+
+        outcome = asyncio.run(in_a_slot())
+        assert len(spawned) == 2, outcome
+        assert spawned[1] - spawned[0] >= self.INTERVAL - 0.01, spawned
+
+        # Outside a fan-out slot nothing is spaced: the retry spawns at once.
+        spawned.clear()
+        self._dispatch(tmp_path)
+        assert len(spawned) == 2
+        assert spawned[1] - spawned[0] < self.INTERVAL, spawned

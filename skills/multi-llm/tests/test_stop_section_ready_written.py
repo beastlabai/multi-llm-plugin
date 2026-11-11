@@ -25,11 +25,11 @@ import pytest
 
 import modes
 import multi_llm
-from tests.test_check_gate_fixture import _first_run, repo  # noqa: F401
-from tests.test_manual_tasks_on_completion import (  # noqa: F401
-    P, _complete_plan, _run, workdir,
-)
-from tests.test_report_check import Transcript, decision_of, run_check
+from tests.support.gate_fixture import _first_run
+from tests.support.next_phase_world import P
+from tests.support.manual_tasks import _complete_plan
+from tests.support.main_runs import _run
+from tests.support.transcripts import Transcript, decision_of, run_check
 from utils import cli_common, report_check
 from utils import next_phase as np_
 

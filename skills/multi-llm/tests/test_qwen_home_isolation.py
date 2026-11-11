@@ -165,7 +165,9 @@ class TestQwenHomeIsolation:
         def boom(*_a, **_k):
             raise OSError("no space left on device")
 
-        monkeypatch.setattr(qwen_module.tempfile, "mkdtemp", boom)
+        from utils.providers import private_home
+
+        monkeypatch.setattr(private_home.tempfile, "mkdtemp", boom)
 
         env = QwenCodeProvider().get_env(MODEL)
 

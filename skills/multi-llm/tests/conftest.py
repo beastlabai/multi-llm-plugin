@@ -1,15 +1,21 @@
 """Pytest fixtures for multi-llm skill tests."""
 
+import glob
+import hashlib
 import json
 import os
 import pytest
 import re
+import shlex
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Generator, Optional, Set, Tuple
+from typing import (
+    Dict, Generator, List, NamedTuple, Optional, Sequence, Set, Tuple,
+)
 from unittest.mock import MagicMock, patch
 
 # Make the skill's own packages (utils.*) importable from conftest regardless of
@@ -23,6 +29,19 @@ from .harness import (
     MockProvider,
     AssertionHelpers,
 )
+
+#: The shared fixture modules registered for every test, so a test names their
+#: fixtures as parameters and imports nothing for them. A module listed here
+#: defines no autouse fixture and no fixture name another listed module (or this
+#: file) defines; ``tests/support/__init__.py`` has the rules and
+#: ``tests/test_support_package.py`` checks them.
+pytest_plugins = [
+    "tests.support.batch_done_world",
+    "tests.support.full_workflow_world",
+    "tests.support.gate_fixture",
+    "tests.support.main_runs",
+    "tests.support.subagent_world",
+]
 
 
 #: The uv this test session runs under, resolved once at import — before any
@@ -44,6 +63,23 @@ def _session_uv_stays_reachable(monkeypatch):
     """
     if _SESSION_UV and "MULTI_LLM_UV" not in os.environ:
         monkeypatch.setenv("MULTI_LLM_UV", _SESSION_UV)
+
+
+@pytest.fixture(autouse=True)
+def _clear_process_caches():
+    """Start and end every test with every module-level cache empty.
+
+    The caches are process-scoped on purpose (``utils/process_state.py``), so in
+    one pytest worker a probe verdict, a version read or a warn-once entry would
+    otherwise reach the next test. Every cache is registered there and emptied
+    in place here; a test that needs a cold cache mid-test calls ``.clear()`` on
+    it, never ``setattr`` (``tests/test_process_state.py``).
+    """
+    from utils import process_state
+
+    process_state.reset_all()
+    yield
+    process_state.reset_all()
 
 
 def pytest_addoption(parser):
@@ -232,6 +268,9 @@ def _lane_a_spawn_honours_a_faked_subprocess_run(monkeypatch):
 
     def spawn(cmd, **kwargs):
         if subprocess.run is not _STDLIB_SUBPROCESS_RUN:
+            # The adapter's stdout watch is the real spawn's argument, never
+            # `subprocess.run`'s: a fake process has no stream to watch.
+            kwargs.pop("stream_watch", None)
             return subprocess.run(cmd, **kwargs)
         return real_spawn(cmd, **kwargs)
 
@@ -253,8 +292,8 @@ def _isolate_provider_config(request, monkeypatch):
       * unsets ``MULTI_LLM_PROVIDERS_CONFIG`` / ``MULTI_LLM_PROVIDERS_CONFIG_PERMISSIVE``,
       * forces project-local discovery to return ``None`` (deterministic;
         independent of where pytest is launched),
-      * resets ``registry._config`` / ``registry._config_key`` before and after so
-        cache state never leaks between tests.
+      * resets ``registry._config`` before and after so cache state never
+        leaks between tests.
 
     Tests that exercise override behavior add ``@pytest.mark.config_override`` and
     set up their own discovery/env within the test body.
@@ -267,8 +306,6 @@ def _isolate_provider_config(request, monkeypatch):
 
     def _reset_cache():
         registry._config = None
-        if hasattr(registry, "_config_key"):
-            registry._config_key = None
         # §9.3.b: the process-wide run anchor is set-once and immutable within a
         # process. A test that drives an orchestrator pre-flight pins one; the
         # next test's plan is a different path, which would (correctly) raise.
@@ -334,6 +371,125 @@ def _isolate_state_home(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_cli_version_cache(tmp_path, monkeypatch):
+    """Keep doctor's version cache (``utils/cli_version_cache.py``) under each
+    test's tmp dir, never the developer's ``~/.cache/multi-llm``.
+
+    ``XDG_CACHE_HOME`` carries the redirect into child interpreters (a
+    subprocess doctor run); the module patch holds it in-process even for a
+    test that resets that variable. The variable also moves uv's cache, so on
+    POSIX ``UV_CACHE_DIR`` is pinned to the one uv would have used (uv's
+    Windows cache ignores ``XDG_CACHE_HOME``). It sits beside ``tmp_path``,
+    not in it, because tests that ``chdir`` there assert that doctor leaves
+    the working directory alone; nothing is created until a doctor run writes.
+    """
+    from utils import cli_version_cache
+
+    if os.name != "nt" and not os.environ.get("UV_CACHE_DIR"):
+        base = os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
+        monkeypatch.setenv("UV_CACHE_DIR", os.path.join(base, "uv"))
+    home = tmp_path.parent / f"{tmp_path.name}.xdg-cache"
+    monkeypatch.setenv("XDG_CACHE_HOME", str(home))
+    target = str(home / "multi-llm")
+    monkeypatch.setattr(cli_version_cache, "cache_dir", lambda: target)
+    yield
+
+
+#: The test files that run with ``MULTI_LLM_STRICT_ADVISORY=1``: an exception an
+#: advisory read of ``run_status`` (or a ``status_*`` module beside it),
+#: ``detach`` or ``next_phase`` swallows (``utils/advisory.py``) fails the
+#: test instead of vanishing. A test in them
+#: that feeds a malformed input on purpose asserts the swallow with
+#: :func:`lenient_advisory` (docs/development/runtime.md#advisory-guards).
+STRICT_ADVISORY_FILES = frozenset({
+    "test_detach.py",
+    "test_next_command_emitters.py",
+    "test_next_phase.py",
+    "test_status_after_a_stop.py",
+    "test_status_after_switching_to_native.py",
+    "test_status_file.py",
+    "test_status_native_stop_head.py",
+    "test_status_phase_dirs.py",
+    "test_status_recorded_route.py",
+    "test_status_run_view_every_leg.py",
+    "test_status_tallies_every_task.py",
+    "test_status_why_punctuation.py",
+})
+
+
+@pytest.fixture(autouse=True)
+def _advisory_mode(request, monkeypatch):
+    """Strict advisory guards for :data:`STRICT_ADVISORY_FILES`, and the
+    default (silent) everywhere else, whatever the developer's shell exports:
+    a ``MULTI_LLM_DEBUG=1`` left set would put tracebacks on the stderr that
+    tests compare."""
+    monkeypatch.delenv("MULTI_LLM_DEBUG", raising=False)
+    monkeypatch.delenv("MULTI_LLM_STRICT_ADVISORY", raising=False)
+    if request.path.name in STRICT_ADVISORY_FILES:
+        monkeypatch.setenv("MULTI_LLM_STRICT_ADVISORY", "1")
+    yield
+
+
+def stand_in(double):
+    """Make *double* a stand-in for a production callable called with keywords.
+
+    Production never inspects a double's signature: it passes every keyword
+    it has, unconditionally (a hook that is off is ``None``). So every double
+    takes ``**_`` — and this is the one place that rule lives. *double*
+    receives the keywords its own signature names; the rest are accepted and
+    dropped. A double that already takes ``**kwargs`` is returned as is::
+
+        @stand_in
+        def fake_dispatch(task, *, phase_dir, runner, after_attempt=None):
+            ...
+
+        monkeypatch.setattr(runner_preflight, "_run_probe", stand_in(lambda argv: done))
+    """
+    import functools
+    import inspect
+
+    params = inspect.signature(double).parameters.values()
+    if any(param.kind is param.VAR_KEYWORD for param in params):
+        return double
+    named = {
+        param.name for param in params
+        if param.kind in (param.KEYWORD_ONLY, param.POSITIONAL_OR_KEYWORD)
+    }
+
+    @functools.wraps(double)
+    def accepting(*args, **kwargs):
+        return double(*args, **{k: v for k, v in kwargs.items() if k in named})
+
+    return accepting
+
+
+@pytest.fixture
+def lenient_advisory(monkeypatch):
+    """The production (silent) guard inside a strict file, for a test that
+    feeds a malformed input on purpose. Yields the labels of the sites that
+    swallowed something, in order, so the test asserts the swallow it expects
+    rather than merely tolerating any. In-process only: a child process's
+    swallow is not recorded."""
+    import importlib
+
+    from utils import advisory
+
+    monkeypatch.delenv("MULTI_LLM_STRICT_ADVISORY", raising=False)
+    labels: List[str] = []
+    real = advisory.note_swallowed
+
+    def record(label, exc):
+        labels.append(label)
+        real(label, exc)
+
+    for name in ("advisory", "run_status", "status_views", "status_commands",
+                 "status_native", "status_text", "detach", "next_phase",
+                 "next_phase_words"):
+        monkeypatch.setattr(importlib.import_module(f"utils.{name}"), "note_swallowed", record)
+    yield labels
+
+
+@pytest.fixture(autouse=True)
 def _pin_opencode_debug_config(request, monkeypatch):
     """Keep the default suite from spawning `opencode debug config` (plan §8).
 
@@ -343,23 +499,19 @@ def _pin_opencode_debug_config(request, monkeypatch):
     (``None``, i.e. "unknown": every caller keeps its pre-existing verdict, and
     `_user_defines_provider` falls back to its file read) for every test that
     does not opt out with ``@pytest.mark.debug_config``. The per-process memo
-    is cleared around every test so one read never leaks into the next.
+    starts every test empty (`_clear_process_caches`), so one read never leaks
+    into the next.
     """
     try:
         from utils.providers import opencode as oc
     except Exception:
         yield
         return
-    memo = getattr(oc, "_USER_CONFIG_MEMO", None)
-    if memo is not None:
-        memo.clear()
     if "debug_config" not in request.keywords and hasattr(oc, "_spawn_debug_config"):
         monkeypatch.setattr(
             oc, "_spawn_debug_config", lambda argv, env, cwd, timeout: None
         )
     yield
-    if memo is not None:
-        memo.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -378,6 +530,294 @@ def _no_real_codex_trust_bookkeeping(monkeypatch):
     codex_trust.reset()
     yield
     codex_trust.reset()
+
+
+def _canonical_file(path: str) -> str:
+    """``path`` with every symlink resolved, case-folded where the OS folds case
+    (macOS ``/var`` → ``/private/var``, Windows 8.3 names)."""
+    return os.path.normcase(os.path.realpath(os.path.abspath(path)))
+
+
+class _WrapperIdentity(NamedTuple):
+    """What makes a file a production Landlock wrapper, whatever its name or
+    place: its canonical path, its inode (a hard link or symlink shares it) or
+    its bytes (a copy, a generated package's copy share them)."""
+
+    paths: frozenset
+    inodes: frozenset
+    digests: frozenset
+    sizes: frozenset
+    names: frozenset
+
+
+def _production_wrapper_files() -> List[str]:
+    """Every copy of the production wrapper this checkout holds.
+
+    The copy beside ``landlock_dispatch.__file__`` (the one ``WRAPPER_PATHS``
+    is built from), plus the source tree's and each generated package's
+    (``packaging/<host>/…/skills/multi-llm/utils``), found by walking up from
+    it: a run from either tree must not run the other's, stale or not.
+    """
+    try:
+        from utils import landlock_dispatch
+    except Exception:
+        return []
+    names = {os.path.basename(p) for p in landlock_dispatch.WRAPPER_PATHS.values()}
+    here = os.path.dirname(os.path.abspath(landlock_dispatch.__file__))
+    payload = os.path.join("skills", "multi-llm", "utils")
+    dirs = [here]
+    ancestor = here
+    for _ in range(8):
+        parent = os.path.dirname(ancestor)
+        if parent == ancestor:
+            break
+        ancestor = parent
+        dirs.append(os.path.join(ancestor, payload))
+        packaging = os.path.join(glob.escape(ancestor), "packaging", "*")
+        dirs.extend(glob.glob(os.path.join(packaging, payload)))
+        dirs.extend(glob.glob(os.path.join(packaging, "multi-llm", payload)))
+    return sorted({
+        os.path.join(d, n) for d in dirs for n in names
+        if os.path.isfile(os.path.join(d, n))
+    })
+
+
+def _production_wrapper_identity() -> _WrapperIdentity:
+    paths, inodes, digests, sizes, names = set(), set(), set(), set(), set()
+    for path in _production_wrapper_files():
+        try:
+            info = os.stat(path)
+            with open(path, "rb") as handle:
+                data = handle.read()
+        except OSError:
+            continue
+        paths.add(_canonical_file(path))
+        if info.st_ino:
+            inodes.add((info.st_dev, info.st_ino))
+        digests.add(hashlib.sha256(data).hexdigest())
+        sizes.add(len(data))
+        names.add(os.path.basename(path))
+    return _WrapperIdentity(*(frozenset(x) for x in (paths, inodes, digests, sizes, names)))
+
+
+#: Taken at import, before any test can patch ``WRAPPER_PATHS``: tests point
+#: that table at their fakes with ``monkeypatch.setitem``, and a call-time read
+#: would classify every fake as production.
+_PRODUCTION_WRAPPERS = _production_wrapper_identity()
+
+#: (canonical path, size, mtime) → whether that file's bytes are a production
+#: copy, so a file is hashed once per version, not once per probe.
+_WRAPPER_DIGESTS: Dict[Tuple[str, int, int], bool] = {}
+
+
+def _is_production_wrapper(path: str) -> bool:
+    """Whether the regular file at ``path`` (symlinks followed) is a production
+    wrapper by inode, canonical path or bytes (size first, then a hash)."""
+    identity = _PRODUCTION_WRAPPERS
+    try:
+        info = os.stat(path)
+    except (OSError, ValueError):
+        return False
+    if not stat.S_ISREG(info.st_mode):
+        return False
+    if info.st_ino and (info.st_dev, info.st_ino) in identity.inodes:
+        return True
+    canonical = _canonical_file(path)
+    if canonical in identity.paths:
+        return True
+    if info.st_size not in identity.sizes:
+        return False
+    key = (canonical, info.st_size, info.st_mtime_ns)
+    known = _WRAPPER_DIGESTS.get(key)
+    if known is None:
+        try:
+            with open(path, "rb") as handle:
+                digest = hashlib.sha256(handle.read()).hexdigest()
+        except OSError:
+            return False
+        known = _WRAPPER_DIGESTS[key] = digest in identity.digests
+    return known
+
+
+def _under(path: str, root: str) -> bool:
+    """Whether ``path`` lies under ``root`` (already canonical).
+
+    The DIRECTORY is resolved, never the file: a mock launcher is often a
+    symlink from ``tmp_path/bin`` into the harness, and the PATH entry is the
+    fact that matters.
+    """
+    absolute = os.path.abspath(path)
+    resolved = os.path.join(
+        os.path.realpath(os.path.dirname(absolute)), os.path.basename(absolute)
+    )
+    return os.path.normcase(resolved).startswith(root + os.sep)
+
+
+#: Programs whose code is text the guard cannot follow to a file
+#: (``sh -c 'exec "$PY" "$WRAPPER"'``), in any form.
+_SHELLS = frozenset({
+    "sh", "bash", "dash", "zsh", "ksh", "mksh", "ash", "yash", "busybox",
+    "fish", "csh", "tcsh", "cmd", "powershell", "pwsh",
+})
+#: Launchers that run another command from their argv (``env -S``, ``env -C``
+#: and their own option values included): an indirection, treated as a shell.
+_PREFIX_LAUNCHERS = frozenset({
+    "env", "nice", "nohup", "setsid", "stdbuf", "timeout", "ionice", "taskset",
+    "time", "xargs",
+})
+_PYTHON = re.compile(r"(?:python|pythonw|pypy)[0-9.]*t?|py")
+_SHELL_VARIABLE = re.compile(r"\$(?:\{(\w+)\}|(\w+))")
+
+
+def _program_names(*words: str) -> Set[str]:
+    """The names ``words`` run as: each one's own and, for a symlink, its
+    target's (``/bin/sh`` → ``dash``), lower-cased, without ``.exe``."""
+    names: Set[str] = set()
+    for word in words:
+        if not word:
+            continue
+        for candidate in (word, os.path.realpath(word)):
+            name = os.path.basename(candidate).lower()
+            names.add(name[:-4] if name.endswith(".exe") else name)
+    return names
+
+
+def _python_runs_text(options: Sequence[str]) -> bool:
+    """Whether a Python command line runs ``-c`` text or a ``-m`` module rather
+    than a script file; its options end at the first word that is not one."""
+    takes_value = False
+    for word in options:
+        if takes_value:
+            takes_value = False
+            continue
+        if not word.startswith("-") or word in ("-", "--"):
+            return False
+        if word.startswith("--"):
+            takes_value = word == "--check-hash-based-pycs"
+            continue
+        for position, letter in enumerate(word[1:], 1):
+            if letter in "cm":
+                return True
+            if letter in "WX":
+                takes_value = position == len(word) - 1
+                break
+    return False
+
+
+def _shell_form(words: Sequence[str], launcher: Sequence[str]) -> bool:
+    """Whether ``words`` launch program text or another command line rather
+    than a file the guard can identify: a shell or a prefix launcher
+    (``env``, ``timeout``, …) in any form, or Python ``-c``/``-m``."""
+    names = _program_names(words[0], *launcher[:1])
+    if names & (_SHELLS | _PREFIX_LAUNCHERS):
+        return True
+    return any(_PYTHON.fullmatch(name) for name in names) and _python_runs_text(words[1:])
+
+
+def _shell_text_words(words: Sequence[str], env: Optional[Dict[str, str]]) -> List[str]:
+    """The paths a shell-form probe reaches without naming them as a word:
+    each word's shell tokens with ``$NAME``/``${NAME}`` expanded from the
+    child's environment, and those expansions split again (``eval "$CMD"``)."""
+    child_env = os.environ if env is None else env
+
+    def expand(token: str) -> str:
+        return _SHELL_VARIABLE.sub(
+            lambda m: str(child_env.get(m.group(1) or m.group(2), m.group(0))), token
+        )
+
+    found: List[str] = []
+    for word in words:
+        try:
+            tokens = shlex.split(word)
+        except ValueError:
+            tokens = word.split()
+        for token in tokens:
+            expanded = expand(token)
+            found.append(expanded)
+            if expanded != token:
+                found.extend(expanded.split())
+    return found
+
+
+#: A Python module argument, bare or glued to its flag (``-mutils.x``).
+_MODULE_WORD = re.compile(r"(?:-[A-Za-z]*m)?([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)")
+
+
+def _mentions_wrapper(tokens: Sequence[str], names: Set[str]) -> bool:
+    """Whether program text names a wrapper file (``…/landlock_exec.py``) or
+    module (``-m utils.landlock_exec``) at all: text that builds the path out
+    of pieces no expansion here resolves is still caught by the name."""
+    stems = {os.path.splitext(name)[0] for name in names}
+    for token in tokens:
+        if any(name in token for name in names):
+            return True
+        match = _MODULE_WORD.fullmatch(token)
+        if match and match.group(1).rsplit(".", 1)[-1] in stems:
+            return True
+    return False
+
+
+def _current_wrapper_names() -> Set[str]:
+    try:
+        from utils import landlock_dispatch
+    except Exception:
+        return set()
+    return {os.path.basename(str(p)) for p in landlock_dispatch.WRAPPER_PATHS.values()}
+
+
+def _probe_guard_verdict(
+    argv,
+    *,
+    cwd,
+    temp_root: str,
+    env: Optional[Dict[str, str]] = None,
+    launcher: Sequence[str] = (),
+    shell_ok: bool = False,
+) -> Optional[str]:
+    """What the probe guard does with one probe ``argv``, before its other rules.
+
+    ``"wrapper"`` (answered exit 126, no usable Landlock): some word reaches a
+    production wrapper by identity (any copy, hard link or symlink, any name,
+    any position), or names a file called like a wrapper (the production names,
+    or whatever ``WRAPPER_PATHS`` holds now) that does not resolve under
+    ``temp_root``. Relative words resolve against the child's ``cwd``, as the
+    child opens them. ``launcher`` is ``argv[0]`` as the spawn resolves it.
+    A :func:`_shell_form` is checked through its shell tokens and the
+    variables they expand too, and is ``"wrapper"`` when its text mentions a
+    wrapper's file or module name at all. ``"shell"``: any other shell form in
+    a test that did not opt in with ``@pytest.mark.shell_probe``. ``None``:
+    the guard's other rules decide, and a test's own fake wrapper under
+    ``tmp_path`` runs for real.
+    """
+    words = [os.fspath(a) if isinstance(a, os.PathLike) else str(a) for a in argv]
+    if not words:
+        return None
+    base = os.fspath(cwd) if cwd is not None else os.getcwd()
+    shell = _shell_form(words, [str(w) for w in launcher])
+    text = _shell_text_words(words, env) if shell else []
+    candidates = [*(str(w) for w in launcher), *words, *text]
+    names = _PRODUCTION_WRAPPERS.names | _current_wrapper_names()
+    for word in candidates:
+        if not word:
+            continue
+        path = word if os.path.isabs(word) else os.path.join(base, word)
+        if _is_production_wrapper(path):
+            return "wrapper"
+        named = os.path.basename(path) in names or (
+            os.path.isfile(path) and os.path.basename(os.path.realpath(path)) in names
+        )
+        if named and not _canonical_file(path).startswith(temp_root + os.sep):
+            return "wrapper"
+    if shell and _mentions_wrapper([*words, *text], names):
+        return "wrapper"
+    if shell and not shell_ok:
+        return "shell"
+    return None
+
+
+#: The shell-form probes the guard refused in the running test (stash key on
+#: the test's node); a non-empty list fails the test at teardown.
+PROBE_GUARD_REFUSALS = pytest.StashKey[List[List[str]]]()
 
 
 @pytest.fixture(autouse=True)
@@ -400,51 +840,44 @@ def _pin_real_sandbox_probes(request, monkeypatch):
     slot, the opposite of "as before". It is answered as a CLI that does not
     know the rung (``unexpected argument``), which the walk reads as *this rung
     is absent* — so the ladder falls through to exactly the pre-ladder bypass,
-    and a test that wants rung 1 fakes its probe itself. Mock launchers under ``tmp_path`` and the fake ``sh`` probes
-    the gate's own tests build run for real. The shared per-process probe
-    cache is reset around every test so one verdict never leaks into the next.
+    and a test that wants rung 1 fakes its probe itself. Mock launchers under ``tmp_path`` run for real.
+    The production Landlock wrapper never runs (:func:`_probe_guard_verdict`):
+    a probe reaching it in any launch form is answered exit 126. A probe whose
+    program is shell text or another command line (``sh -c``, ``python -c``,
+    ``env …``) is refused,
+    and fails the test at teardown, unless the test opts in with
+    ``@pytest.mark.shell_probe``, as the gate's own tests with fake ``sh``
+    probes do. The shared per-process probe
+    cache starts every test empty (`_clear_process_caches`), so one verdict
+    never leaks into the next.
     Opt out with ``@pytest.mark.sandbox_probe``.
     """
     try:
         import utils.subagent_executor as executor
+        import utils.sandbox_walk as sandbox_walk
         import utils.review_orchestrator_base as rob
         from utils.llm_client import _resolve_executable
         from utils import provider_registry as registry
     except Exception:
         yield
         return
-    # The one probe cache both lanes share (plan §3.6), with its decisions,
-    # version reads and once-per-process retirement lines.
-    for name in (
-        "_SANDBOX_PROBE_CACHE", "_SANDBOX_PROBE_KEY_LOCKS", "_SANDBOX_DECISIONS",
-        "_PROBE_VERSION_CACHE",
-        # The version preflight's cache feeds the walk's removed_at skip
-        # (plan §3.2): a version read by an earlier test (the mock answers
-        # 0.156.1) must not skip rung 1 in a later one.
-        "_VERSION_CACHE",
-    ):
-        if hasattr(executor, name):
-            monkeypatch.setattr(executor, name, {})
-    if hasattr(executor, "_RETIREMENTS_ANNOUNCED"):
-        monkeypatch.setattr(executor, "_RETIREMENTS_ANNOUNCED", set())
+    # The probe cache both lanes share, its decisions, the version reads that
+    # feed the walk's removed_at skip and the retirement lines start empty with
+    # every other registered cache (`_clear_process_caches`).
     if "sandbox_probe" in request.keywords:
         yield
         return
-    real = executor._run_sandbox_probe
+    real = sandbox_walk._run_sandbox_probe
+    shell_ok = "shell_probe" in request.keywords
+    refused: List[List[str]] = []
+    request.node.stash[PROBE_GUARD_REFUSALS] = refused
     # `realpath`, because pytest's `tmp_path` is a resolved path: with `/var` a
     # symlink to `/private/var` (macOS) or a short 8.3 `RUNNER~1` user dir
     # (Windows) the unresolved temp dir is not a prefix of any mock's path.
     temp_root = os.path.normcase(os.path.realpath(tempfile.gettempdir()))
 
     def _in_temp(path: str) -> bool:
-        # The DIRECTORY is resolved, never the file: a mock launcher is often a
-        # symlink from `tmp_path/bin` into the harness, and the PATH entry is the
-        # fact that matters.
-        absolute = os.path.abspath(path)
-        resolved = os.path.join(
-            os.path.realpath(os.path.dirname(absolute)), os.path.basename(absolute)
-        )
-        return os.path.normcase(resolved).startswith(temp_root + os.sep)
+        return _under(path, temp_root)
 
     def _provider_commands() -> Set[str]:
         names: Set[str] = set()
@@ -470,27 +903,20 @@ def _pin_real_sandbox_probes(request, monkeypatch):
                         probes.add(tuple(rung.probe_argv))
         return probes
 
-    def _wrapped_tail(argv):
-        # The plugin-landlock rung's probe (plan codex-sandbox-unavailable §8.1):
-        # `[python, -I, -S, <wrapper>, --allow …, --, <resolved codex argv>]`.
-        # It starts with the interpreter, so the basename check below would let
-        # it through and the default suite would run the REAL wrapper — real
-        # Landlock on a capable kernel, exit 126 on another — around whatever
-        # codex it names. Looked past the wrapper instead.
-        try:
-            from utils.landlock_dispatch import unwrap_argv
-        except Exception:
-            return None
-        return unwrap_argv(argv)
-
     def guarded(argv, **kwargs):
-        tail = _wrapped_tail(argv) if argv else None
-        if tail is not None:
-            wrapper = next(
-                (str(a) for a in argv[:6] if str(a).endswith(".py")), ""
+        if argv:
+            try:
+                launcher, _ = _resolve_executable(str(argv[0]))
+            except Exception:
+                launcher = []
+            verdict = _probe_guard_verdict(
+                argv, cwd=kwargs.get("cwd"), env=kwargs.get("env"),
+                launcher=launcher, temp_root=temp_root, shell_ok=shell_ok,
             )
-            if not _in_temp(wrapper):
-                # The production wrapper: answered as a kernel with no usable
+            if verdict == "wrapper":
+                # The production wrapper (by identity, so a checkout under the
+                # temp dir, a copy or a link is covered too), or any wrapper
+                # outside the temp dir: answered as a kernel with no usable
                 # Landlock (the wrapper's own exit 126), so the walk records
                 # the rung `absent` and falls through exactly as before the
                 # rung existed. A test that wants the rung points
@@ -502,7 +928,13 @@ def _pin_real_sandbox_probes(request, monkeypatch):
                     "the production Landlock wrapper (plugin-landlock rung "
                     "absent)\n",
                 )
-            return real(argv, **kwargs)
+            if verdict == "shell":
+                refused.append([str(a) for a in argv])
+                return subprocess.CompletedProcess(
+                    list(argv), 126, "",
+                    "probe guard: a shell-form probe runs only in a test marked "
+                    "@pytest.mark.shell_probe\n",
+                )
         head = os.path.basename(str(argv[0])) if argv else ""
         if head in _provider_commands():
             launcher, _ = _resolve_executable(str(argv[0]))
@@ -518,8 +950,15 @@ def _pin_real_sandbox_probes(request, monkeypatch):
                 return None
         return real(argv, **kwargs)
 
-    monkeypatch.setattr(executor, "_run_sandbox_probe", guarded)
+    monkeypatch.setattr(sandbox_walk, "_run_sandbox_probe", guarded)
     yield
+    if refused:
+        pytest.fail(
+            f"the probe guard refused {len(refused)} shell-form sandbox "
+            f"probe(s), first {refused[0]!r}: a test whose fake probes are "
+            "shell text opts in with @pytest.mark.shell_probe",
+            pytrace=False,
+        )
 
 
 @pytest.fixture

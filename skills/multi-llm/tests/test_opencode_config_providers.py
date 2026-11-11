@@ -31,8 +31,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import provider_registry as registry  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from utils import dispatch_spawn, runner_preflight  # noqa: E402
 from utils.providers import base as pbase  # noqa: E402
 from utils.providers import opencode as oc  # noqa: E402
+from utils.providers import version_gate  # noqa: E402
 from utils.providers.base import (  # noqa: E402
     PROFILE_AGENT_READONLY,
     PROFILE_AGENT_WRITE,
@@ -68,7 +70,14 @@ def _clean(monkeypatch):
     oc.reset_hermetic_state()
     executor.reset_auth_cache()
     # Nothing here may reach the developer's `--pure` help sniff.
-    monkeypatch.setattr(oc, "_read_help_tokens", lambda binary: frozenset({oc.PURE_FLAG}))
+    real_read = version_gate.read_help_tokens
+    monkeypatch.setattr(
+        version_gate, "read_help_tokens",
+        lambda binary, *, help_argv=("--help",), **kw: (
+            frozenset({oc.PURE_FLAG}) if tuple(help_argv) == ("run", "--help")
+            else real_read(binary, help_argv=help_argv, **kw)
+        ),
+    )
     monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
     yield
     oc.sweep_config_home()
@@ -106,7 +115,6 @@ def _use_config(tmp_path, monkeypatch, body: str) -> None:
     path.write_text(body, encoding="utf-8")
     monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(path))
     registry._config = None
-    registry._config_key = None
 
 
 def _replay_files(case: str, user_xdg: Path, monkeypatch) -> None:
@@ -737,7 +745,7 @@ class TestTheStructuralLeg:
         self, provider, user_only, monkeypatch
     ):
         probes: List[Any] = []
-        monkeypatch.setattr(executor, "_run_probe", lambda argv, env=None: probes.append(argv))
+        monkeypatch.setattr(runner_preflight, "_run_probe", lambda argv, env=None: probes.append(argv))
         # Patched on the class: `monkeypatch.setattr(instance, ...)` undoes by
         # writing the bound method back onto the shared registry instance,
         # which then shadows every later class-level patch of it.
@@ -752,24 +760,6 @@ class TestTheStructuralLeg:
         assert "sk-canary" not in str(excinfo.value)
         # Nothing spawned: no version, no `auth list`, no `opencode models`.
         assert probes == []
-
-    def test_a_narrow_double_without_the_keywords_still_works(self, monkeypatch):
-        class Narrow:
-            def describe_unresolvable_model(self, model):
-                return "refused: " + model
-
-        provider = registry.get_provider("opencode")
-        # Patched on the class: `monkeypatch.setattr(instance, ...)` undoes by
-        # writing the bound method back onto the shared registry instance,
-        # which then shadows every later class-level patch of it.
-        monkeypatch.setattr(
-            type(provider), "describe_unresolvable_model",
-            lambda self, model: Narrow().describe_unresolvable_model(model),
-        )
-        monkeypatch.setattr(type(provider), "is_available", lambda self: True)
-        with pytest.raises(executor.RunnerRejected) as excinfo:
-            executor.preflight_runner("opencode:x/y", key=KEY)
-        assert "refused: x/y" in str(excinfo.value)
 
 
 # --------------------------------------------------------------------------- #
@@ -799,13 +789,13 @@ class TestDetectAuthConfigLeg:
 
     def test_a_declared_custom_provider_records_config(self, user_xdg, monkeypatch):
         probe = _Probe(lambda env: _auth_run("config_provider_only"))
-        monkeypatch.setattr(executor, "_run_probe", probe)
+        monkeypatch.setattr(runner_preflight, "_run_probe", probe)
         monkeypatch.setattr(oc, "_spawn_debug_config", _DebugConfig(_stdout("custom_inline_key")))
         assert _detect("stub/stub-model") == "config"
         assert any(key.endswith("|stub|plain") for key in executor._AUTH_CACHE)
 
     def test_a_keyless_builtin_override_is_still_refused(self, user_xdg, monkeypatch):
-        monkeypatch.setattr(executor, "_run_probe", _Probe(lambda env: _auth_run("empty")))
+        monkeypatch.setattr(runner_preflight, "_run_probe", _Probe(lambda env: _auth_run("empty")))
         monkeypatch.setattr(
             oc, "_spawn_debug_config", _DebugConfig(_stdout("builtin_override_keyless"))
         )
@@ -816,7 +806,7 @@ class TestDetectAuthConfigLeg:
 
     def test_the_lazy_path_never_reads_config_on_a_login(self, user_xdg, monkeypatch):
         probe = _Probe(lambda env: _auth_run("stored"))
-        monkeypatch.setattr(executor, "_run_probe", probe)
+        monkeypatch.setattr(runner_preflight, "_run_probe", probe)
         fake = _DebugConfig(_stdout("custom_inline_key"))
         monkeypatch.setattr(oc, "_spawn_debug_config", fake)
         assert _detect("openrouter/x/y") == "ok"
@@ -826,7 +816,7 @@ class TestDetectAuthConfigLeg:
         self, user_xdg, monkeypatch
     ):
         probe = _Probe(lambda env: _auth_run("stored"))
-        monkeypatch.setattr(executor, "_run_probe", probe)
+        monkeypatch.setattr(runner_preflight, "_run_probe", probe)
         _detect("openrouter/a", PROFILE_AGENT_WRITE)
         _detect("openrouter/b", PROFILE_AGENT_WRITE)
         _detect("openrouter/a", PROFILE_AGENT_READONLY)
@@ -852,7 +842,7 @@ class TestTheProbeRunsUnderTheDispatchEnv:
         _use_config(tmp_path, monkeypatch, "env_allowlist: on\n")
         monkeypatch.setenv("OPENROUTER_API_KEY", "sk-canary-not-a-key-8")
         probe = _Probe(self._answer_by_env)
-        monkeypatch.setattr(executor, "_run_probe", probe)
+        monkeypatch.setattr(runner_preflight, "_run_probe", probe)
         with pytest.raises(executor.RunnerRejected) as excinfo:
             _detect("openrouter/x/y")
         message = str(excinfo.value)
@@ -862,16 +852,16 @@ class TestTheProbeRunsUnderTheDispatchEnv:
 
     def test_with_the_allowlist_off_nothing_changes(self, user_xdg, monkeypatch):
         monkeypatch.setenv("OPENROUTER_API_KEY", "sk-canary-not-a-key-8")
-        monkeypatch.setattr(executor, "_run_probe", _Probe(self._answer_by_env))
+        monkeypatch.setattr(runner_preflight, "_run_probe", _Probe(self._answer_by_env))
         assert _detect("openrouter/x/y") == "ok"
 
     def test_a_host_guard_strips_it_from_the_probe_too(self, user_xdg, monkeypatch):
         monkeypatch.setenv("OPENROUTER_API_KEY", "sk-canary-not-a-key-8")
         monkeypatch.setattr(
-            executor, "_host_env_guards", lambda: (["OPENROUTER_API_KEY"], [])
+            dispatch_spawn, "_host_env_guards", lambda: (["OPENROUTER_API_KEY"], [])
         )
         probe = _Probe(self._answer_by_env)
-        monkeypatch.setattr(executor, "_run_probe", probe)
+        monkeypatch.setattr(runner_preflight, "_run_probe", probe)
         with pytest.raises(executor.RunnerRejected) as excinfo:
             _detect("openrouter/x/y")
         assert "host env guard" in str(excinfo.value)
@@ -887,7 +877,7 @@ class TestTheProbeRunsUnderTheDispatchEnv:
             return real(self, model, profile, **kwargs)
 
         monkeypatch.setattr(type(provider), "resolve_env", counting)
-        monkeypatch.setattr(executor, "_run_probe", _Probe(lambda env: _auth_run("stored")))
+        monkeypatch.setattr(runner_preflight, "_run_probe", _Probe(lambda env: _auth_run("stored")))
         _detect("openrouter/x/y")
         _detect("openrouter/x/y")
         _detect("openrouter/other")
@@ -895,7 +885,7 @@ class TestTheProbeRunsUnderTheDispatchEnv:
 
     def test_no_hermetic_slot_is_entered_for_the_probe(self, user_xdg, monkeypatch):
         probe = _Probe(lambda env: _auth_run("stored"))
-        monkeypatch.setattr(executor, "_run_probe", probe)
+        monkeypatch.setattr(runner_preflight, "_run_probe", probe)
         _detect("openrouter/x/y", PROFILE_AGENT_READONLY)
         assert probe.calls[0]["active"] is None
 
@@ -911,7 +901,7 @@ class TestTheProbeRunsUnderTheDispatchEnv:
         )
         assert env is None or "XDG_CONFIG_HOME" not in env or env["XDG_CONFIG_HOME"] == str(user_xdg)
         probe = _Probe(lambda env: _auth_run("empty"))
-        monkeypatch.setattr(executor, "_run_probe", probe)
+        monkeypatch.setattr(runner_preflight, "_run_probe", probe)
         with pytest.raises(executor.RunnerRejected) as excinfo:
             _detect("mine/m", PROFILE_AGENT_READONLY)
         # The auth leg alone still refuses (the structural leg runs first in
@@ -951,9 +941,9 @@ class TestTheProbeRunsUnderTheDispatchEnv:
         if dropped_by == "env_allowlist":
             _use_config(tmp_path, monkeypatch, "env_allowlist: on\n")
         else:
-            monkeypatch.setattr(executor, "_host_env_guards", lambda: (["MY_TEST_KEY"], []))
+            monkeypatch.setattr(dispatch_spawn, "_host_env_guards", lambda: (["MY_TEST_KEY"], []))
         seen = self._env_keyed_reader(user_xdg, monkeypatch)
-        monkeypatch.setattr(executor, "_run_probe", _Probe(lambda env: _auth_run("empty")))
+        monkeypatch.setattr(runner_preflight, "_run_probe", _Probe(lambda env: _auth_run("empty")))
         with pytest.raises(executor.RunnerRejected) as excinfo:
             _detect("openrouter/x/y", cwd=str(tmp_path))
         assert excinfo.value.reason_code == "not_authenticated"
@@ -966,7 +956,7 @@ class TestTheProbeRunsUnderTheDispatchEnv:
     ):
         monkeypatch.setenv("MY_TEST_KEY", "sk-canary-not-a-key-3")
         self._env_keyed_reader(user_xdg, monkeypatch)
-        monkeypatch.setattr(executor, "_run_probe", _Probe(lambda env: _auth_run("empty")))
+        monkeypatch.setattr(runner_preflight, "_run_probe", _Probe(lambda env: _auth_run("empty")))
         assert _detect("openrouter/x/y", cwd=str(tmp_path)) == "config"
 
     def test_an_unset_env_key_is_refused(self, user_xdg, tmp_path, monkeypatch):
@@ -975,7 +965,7 @@ class TestTheProbeRunsUnderTheDispatchEnv:
         retries graded `connection_error`, retried by the ladder)."""
         monkeypatch.delenv("MY_TEST_KEY", raising=False)
         self._env_keyed_reader(user_xdg, monkeypatch)
-        monkeypatch.setattr(executor, "_run_probe", _Probe(lambda env: _auth_run("empty")))
+        monkeypatch.setattr(runner_preflight, "_run_probe", _Probe(lambda env: _auth_run("empty")))
         with pytest.raises(executor.RunnerRejected) as excinfo:
             _detect("openrouter/x/y", cwd=str(tmp_path))
         assert excinfo.value.reason_code == "not_authenticated"
@@ -993,7 +983,7 @@ class TestTheProbeRunsUnderTheDispatchEnv:
         ), encoding="utf-8")
         fake = _DebugConfig(None, dispatch=_stdout("builtin_override_keyed"))
         monkeypatch.setattr(oc, "_spawn_debug_config", fake)
-        monkeypatch.setattr(executor, "_run_probe", _Probe(lambda env: _auth_run("empty")))
+        monkeypatch.setattr(runner_preflight, "_run_probe", _Probe(lambda env: _auth_run("empty")))
         with pytest.raises(executor.RunnerRejected) as excinfo:
             _detect("openrouter/x/y", PROFILE_AGENT_READONLY, cwd=str(tmp_path))
         assert excinfo.value.reason_code == "not_authenticated"
@@ -1017,7 +1007,7 @@ class TestTheProbeRunsUnderTheDispatchEnv:
         ))
         fake = _DebugConfig(None, dispatch=_stdout("builtin_override_envkey_unset"))
         monkeypatch.setattr(oc, "_spawn_debug_config", fake)
-        monkeypatch.setattr(executor, "_run_probe", _Probe(lambda env: _auth_run("empty")))
+        monkeypatch.setattr(runner_preflight, "_run_probe", _Probe(lambda env: _auth_run("empty")))
         monkeypatch.delenv("MY_TEST_KEY", raising=False)
         with pytest.raises(executor.RunnerRejected):
             _detect("openrouter/x/y", PROFILE_AGENT_READONLY, cwd=str(tmp_path))
@@ -1065,7 +1055,7 @@ class TestCursorProfileScope:
             probe = _Probe(lambda env: subprocess.CompletedProcess(
                 ["cursor-agent"], 0, '{"isAuthenticated": true}', ""
             ))
-            monkeypatch.setattr(executor, "_run_probe", probe)
+            monkeypatch.setattr(runner_preflight, "_run_probe", probe)
             provider = registry.get_provider("cursor-agent")
             executor._detect_auth(
                 "cursor-agent", "auto", key=KEY, spec="cursor-agent:auto",

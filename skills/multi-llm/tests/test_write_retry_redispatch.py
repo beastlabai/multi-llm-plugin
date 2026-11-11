@@ -30,6 +30,7 @@ from tests.mock_launchers import install_mock_llm, mock_path  # noqa: E402
 from tests.test_write_executor import _patch_edit, env  # noqa: E402,F401
 from utils import provider_registry as registry  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from utils import dispatch_spawn  # noqa: E402
 from utils.output_handler import get_phase_dir  # noqa: E402
 from utils.state_manager import get_or_create_state  # noqa: E402
 from utils.subagent_tasks import PRIOR_CHANGES_TOKEN  # noqa: E402
@@ -120,7 +121,7 @@ class TestAnApplyBatchThatRepliedInProse:
                 return real(**kwargs)
             return executor._Capture(timed_out=True, argv=["codex"], duration=0.01)
 
-        monkeypatch.setattr(executor, "_spawn", spawn)
+        monkeypatch.setattr(dispatch_spawn, "_spawn", spawn)
         result = env.scheduler([env.apply_task(0)]).run()
 
         assert sum("Apply batch 0" in p for p in prompts) == 1
@@ -224,7 +225,7 @@ class TestEveryRetryableRungAsksFirst:
             spawns.append(kwargs.get("prompt"))
             return _capture(status)
 
-        monkeypatch.setattr(executor, "_spawn", fake_spawn)
+        monkeypatch.setattr(dispatch_spawn, "_spawn", fake_spawn)
         asked = []
         task = env.apply_task(0)
         outcome = executor.dispatch_task(
@@ -266,7 +267,7 @@ class TestEveryRetryableRungAsksFirst:
             raise OSError("gone")
 
         monkeypatch.setattr(
-            executor, "_spawn",
+            dispatch_spawn, "_spawn",
             lambda **kwargs: _capture(executor.STATUS_TIMEOUT),
         )
         task = env.apply_task(0)
@@ -361,7 +362,6 @@ def repo(tmp_path, monkeypatch):
     monkeypatch.setenv("MOCK_LLM_CALL_LOG", str(log))
     registry._RUN_ANCHOR = None
     registry._config = None
-    registry._config_key = None
     executor.reset_version_cache()
     monkeypatch.chdir(root)
 
@@ -372,7 +372,6 @@ def repo(tmp_path, monkeypatch):
     yield {"root": root, "plan": plan, "log": log}
     registry._RUN_ANCHOR = None
     registry._config = None
-    registry._config_key = None
 
 
 def test_an_implement_batch_that_replied_in_prose_is_not_sent_again(repo, capsys):
@@ -453,34 +452,34 @@ def test_a_failed_dispatch_with_no_result_file_draws_no_verdict_warning(env):
 @pytest.mark.parametrize("mode", ["full", "improve-plan", "improve-code"])
 def test_parent_runtime_files_are_not_runner_edits(env, mode):
     from types import SimpleNamespace
-    from utils import detach
+    from utils import run_record
 
     parent = env.out_dir / mode
     parent.mkdir()
-    env.monkeypatch.setattr(detach, "_ACTIVE", SimpleNamespace(phase_dir=str(parent)))
+    env.monkeypatch.setattr(run_record, "_ACTIVE", SimpleNamespace(phase_dir=str(parent)))
     scheduler = env.scheduler([env.apply_task(0)])
-    before = scheduler._census()
+    before = scheduler._sweep.census()
     for name in (".status.json", ".status.lock", "orchestrator-run.log"):
         (parent / name).write_text("runtime update\n")
-    assert scheduler._census() == before
+    assert scheduler._sweep.census() == before
     # A source edit, a sibling artifact and a composite result are still visible.
     (env.root / "src/a.py").write_text("changed source bytes\n")
     (parent / "result.json").write_text("changed result\n")
     sibling = env.out_dir / "review-plan"
     sibling.mkdir()
     (sibling / ".status.json").write_text("unrelated phase\n")
-    after = scheduler._census()
+    after = scheduler._sweep.census()
     changed = {p for p in set(before) | set(after) if before.get(p) != after.get(p)}
     assert changed == {"src/a.py", f".multi-llm/p/{mode}/result.json", ".multi-llm/p/review-plan/.status.json"}
 
 
 def test_report_reask_survives_parent_heartbeat_and_log_updates(env):
     from types import SimpleNamespace
-    from utils import detach, write_batch_scheduler as scheduler_module
+    from utils import run_record, write_batch_scheduler as scheduler_module
 
     parent = env.out_dir / "full"
     parent.mkdir()
-    env.monkeypatch.setattr(detach, "_ACTIVE", SimpleNamespace(phase_dir=str(parent)))
+    env.monkeypatch.setattr(run_record, "_ACTIVE", SimpleNamespace(phase_dir=str(parent)))
     env.edits([_patch_edit(env.plan)], prose=True)
     env.monkeypatch.setenv("MOCK_LLM_REPAIR_RESULT", json.dumps(GOOD))
     original = scheduler_module.dispatch_task

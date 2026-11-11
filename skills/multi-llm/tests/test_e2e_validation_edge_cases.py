@@ -614,9 +614,9 @@ class TestConfidenceEdgeValues:
     - Negative confidence (should be clamped to 0.0)
     - Confidence > 1.0 (should be clamped to 1.0)
 
-    Note: The confidence clamping happens in validate_groups() when parsing
-    the LLM response. Here we test via the merge function to verify the
-    end-to-end flow handles edge values correctly.
+    Note: The batched merge passes each confidence through as the subagent
+    wrote it. Here we test via the merge function to verify the end-to-end
+    flow handles edge values correctly.
     """
 
     def test_confidence_edge_values(self):

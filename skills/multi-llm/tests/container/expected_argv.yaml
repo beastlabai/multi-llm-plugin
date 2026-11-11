@@ -494,7 +494,7 @@ entries:
   # (§7 step 6): its seconds come from the slot's `timeout_s=`, so it is pinned
   # as the `<timeout>` placeholder rather than verbatim -- otherwise one run's
   # slot length would freeze into this row and redden every other one. The
-  # placeholder pins the SHAPE; the VALUE is pinned by test_providers.py's
+  # placeholder pins the SHAPE; the VALUE is pinned by test_provider_qwen_code.py's
   # derivation table plus test_container_argv.py's raw-call-log read.
   #
   # `--max-tool-calls 0` and `--max-session-turns 25` are module constants, so
@@ -606,7 +606,7 @@ entries:
   # `"--max-time": "1195"` — one slot length frozen into the pinned table, which
   # would have reddened the day `providers.yaml`'s `default_timeout` moved. The
   # placeholder pins the SHAPE (flag present, one value, right position); the
-  # value's own arithmetic is pinned in `test_providers.py`'s derivation table.
+  # value's own arithmetic is pinned in `test_provider_omp.py`'s derivation table.
   - provider: omp
     profile: generate
     transport: stdin

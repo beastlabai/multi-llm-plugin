@@ -16,6 +16,8 @@ import re
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import run_status  # noqa: E402
@@ -301,7 +303,6 @@ class TestRecords:
         config.write_text("driver:\n  subagent_runner: codex:gpt-5.5\n", encoding="utf-8")
         monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(config))
         monkeypatch.setattr(registry, "_config", None)
-        monkeypatch.setattr(registry, "_config_key", None)
         plan = root / "plans" / "kart.md"
         plan.parent.mkdir(parents=True)
         plan.write_text("# Kart\n", encoding="utf-8")
@@ -355,47 +356,45 @@ def _bare(cls, **attrs):
 
 
 class TestTheNativePlanOfWork:
-    """The apply phases' native emit prints each item's description, bounded."""
+    """The apply phases' native emit prints the counts and two paths, no item.
+
+    Each batch's items are in ``orchestrator_output.json`` and the host's batch
+    ids in ``orchestrator_summary.json`` beside it, and ``util decisions`` shows
+    the user every item, so the command's output stops at the summary block
+    (docs/development/write-scheduler.md#the-host-summary).
+    """
 
     def _item(self, description: str) -> dict:
         return {"title": "Clamp speed", "type": "bug", "importance": "HIGH",
                 "file": "src/opponent.js", "reference": "## Decisions",
                 "description": description}
 
-    def _shown(self, out: str) -> str:
-        return out.split("Description:\n  ", 1)[1].splitlines()[0]
-
-    def test_code_fixes(self, capsys):
-        from apply_code_fixes_orchestrator import ApplyCodeFixesOrchestrator
-
-        orch = _bare(ApplyCodeFixesOrchestrator)
-        orch.print_text_summary([{"fixes": [self._item(LONG_REASON)]}], "/dev/null")
-        shown = self._shown(capsys.readouterr().out)
-        assert len(shown) <= 200
-        assert_clean_cut(shown, LONG_REASON)
-
-    def test_suggestions(self, capsys):
+    @staticmethod
+    def _orchestrator(kind):
+        if kind == "fixes":
+            from apply_code_fixes_orchestrator import ApplyCodeFixesOrchestrator
+            return _bare(ApplyCodeFixesOrchestrator)
         from apply_suggestions_orchestrator import ApplySuggestionsOrchestrator
+        return _bare(ApplySuggestionsOrchestrator)
 
-        orch = _bare(ApplySuggestionsOrchestrator)
-        orch.print_text_summary([{"suggestions": [self._item(LONG_REASON)]}], "/dev/null")
-        assert_clean_cut(self._shown(capsys.readouterr().out), LONG_REASON)
+    @pytest.mark.parametrize("kind", ["fixes", "suggestions"])
+    def test_no_item_text_reaches_the_output(self, capsys, tmp_path, kind):
+        output = tmp_path / "orchestrator_output.json"
+        orch = self._orchestrator(kind)
+        orch.formatted_human = [dict(self._item(T002_FINDING), validation_reason="unclear")]
+        orch.print_text_summary([{kind: [self._item(LONG_REASON)]}], str(output))
+        out = capsys.readouterr().out
+        assert "Batches: 1" in out
+        for text in ("Clamp speed", LONG_REASON[:40], T002_FINDING[:40], "unclear"):
+            assert text not in out
+        assert out.rstrip().splitlines()[-1] == f"Batches and their items: {output}"
 
-    def test_a_short_description_is_shown_whole_without_a_mark(self, capsys):
-        from apply_code_fixes_orchestrator import ApplyCodeFixesOrchestrator
+    def test_the_summary_is_named_when_it_is_on_disk(self, capsys, tmp_path):
+        output = tmp_path / "orchestrator_output.json"
+        (tmp_path / "orchestrator_summary.json").write_text("{}\n", encoding="utf-8")
+        self._orchestrator("fixes").print_text_summary([], str(output))
+        assert capsys.readouterr().out.rstrip().splitlines()[-2:] == [
+            f"Batches and their items: {output}",
+            f"Batch ids, counts and items to decide: {tmp_path / 'orchestrator_summary.json'}",
+        ]
 
-        orch = _bare(ApplyCodeFixesOrchestrator)
-        orch.print_text_summary([{"fixes": [self._item(T002_FINDING)]}], "/dev/null")
-        assert self._shown(capsys.readouterr().out) == T002_FINDING
-
-
-def test_the_review_fixes_section_of_the_plan(tmp_path):
-    import code_review_orchestrator
-
-    plan = tmp_path / "plan.md"
-    plan.write_text("# Plan\n", encoding="utf-8")
-    code_review_orchestrator.update_plan_with_fixes(
-        plan, [{"fixed": False, "issue_title": "Clamp", "reason": LONG_REASON}])
-    line = next(item for item in plan.read_text(encoding="utf-8").splitlines()
-                if "**Clamp**" in item)
-    assert_clean_cut(line, LONG_REASON)

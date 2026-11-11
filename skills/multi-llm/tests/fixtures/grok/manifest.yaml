@@ -123,6 +123,7 @@ rows:
       third and fourth only. `stopReason` reads `end_turn` (`EndTurn`
       at 0.2.93); the parser never reads it.
     expect:
+      lane_status: {lane_a: ok, lane_b: ok}
       salvage: answer
       success: true
       data:
@@ -150,6 +151,7 @@ rows:
       is itself the measurement and a future divergence should show up as a
       diff on the row that changed.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       salvage: none
       # THE RUN FAILED. `true` is what the parser says — see `notes` at the top.
       success: false
@@ -172,6 +174,7 @@ rows:
       reports that verdict as a successful answer. Byte-identical to `truncated`
       and `error-envelope`.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       salvage: none
       success: false
       # `data` is None now, not the envelope: the envelope IS the failure.
@@ -197,6 +200,7 @@ rows:
       §6.2 shape (two assistant *messages*) is unreachable: grok concatenates
       every turn into one `text` before printing.
     expect:
+      lane_status: {lane_a: ok, lane_b: ok}
       salvage: answer
       success: true
       data:
@@ -220,6 +224,7 @@ rows:
       mis-served: nothing from the error object reaches any pattern table, which
       is why `classify_failure` is `null` here.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       salvage: none
       success: false
       error_contains: ['empty response from model (no_visible_content)']
@@ -263,6 +268,7 @@ rows:
       things 0.2.93 carried: the `Request URL:` line and the response headers
       grok echoed back, which named the failserver.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       salvage: none
       success: false
       raw_contains:
@@ -303,6 +309,7 @@ rows:
       categories this CLI's failures land on, and it is the one that matters
       most, since no retry fixes a credential.
     expect:
+      lane_status: {lane_a: auth_failed, lane_b: auth_failed}
       salvage: none
       success: false
       raw_contains:
@@ -329,6 +336,7 @@ rows:
       that §7.5 rule 6(b) does not bite the way it does for claude-code or gemini
       (10): an executor-level re-dispatch here doubles two requests, not ten.
     expect:
+      lane_status: {lane_a: rate_limited, lane_b: rate_limited}
       salvage: none
       success: false
       raw_contains:
@@ -355,6 +363,7 @@ rows:
       404 is strictly more specific than "api error" — and this cell is one of
       the three that moved. See README, defect 3.
     expect:
+      lane_status: {lane_a: invalid_model, lane_b: invalid_model}
       salvage: none
       success: false
       raw_contains:
@@ -381,6 +390,7 @@ rows:
       INVALID_MODEL_MARKERS entry) — which is the opposite of the upstream-404
       row above, and the reason both are committed.
     expect:
+      lane_status: {lane_a: invalid_model, lane_b: invalid_model}
       salvage: none
       success: false
       error_contains: ["unknown model id", "no-such-model-9999"]
@@ -402,6 +412,7 @@ rows:
       otherwise have made this `server_error` like the 404 row. **One** chat
       request: not retried, which is what §7.2 wants.
     expect:
+      lane_status: {lane_a: context_length_exceeded, lane_b: context_length_exceeded}
       salvage: none
       success: false
       raw_contains:
@@ -427,6 +438,7 @@ rows:
       distinguishes at all — and it still classifies as `null`, because
       `error sending request` matches nothing in CONNECTION_ERROR_MARKERS.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       salvage: none
       success: false
       raw_contains:

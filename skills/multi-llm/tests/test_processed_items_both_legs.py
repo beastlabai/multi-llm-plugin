@@ -44,8 +44,10 @@ from utils.state_manager import (  # noqa: E402
 from utils.write_phase_bridge import WRITE_TASK_FILENAME  # noqa: E402
 
 from tests.test_write_executor import FakeState, env  # noqa: E402,F401
-from tests.test_write_executor_orchestrators import repo  # noqa: E402,F401
-from tests.test_write_batch_declined import REASON, _PairRig  # noqa: E402
+from tests.support.write_orchestrators import (  # noqa: E402
+    orchestrator_repo,  # noqa: F401 - the repo fixture
+)
+from tests.support.declined_world import REASON, _PairRig  # noqa: E402
 
 #: Every record's details, on both legs; a declined or skipped one adds
 #: its `reason`.
@@ -327,8 +329,8 @@ class TestALaterReviewOffersADeclinedItemAgainOnTheExecutorLeg(_PairRig):
         applied one fixed, so not reported) makes a batch the earlier run
         never ran, which is dispatched, and a second decline is recorded as
         one — never as applied."""
-        from tests.test_write_batch_declined import _alpha_pair_groups
-        from tests.test_write_executor_orchestrators import _validation
+        from tests.support.declined_world import _alpha_pair_groups
+        from tests.support.write_orchestrators import _validation
         from utils.state_manager import generate_group_id, get_or_create_state
 
         plan = self._review_pair(repo)

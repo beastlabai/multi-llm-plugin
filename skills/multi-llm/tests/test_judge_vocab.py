@@ -32,11 +32,8 @@ SKILL_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SKILL_ROOT))
 
 import display_decisions  # noqa: E402
-from tests.test_apply_orchestrator_base import (  # noqa: E402
-    MockApplyOrchestrator,
-    _FakeOutcome,
-    _FakeSchedulerResult,
-    _make_args,
+from tests.support.apply_base import (  # noqa: E402
+    MockApplyOrchestrator, _FakeOutcome, _FakeSchedulerResult, _make_args,
     _setup_plan_with_output,
 )
 from utils import html_report_generator  # noqa: E402
@@ -65,6 +62,7 @@ from utils.report_parser import (  # noqa: E402
     parse_validation_overrides_groups,
 )
 from utils.state_manager import StateManager  # noqa: E402
+from tests.source_cache import python_files, source_tree  # noqa: E402
 
 FIXTURES = SKILL_ROOT / "tests" / "fixtures" / "legacy_judge_keys"
 
@@ -213,9 +211,9 @@ _LEGACY_LITERAL = re.compile(
 
 
 def _runtime_modules():
-    for path in sorted(SKILL_ROOT.rglob("*.py")):
+    for path in python_files(SKILL_ROOT):
         rel = path.relative_to(SKILL_ROOT).as_posix()
-        if rel.startswith(("tests/", ".venv/", "legacy/")) or "/." in rel:
+        if rel.startswith(("tests/", ".venv/")) or "/." in rel:
             continue
         yield rel, path
 
@@ -227,7 +225,7 @@ class TestWritersUseOnlyTheNewNames:
         for rel, path in _runtime_modules():
             if rel == "utils/judge_vocab.py":
                 continue
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+            tree = source_tree(path)
             for node in ast.walk(tree):
                 if (isinstance(node, ast.Constant) and isinstance(node.value, str)
                         and _LEGACY_LITERAL.match(node.value)):
@@ -238,9 +236,10 @@ class TestWritersUseOnlyTheNewNames:
         """The one legacy literal a template may hold is in its localStorage
         migration, which turns an old saved selection into the new value."""
         for name in ("report_template.html", "pr_report_template.html",
-                     "consolidated_report_template.html"):
+                     "consolidated_report_template.html", "shared/report_core.js"):
             text = (SKILL_ROOT / "templates" / name).read_text(encoding="utf-8")
-            assert "value=\"judge_decide\"" in text, name
+            if not name.startswith("shared/"):
+                assert "value=\"judge_decide\"" in text, name
             for line in text.splitlines():
                 if LEGACY_TOKEN.search(line):
                     assert ("overrides[k] === 'claude_decide'" in line
@@ -264,14 +263,12 @@ class TestWritersUseOnlyTheNewNames:
         # below it shares, so it is held only to naming no old key.
         delegating = SKILL_ROOT / "instructions" / "apply-commit-fixes.md"
         assert not LEGACY_TOKEN.search(delegating.read_text(encoding="utf-8"))
-        apply_files = [
-            *sorted(path for path in (SKILL_ROOT / "instructions").glob("apply-*.md")
-                    if path != delegating),
-            *sorted((SKILL_ROOT / "legacy" / "instructions").glob("apply-*.md")),
-        ]
-        references = [SKILL_ROOT / "references" / "human-decision-batch.md",
-                      SKILL_ROOT / "legacy" / "references" / "human-decision-batch.md"]
-        assert len(apply_files) == 6
+        apply_files = sorted(
+            path for path in (SKILL_ROOT / "instructions").glob("apply-*.md")
+            if path != delegating
+        )
+        references = [SKILL_ROOT / "references" / "human-decision-batch.md"]
+        assert len(apply_files) == 3
         read = "`batch_context.decision_source` is `judge_auto_decide` or `judge_auto_decide_salvage`"
         for path in apply_files:
             text = path.read_text(encoding="utf-8")
@@ -407,10 +404,10 @@ class TestAnEarlierRunLoadsTheSame:
             orch = _resumed_orchestrator(plan_path)
             capsys.readouterr()  # the constructor's and the previous pass's lines
 
-            decided = orch.judge_decisions()
-            orch.print_write_outcome_summary()
+            decided = orch.phase_report().judge_decisions()
+            orch.phase_report().print_write_outcome_summary()
             out = capsys.readouterr().out
-            summary = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+            summary = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
             # No save() by hand: on the native leg nothing saves after the
             # load (completion is the host's --mark-completed, later), and the
             # host reads this file raw for its "Decided by the judge agent"
@@ -419,7 +416,7 @@ class TestAnEarlierRunLoadsTheSame:
 
             seen[spelling] = (
                 sorted(decided),
-                orch._judge_breakdown(decided),
+                orch.phase_report()._judge_breakdown(decided),
                 _normalized(out, root),
                 _normalized(summary, root),
             )
@@ -673,8 +670,8 @@ class TestTheUpgradeIsWrittenBack:
 import sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
-from utils import metrics
-metrics.STATE_LOCK_TIMEOUT_S = 0
+from utils import metrics, state_file
+state_file.STATE_LOCK_TIMEOUT_S = 0
 path = Path(sys.argv[2])
 try:
     with metrics.state_file_lock(path):
@@ -713,11 +710,12 @@ except metrics.StateLockTimeout:
         self, tmp_path, monkeypatch
     ):
         from utils import metrics
+        from utils import state_file as state_file_mod
 
         plan_path, state_file = _plan_with_recorded_decisions(tmp_path, "legacy")
         # A second OS-lock acquisition would fail immediately rather than
         # waiting on our own lock for the production timeout.
-        monkeypatch.setattr(metrics, "STATE_LOCK_TIMEOUT_S", 0)
+        monkeypatch.setattr(state_file_mod, "STATE_LOCK_TIMEOUT_S", 0)
         with metrics.state_file_lock(state_file):
             StateManager(plan_path)
         assert not LEGACY_TOKEN.search(state_file.read_text(encoding="utf-8"))
@@ -726,12 +724,12 @@ except metrics.StateLockTimeout:
     def test_a_failed_upgrade_writeback_is_advisory(
         self, failure, tmp_path, monkeypatch, caplog
     ):
-        from utils import metrics
+        from utils import state_file as state_file_mod
 
         plan_path, state_file = _plan_with_recorded_decisions(tmp_path, "legacy")
         pinned = _pin_file(state_file)
         if failure == "lock":
-            monkeypatch.setattr(metrics.process_control.FileMutex, "acquire",
+            monkeypatch.setattr(state_file_mod.process_control.FileMutex, "acquire",
                                 lambda *_args, **_kwargs: False)
         else:
             def fail_write(*_args):

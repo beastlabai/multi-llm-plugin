@@ -4,8 +4,8 @@ Every raw-substring classifier this repo grew independently decides something
 expensive: a re-dispatch at a fresh full timeout, a batch-fatal ``auth_failed``,
 or a persisted ``recoverable`` flag that buys a whole revalidation pass. The
 point of M19 is that there is exactly **one** implementation of "what is this
-failure", living in ``utils/providers/base.py`` beside the boundary-aware
-matcher, and that Lane A stops carrying its own copies of it.
+failure", living in ``utils/providers/failure_classifier.py`` beside the
+boundary-aware matcher, and that Lane A stops carrying its own copies of it.
 
 The tests are grouped by the thing that can regress:
 
@@ -16,7 +16,7 @@ The tests are grouped by the thing that can regress:
 * launch failures ordered root-cause-before-auth, with ``exit_code == 127``
 * the exit-0 CLIs, whose exit code carries no verdict at all
 * the six §7.1.a duplicate sites, asserted gone by a source-level guard
-* ``validation.py``'s delegation, and the persisted contract it may not move
+* ``validation.py``'s persisted contract, which it may not move
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import subagent_executor as executor  # noqa: E402
+from utils import dispatch_spawn, runner_preflight  # noqa: E402
 from utils.providers import base as pbase  # noqa: E402
 from utils.provider_registry import get_provider  # noqa: E402
 from utils.retry_ladder import (  # noqa: E402
@@ -45,11 +46,14 @@ from utils.retry_ladder import (  # noqa: E402
     STATUS_AUTH_FAILED,
     STATUS_CONTEXT_LENGTH_EXCEEDED,
     STATUS_RATE_LIMITED,
+    STATUS_RUNNER_ERROR,
+    STATUS_SANDBOX_UNAVAILABLE,
     STATUS_SPAWN_FAILED,
     STATUS_TIMEOUT,
 )
 from utils.subagent_tasks import build_inputs, make_task  # noqa: E402
 from tests import opencode_fixtures as oc_pin  # noqa: E402
+from tests.source_cache import python_files, source_tree
 
 
 SKILL_DIR = Path(__file__).parent.parent
@@ -282,7 +286,7 @@ class TestContextOverflowSpawnsNothingTwice:
                 argv=["codex", "exec"],
             )
 
-        monkeypatch.setattr(executor, "_spawn", fake_spawn)
+        monkeypatch.setattr(dispatch_spawn, "_spawn", fake_spawn)
         task = make_task(
             kind="validation",
             task_id="validation-batch-0",
@@ -418,35 +422,32 @@ class TestLaunchFailureMarkers:
             STATUS_SPAWN_FAILED
         )
 
-    def test_lane_as_composed_sentence_still_reads_the_omp_refusal(self):
-        """Lane A classifies its own ``"<cli> exited with code N: <describe_failure>"``
-        string, handed over as stdout (``review_orchestrator_base``); omp's
-        ``describe_failure`` quotes the stderr line into it, so the refusal is
-        read there too, right after that prefix and nowhere else."""
+    def test_the_fan_out_reads_the_omp_refusal_off_stderr_not_its_own_line(self):
+        """The fan-out takes omp's own verdict (``details["failure_category"]``,
+        read off the capture by ``classify_failure``), so the refusal is read
+        where omp writes it, stderr at a line start, and the composed
+        ``"<cli> exited with code N: <describe_failure>"`` line is for the
+        reader, tagged with that verdict."""
+        from utils.provider_outcome import Capture, outcome_from_capture
         from utils.providers.omp import OmpProvider
+        from utils.review_orchestrator_base import attempt_ladder_status
 
         fixtures = Path(__file__).parent / "fixtures" / "omp"
         stdout = (fixtures / "invalid-tool.stdout.txt").read_text(encoding="utf-8")
         stderr = (fixtures / "invalid-tool.stderr.txt").read_text(encoding="utf-8")
+        result = outcome_from_capture(
+            OmpProvider(), Capture(stdout=stdout, stderr=stderr, exit_code=2),
+            provider_name="omp", model="m",
+        )
+        assert result["details"]["failure_category"] == STATUS_SPAWN_FAILED
+        assert result["error"].endswith(f" [{STATUS_SPAWN_FAILED}]")
+        assert attempt_ladder_status(result, result["details"]) == STATUS_SPAWN_FAILED
+        # The line alone names no launch failure: a sentence that quotes
+        # omp's refusal is not one.
         reason = OmpProvider().describe_failure(stdout, stderr)
-        composed = f"omp exited with code 2: {reason}"
-        assert pbase.classify_streams(composed, "") == STATUS_SPAWN_FAILED
-        assert pbase.match_streams(composed, "").status == STATUS_SPAWN_FAILED
-        # The prefix is llm_client's own composition, pinned so the two move
-        # together.
-        client = (
-            Path(__file__).parent.parent / "utils" / "llm_client.py"
-        ).read_text(encoding="utf-8")
-        assert (
-            'error_message = f"{provider_name} exited with code '
-            '{result.returncode}"' in client
-        )
-        # Another runner's sentence that only quotes it later is not omp's.
-        quoted = (
-            "claude-code exited with code 1: the reviewer wrote that omp says "
-            "Error: Unknown tool in --tools: bogus."
-        )
-        assert pbase.classify_streams(quoted, "") != STATUS_SPAWN_FAILED
+        assert pbase.classify_streams(
+            f"omp exited with code 2: {reason}", ""
+        ) != STATUS_SPAWN_FAILED
 
     def test_a_root_refusal_is_read_as_the_root_cause_not_as_auth(self):
         """§7.2's ordering rule: a root refusal reads like a permission problem.
@@ -616,6 +617,7 @@ class TestConfigDeclaredProvidersOnThePin:
     @pytest.fixture(autouse=True)
     def _setup(self, tmp_path, monkeypatch):
         from utils.providers import opencode as oc
+        from utils.providers import version_gate
 
         self.oc = oc
         home = tmp_path / "user-config"
@@ -629,8 +631,13 @@ class TestConfigDeclaredProvidersOnThePin:
         monkeypatch.delenv("OPENCODE_CONFIG_DIR", raising=False)
         monkeypatch.delenv("OPENCODE_CONFIG_CONTENT", raising=False)
         monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+        real_read = version_gate.read_help_tokens
         monkeypatch.setattr(
-            oc, "_read_help_tokens", lambda binary: frozenset({oc.PURE_FLAG})
+            version_gate, "read_help_tokens",
+            lambda binary, *, help_argv=("--help",), **kw: (
+                frozenset({oc.PURE_FLAG}) if tuple(help_argv) == ("run", "--help")
+                else real_read(binary, help_argv=help_argv, **kw)
+            ),
         )
         oc.reset_hermetic_state()
         executor.reset_auth_cache()
@@ -655,7 +662,7 @@ class TestConfigDeclaredProvidersOnThePin:
                 list(argv), self.debug_code, self.debug_stdout, ""
             )
 
-        monkeypatch.setattr(executor, "_run_probe", run_probe)
+        monkeypatch.setattr(runner_preflight, "_run_probe", run_probe)
         monkeypatch.setattr(oc, "_spawn_debug_config", spawn)
         yield
         oc.reset_hermetic_state()
@@ -753,7 +760,6 @@ class TestConfigDeclaredProvidersOnThePin:
         )
         monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(path))
         registry._config = None
-        registry._config_key = None
         self._use("hermetic_pure_config_content")
         assert self._detect("stub/stub-model", "agent-readonly") == "config"
         assert ["opencode", "--pure", "debug", "config"] in self.reads
@@ -791,7 +797,6 @@ class TestConfigDeclaredProvidersOnThePin:
             path.write_text("providers:\n  opencode:\n    hermetic: off\n", encoding="utf-8")
             monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(path))
             registry._config = None
-            registry._config_key = None
             profile = "agent-readonly"
         assert self._detect("stub/stub-model", profile) == "config"
 
@@ -899,68 +904,23 @@ class TestPerAdapterPatternOverrides:
 
 
 # ---------------------------------------------------------------------------
-# §7.1.a — `_format_failure_details`' elif chain becomes a category lookup
-# ---------------------------------------------------------------------------
-
-class TestReasonLineIsACategoryLookup:
-    """The `Reason:` line and the retry decision read the same classifier."""
-
-    def _reason(self, returncode, stdout="", stderr=""):
-        from utils.review_orchestrator_base import _format_failure_details
-
-        return _format_failure_details(returncode, stdout, stderr)
-
-    def test_a_missing_binary_no_longer_hard_codes_cursor_agent(self):
-        """`:434` named "cursor-agent" as the missing CLI for every provider."""
-        reason = self._reason(127, stderr="sh: 1: goose: not found")
-        assert "cursor-agent" not in reason
-
-    @pytest.mark.parametrize("stderr,expected", [
-        ("bash: codex: command not found", "could not be started"),
-        ("Error: permission denied", "Permission denied"),
-        ("HTTP status 429 returned", "Rate limited"),
-        ("Error: model not found: gpt-5.5", "Model not found or invalid"),
-        ("HTTP status 503 service unavailable", "API/Server error"),
-        ("the request timed out after 600s", "Timed out"),
-        ("Error: connection refused by the API host", "Connection"),
-    ])
-    def test_each_category_renders_its_own_reason(self, stderr, expected):
-        assert expected in self._reason(1, stderr=stderr)
-
-    def test_a_context_overflow_gets_the_actionable_reason(self):
-        reason = self._reason(1, stderr=CONTEXT_OVERFLOW_STREAMS["openai"])
-        assert "context window" in reason
-
-    def test_an_unrecognized_failure_is_still_unknown(self):
-        assert "Unknown" in self._reason(1, stderr="something went sideways")
-
-    def test_the_reason_line_is_still_boundary_aware(self):
-        """L2's guarantee, re-asserted through the shared classifier."""
-        prose = (
-            "Failed to parse JSON output from cursor-agent. The module under "
-            "review spans 429 lines and imports nothing unusual.\n"
-        )
-        assert "Rate limited" not in self._reason(1, stdout=prose)
-
-
-# ---------------------------------------------------------------------------
 # §14.2 — the grep-style guard. Red today at six sites.
 # ---------------------------------------------------------------------------
 
 #: The four tokens §14.2 names. A classifier spelled as a raw Python substring
-#: test on any of these is a duplicate of ``providers/base.py``'s declared
-#: pattern sets, and duplicates drift: the whole L2 defect was ``'429' in
+#: test on any of these is a duplicate of ``providers/failure_classifier.py``'s
+#: declared pattern sets, and duplicates drift: the whole L2 defect was ``'429' in
 #: str(error)`` disagreeing with a list that had already been made safe.
 BANNED_CLASSIFIER_PREFIXES = ("429", "rate limit", "rate-limit", "ratelimit",
                               "context", "connection")
 
 #: The one module allowed to declare them: it owns the boundary-aware matcher
 #: (``stream_pattern``/``matches_any``) that makes them safe.
-GUARD_EXEMPT = {"utils/providers/base.py"}
+GUARD_EXEMPT = {"utils/providers/failure_classifier.py"}
 
 
 def _runtime_modules():
-    for path in sorted(SKILL_DIR.rglob("*.py")):
+    for path in python_files(SKILL_DIR):
         rel = path.relative_to(SKILL_DIR).as_posix()
         if rel.startswith(("tests/", "legacy/", ".venv/", "build/")):
             continue
@@ -1004,6 +964,13 @@ def _substring_classifier_sites(rel, tree):
             if isinstance(target, ast.Name):
                 literal_lists[target.id] = (node.lineno, items)
 
+    # One pass indexes every comprehension by its element node, so the
+    # `any(... for ...)` lookup below is a dict hit rather than a second walk.
+    comprehension_of = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.GeneratorExp, ast.ListComp)):
+            comprehension_of[id(node.elt)] = node
+
     sites = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Compare):
@@ -1016,17 +983,15 @@ def _substring_classifier_sites(rel, tree):
                 sites.append((rel, node.lineno, repr(left.value)))
         elif isinstance(left, ast.Name):
             # `any(pattern in error_lower for pattern in <NAME>)`
-            for comp in ast.walk(tree):
-                if not isinstance(comp, (ast.GeneratorExp, ast.ListComp)):
-                    continue
-                if comp.elt is not node:
-                    continue
-                for generator in comp.generators:
-                    iterated = generator.iter
-                    if isinstance(iterated, ast.Name):
-                        found = literal_lists.get(iterated.id)
-                        if found and any(_banned(v) for v in found[1]):
-                            sites.append((rel, found[0], iterated.id))
+            comp = comprehension_of.get(id(node))
+            if comp is None:
+                continue
+            for generator in comp.generators:
+                iterated = generator.iter
+                if isinstance(iterated, ast.Name):
+                    found = literal_lists.get(iterated.id)
+                    if found and any(_banned(v) for v in found[1]):
+                        sites.append((rel, found[0], iterated.id))
     return sites
 
 
@@ -1037,80 +1002,35 @@ class TestNoDuplicateSubstringClassifiers:
         found = []
         for rel, path in _runtime_modules():
             try:
-                tree = ast.parse(path.read_text(encoding="utf-8"))
+                tree = source_tree(path)
             except (SyntaxError, UnicodeDecodeError):  # pragma: no cover
                 continue
             found.extend(_substring_classifier_sites(rel, tree))
         return sorted(set(found))
 
-    def test_no_raw_substring_classifier_survives_outside_base_py(self):
+    def test_no_raw_substring_classifier_survives_outside_the_classifier(self):
         sites = self._sites()
         rendered = "\n".join(f"  {rel}:{line}  {what}" for rel, line, what in sites)
         assert not sites, (
             "raw substring classifiers still live outside "
-            "utils/providers/base.py's declared pattern sets:\n" + rendered
+            "utils/providers/failure_classifier.py's declared pattern sets:\n" + rendered
         )
 
     def test_the_exempt_module_really_does_declare_them(self):
         """The guard must be exempting a real owner, not an empty file."""
-        assert "429" in pbase.LLMProvider.rate_limit_patterns
-        assert "rate limit" in pbase.LLMProvider.rate_limit_patterns
+        from utils.providers import failure_classifier
+
+        assert "429" in failure_classifier.RATE_LIMIT_PATTERNS
+        assert "rate limit" in failure_classifier.RATE_LIMIT_PATTERNS
+        assert pbase.LLMProvider.rate_limit_patterns is failure_classifier.RATE_LIMIT_PATTERNS
 
 
 # ---------------------------------------------------------------------------
-# §7.1.a — validation.py delegates, and its persisted contract does not move
+# §7.1.a — validation.py's persisted contract does not move
 # ---------------------------------------------------------------------------
 
-class TestValidationErrorDelegation:
-    """``_classify_validation_error`` keeps its vocabulary and loses its body."""
-
-    def _classify(self, error, http_status=None):
-        from utils.validation import _classify_validation_error
-
-        return _classify_validation_error(error, http_status)
-
-    def test_the_http_fast_path_is_still_first(self):
-        from utils.validation import ERROR_TYPE_RATE_LIMITED
-
-        assert self._classify("Request timeout", 429) == ERROR_TYPE_RATE_LIMITED
-
-    @pytest.mark.parametrize("error,expected", [
-        ("Rate limit exceeded", "rate_limited"),
-        ("Request was throttled", "rate_limited"),
-        ("Connection timed out", "timeout"),
-        ("deadline exceeded", "timeout"),
-        ("Connection refused by server", "model_failure"),
-        ("Service unavailable", "model_failure"),
-        ("Binary not found in PATH", "model_failure"),
-        ("Error: unauthorized", "model_failure"),
-    ])
-    def test_the_four_transport_categories_map_onto_the_kept_vocabulary(
-        self, error, expected
-    ):
-        assert self._classify(error) == expected
-
-    def test_the_parse_half_stays_local(self):
-        from utils.validation import ERROR_TYPE_PARSING
-
-        assert self._classify("No valid JSON in response") == ERROR_TYPE_PARSING
-        assert self._classify("Expecting value: line 1 column 1") == ERROR_TYPE_PARSING
-
-    def test_an_error_naming_a_json_path_is_not_a_parsing_error(self):
-        """The bare ``"json"`` pattern bought a wasted revalidation pass.
-
-        An error that merely *names* the output file classified as
-        ``parsing_error`` — hence ``recoverable`` — so the phase spent a whole
-        revalidation dispatch on a condition no re-ask can fix.
-        """
-        from utils.validation import ERROR_TYPE_PARSING, RECOVERABLE_ERROR_TYPES
-
-        for error in (
-            "Output file /tmp/plan/review-plan/plan_review_codex.json was never written",
-            "Permission denied writing validation_batch_0.json",
-        ):
-            classified = self._classify(error)
-            assert classified != ERROR_TYPE_PARSING, error
-            assert classified not in RECOVERABLE_ERROR_TYPES, error
+class TestValidationErrorVocabulary:
+    """The persisted ``error_type``/``recoverable`` vocabulary does not move."""
 
     def test_the_persisted_contract_did_not_move(self):
         """`error_type`/`recoverable` are written into every group result."""
@@ -1210,10 +1130,22 @@ class TestLaneANetworkRetryReadsTheSharedClassifier:
 class TestSandboxMarkers:
     """`bwrap:` lines are the machine's fault, fatal, and never `permission_denied`."""
 
+    #: The measured refusals (`base.SANDBOX_MARKERS` names each capture).
     BWRAP_LINES = [
         "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted",
         "bwrap: setting up uid map: Permission denied",
+        "bwrap: No permissions to create a new namespace",
+    ]
+
+    #: Bubblewrap words on stderr that are no measured refusal: an unmeasured
+    #: line (no capture prints it), a tool's or a log's mention, a refusal
+    #: quoted mid-line. None decides the batch-fatal verdict.
+    NOT_A_REFUSAL = [
         "error: bubblewrap failed to start the sandbox",
+        "| Read docs/bubblewrap.md",
+        "warning: bubblewrap is not installed; tools run unsandboxed",
+        "> bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted",
+        "  bwrap: setting up uid map: Permission denied",
     ]
 
     @pytest.mark.parametrize("stream", BWRAP_LINES)
@@ -1223,10 +1155,23 @@ class TestSandboxMarkers:
         assert pbase.classify_streams("", stream, exit_code=1) == (
             pbase.CATEGORY_SANDBOX_UNAVAILABLE
         )
-        # Wherever the line sits — this haystack is `stdout\nstderr`.
+        # Whatever stdout holds beside it.
         assert pbase.classify_streams("event: started\n", stream + "\n", exit_code=1) == (
             pbase.CATEGORY_SANDBOX_UNAVAILABLE
         )
+
+    @pytest.mark.parametrize("stream", BWRAP_LINES)
+    def test_the_line_on_stdout_never_fails_the_batch(self, stream):
+        """Read off stderr alone: the verdict fails the executor's batch, and a
+        failed run's stdout is often an answer quoting the line. (A quoted
+        "Permission denied" still reads as the per-task ``permission_denied``.)"""
+        from utils.providers import base as pbase
+        from utils.retry_ladder import FATAL_STATUSES
+
+        for stdout in (stream, f"The plan quotes:\n{stream}\n"):
+            for stderr in ("", "Connection reset by peer"):
+                verdict = pbase.classify_streams(stdout, stderr, exit_code=1)
+                assert verdict not in FATAL_STATUSES, (stdout, stderr, verdict)
 
     def test_the_category_is_the_ladder_status_at_rung_1(self):
         from utils import review_orchestrator_base as rob
@@ -1241,13 +1186,13 @@ class TestSandboxMarkers:
         assert RUNG_BY_STATUS[STATUS_SANDBOX_UNAVAILABLE] == 1
         assert category not in pbase.RETRYABLE_FAILURE_CATEGORIES
 
-    def test_the_reason_line_names_doctor(self):
-        from utils.review_orchestrator_base import _format_failure_details
+    @pytest.mark.parametrize("stream", NOT_A_REFUSAL)
+    def test_only_a_whole_measured_line_is_the_sandbox_category(self, stream):
+        from utils.providers import base as pbase
 
-        reason = _format_failure_details(1, "", self.BWRAP_LINES[0])
-        assert "sandbox" in reason
-        assert "multi_llm.py doctor" in reason
-        assert "Permission denied" not in reason.split("\n")[0]
+        assert pbase.classify_streams("", stream, exit_code=1) != (
+            pbase.CATEGORY_SANDBOX_UNAVAILABLE
+        )
 
     def test_a_bwrap_word_inside_prose_is_not_a_sandbox_failure(self):
         """`^bwrap: ` is anchored to a line start; a review quoting the word
@@ -1256,4 +1201,176 @@ class TestSandboxMarkers:
 
         assert pbase.classify_streams(
             "", "the plan mentions bwrap: as a sandbox option", exit_code=1
+        ) is None
+
+
+def _capture(stdout, stderr, exit_code=1):
+    from utils.provider_outcome import Capture
+
+    return Capture(stdout=stdout, stderr=stderr, exit_code=exit_code)
+
+
+def _both_lanes(provider_name, capture):
+    from tests.test_provider_fixture_rows import _lane_a_status, _lane_b_status
+
+    return _lane_a_status(provider_name, capture), _lane_b_status(provider_name, capture)
+
+
+#: codex's own events on stdout: the run got past its argv and reached the API.
+_CODEX_PROGRESS = "\n".join([
+    json.dumps({"type": "thread.started", "thread_id": "t"}),
+    json.dumps({"type": "turn.started"}),
+    json.dumps({"type": "error", "message": "stream disconnected before completion"}),
+]) + "\n"
+
+
+class TestAShellRefusalNeedsARunThatMadeNoProgress:
+    """A shell's ``command not found`` on stderr may be a hook's, a wrapper's
+    or an MCP server's, so it stops the slot and fails the executor's batch
+    only for a run that made no progress (``base.launch_refusal``); exit 127,
+    a CLI's own refusal and an adapter's refusal shape stay fatal
+    (docs/development/delegation.md#read-and-analyze-executor)."""
+
+    def test_after_progress_the_run_keeps_its_transport_retry(self):
+        codex = get_provider("codex")
+        capture = _capture(_CODEX_PROGRESS, "bash: line 1: uvx: command not found\n")
+        # The tables still read the phrase; what changed is who acts on it.
+        assert codex.classify_failure(capture.stdout, capture.stderr, 1) == STATUS_SPAWN_FAILED
+        category, read = pbase.launch_refusal(codex, capture.stdout, capture.stderr, 1)
+        assert category is None and read == "bash: line 1: uvx: " + " " * 17 + "\n"
+        assert executor._classify_failed_run(codex, capture, "m") is None
+        lanes = _both_lanes("codex", capture)
+        assert lanes == ("runner_error", "unparseable_result"), lanes
+
+    def test_with_the_line_set_aside_the_rest_of_stderr_decides(self):
+        """No stdout, but stderr names an overload: the rate limit is the
+        verdict, and its quote is cut from the stderr without the shell line."""
+        claude = get_provider("claude-code")
+        capture = _capture("", "sh: 1: jq: command not found\nAPI Error: 529 overloaded\n")
+        verdict = executor._classify_failed_run(claude, capture, "m")
+        assert verdict is not None and verdict[0] == STATUS_RATE_LIMITED, verdict
+        assert "overloaded" in verdict[1] and "command not found" not in verdict[1]
+
+    @pytest.mark.parametrize("diagnosis,verdict", [
+        ("HTTP 401 Unauthorized", STATUS_AUTH_FAILED),
+        ("HTTP 429 Too Many Requests", STATUS_RATE_LIMITED),
+        ("model not found", "invalid_model"),
+    ])
+    def test_a_diagnosis_on_the_shell_line_still_decides(self, diagnosis, verdict):
+        """Only the shell's phrase is read past, never the text beside it: a
+        401, 429 or unknown model on the same line keeps its verdict on both
+        lanes, and the quote keeps the diagnosis (F07 review, point 3)."""
+        codex = get_provider("codex")
+        stderr = f"ERROR: {diagnosis}; hook stderr: jq: command not found\n"
+        capture = _capture('{"type":"thread.started","thread_id":"t"}\n', stderr)
+        category, read = pbase.launch_refusal(codex, capture.stdout, stderr, 1)
+        assert category == verdict
+        assert diagnosis in read and "command not found" not in read
+        assert len(read) == len(stderr)
+        found = executor._classify_failed_run(codex, capture, "m")
+        assert found is not None and found[0] == verdict and diagnosis in found[1]
+        assert _both_lanes("codex", capture)[0] == verdict
+
+    @pytest.mark.parametrize("stderr", [
+        "bash: codex: command not found\n",
+        "bash: /usr/local/bin/codex: cannot execute binary file: Exec format error\n",
+        "'codex' is not recognized as an internal or external command,\n"
+        "operable program or batch file.\n",
+    ])
+    def test_with_no_progress_the_refusal_stays_fatal(self, stderr):
+        codex = get_provider("codex")
+        capture = _capture("", stderr)
+        verdict = executor._classify_failed_run(codex, capture, "m")
+        assert verdict is not None and verdict[0] == STATUS_SPAWN_FAILED, verdict
+        assert _both_lanes("codex", capture) == (STATUS_SPAWN_FAILED,) * 2
+
+    def test_exit_127_stays_fatal_whatever_stdout_holds(self):
+        codex = get_provider("codex")
+        capture = _capture(_CODEX_PROGRESS, "bash: line 1: uvx: command not found\n", 127)
+        assert pbase.launch_refusal(codex, capture.stdout, capture.stderr, 127)[0] == (
+            STATUS_SPAWN_FAILED
+        )
+        assert executor._classify_failed_run(codex, capture, "m")[0] == STATUS_SPAWN_FAILED
+
+    def test_a_clis_own_refusal_stays_fatal_beside_a_shell_line(self):
+        omp = get_provider("omp")
+        stderr = "sh: 1: jq: command not found\nError: Unknown tool in --tools: bogus.\n"
+        capture = _capture('{"type":"session"}\n', stderr, 2)
+        assert executor._classify_failed_run(omp, capture, "m")[0] == STATUS_SPAWN_FAILED
+
+    def test_an_adapters_own_refusal_shape_stays_fatal(self):
+        vibe = get_provider("vibe")
+        stdout = "Error: Invalid configuration (1 error(s)):\n  models: bad\n"
+        capture = _capture(stdout, "sh: 1: jq: command not found\n")
+        assert executor._classify_failed_run(vibe, capture, "m")[0] == STATUS_SPAWN_FAILED
+
+    def test_the_two_tables_split_the_row(self):
+        row = pbase.STDERR_LAUNCH_FAILURE_MARKERS[STATUS_SPAWN_FAILED]
+        assert row == pbase.CLI_REFUSAL_MARKERS + pbase.SHELL_REFUSAL_MARKERS
+        assert not set(pbase.CLI_REFUSAL_MARKERS) & set(pbase.SHELL_REFUSAL_MARKERS)
+
+
+class TestAnUnmeasuredBubblewrapLinePointsAtDoctor:
+    """A bubblewrap line that is none of the measured refusals keeps its
+    verdict and retries, and the failure message still names the sandbox and
+    ``multi_llm.py doctor`` (docs/development/providers.md#launch-diagnostics)."""
+
+    LINES = [
+        "bwrap: Creating new namespace failed: Operation not permitted",
+        "bwrap: Can't mount proc on /newroot/proc: Operation not permitted",
+        "2026-11-10T00:00:00Z ERROR codex_core::exec: "
+        "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted",
+    ]
+
+    @pytest.mark.parametrize("line", LINES)
+    def test_the_hint_quotes_the_line_and_names_doctor(self, line):
+        hint = pbase.sandbox_hint("Reading additional input from stdin...\n" + line + "\n")
+        assert hint is not None and "multi_llm.py doctor" in hint
+        assert "bwrap: " in hint and "Reading additional" not in hint
+
+    @pytest.mark.parametrize("stderr", ["", "Operation not permitted\n", "the wrapper is bwrapper: x"])
+    def test_no_bubblewrap_line_no_hint(self, stderr):
+        assert pbase.sandbox_hint(stderr) is None
+
+    @pytest.mark.parametrize("line", LINES)
+    def test_the_executor_retries_once_and_names_doctor(self, line):
+        codex = get_provider("codex")
+        verdict = executor._classify_failed_run(codex, _capture("", line + "\n"), "m")
+        assert verdict is not None
+        status, reason = verdict
+        assert status == STATUS_RUNNER_ERROR and status not in FATAL_STATUSES
+        assert "multi_llm.py doctor" in reason and "bwrap: " in reason
+
+    @pytest.mark.parametrize("line", LINES)
+    def test_the_fan_out_line_names_doctor(self, line):
+        from utils.provider_outcome import outcome_from_capture
+
+        outcome = outcome_from_capture(
+            get_provider("codex"), _capture("", line + "\n"), provider_name="codex", model="m",
+        )
+        assert "multi_llm.py doctor" in outcome["error"], outcome["error"]
+
+    def test_a_measured_line_stays_fatal_with_one_pointer(self):
+        from utils.provider_outcome import outcome_from_capture
+
+        line = TestSandboxMarkers.BWRAP_LINES[0]
+        codex = get_provider("codex")
+        verdict = executor._classify_failed_run(codex, _capture("", line + "\n"), "m")
+        assert verdict[0] == STATUS_SANDBOX_UNAVAILABLE
+        outcome = outcome_from_capture(
+            codex, _capture("", line + "\n"), provider_name="codex", model="m",
+        )
+        assert outcome["error"].endswith("[sandbox_unavailable]"), outcome["error"]
+
+    def test_a_relaying_adapters_stderr_gives_no_hint(self):
+        """kilocode's stderr also relays a tool's words (``LAUNCH_DIAGNOSTICS``
+        ``none``), so a bubblewrap line there points at nothing."""
+        kilocode = get_provider("kilocode")
+        capture = _capture("", self.LINES[0] + "\n")
+        assert executor._classify_failed_run(kilocode, capture, "m") is None
+
+    def test_an_exit_zero_gives_no_hint(self):
+        codex = get_provider("codex")
+        assert executor._classify_failed_run(
+            codex, _capture("", self.LINES[0] + "\n", 0), "m"
         ) is None

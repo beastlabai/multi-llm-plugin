@@ -27,7 +27,7 @@ from utils import run_status
 from utils.state_manager import get_or_create_state
 
 import tests.test_check_gate_fixture as gate
-from tests.test_check_gate_fixture import FINDINGS, repo  # noqa: F401
+from tests.support.gate_fixture import FINDINGS
 
 PLAN = "plans/checked.md"
 STOPPED_HEAD = (

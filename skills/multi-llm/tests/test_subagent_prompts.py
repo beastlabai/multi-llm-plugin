@@ -38,6 +38,7 @@ from utils.subagent_prompts import (  # noqa: E402
     extract_reference_section,
     render_reference_section,
 )
+from tests.source_cache import source_tree  # noqa: E402
 
 GOLDEN_DIR = SKILL_ROOT / "tests" / "golden" / "prompts"
 
@@ -87,6 +88,37 @@ SUGGESTION_RECORDS = [
         ],
     },
 ]
+
+#: One batch's cited plan sections (``utils/validation_sections.py``): the
+#: preamble, the section its groups cite, and a marker for what is omitted.
+CITED_PLAN_EXCERPT = (
+    "# Fixture plan\n\nUploads go to the shared bucket.\n\n"
+    "## Step 1\nDo the thing.\n\n"
+    "[... not cited by this batch, not shown: ## Step 2, ## Step 3 ...]"
+)
+
+CITED_RECORDS = [
+    {**record, "suggestions": [
+        {**suggestion, "reference": "## Step 1"} for suggestion in record["suggestions"]
+    ]}
+    for record in SUGGESTION_RECORDS
+]
+
+CITED_SOURCE = {
+    "label": "plan",
+    "kind": "plan",
+    "path": "validation-snapshot.md",
+    "abs_path": "/abs/plans/fixture-plan/review-plan/validation-snapshot.md",
+    "sha256": "0" * 64,
+    "bytes": 14000,
+    "chars_shown": len(CITED_PLAN_EXCERPT),
+    "truncated": True,
+    "mode": "path",
+    "in_phase_dir": True,
+    "selection": "cited",
+    "sections_total": 3,
+    "sections_shown": 1,
+}
 
 GROUP_RECORDS = [
     {
@@ -161,6 +193,14 @@ def _prompts():
             plan_excerpt=PLAN_EXCERPT, suggestion_records=SUGGESTION_RECORDS,
             scope_guidance=validator_guidance("preserve", "review-plan"),
         ),
+        # A batch that carries only the plan sections its groups cite, with
+        # the round's snapshot named by path (docs/development/delegation.md,
+        # "Cited plan sections").
+        "validation_cited": build_validation_prompt(
+            plan_excerpt=CITED_PLAN_EXCERPT,
+            suggestion_records=CITED_RECORDS,
+            context_sources=[CITED_SOURCE],
+        ),
         "validation_code_review": build_validation_prompt(
             plan_excerpt=PLAN_EXCERPT,
             suggestion_records=SUGGESTION_RECORDS,
@@ -214,9 +254,7 @@ class TestGeneratorsArePure:
     }
 
     def _generator_functions(self):
-        tree = ast.parse(
-            (SKILL_ROOT / "utils" / "subagent_prompts.py").read_text(encoding="utf-8")
-        )
+        tree = source_tree(SKILL_ROOT / "utils" / "subagent_prompts.py")
         wanted = {
             "build_validation_prompt",
             "build_consolidation_prompt",
@@ -250,9 +288,7 @@ class TestGeneratorsArePure:
     def test_module_imports_nothing_that_does_io(self):
         """The module's own imports are `json` and typing only, so importing it
         cannot read a file, a clock or the config."""
-        tree = ast.parse(
-            (SKILL_ROOT / "utils" / "subagent_prompts.py").read_text(encoding="utf-8")
-        )
+        tree = source_tree(SKILL_ROOT / "utils" / "subagent_prompts.py")
         top_level = [
             node for node in tree.body
             if isinstance(node, (ast.Import, ast.ImportFrom))
@@ -471,12 +507,12 @@ class TestRenderedReferenceSections:
         current = extract_reference_section(document, name)
         assert current is not None, (
             f"{rel_path} carries no BEGIN/END GENERATED markers for {name!r}. "
-            f"Run `python utils/subagent_prompts.py` after adding them."
+            f"Run `python -m utils.subagent_prompts` after adding them."
         )
         assert current == render_reference_section(name), (
             f"{rel_path}'s {name!r} block has diverged from "
             f"utils/subagent_prompts.py. Edit the constant, then run "
-            f"`python utils/subagent_prompts.py` to re-render."
+            f"`python -m utils.subagent_prompts` to re-render."
         )
 
     def test_judge_rules_travel_inside_the_prompt_verbatim(self):

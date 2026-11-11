@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -25,7 +26,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import implement_orchestrator  # noqa: E402
 from utils import prior_changes  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
-from utils import subagent_executor as executor  # noqa: E402
 from utils import write_safety  # noqa: E402
 from utils.code_fix_batcher import batch_code_fixes  # noqa: E402
 from utils.suggestion_batcher import group_suggestions_for_subagents  # noqa: E402
@@ -36,103 +36,35 @@ from utils.write_phase_bridge import (  # noqa: E402
 )
 from tests.mock_launchers import (  # noqa: E402
     MOCK_LLM,  # noqa: F401 - imported from here by sibling files
-    install_mock_llm,
-    mock_path,
     write_sh_command,
 )
-
-PLAN = """# Sample Implementation Plan
-
-## Overview
-A plan with three dependent tasks.
-
-## Tasks
-
-### T001: Create the module
-Create the module file.
-- Depends on: none
-- Files to create: src/main.py
-
-### T002: Implement the core
-Implement the core functionality.
-- Depends on: T001
-- Files to modify: src/main.py
-
-### T003: Add tests
-Write unit tests.
-- Depends on: T002
-- Files to create: tests/test_main.py
-"""
+from tests.support.write_orchestrators import (
+    IMPLEMENT_WRITE_IDS,
+    PLAN,
+    _ApplyRig,
+    _groups,
+    _phase_dir,
+    _seed_generate_tasks,
+    _validation,
+    orchestrator_repo,  # noqa: F401 - the repo fixture
+)
 
 
-@pytest.fixture
-def repo(tmp_path, monkeypatch):
-    """A real git repo with the plan, a mock PATH and a driver config."""
-    root = tmp_path / "repo"
-    root.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
-    (root / "plans").mkdir()
-    plan = root / "plans" / "sample.md"
-    plan.write_text(PLAN, encoding="utf-8")
-    (root / "src").mkdir()
-    (root / "src" / "main.py").write_text("x = 1\n", encoding="utf-8")
-    # A real commit: `implement` records `head_before_implement`, and
-    # `git rev-parse HEAD` in a repo with no commits is a hard error.
-    env = {
-        **os.environ,
-        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
-        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
-    }
-    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
-    subprocess.run(["git", "commit", "-qm", "init"], cwd=root, check=True, env=env)
-
-    bin_dir = tmp_path / "bin"
-    install_mock_llm(bin_dir, "codex")
-    monkeypatch.setenv("PATH", mock_path(bin_dir, ("codex",)))
-    monkeypatch.setenv("MULTI_LLM_TEST_MODE", "1")
-    monkeypatch.setenv("MULTI_LLM_TEST_FAST_BACKOFF", "1")
-    config = tmp_path / "driver.yaml"
-    config.write_text("driver:\n  subagent_runner: codex:gpt-5.5\n", encoding="utf-8")
-    monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(config))
-    registry._config = None
-    registry._config_key = None
-    executor.reset_version_cache()
-    monkeypatch.chdir(root)
-
-    class Repo:
-        pass
-
-    obj = Repo()
-    obj.root = root
-    obj.plan = plan
-    obj.tmp_path = tmp_path
-    obj.monkeypatch = monkeypatch
-    yield obj
-    registry._config = None
-    registry._config_key = None
+def __getattr__(name):
+    # `repo` moved to tests/support/write_orchestrators.py (as orchestrator_repo); test_implement_continues_a_started_run.py still
+    # imports it from here.
+    if name == "repo":
+        return orchestrator_repo
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-#: What a *compliant* runner attests to: an implement task's `expected_ids` is
-#: `[task_id]`, and a batch that moves bytes while attesting to none of its
-#: expected ids is a partial application, not a success (D3g/D3n). Extra ids are
-#: ignored by the classifier, so one superset serves every batch of the run.
-IMPLEMENT_WRITE_IDS = json.dumps(["T001", "T002", "T003"])
-
-
-def _phase_dir(repo) -> Path:
-    from utils.output_handler import get_phase_dir
-
-    return Path(get_phase_dir(repo.plan, "implement"))
-
-
-def _seed_generate_tasks(repo) -> None:
-    """Mark the upstream phases done so `implement` reaches its own work."""
-    from utils.state_manager import get_or_create_state
-
-    state = get_or_create_state(repo.plan)
-    state.mark_phase_completed("generate-tasks")
-    state.mark_phase_completed("apply-suggestions")
-    state.save()
+def _alive(pid):
+    """Is *pid* still running (a zombie is not)?"""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as handle:
+            return handle.read().rsplit(b")", 1)[-1].split()[0] != b"Z"
+    except OSError:
+        return False
 
 
 class TestImplementOrchestratorWiring:
@@ -180,6 +112,91 @@ class TestImplementOrchestratorWiring:
         report = json.loads((phase_dir / "write_batch_report.json").read_text())
         assert report["finalized"] is True
         assert report["exit"] == 0
+
+    @pytest.mark.skipif(sys.platform != "linux", reason="a POSIX wrapper; setsid")
+    def test_a_held_pipe_outside_the_runs_group_stops_as_a_timeout_that_moved_bytes(
+        self, repo, capsys
+    ):
+        """F03 (coordinator's design): T001's runner applies its edit and
+        exits 0, but a helper it started in a session of its own keeps its
+        output open, so the run's group is stopped and the pipe stays held.
+        The batch ends exactly as a runner that applied its edit and ran past
+        its time limit: the same status, the same stop and the same resume
+        answer, never sent again by itself, and the helper never signalled."""
+        from utils import dispatch_spawn, status_file
+        from utils.providers.codex import CodexProvider
+
+        _seed_generate_tasks(repo)
+        # A 4 s slot: codex's declared 25 s retry envelope would refuse it.
+        repo.monkeypatch.setattr(CodexProvider, "internal_retries", None)
+        repo.monkeypatch.setenv("MOCK_LLM_EDITS", json.dumps([
+            {"path": "src/main.py", "mode": "patch", "content": "# edited\n"}
+        ]))
+        repo.monkeypatch.setenv("MOCK_LLM_WRITE_IDS", IMPLEMENT_WRITE_IDS)
+        repo.monkeypatch.setattr(dispatch_spawn, "TIMEOUT_DRAIN_S", 0.5)
+        tmp = repo.tmp_path
+        (tmp / "driver.yaml").write_text(
+            "driver:\n  subagent_runner: codex:gpt-5.5\n  subagent_timeout_s: 4\n",
+            encoding="utf-8")
+        real = tmp / "real-bin"
+        real.mkdir()
+        codex = tmp / "bin" / "codex"
+        (real / "codex").symlink_to(codex.resolve())
+        holders = tmp / "holders"
+
+        def run(body):
+            registry._config = None
+            registry._config_key = None
+            codex.unlink()
+            codex.write_text(
+                "#!/bin/sh\n"
+                'case " $* " in\n'
+                f'  *" exec "*)\n{body}\n    ;;\n'
+                "esac\n"
+                f'exec "{real / "codex"}" "$@"\n',
+                encoding="utf-8",
+            )
+            codex.chmod(0o755)
+            code = implement_orchestrator.main([
+                "--plan-file", str(repo.plan), "--yes", "--exec-subagents",
+            ])
+            captured = capsys.readouterr()
+            out = captured.out + captured.err
+            phase_dir = _phase_dir(repo)
+            report = json.loads((phase_dir / "subagent_batch_report.json").read_text())
+            rows = {row["task_id"]: row for row in report["tasks"]}
+            stop = status_file.read_status(str(phase_dir))["progress"]["write_subagents"]["stop"]
+            way = out[out.index("To go on:"):out.index("Audit log:")]
+            facts = {
+                "code": code, "status": rows["T001"]["status"],
+                "attempts": rows["T001"]["attempt_count"], "rows": sorted(rows),
+                "kind": stop.get("kind"), "answers": stop.get("answers"),
+                "resume_why": stop.get("resume_why"), "way_forward": way,
+            }
+            return facts, rows["T001"].get("reason") or ""
+
+        pids = []
+        try:
+            held, held_reason = run(
+                f'    setsid sleep 30 &\n    echo $! >> "{holders}"\n'
+                f'    "{real / "codex"}" "$@"\n    exit $?')
+            pids = [int(line) for line in holders.read_text(encoding="utf-8").split()]
+            assert all(_alive(pid) for pid in pids), "the outside holder was signalled"
+            # Back to the tree before the run, for the same batch to time out.
+            shutil.rmtree(_phase_dir(repo))
+            subprocess.run(["git", "checkout", "-q", "--", "."], cwd=repo.root, check=True)
+            timed, _reason = run(f'    "{real / "codex"}" "$@"\n    sleep 30\n    exit 0')
+        finally:
+            for pid in pids:
+                try:
+                    os.kill(pid, 9)
+                except OSError:
+                    pass
+        assert held == timed
+        assert held["code"] == 3 and held["status"] == "partial_application"
+        assert held["attempts"] == 1 and held["rows"] == ["T001"]
+        assert "a process outside the run's process group holds it" in held_reason
+        assert "pgrep -l -s" in held_reason
 
     def test_a_stopped_batch_still_seeds_pending_for_every_undispatched_task(
         self, repo
@@ -280,7 +297,6 @@ class TestImplementOrchestratorWiring:
             f"  verify_command: {verify}\n", encoding="utf-8",
         )
         registry._config = None
-        registry._config_key = None
         repo.monkeypatch.setenv("MOCK_LLM_EDITS", json.dumps([
             {"path": "src/main.py", "mode": "patch", "content": "# edited\n"}
         ]))
@@ -431,14 +447,14 @@ class TestImplementOrchestratorWiring:
 
         Mirrors ``test_unattended.TestApplyPhaseRowsAreRecorded.
         test_a_detached_apply_run_lands_both_in_status_json``: a fake
-        ``RunHandle`` is installed as ``detach._ACTIVE`` (claimed via
+        ``RunHandle`` is installed as ``run_record._ACTIVE`` (claimed via
         ``status_file.claim_run``, never ``.start()``, so no lock/heartbeat/
         signal-handler machinery runs) and the orchestrator is driven in the
         foreground (no ``--detach``/``--internal-worker``) — ``detach.
         record_resolution``/``record_output_files`` only check whether
         ``_ACTIVE`` names this phase dir, not how it got there.
         """
-        from utils import detach, status_file
+        from utils import detach, run_record, status_file
 
         _seed_generate_tasks(repo)
         repo.monkeypatch.setenv("MOCK_LLM_EDITS", json.dumps([
@@ -465,7 +481,7 @@ class TestImplementOrchestratorWiring:
             plan_file=str(repo.plan), detached=True,
         )
         status_file.claim_run(str(phase_dir), {"run_id": "run-1", "state": "running"})
-        monkeypatch.setattr(detach, "_ACTIVE", handle)
+        monkeypatch.setattr(run_record, "_ACTIVE", handle)
 
         code = implement_orchestrator.main([
             "--plan-file", str(repo.plan), "--yes", "--exec-subagents",
@@ -1051,7 +1067,7 @@ class TestFullStackDetachedImplement:
             pytest.skip("the POSIX double-spawn path; Windows is covered in CI")
         import time
 
-        from utils import detach, status_file
+        from utils import detach, run_record, status_file
 
         _seed_generate_tasks(repo)
         stub = tmp_path / "uv-stub"
@@ -1092,7 +1108,7 @@ class TestFullStackDetachedImplement:
         status = json.loads((phase_dir / ".status.json").read_text())
         progress = status["progress"]["write_subagents"]
         assert progress["total"] == 3
-        assert progress["finalized"] is True
+        assert status["state"] == "complete"
         assert [t["task_id"] for t in progress["tasks"]] == ["T001", "T002", "T003"]
 
     def test_resume_after_a_mid_batch_kill_redispatches_only_the_incomplete(
@@ -1247,110 +1263,6 @@ class TestFullStackDetachedImplement:
 # #28, the apply half: an apply phase's summary.md and write_batch_report.json
 # on `--resume` (three-host racing run, 2026-10-01)
 # ---------------------------------------------------------------------------
-
-APPLY_PLAN = """# Apply Plan
-
-## Step 1: Alpha
-Alpha text.
-
-## Step 2: Beta
-Beta text.
-
-## Step 3: Gamma
-Gamma text.
-"""
-
-APPLY_SECTIONS = ("Alpha", "Beta", "Gamma")
-
-
-def _groups(prefix):
-    """One HIGH suggestion per plan section, so each lands in a batch of its own."""
-    return [
-        {"theme": f"{prefix} theme {n}", "category": "c", "models": ["m"],
-         "suggestions": [{
-             "title": f"{prefix} suggestion {n}", "desc": f"Do {prefix} {n}.",
-             "type": "addition", "reference": f"## Step {n + 1}: {name}",
-             "importance": "HIGH", "source_model": "m",
-         }]}
-        for n, name in enumerate(APPLY_SECTIONS)
-    ]
-
-
-def _validation(statuses):
-    return {
-        "metadata": {"schema_version": "2.0", "validated_at": "2026-10-02T10:00:00",
-                     "model": "m", "plan_hash": "x", "total_groups": len(statuses)},
-        "groups": [{"group_index": i, "status": s, "reason": "r", "confidence": 0.9}
-                   for i, s in enumerate(statuses)],
-    }
-
-
-class _ApplyRig:
-    """The real apply-suggestions orchestrator over the mock runner."""
-
-    def _review(self, repo, prefix, statuses=("valid",) * 3):
-        """A review-plan cycle on disk, completed now."""
-        from utils.state_manager import get_or_create_state
-
-        plan = repo.root / "plans" / "apply.md"
-        if not plan.exists():
-            # Bytes: `backup.<sha8>.md` names the sha256 of APPLY_PLAN's LF
-            # bytes, which a text-mode write turns into CRLF on Windows.
-            plan.write_bytes(APPLY_PLAN.encode("utf-8"))
-        review = repo.root / "plans" / "apply" / "review-plan"
-        review.mkdir(parents=True, exist_ok=True)
-        (review / "grouped.json").write_text(json.dumps(_groups(prefix)), encoding="utf-8")
-        (review / "validation.json").write_text(
-            json.dumps(_validation(list(statuses))), encoding="utf-8")
-        state = get_or_create_state(plan)
-        state.mark_phase_completed("review-plan")
-        state.save()
-        return plan
-
-    def _ids(self, plan):
-        """Each batch's member ids, as the phase materializes them."""
-        import apply_suggestions_orchestrator as orchestrator
-
-        assert orchestrator.main(
-            ["--plan-file", str(plan), "--yes", "--dry-run-subagents"]) == 0
-        tasks = json.loads((self._phase_dir(plan) / WRITE_TASK_FILENAME).read_text())
-        return [task["expected_ids"] for task in tasks["batches"]]
-
-    @staticmethod
-    def _phase_dir(plan):
-        return plan.parent / plan.stem / "apply-suggestions"
-
-    def _run(self, repo, plan, attest, *flags, content="edit\n"):
-        import apply_suggestions_orchestrator as orchestrator
-
-        repo.monkeypatch.setenv("MOCK_LLM_EDITS", json.dumps([
-            {"path": "plans/apply.md", "mode": "patch", "content": content}
-        ]))
-        repo.monkeypatch.setenv("MOCK_LLM_WRITE_IDS", json.dumps(attest))
-        return orchestrator.main(
-            ["--plan-file", str(plan), "--yes", "--exec-subagents", *flags])
-
-    def _report(self, plan):
-        return json.loads(
-            (self._phase_dir(plan) / "write_batch_report.json").read_text())["tasks"]
-
-    def _summary(self, plan):
-        return (self._phase_dir(plan) / "summary.md").read_text(encoding="utf-8")
-
-    @staticmethod
-    def _section(summary, heading):
-        """The lines under one `### …` heading, up to the next blank line."""
-        lines = summary.splitlines()
-        start = lines.index(heading)
-        return lines[start:lines.index("", start)]
-
-    def _deselect(self, repo, index):
-        """The user skips one item between the runs (here: in validation)."""
-        statuses = ["valid"] * 3
-        statuses[index] = "invalid"
-        review = repo.root / "plans" / "apply" / "review-plan"
-        (review / "validation.json").write_text(
-            json.dumps(_validation(statuses)), encoding="utf-8")
 
 
 class TestAnApplyResumeKeepsTheEarlierRunsRows(_ApplyRig):
@@ -1932,10 +1844,9 @@ class TestImplementsApplySuggestionsGateReadsEveryValidationShape:
         state.mark_phase_completed("generate-tasks")
         state.save()
         self._review_plan_with_valid_groups(repo)
-        with pytest.raises(SystemExit) as exc:
-            implement_orchestrator.main(["--plan-file", str(repo.plan), "--yes"])
+        code = implement_orchestrator.main(["--plan-file", str(repo.plan), "--yes"])
         out = capsys.readouterr().out
-        assert exc.value.code == 3, out
+        assert code == 3, out
         assert "PREREQUISITE_UNMET" in out
         assert "1 valid suggestions not yet applied" in out
 
@@ -2021,8 +1932,8 @@ class TestTheNativeImplementEmitMaterializesTheWriteTaskFile:
 
     def test_write_tasks_json_matches_the_executor_s_rendering(self, repo, capsys):
         from utils import write_prompt
-        from utils.write_batch_scheduler import WriteBatchScheduler
         from utils.output_handler import get_output_dir
+        from tests.scheduler_support import make_scheduler
 
         _seed_generate_tasks(repo)
         assert implement_orchestrator.main(["--plan-file", str(repo.plan), "--yes"]) == 0
@@ -2032,11 +1943,11 @@ class TestTheNativeImplementEmitMaterializesTheWriteTaskFile:
         assert document["kind"] == "implement"
         assert [t["task_id"] for t in document["batches"]] == ["T001", "T002", "T003"]
 
-        scheduler = WriteBatchScheduler.__new__(WriteBatchScheduler)
-        scheduler.kind = "implement"
-        scheduler.output_dir = str(get_output_dir(repo.plan))
-        scheduler.phase = "implement"
+        scheduler = make_scheduler(
+            get_output_dir(repo.plan), kind="implement", phase="implement",
+            phase_dir=phase_dir, plan_file=repo.plan,
+        )
         for task in document["batches"]:
             text, _task, _info = write_prompt.render_write_prompt(phase_dir, task["task_id"])
-            assert text == scheduler._with_result_contract(
-                task, scheduler.dispatched_prompt(task))
+            assert text == scheduler._prompts.with_result_contract(
+                task, scheduler._prompts.dispatched_prompt(task))

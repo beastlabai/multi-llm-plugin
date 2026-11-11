@@ -80,7 +80,7 @@ def _run_review_plan(tmp_path: Path, models=("cursor-agent:auto",)):
     with patch.object(
         base, "invoke_with_file_output",
         side_effect=lambda **kwargs: _ok_reply(kwargs["model_spec"]),
-    ), patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+    ), patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
         exit_code = asyncio.run(rpo.main(argv))
     phase_dir = base.get_phase_dir(plan, "review-plan")
     return plan, phase_dir, exit_code
@@ -146,7 +146,7 @@ class TestPhaseStateReachesComplete:
         }
         with patch.object(
             base, "invoke_with_file_output", side_effect=lambda **kwargs: dict(empty_reply)
-        ), patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+        ), patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             exit_code = asyncio.run(rpo.main(argv))
 
         assert exit_code == 0
@@ -212,35 +212,39 @@ def _three_findings(model_spec: str) -> dict:
 def _run_with_validation(tmp_path: Path, threshold: int):
     """A run whose groups all validate, with the recommendation threshold given.
 
-    Two more seams than the runs above, both standing in for work a provider
-    would do: ``validate_groups`` (the LLM call) and
-    ``apply_validation_to_groups`` (which joins its verdicts back). Everything
-    the recommendation itself depends on — the fan-out, the grouping, the
-    count — is still the real thing.
+    Two more seams than the runs above, both standing in for work the
+    delegated validators would do: ``dispatch_subagent_tasks`` (running the
+    batches) and ``merge_validation_batches`` (which joins their verdicts
+    back). Everything the recommendation itself depends on — the fan-out, the
+    grouping, the count — is still the real thing.
     """
     plan = _plan(tmp_path)
     argv = [
         "--plan-file", str(plan),
         "--models", "cursor-agent:auto",
-        "--internal-validation",
+        "--exec-subagents",
         "--consolidation-threshold", str(threshold),
         "--timeout", "5",
     ]
 
-    async def _validate(groups, **kwargs):
-        return []
+    def _dispatch(_args, **kwargs):
+        return True
 
-    def _apply(groups, results):
-        return [dict(group, validation_status="valid") for group in groups]
+    def _merged(_phase_dir, _metadata, grouped, _validation_path, claim=None):
+        return [
+            dict(g.to_dict() if hasattr(g, "to_dict") else g,
+                 validation_status="valid")
+            for g in grouped
+        ]
 
     context = cli_common.activate_result(cli_common.ResultContext())
     try:
         with patch.object(
             base, "invoke_with_file_output",
             side_effect=lambda **kwargs: _three_findings(kwargs["model_spec"]),
-        ), patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0), \
-                patch.object(base, "validate_groups", _validate), \
-                patch.object(base, "apply_validation_to_groups", _apply):
+        ), patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0), \
+                patch.object(base, "dispatch_subagent_tasks", new=_dispatch), \
+                patch.object(base, "merge_validation_batches", new=_merged):
             exit_code = asyncio.run(rpo.main(argv))
     finally:
         cli_common.deactivate_result()
@@ -321,6 +325,45 @@ class TestConsolidationRecommendationLeavesTheLog:
             f"consolidation recommended: {groups} valid groups >= 2 "
             "— run --consolidate"
         ) in out
+
+
+class TestTheRetiredInternalValidationFlag:
+    """``--internal-validation`` once validated in-process; it is retired and
+    now warns and takes the delegated route, exactly as a run without it."""
+
+    def _run(self, tmp_path, *extra):
+        plan = _plan(tmp_path)
+        argv = [
+            "--plan-file", str(plan), "--models", "cursor-agent:auto",
+            "--timeout", "5", *extra,
+        ]
+        context = cli_common.activate_result(cli_common.ResultContext())
+        try:
+            with patch.object(
+                base, "invoke_with_file_output",
+                side_effect=lambda **kwargs: _three_findings(kwargs["model_spec"]),
+            ), patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
+                exit_code = asyncio.run(rpo.main(argv))
+        finally:
+            cli_common.deactivate_result()
+        return base.get_phase_dir(plan, "review-plan"), exit_code, context
+
+    def test_it_warns_once_and_stops_at_the_validation_marker(self, tmp_path, capsys):
+        phase_dir, exit_code, context = self._run(tmp_path, "--internal-validation")
+        out, err = capsys.readouterr()
+
+        assert exit_code == 0
+        assert err.count("--internal-validation is retired") == 1
+        assert "Running internal validation" not in out
+        assert "[VALIDATION_PENDING]" in out or "[VALIDATION_BATCHES_PENDING]" in out
+        assert (phase_dir / "validation_tasks.json").is_file()
+        # The host is still handed its follow-up: a replayed retired flag would
+        # have made `set_next` drop the whole command.
+        follow_up = context.payload(0)["next"]
+        assert follow_up and "--reaggregate" in follow_up
+        assert "--internal-" not in follow_up
+
+
 class TestTheFanOutReportsProgressWhileItRuns:
     """F5: `progress.models_done` was written `0` once, before the first launch,
     and recomputed only after the last model returned — so every poll during the
@@ -369,7 +412,7 @@ class TestTheFanOutReportsProgressWhileItRuns:
         ] + (["--force"] if force else [])
         calls = []
         self.dispatched = []
-        real = base._detach.report_progress
+        real = base._run_record.report_progress
 
         def record(phase_dir, **updates):
             calls.append(dict(updates))
@@ -381,8 +424,8 @@ class TestTheFanOutReportsProgressWhileItRuns:
 
         with patch.object(
             base, "invoke_with_file_output", side_effect=dispatch,
-        ), patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0), patch.object(
-            base._detach, "report_progress", record
+        ), patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0), patch.object(
+            base._run_record, "report_progress", record
         ):
             assert asyncio.run(rpo.main(argv)) == 0
         return calls
@@ -630,7 +673,7 @@ class TestTheHighPriorityGroupCountReachesTheHost:
         context = cli_common.activate_result(cli_common.ResultContext())
         try:
             with patch.object(base, "invoke_with_file_output", side_effect=reply), \
-                    patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+                    patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
                 assert asyncio.run(rpo.main(argv)) == 0
         finally:
             cli_common.deactivate_result()
@@ -756,7 +799,7 @@ class TestTheMapIsCompleteBeforeTheFirstSlotStarts:
             "--max-parallel", str(len(self.MODELS)),
         ]
         calls = []
-        real = base._detach.report_progress
+        real = base._run_record.report_progress
 
         def record(phase_dir, **updates):
             calls.append(dict(updates))
@@ -765,8 +808,8 @@ class TestTheMapIsCompleteBeforeTheFirstSlotStarts:
         with _fast_ticker() as emitted, patch.object(
             base, "invoke_with_file_output",
             side_effect=lambda **kwargs: _ok_reply(kwargs["model_spec"]),
-        ), patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0), patch.object(
-            base._detach, "report_progress", record
+        ), patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0), patch.object(
+            base._run_record, "report_progress", record
         ):
             assert asyncio.run(rpo.main(argv)) == 0
         return base.get_phase_dir(plan, "review-plan"), calls, emitted
@@ -822,7 +865,7 @@ class TestTheMapIsCompleteBeforeTheFirstSlotStarts:
         # launch write, so the disk as its first invocation *enters* is exactly
         # what a poll landing in that window would render.
         snapshots = []
-        real = base._detach.report_progress
+        real = base._run_record.report_progress
 
         def record(phase_dir, **updates):
             if not snapshots:
@@ -834,8 +877,8 @@ class TestTheMapIsCompleteBeforeTheFirstSlotStarts:
         with _fast_ticker(), patch.object(
             base, "invoke_with_file_output",
             side_effect=lambda **kwargs: _ok_reply(kwargs["model_spec"]),
-        ), patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0), patch.object(
-            base._detach, "report_progress", record
+        ), patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0), patch.object(
+            base._run_record, "report_progress", record
         ):
             assert asyncio.run(rpo.main(argv)) == 0
 
@@ -898,7 +941,7 @@ class TestAResumedRunDoesNotReportSkippedModelsAsPending:
         with patch.object(
             base, "invoke_with_file_output",
             side_effect=lambda **kwargs: _ok_reply(kwargs["model_spec"]),
-        ), patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+        ), patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             assert asyncio.run(rpo.main(argv)) == 0
         return base.get_phase_dir(plan, "review-plan")
 
@@ -995,7 +1038,7 @@ class TestASlotWaitingOnTheSemaphoreReadsQueued:
             release.set()
             await task
 
-        with patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+        with patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             asyncio.run(drive())
 
         assert seen["head"] == "running", seen
@@ -1013,14 +1056,17 @@ class TestASlotWaitingOnTheSemaphoreReadsQueued:
 class TestTheStaggeringRowCarriesItsCountdown:
     """2026-09-21: the fan-out names the sleep it takes, so the row can.
 
-    `run_models_concurrent` is the one caller that knows the stagger delay —
-    `index * PROVIDER_STAGGER_DELAY`, through `get_backoff_delay` — and the
-    tracker cannot infer it. The slot's `staggering` transition is therefore
-    made with that delay, and the map, read at that instant, carries the
-    `stagger_until` the `status` table renders as `starts in Ns`.
+    `run_models_concurrent` is the one caller that knows how long a slot waits
+    for its provider's launch turn — its place in the line times the
+    provider's interval, through `get_backoff_delay` — and the tracker cannot
+    infer it. The slot's `staggering` transition is therefore made with that
+    delay, and the map, read at that instant, carries the `stagger_until` the
+    `status` table renders as `starts in Ns`. On a virtual clock, so each slot
+    waits exactly once.
     """
 
-    MODELS = ["cursor-agent:auto", "codex:gpt-5.5", "pi:auto"]
+    # One provider: the stagger is bucketed by provider.
+    MODELS = ["cursor-agent:auto", "cursor-agent:sonnet", "cursor-agent:gpt-5"]
 
     def test_every_staggered_slot_is_stamped_with_its_own_delay(self, tmp_path):
         phase_dir = tmp_path / "review-plan"
@@ -1034,25 +1080,26 @@ class TestTheStaggeringRowCarriesItsCountdown:
         def spy(spec, **kwargs):
             real(spec, **kwargs)
             # The row as a poll landing on this write would read it.
-            seen[spec] = (kwargs, dict(tracker.snapshot()[spec]))
+            seen.setdefault(spec, (kwargs, dict(tracker.snapshot()[spec])))
 
         async def factory(model_spec, index):
             tracker.running(model_spec, attempt=1)
             return {"success": True, "source": "file"}
 
-        with patch.object(base, "PROVIDER_STAGGER_DELAY", 0.02), \
+        from tests.launch_timeline import run_on_virtual_clock
+        with patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.02), \
                 patch.object(tracker, "staggering", spy):
-            asyncio.run(base.run_models_concurrent(
+            run_on_virtual_clock(base.run_models_concurrent(
                 list(self.MODELS), factory, 30, 3, tracker=tracker
             ))
 
         head, *tail = self.MODELS
-        assert head not in seen, "index 0 never staggers"
+        assert head not in seen, "a provider's first slot never staggers"
         assert list(seen) == tail
+        step = base.get_backoff_delay(0.02)
         for index, spec in enumerate(tail, start=1):
             kwargs, row = seen[spec]
-            expected = base.get_backoff_delay(index * 0.02)
-            assert kwargs == {"delay_s": expected}, (spec, kwargs)
+            assert kwargs == {"delay_s": index * step}, (spec, kwargs)
             assert row["state"] == "staggering"
             assert "stagger_until" in row, (spec, row)
         # And once dispatched, no row still carries a countdown.
@@ -1125,7 +1172,7 @@ class TestEveryEndingRetiresEverySlot:
             await asyncio.sleep(30)
             return {"success": True, "source": "file"}
 
-        with patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+        with patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             results = asyncio.run(base.run_models_concurrent(
                 list(self.MODELS), straggle, 0.05, 4, tracker=tracker
             ))
@@ -1163,7 +1210,7 @@ class TestEveryEndingRetiresEverySlot:
                 await asyncio.sleep(30)
             return {"success": True, "source": "file"}
 
-        with patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+        with patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             results = asyncio.run(base.run_models_concurrent(
                 list(self.MODELS), one_answers_one_straggles, 0.05, 4,
                 tracker=tracker,
@@ -1194,7 +1241,7 @@ class TestEveryEndingRetiresEverySlot:
                 raise RuntimeError("provider exploded")
             return {"success": True, "source": "file"}
 
-        with patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+        with patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             results = asyncio.run(base.run_models_concurrent(
                 list(self.MODELS), one_explodes, 60, 4, tracker=tracker
             ))
@@ -1236,7 +1283,7 @@ class TestEveryEndingRetiresEverySlot:
             except asyncio.CancelledError:
                 pass
 
-        with patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+        with patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             asyncio.run(drive())
 
         snapshot = self._assert_agrees_with_the_report(tracker, {})
@@ -1315,7 +1362,7 @@ class TestAnInProcessSalvageMovesTheMapWithTheReport:
         ]
         with patch.object(base, "run_all_models", new=fake_run_all_models), \
              patch.object(base, "dispatch_salvage_tasks", new=fake_salvage), \
-             patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+             patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             assert asyncio.run(rpo.main(argv)) == 0
 
         status = status_file.read_status(str(phase_dir))
@@ -1545,7 +1592,7 @@ class TestThePhaseTickerOutlivesTheFanOut:
         it can be observed, by asking the blocking stub itself how many lines
         landed while it was blocking.
 
-        Its predecessor drove the `--internal-validation` path with an `async`
+        Its predecessor drove the retired `--internal-validation` path with an `async`
         stub that awaited, so `len(after) >= 2` was a statement about the stub
         rather than about the production dispatch path, and it passed both
         before and after the defect.
@@ -1558,7 +1605,7 @@ class TestThePhaseTickerOutlivesTheFanOut:
         phase_dir = base.get_phase_dir(plan, "review-plan")
         maps = {}
         window = {}
-        real = base._detach.report_progress
+        real = base._run_record.report_progress
 
         def record(pd, **updates):
             real(pd, **updates)
@@ -1593,7 +1640,7 @@ class TestThePhaseTickerOutlivesTheFanOut:
             window["after"] = len(phase_lines())
             return True
 
-        def merged(_phase_dir, _metadata, grouped, _validation_path):
+        def merged(_phase_dir, _metadata, grouped, _validation_path, claim=None):
             return [
                 (g.to_dict() if hasattr(g, "to_dict") else dict(g))
                 for g in grouped
@@ -1602,11 +1649,11 @@ class TestThePhaseTickerOutlivesTheFanOut:
         with _realtime_ticker() as emitted, patch.object(
             base, "invoke_with_file_output",
             side_effect=lambda **kwargs: _ok_reply(kwargs["model_spec"]),
-        ), patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0), patch.object(
+        ), patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0), patch.object(
             base, "dispatch_subagent_tasks", new=blocking_dispatch
         ), patch.object(
             base, "merge_validation_batches", new=merged
-        ), patch.object(base._detach, "report_progress", record):
+        ), patch.object(base._run_record, "report_progress", record):
             assert asyncio.run(rpo.main(argv)) == 0
 
         # The assertion the defect fails: the dispatch really was reached, and
@@ -1721,7 +1768,7 @@ class TestThePhaseTickerOutlivesTheFanOut:
             base, "run_all_models", new=fake_run_all_models
         ), patch.object(
             base, "dispatch_salvage_tasks", new=blocking_salvage
-        ), patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+        ), patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             assert asyncio.run(rpo.main(argv)) == 0
 
         assert window, "the in-process salvage was never reached"
@@ -1765,7 +1812,7 @@ class TestThePhaseTickerOutlivesTheFanOut:
         with _fast_ticker() as emitted, patch.object(
             base, "invoke_with_file_output",
             side_effect=lambda **kwargs: _ok_reply(kwargs["model_spec"]),
-        ), patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+        ), patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             assert asyncio.run(rpo.main(argv)) == 0
 
         phase_dir = base.get_phase_dir(plan, "review-plan")
@@ -1797,7 +1844,7 @@ class TestThePhaseTickerOutlivesTheFanOut:
         with patch.object(
             base, "invoke_with_file_output",
             side_effect=lambda **kwargs: _ok_reply(kwargs["model_spec"]),
-        ), patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+        ), patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             assert asyncio.run(rpo.main(
                 common + ["--models", "cursor-agent:auto"]
             )) == 0
@@ -1865,7 +1912,7 @@ class TestTheRecordedPromptNamesTheAttemptsMinutes:
             ))
 
     def test_the_reconstructed_prompt_equals_the_sent_prompt(self, tmp_path):
-        from utils.llm_client import render_working_limits
+        from utils.prompt_channels import render_working_limits
 
         sent = []
         result = self._run(tmp_path, "cursor-agent:auto", 1200, sent)
@@ -1888,7 +1935,7 @@ class TestTheRecordedPromptNamesTheAttemptsMinutes:
         719.6 s pins the rounding: the placeholder uses `attempt_timeout`'s
         `round` (720 s, 12 minutes), where a truncated 719 s would read 11.
         """
-        from utils.llm_client import render_working_limits
+        from utils.prompt_channels import render_working_limits
 
         sent = []
         result = self._run(tmp_path, "muse:muse-spark-1.2", 719.6, sent)

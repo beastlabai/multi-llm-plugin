@@ -27,6 +27,7 @@ sys.path.insert(0, str(SKILL_ROOT / "hosts"))
 
 from utils import host_capabilities as caps  # noqa: E402
 from utils import host_install  # noqa: E402
+from utils.host_routes import codex as codex_route  # noqa: E402
 import render_capabilities as renderer  # noqa: E402
 from tests.mock_launchers import shim_path, spawn_environment, write_launcher  # noqa: E402
 
@@ -397,7 +398,7 @@ class TestCheckReportsPluginRoute:
     def test_a_list_that_does_not_answer_falls_through_to_the_table(
         self, machine, monkeypatch, body
     ):
-        monkeypatch.setattr(host_install, "CODEX_LIST_TIMEOUT_S", 1)
+        monkeypatch.setattr(codex_route, "CODEX_LIST_TIMEOUT_S", 1)
         machine.codex_failing(body)
         machine.config.write_text(_table(PLUGIN_ID, True))
         _payload(machine.codex_home, PACKAGE["marketplace"], "0.1.0")

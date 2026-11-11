@@ -26,86 +26,38 @@ from utils import prior_changes  # noqa: E402
 from utils import write_prompt  # noqa: E402
 from utils.cli_common import parse_result_line  # noqa: E402
 from utils.subagent_tasks import PRIOR_CHANGES_TOKEN  # noqa: E402
-from utils.write_batch_scheduler import WriteBatchScheduler  # noqa: E402
+from utils.write_batch_scheduler import RESULT_IDS_HEADING  # noqa: E402
+from tests.scheduler_support import make_scheduler  # noqa: E402
 from utils.subagent_executor import CHECK_FINDING_MAX_CHARS, check_findings_from  # noqa: E402
-from utils.write_phase_bridge import (  # noqa: E402
-    WRITE_TASK_FILENAME,
-    materialize_write_tasks,
-    write_task_file_for_phase,
+from utils.write_phase_bridge import WRITE_TASK_FILENAME  # noqa: E402
+from tests.support.write_prompt_world import (
+    PROMPT,
+    _implement_batches,
+    _materialize,
+    _suggestion_batches,
+    prompt_plan_dir,  # noqa: F401 - the plan_dir fixture
 )
 
 
-PROMPT = (
-    "# Apply these suggestions\n\n"
-    "## Prior changes\n\n" + PRIOR_CHANGES_TOKEN + "\n\n"
-    "## Suggestions\n\n1. Add email validation\n2. Enforce password rules\n\n"
-    "## Return Format\n\nSummarize each item.\n"
-)
-
-
-def _suggestion_batches():
-    return [
-        {
-            "section_key": "step_2",
-            "prompt": PROMPT,
-            "suggestions": [
-                {"group_id": "g-email", "title": "Add email validation"},
-                {"group_id": "g-password", "title": "Enforce password rules"},
-            ],
-        },
-        {
-            "section_key": "step_3",
-            "prompt": PROMPT.replace("Add email validation", "Add rate limiting"),
-            "suggestions": [{"group_id": "g-rate", "title": "Add rate limiting"}],
-        },
-    ]
-
-
-def _implement_batches():
-    return [
-        {"batch_index": 0, "can_parallelize": False, "tasks": [
-            {"id": "T001", "title": "Foundation", "prompt": PROMPT,
-             "files_to_create": ["src/a.py"], "depends_on": [],
-             "executor_role": "agent"},
-        ]},
-        {"batch_index": 1, "can_parallelize": False, "tasks": [
-            {"id": "T002", "title": "Manual step", "prompt": PROMPT,
-             "files_to_create": [], "depends_on": ["T001"],
-             "executor_role": "human"},
-        ]},
-    ]
-
-
-@pytest.fixture
-def plan_dir(tmp_path):
-    plan = tmp_path / "plans" / "feature.md"
-    plan.parent.mkdir(parents=True)
-    plan.write_text("# Feature\n\n## Step 2\n\nBody.\n", encoding="utf-8")
-    out = tmp_path / "plans" / "feature"
-    out.mkdir()
-    return plan, out
-
-
-def _materialize(plan, out, kind, batches, phase_subdir):
-    phase_dir = out / phase_subdir
-    phase_dir.mkdir(parents=True, exist_ok=True)
-    tasks = materialize_write_tasks(
-        kind=kind, batches=batches, phase_dir=str(phase_dir), plan_file=str(plan),
-    )
-    write_task_file_for_phase(
-        kind=kind, tasks=tasks, phase_dir=str(phase_dir), plan_file=str(plan),
-    )
-    return phase_dir, tasks
+def _recorded(out, phase_dir, task_id, capsys):
+    """*task_id* recorded `completed` by the real `util batch-done`: a
+    shared-artifact batch is bound only after the ones before it, and only a
+    record carrying the run counts (test_batch_snapshot.py)."""
+    from utils import batch_done
+    state = out / "state.json"
+    if not state.exists():
+        state.write_text(json.dumps({"task_status": {}}), encoding="utf-8")
+    assert batch_done.main([
+        "--phase-dir", str(phase_dir), "--task-id", task_id, "--status", "completed",
+    ]) == 0
+    capsys.readouterr()
 
 
 def _executor_rendering(kind, out, phase, task):
     """What `WriteBatchScheduler` dispatches for *task*: the two seams, as its
-    dispatch site composes them (`_with_result_contract(dispatched_prompt)`)."""
-    scheduler = WriteBatchScheduler.__new__(WriteBatchScheduler)
-    scheduler.kind = kind
-    scheduler.output_dir = str(out)
-    scheduler.phase = phase
-    return scheduler._with_result_contract(task, scheduler.dispatched_prompt(task))
+    dispatch site composes them (`BatchPromptBuilder.with_result_contract(dispatched_prompt)`)."""
+    scheduler = make_scheduler(out, kind=kind, phase=phase)
+    return scheduler._prompts.with_result_contract(task, scheduler._prompts.dispatched_prompt(task))
 
 
 class TestTheTwoInvokersRenderTheSameBytes:
@@ -160,6 +112,96 @@ class TestTheTwoInvokersRenderTheSameBytes:
         assert "Nothing was dispatched" in str(exc.value)
 
 
+def _code_fix_batches():
+    return [
+        {"file_key": "src/a.py", "prompt": PROMPT,
+         "fixes": [{"group_id": "f-parse", "title": "Fix the parser"},
+                   {"group_id": "f-null", "title": "Guard the null"}]},
+        {"file_key": "src/b.py",
+         "prompt": PROMPT.replace("Add email validation", "Add rate limiting"),
+         "fixes": [{"group_id": "f-rate", "title": "Add rate limiting"}]},
+    ]
+
+
+def _implement_code_batches():
+    return [
+        {"batch_index": index, "can_parallelize": False, "tasks": [
+            {"id": task_id, "title": title, "prompt": PROMPT.replace(
+                "Add email validation", title),
+             "files_to_create": [f"src/{task_id}.py"],
+             "depends_on": [] if index == 0 else ["T001"], "executor_role": "agent"},
+        ]}
+        for index, (task_id, title) in enumerate((("T001", "Foundation"), ("T002", "Follow-up")))
+    ]
+
+
+class TestTheSharedBlocksLeadAndTheIdsClose:
+    """PERF-9 (docs/development/write-scheduler.md "Prompt order"): the text
+    every batch of a phase shares — process safety, git, scratch files, the
+    result shape and the check contracts — leads, so a provider can cache it
+    as a prefix; the batch prompt follows, and the line naming the batch's
+    expected ids closes the prompt (for the apply kinds, with the
+    `declined` line that refers to it). Both legs, every write kind."""
+
+    BATCH_START = "# Apply these suggestions"
+
+    @pytest.mark.parametrize("leg", ["native", "executor"])
+    @pytest.mark.parametrize("kind,phase,batches,task_ids", [
+        ("apply_suggestions", "apply-suggestions", _suggestion_batches(),
+         ("apply-batch-0", "apply-batch-1")),
+        ("apply_task_suggestions", "apply-task-suggestions", _suggestion_batches(),
+         ("apply-task-batch-0", "apply-task-batch-1")),
+        ("apply_code_fixes", "apply-code-fixes", _code_fix_batches(),
+         ("apply-fix-batch-0", "apply-fix-batch-1")),
+        ("implement", "implement", _implement_code_batches(), ("T001", "T002")),
+    ])
+    def test_the_contract_leads_and_the_expected_ids_close(
+        self, plan_dir, leg, kind, phase, batches, task_ids,
+    ):
+        plan, out = plan_dir
+        phase_dir, tasks = _materialize(plan, out, kind, batches, phase)
+        leads = []
+        for task_id in task_ids:
+            task = next(t for t in tasks if t["task_id"] == task_id)
+            if leg == "native":
+                text, _task, _info = write_prompt.render_write_prompt(phase_dir, task_id)
+            else:
+                text = _executor_rendering(kind, out, phase, task)
+            expected = task["expected_ids"]
+            assert expected
+
+            assert text.startswith("## Process safety (required)\n\n")
+            batch = text.index(self.BATCH_START)
+            lead = text[:batch]
+            for block in ("## Git (required)", "## Scratch files (advisory)",
+                          "## Result (required", "A reply without this JSON object"):
+                assert block in lead, block
+            if kind in ("apply_code_fixes", "implement"):
+                assert "## Checks you ran (required in every reply)" in lead
+            for member in expected:
+                assert f"`{member}`" not in lead, member
+            leads.append(lead)
+
+            # The ids close the prompt, after the batch: one `ids` line, in
+            # prompt order, and only `declined` (which refers to it) after it.
+            assert text.count(RESULT_IDS_HEADING) == 1
+            assert text.index(RESULT_IDS_HEADING) > batch
+            lines = text[text.index(RESULT_IDS_HEADING):].rstrip("\n").splitlines()
+            ids_lines = [line for line in lines if line.startswith("- `ids`:")]
+            assert len(ids_lines) == 1 and text.count("- `ids`:") == 1
+            spots = [ids_lines[0].index(f"`{member}`") for member in expected]
+            assert spots == sorted(spots)
+            if kind == "implement":
+                assert lines[-1] == ids_lines[0]
+            else:
+                assert lines[-2:] == [ids_lines[0], lines[-1]]
+                assert lines[-1].startswith("- `declined`:")
+            assert text.endswith("\n") and not text.endswith("\n\n")
+
+        # What leads is byte-identical across the run's batches: the prefix.
+        assert len(set(leads)) == 1
+
+
 class TestTheCommand:
     def test_stdout_prints_exactly_the_prompt(self, plan_dir, capsys):
         plan, out = plan_dir
@@ -180,6 +222,7 @@ class TestTheCommand:
         phase_dir, tasks = _materialize(
             plan, out, "apply_suggestions", _suggestion_batches(), "apply-suggestions")
         prior_changes.append(str(out), "b0", "apply-suggestions", "first batch")
+        _recorded(out, phase_dir, "apply-batch-0", capsys)
         code = write_prompt.main([
             "--phase-dir", str(phase_dir), "--task-id", "apply-batch-1",
         ])
@@ -379,7 +422,7 @@ class TestAPromptBoundOutOfOrderSaysSo:
 
     def test_recorded_but_not_appended_is_named(self, plan_dir, capsys):
         out, phase_dir, tasks = self._setup(plan_dir)
-        self._state(out, {"apply-batch-0": "completed"})
+        _recorded(out, phase_dir, "apply-batch-0", capsys)
         code, stdout, warnings = self._bind(phase_dir, "apply-batch-1", capsys)
         assert code == 0
         assert stdout.startswith("[WRITE_PROMPT] ")  # still written
@@ -399,12 +442,27 @@ class TestAPromptBoundOutOfOrderSaysSo:
         assert "batch 0 done" in text
 
     def test_an_unfinished_earlier_batch_is_named(self, plan_dir, capsys):
+        plan, out = plan_dir
+        batches = [_implement_batches()[0], {"batch_index": 1, "can_parallelize": False,
+                   "tasks": [{"id": "T003", "title": "Next", "prompt": PROMPT,
+                              "files_to_create": ["src/c.py"], "depends_on": ["T001"],
+                              "executor_role": "agent"}]}]
+        phase_dir, _tasks = _materialize(plan, out, "implement", batches, "implement")
+        self._state(out, {})
+        code, stdout, warnings = self._bind(phase_dir, "T003", capsys)
+        assert code == 0 and stdout.startswith("[WRITE_PROMPT] ")  # still written
+        assert len(warnings) == 1
+        assert "T001, an earlier batch, has no `util batch-done` record" in warnings[0]
+
+    def test_a_shared_artifact_batch_waits_for_the_earlier_one(self, plan_dir, capsys):
+        """The two shared-artifact phases refuse instead (exit 3): their one
+        snapshot slot would otherwise pass from the earlier batch to this one
+        (test_batch_snapshot.py, TestTheBatchesGoInOrder)."""
         out, phase_dir, _tasks = self._setup(plan_dir)
         self._state(out, {})
-        _code, _stdout, warnings = self._bind(phase_dir, "apply-batch-1", capsys)
-        assert len(warnings) == 1
-        assert "apply-batch-0, an earlier batch, has no `util batch-done` record" in (
-            warnings[0])
+        code, stdout, _warnings = self._bind(phase_dir, "apply-batch-1", capsys)
+        assert code == 3 and stdout == ""
+        assert not (phase_dir / "prompts" / "apply-batch-1.prompt.txt").exists()
 
     def test_the_first_batch_a_skipped_one_and_no_state_say_nothing(
         self, plan_dir, capsys
@@ -418,7 +476,7 @@ class TestAPromptBoundOutOfOrderSaysSo:
 
     def test_stdout_mode_keeps_stdout_the_prompt_alone(self, plan_dir, capsys):
         out, phase_dir, tasks = self._setup(plan_dir)
-        self._state(out, {"apply-batch-0": "completed"})
+        _recorded(out, phase_dir, "apply-batch-0", capsys)
         code, stdout, warnings = self._bind(phase_dir, "apply-batch-1", capsys, "--stdout")
         assert code == 0 and len(warnings) == 1
         assert stdout == _executor_rendering(
@@ -507,13 +565,9 @@ class TestAnAcceptedCheckIsNamedOnBothLegs:
         return out, phase_dir, tasks, state
 
     def _executor(self, out, task, tasks, state):
-        scheduler = WriteBatchScheduler.__new__(WriteBatchScheduler)
-        scheduler.kind = "implement"
-        scheduler.output_dir = str(out)
-        scheduler.phase = "implement"
-        scheduler.state = state
-        scheduler.tasks = tasks
-        return scheduler._with_result_contract(task, scheduler.dispatched_prompt(task))
+        scheduler = make_scheduler(
+            out, kind="implement", phase="implement", state=state, tasks=tasks)
+        return scheduler._prompts.with_result_contract(task, scheduler._prompts.dispatched_prompt(task))
 
     ACCEPTED = (
         "accepted — you answered --human-task T002=done after its check "

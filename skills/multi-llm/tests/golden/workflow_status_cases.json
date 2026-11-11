@@ -1,0 +1,1526 @@
+{
+ "implement_started_with_check_findings": {
+  "plan_name": "foo.md",
+  "state": {
+   "schema_version": "2.0",
+   "plan_path": "<PLAN>",
+   "plan_hash": "755ccc69a4a97df1",
+   "created_at": "2026-11-08T15:54:55.411116",
+   "updated_at": "2026-11-08T15:54:55.414952",
+   "head_at_start": "4ef2374dcf719ecdca52f2b2b1db9937a5b5b0a3",
+   "branch_name": "code-health/u61a",
+   "review_phase_completed": true,
+   "tracked_files": [],
+   "task_status": {
+    "T006": "completed",
+    "T007": "completed",
+    "T008": "skipped"
+   },
+   "phases_completed": {
+    "review-plan": "2026-11-08T15:54:55.414241",
+    "apply-suggestions": "2026-11-08T15:54:55.414247",
+    "generate-tasks": "2026-11-08T15:54:55.414248",
+    "implement": "2026-11-08T15:54:55.414249",
+    "code-review": "2026-11-08T15:54:55.414250"
+   },
+   "phases_skipped": {},
+   "task_titles": {
+    "T006": "Race lifecycle",
+    "T007": "Run static HTML, module, and CDN checks",
+    "T008": "Manual playthrough"
+   },
+   "implement_task_ids": [
+    "T006",
+    "T007",
+    "T008"
+   ],
+   "task_check_findings": {
+    "T007": [
+     "npx html-validate index.html: index.html:1 doctype must be lowercase",
+     "npx html-validate index.html: index.html:105 aria-label misused on a div"
+    ]
+   },
+   "phases_started": {
+    "implement": "2026-11-08T15:54:55.414922"
+   }
+  },
+  "files": {},
+  "warning": null,
+  "warning_asked": true,
+  "expected": {
+   "plan": "<PLAN>",
+   "phases": {
+    "review-plan": {
+     "status": "completed",
+     "timestamp": "2026-11-08T15:54:55.414241"
+    },
+    "apply-suggestions": {
+     "status": "completed",
+     "timestamp": "2026-11-08T15:54:55.414247"
+    },
+    "generate-tasks": {
+     "status": "completed",
+     "timestamp": "2026-11-08T15:54:55.414248"
+    },
+    "review-tasks": {
+     "status": "pending",
+     "optional": true
+    },
+    "apply-task-suggestions": {
+     "status": "pending",
+     "optional": true
+    },
+    "implement": {
+     "status": "in_progress",
+     "tasks_done": 2,
+     "tasks_total": 3,
+     "started_at": "2026-11-08T15:54:55.414922",
+     "manual_tasks": [
+      {
+       "id": "T008",
+       "title": "Manual playthrough"
+      }
+     ],
+     "manual_close_ids": [
+      "T008"
+     ],
+     "check_findings": [
+      {
+       "id": "T007",
+       "title": "Run static HTML, module, and CDN checks",
+       "findings": [
+        "npx html-validate index.html: index.html:1 doctype must be lowercase",
+        "npx html-validate index.html: index.html:105 aria-label misused on a div"
+       ]
+      }
+     ]
+    },
+    "code-review": {
+     "status": "completed",
+     "timestamp": "2026-11-08T15:54:55.414250"
+    },
+    "apply-code-fixes": {
+     "status": "skipped",
+     "reason": "skipped (no findings)"
+    }
+   },
+   "suggested_next": "implement",
+   "hint": "Run /clear before starting the next phase for best performance"
+  }
+ },
+ "stale_review_and_apply_fixes_in_progress": {
+  "plan_name": "t1-plan.md",
+  "state": {
+   "schema_version": "2.0",
+   "plan_path": "<PLAN>",
+   "plan_hash": "c1f34a6b4e90dc07",
+   "created_at": "2026-11-08T15:54:32.944643",
+   "updated_at": "2026-11-08T15:54:33.036998",
+   "head_at_start": "4ef2374dcf719ecdca52f2b2b1db9937a5b5b0a3",
+   "branch_name": "code-health/u61a",
+   "review_phase_completed": true,
+   "tracked_files": [],
+   "task_status": {},
+   "phases_completed": {
+    "review-plan": "2026-11-08T15:54:32.948050",
+    "apply-suggestions": "2026-11-08T15:54:32.958710",
+    "generate-tasks": "2026-11-08T15:54:32.969421",
+    "implement": "2026-11-08T15:54:33.012687",
+    "code-review": "2026-11-08T15:54:33.023500",
+    "apply-code-fixes": "2026-11-08T15:54:33.001858"
+   },
+   "phases_skipped": {},
+   "phases_started": {
+    "apply-code-fixes": "2026-11-08T15:54:33.036950"
+   }
+  },
+  "files": {
+   "code-review/grouped.json": "{\"format_version\": 2, \"groups\": [{\"group_id\": \"g1\", \"theme\": \"t\", \"suggestions\": [{\"title\": \"fix it\", \"importance\": \"HIGH\"}]}]}"
+  },
+  "warning": null,
+  "warning_asked": true,
+  "expected": {
+   "plan": "<PLAN>",
+   "phases": {
+    "review-plan": {
+     "status": "completed",
+     "timestamp": "2026-11-08T15:54:32.948050"
+    },
+    "apply-suggestions": {
+     "status": "completed",
+     "timestamp": "2026-11-08T15:54:32.958710"
+    },
+    "generate-tasks": {
+     "status": "completed",
+     "timestamp": "2026-11-08T15:54:32.969421"
+    },
+    "review-tasks": {
+     "status": "pending",
+     "optional": true
+    },
+    "apply-task-suggestions": {
+     "status": "pending",
+     "optional": true
+    },
+    "implement": {
+     "status": "completed",
+     "timestamp": "2026-11-08T15:54:33.012687"
+    },
+    "code-review": {
+     "status": "completed",
+     "timestamp": "2026-11-08T15:54:33.023500"
+    },
+    "apply-code-fixes": {
+     "status": "in_progress",
+     "stale": true,
+     "completed_at": "2026-11-08T15:54:33.001858",
+     "implemented_at": "2026-11-08T15:54:33.012687",
+     "started_at": "2026-11-08T15:54:33.036950"
+    }
+   },
+   "suggested_next": "apply-code-fixes",
+   "hint": "Run /clear before starting the next phase for best performance"
+  }
+ },
+ "task_groups_notice_on_a_started_apply": {
+  "plan_name": "t1-plan.md",
+  "state": {
+   "schema_version": "2.0",
+   "plan_path": "<PLAN>",
+   "plan_hash": "c1f34a6b4e90dc07",
+   "created_at": "2026-11-08T15:55:43.689038",
+   "updated_at": "2026-11-08T15:55:43.692794",
+   "head_at_start": "4ef2374dcf719ecdca52f2b2b1db9937a5b5b0a3",
+   "branch_name": "code-health/u61a",
+   "review_phase_completed": true,
+   "tracked_files": [],
+   "task_status": {
+    "apply-task-batch-0": "completed"
+   },
+   "phases_completed": {
+    "review-plan": "2026-11-08T15:55:43.692264",
+    "apply-suggestions": "2026-11-08T15:55:43.692272",
+    "generate-tasks": "2026-11-08T15:55:43.692274",
+    "review-tasks": "2026-01-02T10:00:00"
+   },
+   "phases_skipped": {}
+  },
+  "files": {
+   "review-tasks/grouped.json": "{\"format_version\": 2, \"groups\": [{\"group_id\": \"g1\", \"theme\": \"t\", \"suggestions\": [{\"title\": \"s\", \"importance\": \"LOW\"}]}]}",
+   "review-tasks/validation.json": "{\"format_version\": 2, \"groups\": [{\"group_index\": 0, \"status\": \"valid\"}]}"
+  },
+  "warning": null,
+  "warning_asked": true,
+  "expected": {
+   "plan": "<PLAN>",
+   "phases": {
+    "review-plan": {
+     "status": "completed",
+     "timestamp": "2026-11-08T15:55:43.692264"
+    },
+    "apply-suggestions": {
+     "status": "completed",
+     "timestamp": "2026-11-08T15:55:43.692272"
+    },
+    "generate-tasks": {
+     "status": "completed",
+     "timestamp": "2026-11-08T15:55:43.692274"
+    },
+    "review-tasks": {
+     "status": "completed",
+     "timestamp": "2026-01-02T10:00:00"
+    },
+    "apply-task-suggestions": {
+     "status": "in_progress",
+     "optional": true,
+     "notice": "review-tasks left 1 valid task suggestion group to apply, and a run of --apply-task-suggestions started on it and has not finished. Run --apply-task-suggestions --resume first to apply what that run has not applied yet; going straight to --implement skips what is left, and implement then works from the task list as it stands."
+    },
+    "implement": {
+     "status": "pending"
+    },
+    "code-review": {
+     "status": "pending"
+    },
+    "apply-code-fixes": {
+     "status": "pending"
+    }
+   },
+   "suggested_next": "implement",
+   "hint": "Run /clear before starting the next phase for best performance",
+   "notices": [
+    "review-tasks left 1 valid task suggestion group to apply, and a run of --apply-task-suggestions started on it and has not finished. Run --apply-task-suggestions --resume first to apply what that run has not applied yet; going straight to --implement skips what is left, and implement then works from the task list as it stands."
+   ]
+  }
+ },
+ "implement_held_by_a_manual_gate": {
+  "plan_name": "sample.md",
+  "state": {
+   "schema_version": "2.0",
+   "plan_path": "<PLAN>",
+   "plan_hash": "0054e8db49f5af82",
+   "created_at": "2026-11-08T15:55:31.409385",
+   "updated_at": "2026-11-08T15:55:31.444765",
+   "head_at_start": "327cb405600e0101ba2b57d53a5effbf83b3cd2e",
+   "branch_name": "master",
+   "review_phase_completed": false,
+   "tracked_files": [],
+   "task_status": {
+    "T001": "skipped",
+    "T002": "skipped",
+    "T003": "skipped"
+   },
+   "phases_completed": {
+    "generate-tasks": "2026-11-08T15:55:31.415583",
+    "apply-suggestions": "2026-11-08T15:55:31.415596"
+   },
+   "phases_skipped": {},
+   "pre_existing_changes": [
+    "plans/sample/"
+   ],
+   "head_before_implement": "327cb405600e0101ba2b57d53a5effbf83b3cd2e",
+   "task_titles": {
+    "T001": "Create the module",
+    "T002": "Implement the core",
+    "T003": "Add tests"
+   },
+   "implement_task_ids": [
+    "T001",
+    "T002",
+    "T003"
+   ],
+   "implement_human_task_ids": [
+    "T001"
+   ],
+   "implement_task_depends_on": {
+    "T001": [],
+    "T002": [
+     "T001"
+    ],
+    "T003": [
+     "T002"
+    ]
+   },
+   "human_task_strategy": "skip-dependents",
+   "task_status_reasons": {
+    "T001": "deferred — manual task, left for you to complete after implementation (human-task strategy: skip-dependents)",
+    "T002": "skipped — depends on skipped task T001 (Create the module)",
+    "T003": "skipped — depends on skipped task T002 (Implement the core)"
+   },
+   "phases_started": {
+    "implement": "2026-11-08T15:55:31.444677"
+   }
+  },
+  "files": {},
+  "warning": null,
+  "warning_asked": true,
+  "expected": {
+   "plan": "<PLAN>",
+   "phases": {
+    "review-plan": {
+     "status": "pending"
+    },
+    "apply-suggestions": {
+     "status": "completed",
+     "timestamp": "2026-11-08T15:55:31.415596"
+    },
+    "generate-tasks": {
+     "status": "completed",
+     "timestamp": "2026-11-08T15:55:31.415583"
+    },
+    "review-tasks": {
+     "status": "pending",
+     "optional": true
+    },
+    "apply-task-suggestions": {
+     "status": "pending",
+     "optional": true
+    },
+    "implement": {
+     "status": "in_progress",
+     "tasks_done": 0,
+     "tasks_total": 3,
+     "started_at": "2026-11-08T15:55:31.444677",
+     "manual_tasks": [
+      {
+       "id": "T001",
+       "title": "Create the module"
+      },
+      {
+       "id": "T002",
+       "title": "Implement the core",
+       "waits_on": "T001"
+      },
+      {
+       "id": "T003",
+       "title": "Add tests",
+       "waits_on": "T001"
+      }
+     ],
+     "manual_close_ids": [
+      "T001"
+     ],
+     "manual_waiting": {
+      "T001": [
+       "T002",
+       "T003"
+      ]
+     },
+     "manual_gate": true
+    },
+    "code-review": {
+     "status": "pending"
+    },
+    "apply-code-fixes": {
+     "status": "pending"
+    }
+   },
+   "suggested_next": "implement",
+   "hint": "Run /clear before starting the next phase for best performance"
+  }
+ },
+ "skipped_reviews_skip_their_applies": {
+  "plan_name": "wf-plan.md",
+  "state": {
+   "schema_version": "2.0",
+   "plan_path": "<PLAN>",
+   "plan_hash": "61e151d19edacb51",
+   "created_at": "2026-11-08T15:54:59.796410",
+   "updated_at": "2026-11-08T15:54:59.807312",
+   "head_at_start": "4ef2374dcf719ecdca52f2b2b1db9937a5b5b0a3",
+   "branch_name": "code-health/u61a",
+   "review_phase_completed": true,
+   "tracked_files": [],
+   "task_status": {},
+   "phases_completed": {
+    "generate-tasks": "2026-11-08T15:54:59.799567",
+    "review-plan": "2026-11-08T15:54:59.800728",
+    "apply-suggestions": "2026-11-08T15:54:59.801780",
+    "implement": "2026-11-08T15:54:59.803844",
+    "code-review": "2026-11-08T15:54:59.806236"
+   },
+   "phases_skipped": {
+    "review-tasks": {
+     "skipped_at": "2026-11-08T15:54:59.802592",
+     "reason": "not requested (--review-tasks not passed)"
+    },
+    "apply-task-suggestions": {
+     "skipped_at": "2026-11-08T15:54:59.803228",
+     "reason": "Skipped: review-tasks was not executed"
+    },
+    "apply-code-fixes": {
+     "skipped_at": "2026-11-08T15:54:59.806938",
+     "reason": "Skipped: code review produced zero actionable findings"
+    }
+   },
+   "full_workflow": {
+    "current_phase": "complete",
+    "failed_phase": null,
+    "steps": {
+     "review-plan": "done",
+     "Phase 1b: Consolidation": "skipped",
+     "apply-suggestions": "done",
+     "generate-tasks": "already-complete",
+     "review-tasks": "skipped",
+     "apply-task-suggestions": "skipped",
+     "implement": "done",
+     "code-review": "done",
+     "apply-code-fixes": "skipped"
+    }
+   }
+  },
+  "files": {},
+  "warning": null,
+  "warning_asked": false,
+  "expected": {
+   "plan": "<PLAN>",
+   "phases": {
+    "review-plan": {
+     "status": "completed",
+     "timestamp": "2026-11-08T15:54:59.800728"
+    },
+    "apply-suggestions": {
+     "status": "completed",
+     "timestamp": "2026-11-08T15:54:59.801780"
+    },
+    "generate-tasks": {
+     "status": "completed",
+     "timestamp": "2026-11-08T15:54:59.799567"
+    },
+    "review-tasks": {
+     "status": "skipped",
+     "reason": "not requested (--review-tasks not passed)",
+     "timestamp": "2026-11-08T15:54:59.802592"
+    },
+    "apply-task-suggestions": {
+     "status": "skipped",
+     "reason": "Skipped: review-tasks was not executed",
+     "timestamp": "2026-11-08T15:54:59.803228"
+    },
+    "implement": {
+     "status": "completed",
+     "timestamp": "2026-11-08T15:54:59.803844"
+    },
+    "code-review": {
+     "status": "completed",
+     "timestamp": "2026-11-08T15:54:59.806236"
+    },
+    "apply-code-fixes": {
+     "status": "skipped",
+     "reason": "Skipped: code review produced zero actionable findings",
+     "timestamp": "2026-11-08T15:54:59.806938"
+    }
+   },
+   "suggested_next": null,
+   "hint": "Run /clear before starting the next phase for best performance"
+  }
+ },
+ "fresh_plan_with_a_runner_warning": {
+  "plan_name": "x.md",
+  "state": {
+   "schema_version": "2.0",
+   "plan_path": "<PLAN>",
+   "plan_hash": "98acf32e1a70004b",
+   "created_at": "2026-11-08T15:54:32.112789",
+   "updated_at": "2026-11-08T15:54:32.112796",
+   "head_at_start": "03d4793c5288362e43726e51f8c2281a998fef04",
+   "branch_name": "master",
+   "review_phase_completed": false,
+   "tracked_files": [],
+   "task_status": {},
+   "phases_completed": {},
+   "phases_skipped": {}
+  },
+  "files": {},
+  "warning": "implement and apply-code-fixes will be refused on this machine for driver.subagent_runner 'codex:gpt-5.5': the runner's own sandbox cannot start.",
+  "warning_asked": true,
+  "expected": {
+   "plan": "<PLAN>",
+   "phases": {
+    "review-plan": {
+     "status": "pending"
+    },
+    "apply-suggestions": {
+     "status": "pending"
+    },
+    "generate-tasks": {
+     "status": "pending"
+    },
+    "review-tasks": {
+     "status": "pending",
+     "optional": true
+    },
+    "apply-task-suggestions": {
+     "status": "pending",
+     "optional": true
+    },
+    "implement": {
+     "status": "pending",
+     "warning": "implement and apply-code-fixes will be refused on this machine for driver.subagent_runner 'codex:gpt-5.5': the runner's own sandbox cannot start."
+    },
+    "code-review": {
+     "status": "pending"
+    },
+    "apply-code-fixes": {
+     "status": "pending",
+     "warning": "implement and apply-code-fixes will be refused on this machine for driver.subagent_runner 'codex:gpt-5.5': the runner's own sandbox cannot start."
+    }
+   },
+   "suggested_next": "review-plan",
+   "hint": "Run /clear before starting the next phase for best performance",
+   "notices": [
+    "implement and apply-code-fixes will be refused on this machine for driver.subagent_runner 'codex:gpt-5.5': the runner's own sandbox cannot start."
+   ]
+  }
+ },
+ "all_invalid_review_skips_apply_suggestions": {
+  "plan_name": "a plan.md",
+  "state": {
+   "schema_version": "2.0",
+   "plan_path": "<PLAN>",
+   "plan_hash": "2e7bd89e25f839b7",
+   "created_at": "2026-11-08T15:55:50.156786",
+   "updated_at": "2026-11-08T15:55:50.160099",
+   "head_at_start": "4ef2374dcf719ecdca52f2b2b1db9937a5b5b0a3",
+   "branch_name": "code-health/u61a",
+   "review_phase_completed": true,
+   "tracked_files": [],
+   "task_status": {},
+   "phases_completed": {
+    "review-plan": "2026-11-08T15:55:50.160013"
+   },
+   "phases_skipped": {}
+  },
+  "files": {
+   "review-plan/grouped.json": "{\n  \"format_version\": 2,\n  \"groups\": []\n}",
+   "review-plan/validation.json": "[]\n"
+  },
+  "warning": null,
+  "warning_asked": true,
+  "expected": {
+   "plan": "<PLAN>",
+   "phases": {
+    "review-plan": {
+     "status": "completed",
+     "timestamp": "2026-11-08T15:55:50.160013"
+    },
+    "apply-suggestions": {
+     "status": "skipped",
+     "reason": "skipped (no valid findings)"
+    },
+    "generate-tasks": {
+     "status": "pending"
+    },
+    "review-tasks": {
+     "status": "pending",
+     "optional": true
+    },
+    "apply-task-suggestions": {
+     "status": "pending",
+     "optional": true
+    },
+    "implement": {
+     "status": "pending"
+    },
+    "code-review": {
+     "status": "pending"
+    },
+    "apply-code-fixes": {
+     "status": "pending"
+    }
+   },
+   "suggested_next": "generate-tasks",
+   "hint": "Run /clear before starting the next phase for best performance"
+  }
+ },
+ "apply_suggestions_in_progress": {
+  "plan_name": "t1-plan.md",
+  "state": {
+   "schema_version": "2.0",
+   "plan_path": "<PLAN>",
+   "plan_hash": "c1f34a6b4e90dc07",
+   "created_at": "2026-11-08T15:54:28.924832",
+   "updated_at": "2026-11-08T15:54:28.928304",
+   "head_at_start": "4ef2374dcf719ecdca52f2b2b1db9937a5b5b0a3",
+   "branch_name": "code-health/u61a",
+   "review_phase_completed": true,
+   "tracked_files": [],
+   "task_status": {
+    "apply-batch-0": "completed"
+   },
+   "phases_completed": {
+    "review-plan": "2026-01-02T10:00:00"
+   },
+   "phases_skipped": {}
+  },
+  "files": {
+   "review-plan/validation.json": "{\"format_version\": 2, \"groups\": [{\"group_index\": 0, \"status\": \"valid\"}]}"
+  },
+  "warning": null,
+  "warning_asked": true,
+  "expected": {
+   "plan": "<PLAN>",
+   "phases": {
+    "review-plan": {
+     "status": "completed",
+     "timestamp": "2026-01-02T10:00:00"
+    },
+    "apply-suggestions": {
+     "status": "in_progress"
+    },
+    "generate-tasks": {
+     "status": "pending"
+    },
+    "review-tasks": {
+     "status": "pending",
+     "optional": true
+    },
+    "apply-task-suggestions": {
+     "status": "pending",
+     "optional": true
+    },
+    "implement": {
+     "status": "pending"
+    },
+    "code-review": {
+     "status": "pending"
+    },
+    "apply-code-fixes": {
+     "status": "pending"
+    }
+   },
+   "suggested_next": "apply-suggestions",
+   "hint": "Run /clear before starting the next phase for best performance"
+  }
+ },
+ "code_review_skipped": {
+  "plan_name": "t1-plan.md",
+  "state": {
+   "schema_version": "2.0",
+   "plan_path": "<PLAN>",
+   "plan_hash": "c1f34a6b4e90dc07",
+   "created_at": "2026-11-08T15:54:33.145539",
+   "updated_at": "2026-11-08T15:54:33.149693",
+   "head_at_start": "4ef2374dcf719ecdca52f2b2b1db9937a5b5b0a3",
+   "branch_name": "code-health/u61a",
+   "review_phase_completed": true,
+   "tracked_files": [],
+   "task_status": {},
+   "phases_completed": {
+    "review-plan": "2026-11-08T15:54:33.149601",
+    "apply-suggestions": "2026-11-08T15:54:33.149609",
+    "generate-tasks": "2026-11-08T15:54:33.149611"
+   },
+   "phases_skipped": {
+    "code-review": {
+     "skipped_at": "2026-11-08T15:54:33.149614",
+     "reason": "test skip of code-review"
+    }
+   }
+  },
+  "files": {},
+  "warning": null,
+  "warning_asked": true,
+  "expected": {
+   "plan": "<PLAN>",
+   "phases": {
+    "review-plan": {
+     "status": "completed",
+     "timestamp": "2026-11-08T15:54:33.149601"
+    },
+    "apply-suggestions": {
+     "status": "completed",
+     "timestamp": "2026-11-08T15:54:33.149609"
+    },
+    "generate-tasks": {
+     "status": "completed",
+     "timestamp": "2026-11-08T15:54:33.149611"
+    },
+    "review-tasks": {
+     "status": "pending",
+     "optional": true
+    },
+    "apply-task-suggestions": {
+     "status": "pending",
+     "optional": true
+    },
+    "implement": {
+     "status": "pending"
+    },
+    "code-review": {
+     "status": "skipped",
+     "reason": "test skip of code-review",
+     "timestamp": "2026-11-08T15:54:33.149614"
+    },
+    "apply-code-fixes": {
+     "status": "skipped",
+     "reason": "skipped (prerequisite skipped)"
+    }
+   },
+   "suggested_next": "implement",
+   "hint": "Run /clear before starting the next phase for best performance"
+  }
+ },
+ "batch_check_findings": {
+  "plan_name": "checked.md",
+  "state": {
+   "schema_version": "2.0",
+   "plan_path": "<PLAN>",
+   "plan_hash": "b84608f14411cc1f",
+   "created_at": "2026-11-08T15:56:08.125483",
+   "updated_at": "2026-11-08T15:56:08.173324",
+   "head_at_start": "8027c80b64d55625e4575c75b4962a9c57ad063c",
+   "branch_name": "master",
+   "review_phase_completed": false,
+   "tracked_files": [],
+   "task_status": {
+    "T005": "skipped",
+    "T001": "completed"
+   },
+   "phases_completed": {
+    "generate-tasks": "2026-11-08T15:56:08.130601",
+    "apply-suggestions": "2026-11-08T15:56:08.130610"
+   },
+   "phases_skipped": {},
+   "pre_existing_changes": [
+    "plans/checked/"
+   ],
+   "head_before_implement": "8027c80b64d55625e4575c75b4962a9c57ad063c",
+   "task_titles": {
+    "T001": "Edit: create the module",
+    "T002": "Check the module",
+    "T003": "Edit: add tests",
+    "T004": "Edit: wire the fallback",
+    "T005": "Play through by hand"
+   },
+   "implement_task_ids": [
+    "T001",
+    "T002",
+    "T003",
+    "T004",
+    "T005"
+   ],
+   "implement_human_task_ids": [
+    "T005"
+   ],
+   "implement_task_depends_on": {
+    "T001": [],
+    "T002": [
+     "T001"
+    ],
+    "T003": [
+     "T001"
+    ],
+    "T004": [
+     "T002"
+    ],
+    "T005": [
+     "T004"
+    ]
+   },
+   "human_task_strategy": "skip-dependents",
+   "metrics_set_aside": {
+    "implement": {
+     "T005": "manual"
+    }
+   },
+   "task_status_reasons": {
+    "T005": "deferred — manual task, left for you to complete after implementation (human-task strategy: skip-dependents)"
+   },
+   "phases_started": {
+    "implement": "2026-11-08T15:56:08.165076"
+   },
+   "task_batch_check": {
+    "T001": [
+     "node tests/race-logic.test.mjs: AssertionError: a skipped gate must be rejected"
+    ]
+   },
+   "task_own_text": {
+    "T001": "Edit: create the module\nTitle: Edit: create the module\nDescription: Create the module file."
+   },
+   "task_own_check_ran": [
+    "T001"
+   ]
+  },
+  "files": {},
+  "warning": null,
+  "warning_asked": true,
+  "expected": {
+   "plan": "<PLAN>",
+   "phases": {
+    "review-plan": {
+     "status": "pending"
+    },
+    "apply-suggestions": {
+     "status": "completed",
+     "timestamp": "2026-11-08T15:56:08.130610"
+    },
+    "generate-tasks": {
+     "status": "completed",
+     "timestamp": "2026-11-08T15:56:08.130601"
+    },
+    "review-tasks": {
+     "status": "pending",
+     "optional": true
+    },
+    "apply-task-suggestions": {
+     "status": "pending",
+     "optional": true
+    },
+    "implement": {
+     "status": "in_progress",
+     "tasks_done": 1,
+     "tasks_total": 5,
+     "started_at": "2026-11-08T15:56:08.165076",
+     "manual_tasks": [
+      {
+       "id": "T005",
+       "title": "Play through by hand",
+       "after": [
+        "T002",
+        "T004"
+       ]
+      }
+     ],
+     "manual_close_ids": [],
+     "batch_check_findings": [
+      {
+       "id": "T001",
+       "title": "Edit: create the module",
+       "findings": [
+        "node tests/race-logic.test.mjs: AssertionError: a skipped gate must be rejected"
+       ]
+      }
+     ]
+    },
+    "code-review": {
+     "status": "pending"
+    },
+    "apply-code-fixes": {
+     "status": "pending"
+    }
+   },
+   "suggested_next": "implement",
+   "hint": "Run /clear before starting the next phase for best performance"
+  }
+ },
+ "batch_check_accepted": {
+  "plan_name": "checked.md",
+  "state": {
+   "schema_version": "2.0",
+   "plan_path": "<PLAN>",
+   "plan_hash": "8dbd9dc76a599892",
+   "created_at": "2026-11-08T15:55:20.250160",
+   "updated_at": "2026-11-08T15:55:20.602696",
+   "head_at_start": "bfe976e9b42e9dc2db89e85b03c804408f5c6316",
+   "branch_name": "master",
+   "review_phase_completed": false,
+   "tracked_files": [],
+   "task_status": {
+    "T001": "completed",
+    "T003": "completed",
+    "T004": "completed",
+    "T002": "completed",
+    "T007": "completed",
+    "T008": "pending"
+   },
+   "phases_completed": {
+    "generate-tasks": "2026-11-08T15:55:20.259564",
+    "apply-suggestions": "2026-11-08T15:55:20.259579"
+   },
+   "phases_skipped": {},
+   "pre_existing_changes": [
+    "plans/checked/"
+   ],
+   "head_before_implement": "bfe976e9b42e9dc2db89e85b03c804408f5c6316",
+   "task_titles": {
+    "T001": "Edit: create the configuration file",
+    "T002": "Check the module",
+    "T003": "Edit: add the greeting module",
+    "T004": "Edit: add the command-line entry point",
+    "T005": "Edit: add the build stamp module",
+    "T006": "Edit: print the build stamp",
+    "T007": "Edit: write the release note",
+    "T008": "Edit: make the release check pass"
+   },
+   "implement_task_ids": [
+    "T001",
+    "T002",
+    "T003",
+    "T004",
+    "T005",
+    "T006",
+    "T007",
+    "T008"
+   ],
+   "implement_task_depends_on": {
+    "T001": [],
+    "T002": [
+     "T001"
+    ],
+    "T003": [
+     "T001"
+    ],
+    "T004": [
+     "T003"
+    ],
+    "T005": [
+     "T004"
+    ],
+    "T006": [
+     "T005"
+    ],
+    "T007": [
+     "T002"
+    ],
+    "T008": [
+     "T002"
+    ]
+   },
+   "phases_started": {
+    "implement": "2026-11-08T15:55:20.583936"
+   },
+   "task_check_findings": {
+    "T002": [
+     "node scripts/check.mjs exited 1 and printed 'check failed: retries must be 3 (found 2)'. src/config.json has retries=2 (set by T001), but the check requires 3."
+    ]
+   },
+   "task_check_trees": {
+    "T002": "4d6c7089ef9b69b673b8a6540ba92af85016b57a40f53dba0f6d919f3e21a871"
+   },
+   "task_status_reasons": {
+    "T008": "not run — upstream check T002 reported problems; it runs once T002 passes on a --resume, or after --human-task T002=done accepts its findings",
+    "T002": "accepted — you answered --human-task T002=done after its check reported problems; the findings stand (review-code is told about them), the check is not run again and the tasks after it run"
+   },
+   "human_task_decisions": {
+    "T002": "done"
+   },
+   "task_own_check_ran": [
+    "T007"
+   ],
+   "task_batch_check_accepted": {
+    "T007": {
+     "T002": [
+      "node scripts/check.mjs: check failed: retries must be 3 (found 2) (exit 1)"
+     ]
+    }
+   }
+  },
+  "files": {},
+  "warning": null,
+  "warning_asked": true,
+  "expected": {
+   "plan": "<PLAN>",
+   "phases": {
+    "review-plan": {
+     "status": "pending"
+    },
+    "apply-suggestions": {
+     "status": "completed",
+     "timestamp": "2026-11-08T15:55:20.259579"
+    },
+    "generate-tasks": {
+     "status": "completed",
+     "timestamp": "2026-11-08T15:55:20.259564"
+    },
+    "review-tasks": {
+     "status": "pending",
+     "optional": true
+    },
+    "apply-task-suggestions": {
+     "status": "pending",
+     "optional": true
+    },
+    "implement": {
+     "status": "in_progress",
+     "tasks_done": 5,
+     "tasks_total": 8,
+     "started_at": "2026-11-08T15:55:20.583936",
+     "check_findings": [
+      {
+       "id": "T002",
+       "title": "Check the module",
+       "findings": [
+        "node scripts/check.mjs exited 1 and printed 'check failed: retries must be 3 (found 2)'. src/config.json has retries=2 (set by T001), but the check requires 3."
+       ]
+      }
+     ],
+     "batch_check_accepted": [
+      {
+       "id": "T007",
+       "title": "Edit: write the release note",
+       "checks": {
+        "T002": [
+         "node scripts/check.mjs: check failed: retries must be 3 (found 2) (exit 1)"
+        ]
+       }
+      }
+     ]
+    },
+    "code-review": {
+     "status": "pending"
+    },
+    "apply-code-fixes": {
+     "status": "pending"
+    }
+   },
+   "suggested_next": "implement",
+   "hint": "Run /clear before starting the next phase for best performance"
+  }
+ },
+ "batch_check_repeats": {
+  "plan_name": "checked.md",
+  "state": {
+   "schema_version": "2.0",
+   "plan_path": "<PLAN>",
+   "plan_hash": "4ba7bb7eec88b0b2",
+   "created_at": "2026-11-08T15:55:46.408254",
+   "updated_at": "2026-11-08T15:55:46.466576",
+   "head_at_start": "6191e9c03a7931468a2d14779acee9aed885a704",
+   "branch_name": "master",
+   "review_phase_completed": false,
+   "tracked_files": [],
+   "task_status": {
+    "T005": "failed",
+    "T001": "completed",
+    "T002": "completed",
+    "T007": "pending"
+   },
+   "phases_completed": {
+    "generate-tasks": "2026-11-08T15:55:46.411350",
+    "apply-suggestions": "2026-11-08T15:55:46.411360"
+   },
+   "phases_skipped": {},
+   "pre_existing_changes": [
+    "plans/checked/"
+   ],
+   "head_before_implement": "6191e9c03a7931468a2d14779acee9aed885a704",
+   "task_titles": {
+    "T001": "Edit: create the configuration file",
+    "T002": "Check the module",
+    "T003": "Edit: add the greeting module",
+    "T004": "Edit: add the command-line entry point",
+    "T005": "Edit: add the build stamp module",
+    "T006": "Edit: print the build stamp",
+    "T007": "Edit: write the release note"
+   },
+   "implement_task_ids": [
+    "T001",
+    "T002",
+    "T003",
+    "T004",
+    "T005",
+    "T006",
+    "T007"
+   ],
+   "implement_task_depends_on": {
+    "T001": [],
+    "T002": [
+     "T001"
+    ],
+    "T003": [
+     "T001"
+    ],
+    "T004": [
+     "T003"
+    ],
+    "T005": [
+     "T004"
+    ],
+    "T006": [
+     "T005"
+    ],
+    "T007": [
+     "T002"
+    ]
+   },
+   "task_status_reasons": {
+    "T005": "refused before dispatch: Write policy violation (pre-dispatch): src/vendor/stamp.js (driver.write_paths.deny pattern 'src/vendor/**'). Repo root: /tmp/pytest-of-marc/pytest-4327/popen-gw2/test_the_code_task_recorded_fi1/repo. driver.write_paths is checked before dispatch and after the run. Your call: if you want src/vendor/stamp.js written, remove or narrow the deny rule `src/vendor/**` in driver.write_paths (.multi-llm/providers.yaml) so the rule no longer covers it, then resume. If not, skip T005: add --human-task T005=skip to the resume command (T005 and the tasks after it stay undone).",
+    "T007": "not run — upstream check T002 reported problems; it runs once T002 passes on a --resume, or after --human-task T002=done accepts its findings"
+   },
+   "metrics_left_out": {
+    "implement": {
+     "T005": "refused",
+     "T006": ""
+    }
+   },
+   "phases_started": {
+    "implement": "2026-11-08T15:55:46.449686"
+   },
+   "task_own_check_ran": [
+    "T001"
+   ],
+   "task_check_findings": {
+    "T002": [
+     "node scripts/check.mjs: check failed: retries must be 3 (found 2)"
+    ]
+   },
+   "task_check_trees": {
+    "T002": "c225e7bb3d47dd88cc274f825f4db693c15b230e15c365d84aa52b7ce71e9598"
+   },
+   "task_batch_check_repeats": {
+    "T001": {
+     "T002": [
+      "node scripts/check.mjs exited 1: check failed: retries must be 3 (found 2)"
+     ]
+    }
+   }
+  },
+  "files": {},
+  "warning": null,
+  "warning_asked": true,
+  "expected": {
+   "plan": "<PLAN>",
+   "phases": {
+    "review-plan": {
+     "status": "pending"
+    },
+    "apply-suggestions": {
+     "status": "completed",
+     "timestamp": "2026-11-08T15:55:46.411360"
+    },
+    "generate-tasks": {
+     "status": "completed",
+     "timestamp": "2026-11-08T15:55:46.411350"
+    },
+    "review-tasks": {
+     "status": "pending",
+     "optional": true
+    },
+    "apply-task-suggestions": {
+     "status": "pending",
+     "optional": true
+    },
+    "implement": {
+     "status": "in_progress",
+     "tasks_done": 2,
+     "tasks_total": 7,
+     "started_at": "2026-11-08T15:55:46.449686",
+     "check_findings": [
+      {
+       "id": "T002",
+       "title": "Check the module",
+       "findings": [
+        "node scripts/check.mjs: check failed: retries must be 3 (found 2)"
+       ]
+      }
+     ],
+     "batch_check_repeats": [
+      {
+       "id": "T001",
+       "title": "Edit: create the configuration file",
+       "checks": {
+        "T002": [
+         "node scripts/check.mjs exited 1: check failed: retries must be 3 (found 2)"
+        ]
+       }
+      }
+     ]
+    },
+    "code-review": {
+     "status": "pending"
+    },
+    "apply-code-fixes": {
+     "status": "pending"
+    }
+   },
+   "suggested_next": "implement",
+   "hint": "Run /clear before starting the next phase for best performance"
+  }
+ },
+ "scope_blocker": {
+  "plan_name": "feat.md",
+  "state": {
+   "schema_version": "2.0",
+   "plan_path": "<PLAN>",
+   "plan_hash": "922f30970b3b4f59",
+   "created_at": "2026-11-08T15:55:06.354188",
+   "updated_at": "2026-11-08T15:55:06.523771",
+   "head_at_start": "af534c1b768e0e4187f54e964b33fee99aa2c31f",
+   "branch_name": "master",
+   "review_phase_completed": true,
+   "tracked_files": [],
+   "task_status": {
+    "apply-batch-0": "completed"
+   },
+   "phases_completed": {
+    "review-plan": "2026-11-08T15:55:06.357579",
+    "apply-suggestions": "2026-11-08T15:55:06.515205"
+   },
+   "phases_skipped": {},
+   "scope_policy": {
+    "review-plan": {
+     "review_policy": "preserve",
+     "review_policy_source": "explicit",
+     "recorded_at": "2026-11-08T15:55:06",
+     "baseline": {
+      "version": 1,
+      "baseline_id": "7e3c2e05e76f3c5c",
+      "sources": [
+       {
+        "role": "plan",
+        "sha256": "abababababababababababababababababababababababababababababababab",
+        "path": "plans/feat.md"
+       }
+      ],
+      "phase": "review-plan"
+     },
+     "deferrals": [
+      {
+       "group_id": "4ce8219b5eabebb1",
+       "theme": "extension theme",
+       "relation": "scope_extension",
+       "label": "Scope extension",
+       "reason": "Deferred: scope preservation requested: the proposed remedy extends the agreed scope (extension: scope_extension)",
+       "policy": "preserve",
+       "baseline_id": "7e3c2e05e76f3c5c",
+       "authority": "bound",
+       "title": "Also export PDF",
+       "importance": "LOW",
+       "validation_status": "valid",
+       "outcome": "Deferred: scope preservation requested"
+      }
+     ],
+     "blockers": [
+      {
+       "group_id": "b09a4272ccf2e3f2",
+       "task_id": "apply-batch-0",
+       "reason": "the CSV total needs a new aggregation service"
+      }
+     ],
+     "completion": {
+      "outcome": "blocked",
+      "policy": "preserve",
+      "deferred": 1,
+      "blockers": 1,
+      "at": "2026-11-08T15:55:06"
+     }
+    }
+   },
+   "pre_existing_changes": [
+    "plans/feat.md",
+    "plans/feat/"
+   ],
+   "metrics": {
+    "apply-suggestions": [
+     {
+      "label": "apply-batch-0: apply 2 suggestion(s) to step_1 [applied]",
+      "timestamp": "2026-11-08T15:55:06.513958",
+      "subagent_type": "codex:gpt-5.5",
+      "token_count": 22,
+      "duration_ms": 40,
+      "batch_index": 1,
+      "run_id": "4c85e86680634d3587fb79b92133da08"
+     }
+    ]
+   },
+   "processed_apply-suggestions": {
+    "aba34836be0a0688": {
+     "status": "applied",
+     "details": {
+      "task_id": "apply-batch-0",
+      "prior_changes_id": "step_1#47acdd3c",
+      "grouped_sha256": "e4250bcbd7bbdbbf",
+      "leg": "executor"
+     },
+     "timestamp": "2026-11-08T15:55:06.514015"
+    },
+    "b09a4272ccf2e3f2": {
+     "status": "declined",
+     "details": {
+      "task_id": "apply-batch-0",
+      "prior_changes_id": "step_1#47acdd3c",
+      "grouped_sha256": "e4250bcbd7bbdbbf",
+      "leg": "executor",
+      "reason": "SCOPE BLOCKER: the CSV total needs a new aggregation service"
+     },
+     "timestamp": "2026-11-08T15:55:06.514019"
+    }
+   }
+  },
+  "files": {
+   "review-plan/grouped.json": "{\n  \"format_version\": 2,\n  \"groups\": [\n    {\n      \"theme\": \"in_scope theme\",\n      \"category\": \"completeness\",\n      \"models\": [\n        \"m\"\n      ],\n      \"suggestions\": [\n        {\n          \"title\": \"Complete the CSV columns\",\n          \"desc\": \"Add the missing 'total' column.\",\n          \"type\": \"addition\",\n          \"reference\": \"## Step 1: Alpha\",\n          \"importance\": \"MEDIUM\",\n          \"source_model\": \"m\",\n          \"suggestion_hash\": \"121dd07941ca0895\",\n          \"display_label\": \"G1S1\",\n          \"display_hash\": \"121dd079\"\n        }\n      ],\n      \"group_hash\": \"aba34836be0a0688\",\n      \"display_label\": \"G1\",\n      \"display_hash\": \"aba34836\"\n    },\n    {\n      \"theme\": \"edited theme\",\n      \"category\": \"completeness\",\n      \"models\": [\n        \"m\"\n      ],\n      \"suggestions\": [\n        {\n          \"title\": \"Complete the header\",\n          \"desc\": \"Complete the CSV header row so every column the plan names is present, in the order the plan lists them, with the exact names it gives, and keep the delimiter a comma as the plan requires for the weekly export.\",\n          \"type\": \"addition\",\n          \"reference\": \"## Step 1: Alpha\",\n          \"importance\": \"MEDIUM\",\n          \"source_model\": \"m\",\n          \"suggestion_hash\": \"75a7004ece7227d2\",\n          \"display_label\": \"G2S1\",\n          \"display_hash\": \"75a7004e\"\n        }\n      ],\n      \"group_hash\": \"b09a4272ccf2e3f2\",\n      \"display_label\": \"G2\",\n      \"display_hash\": \"b09a4272\"\n    },\n    {\n      \"theme\": \"extension theme\",\n      \"category\": \"completeness\",\n      \"models\": [\n        \"m\"\n      ],\n      \"suggestions\": [\n        {\n          \"title\": \"Also export PDF\",\n          \"desc\": \"Add a PDF export beside the CSV.\",\n          \"type\": \"improvement\",\n          \"reference\": \"## Step 2: Beta\",\n          \"importance\": \"LOW\",\n          \"source_model\": \"m\",\n          \"suggestion_hash\": \"89107ae5e7879d59\",\n          \"display_label\": \"G3S1\",\n          \"display_hash\": \"89107ae5\"\n        }\n      ],\n      \"group_hash\": \"4ce8219b5eabebb1\",\n      \"display_label\": \"G3\",\n      \"display_hash\": \"4ce8219b\"\n    }\n  ]\n}",
+   "review-plan/validation.json": "{\n  \"metadata\": {\n    \"schema_version\": \"2.0\",\n    \"validated_at\": \"2026-10-31T10:00:00\",\n    \"model\": \"m\",\n    \"plan_hash\": \"x\",\n    \"total_groups\": 3\n  },\n  \"groups\": [\n    {\n      \"group_id\": \"aba34836be0a0688\",\n      \"group_index\": 0,\n      \"status\": \"valid\",\n      \"reason\": \"in_scope reason\",\n      \"confidence\": 0.9,\n      \"scope_relation\": \"in_scope\",\n      \"scope_reason\": \"in_scope: in_scope\",\n      \"scope_reference\": \"Plan: Goal\",\n      \"scope_baseline_id\": \"7e3c2e05e76f3c5c\",\n      \"scope_proposal_digest\": \"7e074f1813ab0ca3ed5d2d205d0a66019c803cedf93a40412a8044f44aa6dd18\",\n      \"scope_source\": \"validation\"\n    },\n    {\n      \"group_id\": \"b09a4272ccf2e3f2\",\n      \"group_index\": 1,\n      \"status\": \"valid\",\n      \"reason\": \"edited reason\",\n      \"confidence\": 0.9,\n      \"scope_relation\": \"in_scope\",\n      \"scope_reason\": \"edited: in_scope\",\n      \"scope_reference\": \"Plan: Goal\",\n      \"scope_baseline_id\": \"7e3c2e05e76f3c5c\",\n      \"scope_proposal_digest\": \"aef016c0456021a4de5693881115620939523aff4f670db8501fc3bc48089929\",\n      \"scope_source\": \"validation\"\n    },\n    {\n      \"group_id\": \"4ce8219b5eabebb1\",\n      \"group_index\": 2,\n      \"status\": \"valid\",\n      \"reason\": \"extension reason\",\n      \"confidence\": 0.9,\n      \"scope_relation\": \"scope_extension\",\n      \"scope_reason\": \"extension: scope_extension\",\n      \"scope_reference\": \"Plan: Goal\",\n      \"scope_baseline_id\": \"7e3c2e05e76f3c5c\",\n      \"scope_proposal_digest\": \"ab9cb2c96fb16eb0006adc6ca632fc39c19b0f6f79d31e8b997477b7cb7e74dd\",\n      \"scope_source\": \"validation\"\n    }\n  ]\n}"
+  },
+  "warning": null,
+  "warning_asked": true,
+  "expected": {
+   "plan": "<PLAN>",
+   "phases": {
+    "review-plan": {
+     "status": "completed",
+     "timestamp": "2026-11-08T15:55:06.357579"
+    },
+    "apply-suggestions": {
+     "status": "completed",
+     "timestamp": "2026-11-08T15:55:06.515205",
+     "scope_blocker": "apply-suggestions stopped on a scope blocker: b09a4272ccf2e3f2 cannot be completed within the agreed scope (the CSV total needs a new aggregation service)"
+    },
+    "generate-tasks": {
+     "status": "pending"
+    },
+    "review-tasks": {
+     "status": "pending",
+     "optional": true
+    },
+    "apply-task-suggestions": {
+     "status": "pending",
+     "optional": true
+    },
+    "implement": {
+     "status": "pending"
+    },
+    "code-review": {
+     "status": "pending"
+    },
+    "apply-code-fixes": {
+     "status": "pending"
+    }
+   },
+   "suggested_next": "generate-tasks",
+   "hint": "Run /clear before starting the next phase for best performance",
+   "notices": [
+    "apply-suggestions stopped on a scope blocker: b09a4272ccf2e3f2 cannot be completed within the agreed scope (the CSV total needs a new aggregation service)"
+   ]
+  }
+ },
+ "scope_deferred": {
+  "plan_name": "feat.md",
+  "state": {
+   "schema_version": "2.0",
+   "plan_path": "<PLAN>",
+   "plan_hash": "922f30970b3b4f59",
+   "created_at": "2026-11-08T15:55:05.426212",
+   "updated_at": "2026-11-08T15:55:05.601641",
+   "head_at_start": "1540ed689acd9b8159ee8087359082da080aec81",
+   "branch_name": "master",
+   "review_phase_completed": true,
+   "tracked_files": [],
+   "task_status": {
+    "apply-batch-0": "completed"
+   },
+   "phases_completed": {
+    "review-plan": "2026-11-08T15:55:05.429030",
+    "apply-suggestions": "2026-11-08T15:55:05.592274"
+   },
+   "phases_skipped": {},
+   "scope_policy": {
+    "review-plan": {
+     "review_policy": "preserve",
+     "review_policy_source": "explicit",
+     "recorded_at": "2026-11-08T15:55:05",
+     "baseline": {
+      "version": 1,
+      "baseline_id": "7e3c2e05e76f3c5c",
+      "sources": [
+       {
+        "role": "plan",
+        "sha256": "abababababababababababababababababababababababababababababababab",
+        "path": "plans/feat.md"
+       }
+      ],
+      "phase": "review-plan"
+     },
+     "deferrals": [
+      {
+       "group_id": "4ce8219b5eabebb1",
+       "theme": "extension theme",
+       "relation": "scope_extension",
+       "label": "Scope extension",
+       "reason": "Deferred: scope preservation requested: the proposed remedy extends the agreed scope (extension: scope_extension)",
+       "policy": "preserve",
+       "baseline_id": "7e3c2e05e76f3c5c",
+       "authority": "bound",
+       "title": "Also export PDF",
+       "importance": "LOW",
+       "validation_status": "valid",
+       "outcome": "Deferred: scope preservation requested"
+      },
+      {
+       "group_id": "a4eec6ef7f0a9695",
+       "theme": "leaked theme",
+       "relation": "scope_extension",
+       "label": "Scope extension",
+       "reason": "Deferred: scope preservation requested: the proposed remedy extends the agreed scope (leaked: scope_extension)",
+       "policy": "preserve",
+       "baseline_id": "7e3c2e05e76f3c5c",
+       "authority": "bound",
+       "title": "Add caching",
+       "importance": "MEDIUM",
+       "validation_status": "valid",
+       "outcome": "Deferred: scope preservation requested"
+      },
+      {
+       "group_id": "306dff2d6fff6635",
+       "theme": "unclear theme",
+       "relation": "unclear",
+       "label": "Scope unclear",
+       "reason": "Deferred: scope preservation requested: scope unclear (unclear: unclear)",
+       "policy": "preserve",
+       "baseline_id": "7e3c2e05e76f3c5c",
+       "authority": "bound",
+       "title": "Clarify the week boundary",
+       "importance": "MEDIUM",
+       "validation_status": "valid",
+       "outcome": "Deferred: scope preservation requested"
+      },
+      {
+       "group_id": "fa8a35b729e0beaf",
+       "theme": "legacy theme",
+       "relation": "unclear",
+       "label": "Scope unclear",
+       "reason": "Deferred: scope preservation requested: no validated scope classification; run a fresh classified review, or apply with --scope-policy expand",
+       "policy": "preserve",
+       "baseline_id": "7e3c2e05e76f3c5c",
+       "authority": "missing",
+       "title": "Handle empty weeks",
+       "importance": "HIGH",
+       "validation_status": "valid",
+       "outcome": "Deferred: scope preservation requested"
+      }
+     ],
+     "completion": {
+      "outcome": "eligible work completed",
+      "policy": "preserve",
+      "deferred": 4,
+      "blockers": 0,
+      "at": "2026-11-08T15:55:05"
+     }
+    }
+   },
+   "pre_existing_changes": [
+    "plans/feat.md",
+    "plans/feat/"
+   ],
+   "metrics": {
+    "apply-suggestions": [
+     {
+      "label": "apply-batch-0: apply 1 suggestion(s) to step_1 [applied]",
+      "timestamp": "2026-11-08T15:55:05.590812",
+      "subagent_type": "codex:gpt-5.5",
+      "token_count": 22,
+      "duration_ms": 41,
+      "batch_index": 1,
+      "run_id": "6206703ccc184eeaad4a7d3161caf1d6"
+     }
+    ]
+   },
+   "processed_apply-suggestions": {
+    "aba34836be0a0688": {
+     "status": "applied",
+     "details": {
+      "task_id": "apply-batch-0",
+      "prior_changes_id": "step_1#24be48ef",
+      "grouped_sha256": "a26817f0101f5621",
+      "leg": "executor"
+     },
+     "timestamp": "2026-11-08T15:55:05.590898"
+    }
+   }
+  },
+  "files": {
+   "review-plan/grouped.json": "{\n  \"format_version\": 2,\n  \"groups\": [\n    {\n      \"theme\": \"in_scope theme\",\n      \"category\": \"completeness\",\n      \"models\": [\n        \"m\"\n      ],\n      \"suggestions\": [\n        {\n          \"title\": \"Complete the CSV columns\",\n          \"desc\": \"Add the missing 'total' column.\",\n          \"type\": \"addition\",\n          \"reference\": \"## Step 1: Alpha\",\n          \"importance\": \"MEDIUM\",\n          \"source_model\": \"m\",\n          \"suggestion_hash\": \"121dd07941ca0895\",\n          \"display_label\": \"G1S1\",\n          \"display_hash\": \"121dd079\"\n        }\n      ],\n      \"group_hash\": \"aba34836be0a0688\",\n      \"display_label\": \"G1\",\n      \"display_hash\": \"aba34836\"\n    },\n    {\n      \"theme\": \"extension theme\",\n      \"category\": \"completeness\",\n      \"models\": [\n        \"m\"\n      ],\n      \"suggestions\": [\n        {\n          \"title\": \"Also export PDF\",\n          \"desc\": \"Add a PDF export beside the CSV.\",\n          \"type\": \"improvement\",\n          \"reference\": \"## Step 2: Beta\",\n          \"importance\": \"LOW\",\n          \"source_model\": \"m\",\n          \"suggestion_hash\": \"89107ae5e7879d59\",\n          \"display_label\": \"G2S1\",\n          \"display_hash\": \"89107ae5\"\n        }\n      ],\n      \"group_hash\": \"4ce8219b5eabebb1\",\n      \"display_label\": \"G2\",\n      \"display_hash\": \"4ce8219b\"\n    },\n    {\n      \"theme\": \"invalid theme\",\n      \"category\": \"completeness\",\n      \"models\": [\n        \"m\"\n      ],\n      \"suggestions\": [\n        {\n          \"title\": \"Rename the module\",\n          \"desc\": \"Rename report.py to export.py.\",\n          \"type\": \"addition\",\n          \"reference\": \"## Step 3: Gamma\",\n          \"importance\": \"MEDIUM\",\n          \"source_model\": \"m\",\n          \"suggestion_hash\": \"6abfb16a8cdf1dfd\",\n          \"display_label\": \"G3S1\",\n          \"display_hash\": \"6abfb16a\"\n        }\n      ],\n      \"group_hash\": \"3d23c327176fbd2e\",\n      \"display_label\": \"G3\",\n      \"display_hash\": \"3d23c327\"\n    },\n    {\n      \"theme\": \"user_skipped theme\",\n      \"category\": \"completeness\",\n      \"models\": [\n        \"m\"\n      ],\n      \"suggestions\": [\n        {\n          \"title\": \"Sort rows\",\n          \"desc\": \"Sort rows by date.\",\n          \"type\": \"addition\",\n          \"reference\": \"## Step 4: Delta\",\n          \"importance\": \"MEDIUM\",\n          \"source_model\": \"m\",\n          \"suggestion_hash\": \"fd2ddc7421466260\",\n          \"display_label\": \"G4S1\",\n          \"display_hash\": \"fd2ddc74\"\n        }\n      ],\n      \"group_hash\": \"d3e646d439de3537\",\n      \"display_label\": \"G4\",\n      \"display_hash\": \"d3e646d4\"\n    },\n    {\n      \"theme\": \"leaked theme\",\n      \"category\": \"completeness\",\n      \"models\": [\n        \"m\"\n      ],\n      \"suggestions\": [\n        {\n          \"title\": \"Add caching\",\n          \"desc\": \"Cache every export in Redis.\",\n          \"type\": \"addition\",\n          \"reference\": \"## Step 3: Gamma\",\n          \"importance\": \"MEDIUM\",\n          \"source_model\": \"m\",\n          \"scope_relation\": \"in_scope\",\n          \"scope_reason\": \"required for speed\",\n          \"suggestion_hash\": \"6e0a5aedcd3882ab\",\n          \"display_label\": \"G5S1\",\n          \"display_hash\": \"6e0a5aed\"\n        }\n      ],\n      \"group_hash\": \"a4eec6ef7f0a9695\",\n      \"display_label\": \"G5\",\n      \"display_hash\": \"a4eec6ef\"\n    },\n    {\n      \"theme\": \"unclear theme\",\n      \"category\": \"completeness\",\n      \"models\": [\n        \"m\"\n      ],\n      \"suggestions\": [\n        {\n          \"title\": \"Clarify the week boundary\",\n          \"desc\": \"State whether weeks start Monday.\",\n          \"type\": \"addition\",\n          \"reference\": \"## Step 3: Gamma\",\n          \"importance\": \"MEDIUM\",\n          \"source_model\": \"m\",\n          \"suggestion_hash\": \"4e5b305c614ef599\",\n          \"display_label\": \"G6S1\",\n          \"display_hash\": \"4e5b305c\"\n        }\n      ],\n      \"group_hash\": \"306dff2d6fff6635\",\n      \"display_label\": \"G6\",\n      \"display_hash\": \"306dff2d\"\n    },\n    {\n      \"theme\": \"legacy theme\",\n      \"category\": \"completeness\",\n      \"models\": [\n        \"m\"\n      ],\n      \"suggestions\": [\n        {\n          \"title\": \"Handle empty weeks\",\n          \"desc\": \"Write a header-only file for empty weeks.\",\n          \"type\": \"addition\",\n          \"reference\": \"## Step 4: Delta\",\n          \"importance\": \"HIGH\",\n          \"source_model\": \"m\",\n          \"suggestion_hash\": \"d7a73d4b79dc40c0\",\n          \"display_label\": \"G7S1\",\n          \"display_hash\": \"d7a73d4b\"\n        }\n      ],\n      \"group_hash\": \"fa8a35b729e0beaf\",\n      \"display_label\": \"G7\",\n      \"display_hash\": \"fa8a35b7\"\n    }\n  ]\n}",
+   "review-plan/validation.json": "{\n  \"metadata\": {\n    \"schema_version\": \"2.0\",\n    \"validated_at\": \"2026-10-31T10:00:00\",\n    \"model\": \"m\",\n    \"plan_hash\": \"x\",\n    \"total_groups\": 7\n  },\n  \"groups\": [\n    {\n      \"group_id\": \"aba34836be0a0688\",\n      \"group_index\": 0,\n      \"status\": \"valid\",\n      \"reason\": \"in_scope reason\",\n      \"confidence\": 0.9,\n      \"scope_relation\": \"in_scope\",\n      \"scope_reason\": \"in_scope: in_scope\",\n      \"scope_reference\": \"Plan: Goal\",\n      \"scope_baseline_id\": \"7e3c2e05e76f3c5c\",\n      \"scope_proposal_digest\": \"7e074f1813ab0ca3ed5d2d205d0a66019c803cedf93a40412a8044f44aa6dd18\",\n      \"scope_source\": \"validation\"\n    },\n    {\n      \"group_id\": \"4ce8219b5eabebb1\",\n      \"group_index\": 1,\n      \"status\": \"valid\",\n      \"reason\": \"extension reason\",\n      \"confidence\": 0.9,\n      \"scope_relation\": \"scope_extension\",\n      \"scope_reason\": \"extension: scope_extension\",\n      \"scope_reference\": \"Plan: Goal\",\n      \"scope_baseline_id\": \"7e3c2e05e76f3c5c\",\n      \"scope_proposal_digest\": \"ab9cb2c96fb16eb0006adc6ca632fc39c19b0f6f79d31e8b997477b7cb7e74dd\",\n      \"scope_source\": \"validation\"\n    },\n    {\n      \"group_id\": \"3d23c327176fbd2e\",\n      \"group_index\": 2,\n      \"status\": \"invalid\",\n      \"reason\": \"invalid reason\",\n      \"confidence\": 0.9,\n      \"scope_relation\": \"in_scope\",\n      \"scope_reason\": \"invalid: in_scope\",\n      \"scope_reference\": \"Plan: Goal\",\n      \"scope_baseline_id\": \"7e3c2e05e76f3c5c\",\n      \"scope_proposal_digest\": \"ea12f6317f0009a6b43ddfb449f6b10a6d0da3e04b755b5c872028a63b2b8413\",\n      \"scope_source\": \"validation\"\n    },\n    {\n      \"group_id\": \"d3e646d439de3537\",\n      \"group_index\": 3,\n      \"status\": \"valid\",\n      \"reason\": \"user_skipped reason\",\n      \"confidence\": 0.9,\n      \"scope_relation\": \"in_scope\",\n      \"scope_reason\": \"user_skipped: in_scope\",\n      \"scope_reference\": \"Plan: Goal\",\n      \"scope_baseline_id\": \"7e3c2e05e76f3c5c\",\n      \"scope_proposal_digest\": \"d29e1dfa0da2be622ec8237606e1a5ca616dff0fa7f1f8d570d4df3d86ec5225\",\n      \"scope_source\": \"validation\"\n    },\n    {\n      \"group_id\": \"a4eec6ef7f0a9695\",\n      \"group_index\": 4,\n      \"status\": \"valid\",\n      \"reason\": \"leaked reason\",\n      \"confidence\": 0.9,\n      \"scope_relation\": \"scope_extension\",\n      \"scope_reason\": \"leaked: scope_extension\",\n      \"scope_reference\": \"Plan: Goal\",\n      \"scope_baseline_id\": \"7e3c2e05e76f3c5c\",\n      \"scope_proposal_digest\": \"fa02e9f2f6858193208a14764b5881cbbe41a12294a24e7d5e441d9ebbe7841c\",\n      \"scope_source\": \"validation\"\n    },\n    {\n      \"group_id\": \"306dff2d6fff6635\",\n      \"group_index\": 5,\n      \"status\": \"valid\",\n      \"reason\": \"unclear reason\",\n      \"confidence\": 0.9,\n      \"scope_relation\": \"unclear\",\n      \"scope_reason\": \"unclear: unclear\",\n      \"scope_reference\": \"Plan: Goal\",\n      \"scope_baseline_id\": \"7e3c2e05e76f3c5c\",\n      \"scope_proposal_digest\": \"c17885822d58c8d1faeec9ef71af52c264ef920e9db35f5fafefd6bee0497d70\",\n      \"scope_source\": \"validation\"\n    },\n    {\n      \"group_id\": \"fa8a35b729e0beaf\",\n      \"group_index\": 6,\n      \"status\": \"valid\",\n      \"reason\": \"legacy reason\",\n      \"confidence\": 0.9\n    }\n  ]\n}"
+  },
+  "warning": null,
+  "warning_asked": true,
+  "expected": {
+   "plan": "<PLAN>",
+   "phases": {
+    "review-plan": {
+     "status": "completed",
+     "timestamp": "2026-11-08T15:55:05.429030"
+    },
+    "apply-suggestions": {
+     "status": "completed",
+     "timestamp": "2026-11-08T15:55:05.592274",
+     "scope_deferred": 4
+    },
+    "generate-tasks": {
+     "status": "pending"
+    },
+    "review-tasks": {
+     "status": "pending",
+     "optional": true
+    },
+    "apply-task-suggestions": {
+     "status": "pending",
+     "optional": true
+    },
+    "implement": {
+     "status": "pending"
+    },
+    "code-review": {
+     "status": "pending"
+    },
+    "apply-code-fixes": {
+     "status": "pending"
+    }
+   },
+   "suggested_next": "generate-tasks",
+   "hint": "Run /clear before starting the next phase for best performance",
+   "notices": [
+    "apply-suggestions: eligible work completed; 4 item(s) stay deferred by --scope-policy preserve (apply with --scope-policy expand to offer them again)"
+   ]
+  }
+ }
+}

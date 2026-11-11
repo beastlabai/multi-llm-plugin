@@ -27,12 +27,14 @@ child's argv shape rather than bypassing it.
 """
 
 import argparse
+import contextlib
 import json
 import os
 import signal
 import subprocess
 import sys
 import time
+import types
 from pathlib import Path
 
 import pytest
@@ -42,8 +44,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import multi_llm  # noqa: E402
 import modes as mode_table  # noqa: E402
-from utils import cli_common, detach, process_control, run_registry, run_status, unattended  # noqa: E402
-from utils import progress_tracker, status_file  # noqa: E402
+from utils import cli_common, detach, process_control, run_record, run_registry, run_status, run_sweep, unattended  # noqa: E402
+from utils import progress_tracker, status_file, status_text  # noqa: E402
+from tests.source_cache import python_files, source_text, source_tree
 
 SKILL_ROOT = Path(__file__).parent.parent
 POSIX_ONLY = pytest.mark.skipif(
@@ -68,6 +71,18 @@ def _phase_dir(plan: Path, phase: str = "review-plan") -> Path:
     directory = plan.parent / plan.stem.replace(" ", "_") / phase
     directory.mkdir(parents=True, exist_ok=True)
     return directory
+
+
+@contextlib.contextmanager
+def _foreground_run_holds(phase: Path):
+    """The phase lock a live foreground review run holds from its entry to its
+    exit (``detach.PhaseRun``); ``status`` probes it (``lock_held``)."""
+    lock = process_control.PhaseLock(detach.lock_path(str(phase)))
+    lock.acquire({"holder": "review-plan (foreground)", "pid": os.getpid()})
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 WORKER_TEMPLATE = '''
@@ -899,7 +914,9 @@ class TestDetachGates:
         assert "ceiling 2" in str(exc.value)
         capsys.readouterr()
         assert not Path(detach.log_path(str(phase))).exists()
-        assert not Path(detach.lock_path(str(phase))).exists()
+        # The launch held the dir's lock from its gate and let it go: the file
+        # is durable and inert (process_control.PhaseLock.release), the lock free.
+        assert process_control.lock_is_free(detach.lock_path(str(phase)))
         assert len(run_registry.list_entries(root)) == 2, "no new registry entry"
 
     def test_all_provider_binaries_missing_is_a_foreground_failure(
@@ -989,7 +1006,7 @@ class TestForegroundProgressWrites:
         """The `handle is None` branch, gated on the handle and not on a flag."""
         plan = _plan(tmp_path)
         phase = _phase_dir(plan)
-        monkeypatch.setattr(detach, "_ACTIVE", None)
+        monkeypatch.setattr(run_record, "_ACTIVE", None)
 
         detach.report_progress(
             str(phase), step="fanout", models_total=4, models_done=1
@@ -1024,7 +1041,7 @@ class TestForegroundProgressWrites:
         owned = _phase_dir(plan, "full")
         other = _phase_dir(plan, "review-plan")
         handle = _HandleFor(owned)
-        monkeypatch.setattr(detach, "_ACTIVE", handle)
+        monkeypatch.setattr(run_record, "_ACTIVE", handle)
 
         detach.report_progress(
             str(other), step="fanout", models_done=1, models_total=4
@@ -1065,7 +1082,7 @@ class TestForegroundProgressWrites:
         """
         plan = _plan(tmp_path)
         phase = _phase_dir(plan)
-        monkeypatch.setattr(detach, "_ACTIVE", None)
+        monkeypatch.setattr(run_record, "_ACTIVE", None)
 
         # The siblings, written the way their real sites write them.
         detach.report_progress(str(phase), step="fanout", models_total=2)
@@ -1123,7 +1140,7 @@ class TestForegroundProgressWrites:
         genuinely detached run.
         """
         plan = _plan(tmp_path)
-        monkeypatch.setattr(detach, "_ACTIVE", None)
+        monkeypatch.setattr(run_record, "_ACTIVE", None)
 
         done = _phase_dir(plan, "review-plan")
         status_file.write_status(
@@ -1817,7 +1834,8 @@ class TestStatusSurface:
         assert view["verdict"] == detach.VERDICT_NO_RUN
         assert view["verdict"] not in detach.TERMINAL_VERDICTS
 
-        assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
+        with _foreground_run_holds(phase):
+            assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
         out = capsys.readouterr().out
 
         assert "running in foreground (2/4 models, no detached run record)" in out
@@ -2302,7 +2320,7 @@ class TestStatusSurface:
         """F10: the mirror's `dispatched` counter used to count FINISHED
         tasks — for an 11-minute single-task batch it read `dispatched: 0`
         the whole time, indistinguishable from a stall. `in_flight`
-        (`write_batch_scheduler._begin_sweep`/`_mirror_status`) names the
+        (`write_batch_scheduler._begin_sweep`/`WriteReports.mirror_status`) names the
         task that is still running and how long it has been running for."""
         import re
         from datetime import datetime, timedelta
@@ -2599,12 +2617,14 @@ class TestStatusSurface:
             )
         status_file.write_status(str(phase), checkpoint)
         assert "run" not in status_file.read_status(str(phase))
-        start = time.monotonic()
-        code = run_status.main([
-            "--plan-file", str(plan), "--view", "run", "--host", "opencode",
-            "--wait",
-        ])
-        elapsed = time.monotonic() - start
+        clock = _WaitClock(monkeypatch)
+        clock.start()
+        with _foreground_run_holds(phase):
+            code = run_status.main([
+                "--plan-file", str(plan), "--view", "run", "--host", "opencode",
+                "--wait",
+            ])
+        elapsed = clock.elapsed
         out = capsys.readouterr().out
         assert code == 2
         assert elapsed < 30, f"--wait did not come back ({elapsed:.1f}s)"
@@ -2771,13 +2791,13 @@ class TestStatusSurface:
             "valid": 53, "invalid": 1,
             "needs_human_decision": 3, "validation_failed": 0,
         }
-        status_file.write_status(str(phase), {
-            "phase": "review-plan", "state": "complete",
-            "validation_counts": counts,
-        })
         status_file.claim_run(str(phase), {
             "run_id": "run-counts-001", "state": "done", "exit_code": 0,
             "detached": True,
+        })
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "complete",
+            "validation_counts": counts,
         })
         assert detach.classify_run(str(phase))["validation_counts"] == counts
         ctx = cli_common.activate_result(cli_common.ResultContext())
@@ -2835,12 +2855,12 @@ class TestStatusSurface:
         })
         handle = _HandleFor(run_dir)
         handle.run_id = run_id
-        monkeypatch.setattr(detach, "_ACTIVE", handle)
+        monkeypatch.setattr(run_record, "_ACTIVE", handle)
         detach.record_step_results(str(run_dir), row.phase, steps if steps is not None else [
             {"phase": review, "validation_counts": self.STEP_COUNTS},
             {"phase": apply, "notice": self.STEP_NOTICE},
         ], [str(report)])
-        monkeypatch.setattr(detach, "_ACTIVE", None)
+        monkeypatch.setattr(run_record, "_ACTIVE", None)
         status_file.update_run(
             str(run_dir), ending or {"state": "done", "exit_code": 0}, expect_run_id=run_id)
         return run_dir, report
@@ -2990,13 +3010,15 @@ class TestStatusSurface:
         """
         plan = _plan(tmp_path)
         phase = _phase_dir(plan, phase="code-review")
-        status_file.write_status(str(phase), {
-            "phase": "code-review", "state": "complete",
-            "high_priority_groups": {"count": 1},
-        })
+        # The run's own count, written after its claim (`claim_run` drops a
+        # predecessor's).
         status_file.claim_run(str(phase), {
             "run_id": "run-highpri-001", "state": "done", "exit_code": 0,
             "detached": True,
+        })
+        status_file.write_status(str(phase), {
+            "phase": "code-review", "state": "complete",
+            "high_priority_groups": {"count": 1},
         })
         assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 0
         out = capsys.readouterr().out
@@ -3010,13 +3032,13 @@ class TestStatusSurface:
         """
         plan = _plan(tmp_path)
         phase = _phase_dir(plan, phase="code-review")
-        status_file.write_status(str(phase), {
-            "phase": "code-review", "state": "models_running",
-            "high_priority_groups": {"count": 1},
-        })
         status_file.claim_run(str(phase), {
             "run_id": "run-highpri-002", "state": "running", "detached": True,
             "heartbeat_at": status_file.now_iso(), "heartbeat_interval_s": 10.0,
+        })
+        status_file.write_status(str(phase), {
+            "phase": "code-review", "state": "models_running",
+            "high_priority_groups": {"count": 1},
         })
         assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
         out = capsys.readouterr().out
@@ -3030,17 +3052,217 @@ class TestStatusSurface:
         """
         plan = _plan(tmp_path)
         phase = _phase_dir(plan, phase="review-plan")
-        status_file.write_status(str(phase), {
-            "phase": "review-plan", "state": "complete",
-            "high_priority_groups": {"count": 1},
-        })
         status_file.claim_run(str(phase), {
             "run_id": "run-highpri-003", "state": "done", "exit_code": 0,
             "detached": True,
         })
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "complete",
+            "high_priority_groups": {"count": 1},
+        })
         assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 0
         out = capsys.readouterr().out
         assert "high-priority groups" not in out
+
+    def _poll_high_priority(self, plan, phase, *, checkpoint_state, run, argv=()):
+        """The result payload of a poll of a code-review run left with a count.
+
+        Claimed first, then written, the order a run takes: `claim_run` drops a
+        predecessor's count."""
+        status_file.claim_run(str(phase), {"detached": True, **run})
+        status_file.write_status(str(phase), {
+            "phase": "code-review", "state": checkpoint_state,
+            "high_priority_groups": {"count": 2},
+            "validation_counts": {
+                "valid": 2, "invalid": 0,
+                "needs_human_decision": 0, "validation_failed": 0,
+            },
+        })
+        ctx = cli_common.activate_result(cli_common.ResultContext())
+        try:
+            code = run_status.main(["--plan-file", str(plan), "--view", "run", *argv])
+            return code, ctx.payload(code)
+        finally:
+            cli_common.deactivate_result()
+
+    def test_a_gate_held_review_carries_its_count_on_the_poll(
+        self, tmp_path, capsys
+    ):
+        """STATE-3: a detached `--fail-on-high` review is completed and held at
+        exit 3; a host reads that as "completed, wants a decision" only with a
+        positive count on the poll's result line (`modes.REVIEW_GATE`)."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, phase="code-review")
+        code, payload = self._poll_high_priority(
+            plan, phase, checkpoint_state="complete",
+            run={"run_id": "run-gate-001", "state": "failed", "exit_code": 3,
+                 "error": "needs_human (exit 3)"},
+            argv=("--phase", "code-review"),
+        )
+        capsys.readouterr()
+        assert code == 3
+        assert payload["high_priority_groups"] == {"count": 2}
+        assert payload["validation_counts"]["valid"] == 2
+
+    def test_a_finished_review_carries_its_count_on_the_poll(self, tmp_path, capsys):
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, phase="code-review")
+        code, payload = self._poll_high_priority(
+            plan, phase, checkpoint_state="complete",
+            run={"run_id": "run-gate-002", "state": "done", "exit_code": 0},
+            argv=("--phase", "code-review"),
+        )
+        capsys.readouterr()
+        assert code == 0
+        assert payload["high_priority_groups"] == {"count": 2}
+
+    def test_an_unpinned_listing_does_not_carry_the_count(self, tmp_path, capsys):
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, phase="code-review")
+        _code, payload = self._poll_high_priority(
+            plan, phase, checkpoint_state="complete",
+            run={"run_id": "run-gate-003", "state": "done", "exit_code": 0},
+        )
+        capsys.readouterr()
+        assert "high_priority_groups" not in payload
+
+    def test_a_run_that_stopped_short_does_not_carry_an_earlier_count(
+        self, tmp_path, capsys
+    ):
+        """The count is written only where the phase records itself complete,
+        so one beside any other checkpoint state is an earlier review's."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, phase="code-review")
+        _code, payload = self._poll_high_priority(
+            plan, phase, checkpoint_state="models_complete",
+            run={"run_id": "run-gate-004", "state": "failed", "exit_code": 3,
+                 "error": "needs_human (exit 3)"},
+            argv=("--phase", "code-review"),
+        )
+        capsys.readouterr()
+        assert "high_priority_groups" not in payload
+
+    def test_a_refused_retry_does_not_relay_the_previous_runs_count(
+        self, tmp_path, capsys
+    ):
+        """A completed review recorded two HIGH groups; the retry (an edited
+        plan, refused by task-file validation with exit 3) kept the checkpoint's
+        `state: complete` and wrote nothing, so a count on its poll would read
+        as "completed, held by the HIGH gate" (`modes.REVIEW_GATE`)."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, phase="code-review")
+        status_file.claim_run(str(phase), {
+            "run_id": "run-gate-005", "state": "running", "detached": True,
+        })
+        status_file.write_status(str(phase), {
+            "phase": "code-review", "state": "complete",
+            "high_priority_groups": {"count": 2},
+        })
+        assert status_file.update_run(
+            str(phase), {"state": "done", "exit_code": 0},
+            expect_run_id="run-gate-005",
+        )
+        status_file.claim_run(str(phase), {
+            "run_id": "run-gate-006", "state": "failed", "exit_code": 3,
+            "error": "needs_human (exit 3)", "detached": True,
+        })
+        ctx = cli_common.activate_result(cli_common.ResultContext())
+        try:
+            code = run_status.main([
+                "--plan-file", str(plan), "--view", "run", "--phase", "code-review",
+            ])
+            payload = ctx.payload(code)
+        finally:
+            cli_common.deactivate_result()
+        capsys.readouterr()
+
+        assert code == 3
+        assert status_file.read_status(str(phase))["state"] == "complete"
+        assert "high_priority_groups" not in payload
+
+    def test_a_refused_retry_does_not_relay_the_previous_runs_validation_counts(
+        self, tmp_path, capsys
+    ):
+        """A completed review recorded its verdict counts; the retry (refused by
+        task-file validation with exit 3) wrote nothing of its own, so counts on
+        its poll would summarise a validation it never ran."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        status_file.claim_run(str(phase), {
+            "run_id": "run-counts-005", "state": "running", "detached": True,
+        })
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "complete",
+            "validation_counts": {
+                "valid": 3, "invalid": 1,
+                "needs_human_decision": 2, "validation_failed": 0,
+            },
+        })
+        assert status_file.update_run(
+            str(phase), {"state": "done", "exit_code": 0},
+            expect_run_id="run-counts-005",
+        )
+        status_file.claim_run(str(phase), {
+            "run_id": "run-counts-006", "state": "failed", "exit_code": 3,
+            "error": "needs_human (exit 3)", "detached": True,
+        })
+        ctx = cli_common.activate_result(cli_common.ResultContext())
+        try:
+            code = run_status.main([
+                "--plan-file", str(plan), "--view", "run", "--phase", "review-plan",
+            ])
+            payload = ctx.payload(code)
+        finally:
+            cli_common.deactivate_result()
+        capsys.readouterr()
+
+        assert code == 3
+        assert status_file.read_status(str(phase))["state"] == "complete"
+        assert "validation_counts" not in payload
+
+    def test_a_refused_retry_is_not_given_the_previous_runs_repair(
+        self, tmp_path, capsys
+    ):
+        """A run refused before dispatch closed out with `state:
+        runner_rejected` and `reason_code: binary_absent`; the retry is refused
+        by task-file validation (exit 3) before it writes a checkpoint state of
+        its own, so its pinned poll names no repair: the CLI fault was the
+        previous run's (docs/development/runtime.md)."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        status_file.claim_run(str(phase), {
+            "run_id": "run-refusal-001", "state": "running", "detached": True,
+            "mode": "review-plan",
+        })
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "runner_rejected",
+            "reason_code": "binary_absent", "runner": "codex:gpt-6-luna",
+            "runner_key": "driver.subagent_runner",
+        })
+        assert status_file.update_run(
+            str(phase), {"state": "failed", "exit_code": 3,
+                         "error": "needs_human (exit 3)"},
+            expect_run_id="run-refusal-001",
+        )
+        status_file.claim_run(str(phase), {
+            "run_id": "run-refusal-002", "state": "failed", "exit_code": 3,
+            "error": "needs_human (exit 3)", "detached": True,
+            "mode": "review-plan",
+        })
+
+        code = run_status.main([
+            "--plan-file", str(plan), "--view", "run", "--phase", "review-plan",
+            "--run-id", "run-refusal-002",
+        ])
+        out = capsys.readouterr().out
+
+        assert code == 3, out
+        assert "needs_human (exit 3)" in out, out
+        assert "binary_absent" not in out, out
+        assert "repair first:" not in out, out
+        assert not {"state", *status_file.REFUSAL_KEYS} & set(
+            status_file.read_status(str(phase))
+        )
 
     def test_a_terminal_run_carries_the_workflow_notice_into_view_run(
         self, tmp_path, capsys
@@ -3515,7 +3737,7 @@ class TestRegistry:
         eight_days = time.time() - 8 * 86400
         os.utime(old, (eight_days, eight_days))
 
-        rows = run_registry.sweep(str(root), kill=False)
+        rows = run_sweep.sweep(str(root), kill=False)
         assert {row["run_id"]: row["action"] for row in rows} == {
             "live": "kept", "recycled": "closed", "ancient": "pruned",
         }
@@ -3562,14 +3784,14 @@ class TestRegistry:
 class TestProcessControlFacade:
     def test_no_runtime_module_imports_fcntl_or_msvcrt_directly(self):
         offenders = []
-        for path in sorted(SKILL_ROOT.rglob("*.py")):
+        for path in python_files(SKILL_ROOT):
             parts = path.relative_to(SKILL_ROOT).parts
             if any(p in {"tests", "__pycache__", ".venv"} or p.startswith(".")
                    for p in parts):
                 continue
             if path.name == "process_control.py":
                 continue
-            text = path.read_text(encoding="utf-8")
+            text = source_text(path)
             for module in ("fcntl", "msvcrt"):
                 if f"import {module}" in text:
                     offenders.append(f"{path.relative_to(SKILL_ROOT)}: {module}")
@@ -3812,13 +4034,20 @@ class TestTheCliTreeSnapshot:
         leader = _orphan_sleeper(own_session=True)
         moved = _orphan_sleeper(own_session=True)
         real_signal_tree = process_control._signal_tree
+        real_send = process_control._IdentityUnit._send
 
         def deaf_to_the_moved_member(pid, pgid, sig):
             if pid == moved and pgid is None:
                 return
             real_signal_tree(pid, pgid, sig)
 
+        def deaf_through_its_pidfd(unit, api, held, sig):
+            if held.pid != moved:
+                real_send(unit, api, held, sig)
+
+        # By number off Linux's pidfds, through the moved member's pidfd on it.
         monkeypatch.setattr(process_control, "_signal_tree", deaf_to_the_moved_member)
+        monkeypatch.setattr(process_control._IdentityUnit, "_send", deaf_through_its_pidfd)
         try:
             snapshot = [
                 process_control.Descendant(
@@ -3991,6 +4220,7 @@ class TestTheSweepIsBoundedByOneClock:
         if route == "ps":
             monkeypatch.setattr(process_control, "_linux_start_time", lambda pid: None)
             monkeypatch.setattr(process_control, "_linux_process_table", lambda: None)
+            monkeypatch.setattr(process_control, "_pidfd_api", lambda: None)
             monkeypatch.setattr(process_control, "_linux_state", lambda pid: None)
         leader = subprocess.Popen(["sleep", "60"], start_new_session=True)
         cli = subprocess.Popen([sys.executable, "-c", "pass"])
@@ -4257,6 +4487,35 @@ class TestWindowsSeam:
 # The documented poll loop
 # ===========================================================================
 
+class _WaitClock:
+    """A clock for ``run_status``'s ``--wait`` loop whose ``sleep`` advances it.
+
+    The loop's deadline arithmetic and its 5 s re-check grid run for real; only
+    the passing of time is simulated, so a ``poll_s: 5`` wait costs no wall
+    clock. ``TestWaitTimeoutResolution.test_a_configured_poll_s_is_really_waited_not_only_computed``
+    keeps the one real-time wait.
+    """
+
+    def __init__(self, monkeypatch):
+        self.now = time.time()
+        self.sleeps = []
+        proxy = types.SimpleNamespace(**vars(time))
+        proxy.time = lambda: self.now
+        proxy.sleep = self._sleep
+        monkeypatch.setattr(run_status, "time", proxy)
+
+    def _sleep(self, seconds):
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+    def start(self):
+        self.began = self.now
+
+    @property
+    def elapsed(self):
+        return self.now - self.began
+
+
 class TestWaitTimeoutResolution:
     """``--wait``'s deadline: which source wins, and what the clamp binds.
 
@@ -4281,7 +4540,6 @@ class TestWaitTimeoutResolution:
         override.write_text(f"progress:\n{block}", encoding="utf-8")
         monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(override))
         registry._config = None
-        registry._config_key = None
 
     @staticmethod
     def _resolved(tmp_path, monkeypatch, argv) -> float:
@@ -4503,7 +4761,7 @@ class TestWaitTimeoutResolution:
         assert "Traceback" not in captured.err
 
     def test_an_unrelated_config_error_does_not_end_the_poll_loop_on_a_lie(
-        self, tmp_path, monkeypatch, capsys
+        self, tmp_path, monkeypatch, capsys, lenient_advisory
     ):
         """F4, 2026-09-20: `--wait` died on *any* ConfigError, not only `poll_s`'s.
 
@@ -4524,7 +4782,6 @@ class TestWaitTimeoutResolution:
         )
         monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(override))
         registry._config = None
-        registry._config_key = None
 
         plan = _plan(tmp_path)
         phase = _phase_dir(plan)
@@ -4546,6 +4803,8 @@ class TestWaitTimeoutResolution:
         assert captured.err.startswith("ERROR: ")
         assert "not_a_driver_key" in captured.err
         assert "Traceback" not in captured.err
+        # The control's runner line read the same broken config and was dropped.
+        assert lenient_advisory == ["status: runner text"]
 
     @pytest.mark.parametrize("value", ["nan", "inf", "-inf", "-1", "0"])
     def test_a_timeout_that_is_not_a_positive_finite_number_is_refused(
@@ -5060,12 +5319,13 @@ class TestAReusedPhaseDirDoesNotFakeATerminalRun:
         plan = _plan(tmp_path)
         self._inherited_run_over_a_live_checkpoint(plan)
 
-        start = time.monotonic()
+        clock = _WaitClock(monkeypatch)
+        clock.start()
         code = run_status.main([
             "--plan-file", str(plan), "--view", "run", "--host", "opencode",
             "--wait",
         ])
-        elapsed = time.monotonic() - start
+        elapsed = clock.elapsed
         capsys.readouterr()
 
         assert elapsed >= 4.0, (
@@ -5144,9 +5404,7 @@ class TestTheAskLanesTerminalWordsAreTerminal:
         """
         import ast
 
-        tree = ast.parse(
-            (SKILL_ROOT / "ask_orchestrator.py").read_text(encoding="utf-8")
-        )
+        tree = source_tree(SKILL_ROOT / "ask_orchestrator.py")
         words = {
             node.value.value
             for node in ast.walk(tree)
@@ -5290,10 +5548,7 @@ class TestTheRefusalCloseOutWordsAreTerminal:
         """
         import ast
 
-        tree = ast.parse(
-            (SKILL_ROOT / "utils" / "review_orchestrator_base.py")
-            .read_text(encoding="utf-8")
-        )
+        tree = source_tree(SKILL_ROOT / "utils" / "review_orchestrator_base.py")
         func = next(
             (node for node in ast.walk(tree)
              if isinstance(node, ast.FunctionDef)
@@ -5499,12 +5754,13 @@ class TestAPollThatNamesTheRunIsNotHeldByAStaleCheckpoint:
         plan = _plan(tmp_path)
         self._dead_run_over_a_stale_checkpoint(plan, state="failed")
 
-        start = time.monotonic()
+        clock = _WaitClock(monkeypatch)
+        clock.start()
         run_status.main([
             "--plan-file", str(plan), "--view", "run", "--host", "opencode",
             "--wait",
         ])
-        elapsed = time.monotonic() - start
+        elapsed = clock.elapsed
         capsys.readouterr()
         assert elapsed >= 4.0, (
             "a poll that named no run skipped the checkpoint's vote, which is "
@@ -5556,11 +5812,46 @@ class TestTheForegroundHeadLineHasATense:
     def test_a_working_foreground_phase_still_says_running(self, tmp_path, capsys):
         """The mirror row: the tense has to distinguish, not just soften."""
         plan = _plan(tmp_path)
-        self._foreground(plan, state="models_running", step="fanout", done=1)
+        phase = self._foreground(plan, state="models_running", step="fanout", done=1)
+
+        with _foreground_run_holds(phase):
+            assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
+        out = capsys.readouterr().out
+        assert "running in foreground (1/2 models, no detached run record)" in out
+
+    def test_a_fanout_whose_process_ended_without_a_final_state_says_so(
+        self, tmp_path, capsys
+    ):
+        """P3: a review fan-out whose every model failed exits 3 and leaves
+        ``state: models_running`` behind. Its foreground run held the phase
+        lock for its whole life, so a free lock says that run has ended: the
+        head line stops calling it running. The verdict and exit code stay."""
+        plan = _plan(tmp_path)
+        phase = self._foreground(plan, state="models_running", step="fanout", done=2)
+
+        assert detach.classify_run(str(phase))["verdict"] == detach.VERDICT_NO_RUN
+        assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
+        out = capsys.readouterr().out
+        assert ("ended in foreground without a final state (2/2 models, no detached "
+                "run record)") in out
+        assert "running in foreground" not in out, out
+        assert "phase state:    models_running" in out
+
+    def test_a_phase_whose_foreground_run_holds_no_lock_still_says_running(
+        self, tmp_path, capsys
+    ):
+        """generate-tasks, implement and the apply phases run in the foreground
+        without the phase lock, so a free lock tells nothing there."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, "generate-tasks")
+        status_file.write_status(str(phase), {
+            "phase": "generate-tasks", "state": "task_generation_running",
+            "progress": {"step": "dispatch"},
+        })
 
         assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
         out = capsys.readouterr().out
-        assert "running in foreground (1/2 models, no detached run record)" in out
+        assert "running in foreground (no detached run record)" in out
 
     def test_the_host_handoff_state_counts_as_finished(self, tmp_path, capsys):
         """`validation_pending` is a terminal step, not a stalled one.
@@ -5614,7 +5905,7 @@ class TestOneBadModelRowCostsItsOwnColumn:
         return phase
 
     def test_a_clock_that_raises_costs_that_row_its_clock_only(
-        self, tmp_path, monkeypatch, capsys
+        self, tmp_path, monkeypatch, capsys, lenient_advisory
     ):
         """The renderer's own guard, pinned independently of the parser's.
 
@@ -5641,7 +5932,7 @@ class TestOneBadModelRowCostsItsOwnColumn:
                 )
             return None
 
-        monkeypatch.setattr(run_status, "entry_elapsed_s", _explode)
+        monkeypatch.setattr(status_text, "entry_elapsed_s", _explode)
 
         assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
         out = capsys.readouterr().out
@@ -5654,9 +5945,10 @@ class TestOneBadModelRowCostsItsOwnColumn:
         assert [row.split() for row in rows] == [
             ["codex:gpt-5.6-sol", "running"], ["opencode:auto", "running"]
         ], rows
+        assert lenient_advisory == ["status: model elapsed time"] * 2
 
     def test_a_wait_that_raises_costs_only_the_wait(
-        self, tmp_path, monkeypatch, capsys
+        self, tmp_path, monkeypatch, capsys, lenient_advisory
     ):
         """The wait is read under its own guard, beside the run time's.
 
@@ -5692,7 +5984,7 @@ class TestOneBadModelRowCostsItsOwnColumn:
         def _explode(entry, now=None):
             raise TypeError("can't subtract offset-naive and offset-aware datetimes")
 
-        monkeypatch.setattr(run_status, "entry_queued_s", _explode)
+        monkeypatch.setattr(status_text, "entry_queued_s", _explode)
 
         assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
         out = capsys.readouterr().out
@@ -5707,6 +5999,8 @@ class TestOneBadModelRowCostsItsOwnColumn:
             ["codex:gpt-5.6-sol", "failed", "2m10s/30m", "boom"],
             ["opencode:auto", "queued"],
         ], rows
+        assert lenient_advisory == [
+            "status: finished model queued time", "status: queued model wait"]
 
     def test_an_aware_started_at_does_not_take_the_command_down(
         self, tmp_path, capsys
@@ -6426,7 +6720,7 @@ class TestJustFinishedNamesWhatCrossedTheLineDuringTheWait:
         assert "finished_during_wait" not in payload["runs"][0], payload["runs"][0]
 
     def test_a_malformed_entry_costs_its_own_clause_never_the_command(
-        self, tmp_path, monkeypatch, capsys
+        self, tmp_path, monkeypatch, capsys, lenient_advisory
     ):
         """`status` is the command a poll loop runs, so it must answer.
 
@@ -6452,7 +6746,7 @@ class TestJustFinishedNamesWhatCrossedTheLineDuringTheWait:
                 "gemini:gemini-3.5-pro": self._entry("done", "soon"),
                 "pi:auto": "truncated mid-write",
             })
-            real = run_status.entry_elapsed_s
+            real = status_text.entry_elapsed_s
 
             def _explode(entry, now=None):
                 if entry.get("elapsed_s") == 252:
@@ -6461,7 +6755,7 @@ class TestJustFinishedNamesWhatCrossedTheLineDuringTheWait:
                     )
                 return real(entry, now)
 
-            monkeypatch.setattr(run_status, "entry_elapsed_s", _explode)
+            monkeypatch.setattr(status_text, "entry_elapsed_s", _explode)
 
         assert self._wait_once(plan, monkeypatch, _finish) == 2
         out = capsys.readouterr().out
@@ -6473,6 +6767,9 @@ class TestJustFinishedNamesWhatCrossedTheLineDuringTheWait:
             "gemini:gemini-3.5-pro (done)"
         ) in out
         assert "pi:auto (" not in out
+        # The raising clock is read twice: the clause, then the row's own cell.
+        assert lenient_advisory == [
+            "status: finished-during-wait elapsed time", "status: model elapsed time"]
 
     def test_a_phase_dir_that_appeared_mid_wait_is_not_claimed_as_just_finished(
         self, tmp_path, monkeypatch, capsys
@@ -6657,7 +6954,7 @@ class TestTheLaunchAnnouncesTheRosterItResolved:
         assert "progress_lines" not in payload
 
     def test_an_unreadable_config_costs_the_line_and_not_the_launch(
-        self, tmp_path, monkeypatch, capsys
+        self, tmp_path, monkeypatch, capsys, lenient_advisory
     ):
         """Narration, at the one point where the worker is already running.
 
@@ -6676,6 +6973,7 @@ class TestTheLaunchAnnouncesTheRosterItResolved:
         capsys.readouterr()
         assert "progress_lines" not in payload
         assert payload["next"], "the launch still reported its poll command"
+        assert lenient_advisory == ["detach: launch roster line"]
 
 
 class TestTheRenderedProgressLinesRideTheResultLine:

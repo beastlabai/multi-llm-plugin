@@ -36,9 +36,12 @@ import pytest
 
 import implement_orchestrator  # noqa: E402
 import multi_llm  # noqa: E402
-from tests.test_check_findings_hold_dependents import repo  # noqa: E402,F401
-from tests.test_check_gate_fixture import _check, _implement  # noqa: E402
-from tests.test_check_gate_fixture import repo as gate_repo  # noqa: E402,F401
+from tests.support.implement_world import (  # noqa: E402
+    implement_repo,  # noqa: F401 - the repo fixture
+)
+from tests.support.gate_fixture import _check  # noqa: E402
+from tests.support.implement_world import _implement  # noqa: E402
+from tests.support.gate_fixture import repo as gate_repo  # noqa: E402,F401
 from utils import subagent_executor as executor  # noqa: E402
 from utils.state_manager import (  # noqa: E402
     TASK_BATCH_CHECK_KEY,
@@ -214,7 +217,7 @@ class TestTheExecutorLeg:
     def test_an_implement_run_records_the_finding(self, gate_repo, capsys, monkeypatch):
         """End to end on the executor leg: a code task that says it passed
         a check it did not run, naming a failure, is on record failing."""
-        from tests.test_check_gate_fixture import ALLOW, _policy
+        from tests.support.gate_fixture import ALLOW, _policy
 
         _policy(gate_repo, ALLOW)
         _check(gate_repo, passed=True)
@@ -267,7 +270,7 @@ class TestTheRuleIsStatedOnce:
             "the result shape's placeholder `<each check command you ran>`",
             "or it has no `ran` at all but gives a `not_run` reason",
             '`--own-check findings --finding "its check could not run: ',
-            "`subagent_executor.batch_check_findings`",
+            "`batch_reply.batch_check_findings`",
         ):
             assert clause in text, clause
 

@@ -1,0 +1,2 @@
+error: failed to run prompt: provider.api_error: The model `stub-model` does not exist or you do not have access to it.
+See log: /tmp/mllm-inv/kimi-6bf3eb1d1044/.kimi-code/logs/kimi-code.log

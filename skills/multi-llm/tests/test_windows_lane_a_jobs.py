@@ -747,25 +747,47 @@ def group_job(monkeypatch):
 @POSIX_ONLY
 class TestRealProcessesWithAGroupForTheJob:
     def test_a_timeout_ends_the_grandchild_and_returns_inside_the_drain(
-        self, group_job, tmp_path
+        self, group_job, tmp_path, monkeypatch
     ):
         """The gap itself: the grandchild holds the CLI's stdout, so a stop of
         the CLI alone left the drain waiting out its cap, and the grandchild
         running after it."""
         marker = tmp_path / "grandchild.pid"
-        timeout = 1.5
-        started = time.monotonic()
+        deadline = 0.5
+        armed = []
+        capture_class = llm_client.process_capture.PipeCapture
+
+        class DeadlineAfterTheGrandchildStarted(capture_class):
+            """The deadline is armed once the grandchild has written its pid:
+            two interpreters starting is machine speed, not what is under
+            test. Only the first wait is the deadline's; the drain after the
+            stop is passed through unchanged."""
+
+            def communicate(self, input=None, timeout=None):
+                if not armed:
+                    assert _grandchild(marker, timeout=60), "the grandchild never started"
+                    armed.append(time.monotonic())
+                    timeout = deadline
+                return super().communicate(input=input, timeout=timeout)
+
+        monkeypatch.setattr(
+            llm_client.process_capture, "PipeCapture", DeadlineAfterTheGrandchildStarted)
+        # A broken stop waits out the whole drain; at 20 s the separation from
+        # a working one (a few seconds at most, even on a loaded machine) is
+        # wide, where the 5 s cap left it one second.
+        monkeypatch.setattr(llm_client, "LANE_A_DRAIN_S", 20.0)
         with pytest.raises(subprocess.TimeoutExpired) as caught:
             llm_client._run_provider_cli(
-                _cli_argv(marker), capture_output=True, text=True, timeout=timeout,
+                _cli_argv(marker), capture_output=True, text=True, timeout=60,
                 stdin=subprocess.DEVNULL)
-        elapsed = time.monotonic() - started
+        elapsed = time.monotonic() - armed[0]
 
         grandchild = _grandchild_pid(marker, timeout=0)
         assert grandchild, "the grandchild never started inside the deadline"
-        assert not cli_tree.await_dead([grandchild], timeout=5), "the grandchild survived"
-        assert elapsed - timeout < llm_client.LANE_A_DRAIN_S - 1.0, (
-            f"{elapsed - timeout:.1f}s past the deadline: the drain waited on a survivor")
+        # Only the wait is long: `await_dead` returns as soon as the process is gone.
+        assert not cli_tree.await_dead([grandchild], timeout=30), "the grandchild survived"
+        assert elapsed - deadline < llm_client.LANE_A_DRAIN_S / 2, (
+            f"{elapsed - deadline:.1f}s past the deadline: the drain waited on a survivor")
         assert caught.value.tree_sweep.job == "terminated"
         assert group_job.terminated == [101] and group_job.closed == [101]
 

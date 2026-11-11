@@ -26,10 +26,12 @@ from utils.html_report_generator import (
     string_to_color,
 )
 from utils.report_parser import load_html_selections, merge_selections
+from utils.report_view import hydrate_views
 
 
 def extract_report_data(html_content: str) -> dict:
-    """Extract the embedded reportData JSON from HTML content.
+    """Extract the embedded reportData JSON from HTML content, with its views
+    rebuilt from ``groups`` as the page's ``hydrateViews`` does.
 
     Uses brace counting to properly extract the complete JSON object,
     handling nested structures and strings with special characters.
@@ -77,7 +79,7 @@ def extract_report_data(html_content: str) -> dict:
                 break
 
     json_str = html_content[json_start:end_idx]
-    return json.loads(json_str)
+    return hydrate_views(json.loads(json_str))
 
 
 # ============================================================================
@@ -1400,6 +1402,13 @@ class TestZeroSuggestions:
 
 _TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
 
+
+def _page_code(name: str) -> str:
+    """A template with the shared code it inlines (templates/shared/)."""
+    from utils.html_report_generator import inline_shared_slots
+
+    return inline_shared_slots((_TEMPLATES_DIR / name).read_text(encoding="utf-8"))
+
 #: The incident's lost reviewer, verbatim from the evidence run.
 _PI_SPEC = "pi:openrouter/deepseek/deepseek-v4.1-flash"
 _PI_REASON = (
@@ -1577,7 +1586,7 @@ class TestTheTemplatesReadFailedModelsAsAnObject:
         "name", ["pr_report_template.html", "report_template.html"]
     )
     def test_each_template_carries_the_bar_and_renders_it_at_init(self, name):
-        template = (_TEMPLATES_DIR / name).read_text(encoding="utf-8")
+        template = _page_code(name)
         assert "failedModels.join" not in template
         assert "failedModels.length" not in template
         assert "Object.keys(failedModels)" in template
@@ -1588,8 +1597,8 @@ class TestTheTemplatesReadFailedModelsAsAnObject:
         assert "renderNotices();" in _init_source(template)
 
     def test_the_flat_render_notices_is_the_pr_ones(self):
-        pr = (_TEMPLATES_DIR / "pr_report_template.html").read_text(encoding="utf-8")
-        flat = (_TEMPLATES_DIR / "report_template.html").read_text(encoding="utf-8")
+        pr = _page_code("pr_report_template.html")
+        flat = _page_code("report_template.html")
         assert _function_source(flat, "renderNotices") == _function_source(
             pr, "renderNotices"
         )

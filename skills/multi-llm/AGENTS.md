@@ -20,11 +20,17 @@ Run these from the **repository root**. Use `uv run --project`, not
 # Focused test file
 uv run --project skills/multi-llm -- pytest skills/multi-llm/tests/test_filtering.py -v
 
+# Tests that import a module (advisory; see tests/MODULE_TESTS.md), run at -n 4
+make test-for MODULE=utils/status_file.py
+
 # Ordinary CI suite, excluding explicitly provisioned integrations
 uv run --project skills/multi-llm -- pytest skills/multi-llm/tests -m "not live and not container and not package and not codex_jail"
 
 # Error-handling tests
 uv run --project skills/multi-llm -- pytest skills/multi-llm/tests -m robustness
+
+# Lint gate (ruff; CI runs the same command on its Linux leg)
+make lint
 
 # Check generated host documentation
 uv run --project skills/multi-llm -- python skills/multi-llm/hosts/render_capabilities.py --check
@@ -35,6 +41,17 @@ Choose checks that exercise the changed behavior. The
 harness and plugin validation; `pyproject.toml` defines the test markers and
 normal exclusions. Tests marked `live` need provider CLIs and API access;
 container, package, and Codex-jail tests have separate prerequisites.
+
+## Searching the code
+
+This directory is the source of truth. `packaging/claude/multi-llm/` and
+`packaging/codex/multi-llm/` hold generated copies of it (build output from
+`make claude-regen codex-regen`); edit here and regenerate, never in the copies.
+The root `.ignore` hides those trees from `rg` and Claude Code's Grep, so symbol
+searches return source hits only. `git grep` does not read `.ignore`, and Claude
+Code's Glob bypasses it by default (unless `CLAUDE_CODE_GLOB_NO_IGNORE=false`);
+exclude `packaging/*/multi-llm/` yourself there, or use `rg --no-ignore` to
+search the copies deliberately.
 
 ## Ownership and source of truth
 
@@ -61,17 +78,33 @@ container, package, and Codex-jail tests have separate prerequisites.
 - **`utils/provider_registry.py`** owns configuration layering and typed driver
   accessors. `utils/providers/` owns provider commands, profiles, output channels,
   and usage parsing. Configuration `command` values are metadata; executable
-  provider binaries come from built-in adapters.
-- **`utils/subagent_executor.py`** invokes materialized tasks;
+  provider binaries come from built-in adapters. The adapter roster is discovered
+  from `utils/providers/`, never typed; to add an adapter, follow
+  [Adding a provider adapter](../../docs/development/providers.md#adding-a-provider-adapter).
+  `utils/providers/base.py` is the `LLMProvider` class; the failure classifier,
+  child environment, version gate, sandbox rungs and shared types are modules
+  beside it ([the provider base modules](../../docs/development/providers.md#the-provider-base-modules)).
+- **`utils/subagent_executor.py`** is the facade of the executor that invokes
+  materialized tasks; its code (reply reading, records, result files, runner
+  selection, probe state, the sandbox gate, the spawn, classification,
+  preflight, `dispatch_task`, the batch and the entry points) lives in modules
+  beside it ([where the executor's helpers live](../../docs/development/delegation.md#where-the-executors-helpers-live)).
   **`utils/write_batch_scheduler.py`** owns write scheduling and continuation.
   Both host-native and executor paths must preserve the same task and result
   contracts.
 - **`utils/process_control.py`** owns platform-specific process, lock, and
   teardown primitives. Keep `fcntl`, `msvcrt`, and `ctypes` process internals
-  there.
+  there. Two `ctypes` users sit outside it on purpose, neither doing process
+  control: `utils/prompt_files.py` removes prompt files on Windows through
+  handles it holds open, and `utils/landlock_exec.py` makes the Landlock
+  syscalls in a stdlib-only `-I -S` interpreter that must not import this
+  package (docs/development/runtime.md#process-primitives). A new `ctypes` use
+  needs the same kind of reason.
 
 Imports must be side-effect free: parsing, `sys.argv` reads, and I/O belong in
-`main`, not module scope. Multiple dispatch targets run in one interpreter.
+`main`, not module scope. Multiple dispatch targets run in one interpreter, so a
+module-level cache is declared through `utils/process_state.process_cache` and
+emptied only by the suite (docs/development/dispatcher.md#import-safety).
 
 ## CLI, paths, and lifecycle contracts
 
@@ -128,7 +161,8 @@ silently become the validator.
 be refused explicitly. Do not add a permission bypass to make a provider run;
 profile-scoped exceptions and sandbox fallback conditions are specified in the
 [provider contract](../../docs/development/providers.md#read-only-provider-contracts)
-and guarded by `tests/test_read_only_modes.py`. `agent-write` also requires an
+and guarded by `tests/test_read_only_modes.py`, which reads its table from
+`tests/read_only_modes.yaml`, never from a config layer. `agent-write` also requires an
 explicit declaration consistent with real file-edit support and prompt
 transport. Keep runner environments isolated from the skill's Python venv.
 
@@ -203,7 +237,7 @@ rules. Each has a contents list; load the sections relevant to the change.
   [Write boundaries and tracking](../../docs/development/write-safety.md).
 - **Check findings, accepted checks, human-task answers and dependencies:**
   [Checks and human task gates](../../docs/development/checks.md).
-- **Adapters, configuration, permission profiles, output and environments:**
+- **Adapters (adding one included), configuration, permission profiles, output and environments:**
   [Provider contracts](../../docs/development/providers.md).
 - **Grouping, snapshots, aggregation, result recovery, report decisions:**
   [Review artifacts and reports](../../docs/development/review-results.md).
@@ -211,6 +245,39 @@ rules. Each has a contents list; load the sections relevant to the change.
   [Status views and progress](../../docs/development/status.md).
 - **Tool supervision, stop hooks, report relay, native apply counts:**
   [Host result delivery](../../docs/development/host-reporting.md).
+- **Bracket markers (`[BATCH_DONE]` and the rest): who emits, who reads, never rename:**
+  [Marker registry](../../docs/development/markers.md), generated.
+- **Makefile targets, container lanes and spend guards, package and release gates:**
+  [Makefile lanes and release gates](../../docs/development/release-gates.md).
+
+## Comments and docstrings
+
+**A comment states the rule or the reason, in the present tense, and points to the doc
+section that holds the rest.** It says what must stay true and why a reader may not remove or
+reorder the code; it does not say what the code used to do.
+
+- Keep every "why" that guards a write-safety, sandbox, secret-scrubbing or containment
+  decision, in the comment itself. Move only the story: the incident, the run that found it,
+  the date, the round that fixed it.
+- Write the invariant in a few lines and end with a pointer, `docs/development/<topic>.md#<anchor>`,
+  where the history is. If the history is not there yet, add it there first, briefly.
+- Do not cite unpublished plans. `§7.2`, `fix round 14` and `plans/<name>.md` mean nothing to a
+  reader of a clone: root `plans/` is local-only. Cite the owning doc anchor, a test, or the code.
+  An example path in a usage string (`plans/my-plan.md`) is not a citation.
+- Do not narrate dates, live runs or racing runs, and do not state counts that a registry owns
+  (the adapter roster is discovered from `utils/providers/`).
+- A docstring documents the contract: what the caller passes, what comes back, what is refused.
+  Rule names that are the real vocabulary (`rule 9`, `rung 7`) stay.
+
+`tests/test_comment_citations.py` is the ratchet. It counts plan citations (`§N`, `fix round N`,
+`plans/*.md`) per file across `skills/multi-llm/**/*.py` (tests excluded), `Makefile`,
+`instructions/**`, `hosts/**` and the hand-written packaging sources (`packaging/<host>/*.py` and
+`*.mjs`, `packaging/opencode/src/**`; never the generated trees), and compares them with
+`tests/comment_citation_baseline.json`. A count may only
+go down: an increase fails naming the file. After removing citations, lower the baseline with
+`uv run --project skills/multi-llm -- python skills/multi-llm/tests/test_comment_citations.py --write`.
+Check that a comment-only change left the code alone by comparing each changed module's syntax tree
+with docstrings stripped (`ast.dump`) before and after.
 
 ## Maintaining this guide
 

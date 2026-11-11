@@ -32,10 +32,10 @@ from utils.commit_report import (  # noqa: E402
     commit_prompt_context,
     review_prompt_name,
 )
-from utils.llm_client import (  # noqa: E402
+from utils.llm_client import invoke_with_file_output  # noqa: E402
+from utils.prompt_channels import (  # noqa: E402
     FILE_OUTPUT_LOCATION,
     STDOUT_OUTPUT_LOCATION,
-    invoke_with_file_output,
     render_working_limits,
 )
 from utils.output_handler import output_dir_path  # noqa: E402
@@ -331,7 +331,8 @@ def _slot(tmp_path, monkeypatch, state: Dict[str, Any] | None, *, record_count: 
         return {"success": True, "data": [], "source": "file", "output_file": "", "details": {}}
 
     monkeypatch.setattr(rob, "get_provider", lambda _name: _NoProbeAdapter())
-    monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+    from utils import subagent_executor
+    subagent_executor._SANDBOX_PROBE_CACHE.clear()
     monkeypatch.setattr(cro, "invoke_with_file_output", dispatch)
     monkeypatch.setattr(cro, "get_project_root", lambda _p: str(tmp_path))
     success, _issues, error = asyncio.run(cro.run_single_review(

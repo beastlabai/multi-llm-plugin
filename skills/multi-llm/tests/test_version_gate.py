@@ -43,8 +43,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tests.mock_launchers import launcher_file, write_launcher  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from utils import runner_preflight  # noqa: E402
 from utils.provider_registry import _PROVIDERS, load_base_config  # noqa: E402
 from utils.providers import base as base_module  # noqa: E402
+from utils.providers import child_env, version_gate  # noqa: E402
 from utils.providers.base import (  # noqa: E402
     VERSION_ABOVE_VERIFIED,
     VERSION_OK,
@@ -179,7 +181,8 @@ class TestOneComparison:
         `version_tuple`, so a build cannot be "too old" for the refusal and fine
         for the report — which is exactly the drift a second copy allows.
         """
-        assert base_module._version_below.__module__ == base_module.__name__
+        assert version_gate._version_below.__module__ == version_gate.__name__
+        assert version_gate._version_below is base_module._version_below
         pairs = [
             ("1.9.9", "2.0.0", True),
             ("2.0.0", "2.0.0", False),
@@ -348,7 +351,7 @@ class TestTheCeilingIsReachableFromConfig:
     def test_config_supplies_a_ceiling_the_adapter_does_not_declare(self):
         provider = _Gated()
         with patch.object(
-            base_module, "_provider_block",
+            child_env, "_provider_block",
             lambda name, anchor=None: {"max_version_exclusive": "2.0.0"},
         ):
             assert version_ceiling(provider) == "2.0.0"
@@ -357,7 +360,7 @@ class TestTheCeilingIsReachableFromConfig:
     def test_config_wins_over_the_class_declaration(self):
         provider = _Gated(max_version_exclusive="9.0.0")
         with patch.object(
-            base_module, "_provider_block",
+            child_env, "_provider_block",
             lambda name, anchor=None: {"max_version_exclusive": "2.0.0"},
         ):
             assert version_ceiling(provider) == "2.0.0"
@@ -366,7 +369,7 @@ class TestTheCeilingIsReachableFromConfig:
         provider = _Gated()
         for value in ("", "   ", None, [], {}):
             with patch.object(
-                base_module, "_provider_block",
+                child_env, "_provider_block",
                 lambda name, anchor=None, _v=value: {"max_version_exclusive": _v},
             ):
                 assert version_ceiling(provider) == ""
@@ -383,7 +386,7 @@ class TestTheCeilingIsReachableFromConfig:
         provider = _Gated()
         for value in ("latest", True, "vNext"):
             with patch.object(
-                base_module, "_provider_block",
+                child_env, "_provider_block",
                 lambda name, anchor=None, _v=value: {"max_version_exclusive": _v},
             ):
                 assert version_ceiling(provider) == ""
@@ -400,14 +403,14 @@ class TestTheCeilingIsReachableFromConfig:
             ("  2.0.0  ", "2.0.0"),
         ):
             with patch.object(
-                base_module, "_provider_block",
+                child_env, "_provider_block",
                 lambda name, anchor=None, _v=value: {"max_version_exclusive": _v},
             ):
                 assert version_ceiling(provider) == expected
                 assert version_verdict(provider, "1.2.3").state == VERSION_OK
                 assert version_verdict(provider, "2.0.0").state == VERSION_TOO_NEW
         with patch.object(
-            base_module, "_provider_block",
+            child_env, "_provider_block",
             lambda name, anchor=None: {"max_version_exclusive": "2026.08.11-e8db854"},
         ):
             assert version_ceiling(provider) == "2026.08.11"
@@ -426,7 +429,7 @@ class TestTheCeilingIsReachableFromConfig:
         provider = _Gated()
         for value in ("release-2.0", "1.x", "2.0.0 or later", "build 2.0.0"):
             with patch.object(
-                base_module, "_provider_block",
+                child_env, "_provider_block",
                 lambda name, anchor=None, _v=value: {"max_version_exclusive": _v},
             ):
                 assert version_ceiling(provider) == ""
@@ -618,7 +621,7 @@ class TestTheSharedFlagGate:
 
     def test_an_adapter_declaring_no_binary_never_spawns(self, monkeypatch):
         monkeypatch.setattr(
-            base_module, "read_help_tokens",
+            version_gate, "read_help_tokens",
             lambda *a, **k: pytest.fail("no probe may run without a declared binary"),
         )
         assert _Gated().supports_flag("--x") is False
@@ -646,7 +649,7 @@ class TestTheExemptionIsDeclaredNotAssumed:
 
     def test_an_exempt_flag_is_supported_without_any_probe(self, monkeypatch):
         monkeypatch.setattr(
-            base_module, "read_help_tokens",
+            version_gate, "read_help_tokens",
             lambda *a, **k: pytest.fail("an exempt flag must not spawn a probe"),
         )
         provider = _Gated(
@@ -693,21 +696,23 @@ class TestTheOneOffsAreGone:
     """The absorption, asserted structurally rather than by reading the diff."""
 
     def test_no_adapter_keeps_a_private_help_sniff_of_the_absorbed_three(self):
-        """L7/M7 (claude) and M1 (cursor) hand their gate to the shared one.
+        """L7/M7 (claude) and M1 (cursor) hand their gate to the shared one, and
+        so does opencode's ``--pure`` sniff, the last local copy (its
+        ``help_argv`` reads ``opencode run --help``).
 
-        Named by module rather than by roster on purpose: these are the three
-        §5.4.1 one-offs M14 was scheduled to absorb, and this asserts the
-        absorption happened. A *fourth* adapter growing its own copy is a
+        Named by module rather than by roster on purpose: these are the
+        §5.4.1 one-offs scheduled for absorption, and this asserts the
+        absorption happened. Another adapter growing its own copy is a
         different question, answered by the next test.
         """
-        from utils.providers import claude_code, cursor_agent
+        from utils.providers import claude_code, cursor_agent, opencode
 
-        for module in (claude_code, cursor_agent):
+        for module in (claude_code, cursor_agent, opencode):
             for attribute in ("_read_help_tokens", "_probe_help_tokens",
                               "_help_flag_tokens", "_gateable_binary"):
                 assert not hasattr(module, attribute), (
                     f"{module.__name__}.{attribute} is back — the gate has one "
-                    f"implementation, in providers/base.py"
+                    f"implementation, in providers/version_gate.py"
                 )
         # `supports_flag` is the base's, not an override.
         assert (
@@ -745,7 +750,7 @@ class TestThePreflightRefusalIsUnchanged:
     def _detect(self, provider_name, monkeypatch, streams):
         executor.reset_version_cache()
         monkeypatch.setattr(
-            executor, "_run_probe",
+            runner_preflight, "_run_probe",
             lambda argv: subprocess.CompletedProcess(argv, 0, *streams),
         )
         return executor._detect_version(
@@ -776,7 +781,7 @@ class TestThePreflightRefusalIsUnchanged:
     def test_a_configured_ceiling_refuses_through_the_same_path(self, monkeypatch):
         name = next(n for n, p in sorted(_PROVIDERS.items()) if p.version_cmd)
         monkeypatch.setattr(
-            base_module, "_provider_block",
+            child_env, "_provider_block",
             lambda block_name, anchor=None: {"max_version_exclusive": "2.0.0"},
         )
         with pytest.raises(executor.RunnerRejected) as excinfo:

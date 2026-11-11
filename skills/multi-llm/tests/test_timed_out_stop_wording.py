@@ -21,6 +21,7 @@ if str(SKILL_DIR) not in sys.path:
 
 from tests.test_write_executor import _patch_edit, env  # noqa: E402,F401
 from utils import subagent_executor as executor  # noqa: E402
+from utils import dispatch_spawn  # noqa: E402
 
 
 def _edits_then_times_out(env, monkeypatch) -> None:
@@ -32,7 +33,7 @@ def _edits_then_times_out(env, monkeypatch) -> None:
         real(**kwargs)
         return executor._Capture(timed_out=True, argv=["codex"], duration=0.01)
 
-    monkeypatch.setattr(executor, "_spawn", spawn)
+    monkeypatch.setattr(dispatch_spawn, "_spawn", spawn)
 
 
 class TestATimedOutPartialApplication:
@@ -77,7 +78,7 @@ class TestATimedOutPartialApplication:
             return executor._Capture(exit_code=1, stderr="boom", argv=["codex"],
                                      duration=0.01)
 
-        monkeypatch.setattr(executor, "_spawn", spawn)
+        monkeypatch.setattr(dispatch_spawn, "_spawn", spawn)
         result = env.scheduler([env.apply_task(0)]).run()
 
         assert result.outcomes[0].write_outcome == executor.WRITE_PARTIAL

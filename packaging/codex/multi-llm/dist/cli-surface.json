@@ -470,6 +470,26 @@
   "shell_missing": "Refused before anything ran: this tool starts the dispatcher through a login `{shell}`, and no `{shell}` was found on {platform} along this PATH: {path}. A POSIX bash on PATH is a prerequisite of this tool (on Windows, Git Bash). Install one, put it on PATH, and restart the host. Report this to the user; running without a login shell is not offered, because the provider CLIs would start without the credentials your profile sets.",
   "runbook": {
     "core_end_marker": "MULTI_LLM_CORE_END:",
-    "banner_opening": "=== READ THIS FIRST"
+    "banner_opening": "=== READ THIS FIRST",
+    "pages": {
+      "option": "--page",
+      "size_option": "--page-size",
+      "header": "[CORE_PAGE] mode={mode} page={page}/{pages} sha={sha} bytes={bytes}",
+      "end": "[CORE_PAGE_END] mode={mode} page={page}/{pages} sha={sha}",
+      "sha_chars": 12,
+      "size_default": 16000,
+      "size_min": 2000,
+      "rule": "`runbook` holds page {page} of the {mode} runbook, which is {pages} pages of at most {size} bytes. You hold the whole runbook only when every page from 1 to {pages} arrived whole: each opens with `[CORE_PAGE] mode={mode} page=<i>/{pages} sha={sha} bytes=<n>` and closes with `[CORE_PAGE_END] mode={mode} page=<i>/{pages} sha={sha}`, every one with the same sha, and one of them carries the line that closes the core, `MULTI_LLM_CORE_END: {mode}`. To fetch page <i>, call this tool again with mode \"{mode}\" and extra_flags [\"--page\", \"<i>\", \"--page-size\", \"{size}\"] (`next_page` is that call for the next page): a call whose extra_flags carry --page returns that page and nothing else, and never starts, resumes or repeats a run. A note from your host anywhere in a result that it truncated or omitted part of that result means its page is incomplete, even with both of its lines there: a host that cuts the middle keeps the head and the end. {again} Do not run any step of the runbook until you hold every page.",
+      "rule_one": "`runbook` holds the whole {mode} runbook, on one page of at most {size} bytes: there is no other page to fetch. You hold it only when it arrived whole: it opens with `[CORE_PAGE] mode={mode} page=1/1 sha={sha} bytes=<n>` and closes with `[CORE_PAGE_END] mode={mode} page=1/1 sha={sha}`. A note from your host anywhere in a result that it truncated or omitted part of that result means its page is incomplete, even with both of its lines there: a host that cuts the middle keeps the head and the end. {again} Do not run any step of the runbook until you hold all of it.",
+      "again": "Fetch it again at --page-size {smaller} (`smaller` is that call, for page 1): a new size cuts the runbook afresh, so start again at page 1 with that size and keep it for every later page; never combine pages of two sizes.",
+      "floor": "--page-size {size} is already the smallest this tool serves, so your host cannot pass a page whole: stop and tell the user.",
+      "served": "This call fetched page {page} of {pages} of the {mode} runbook into `runbook`, and nothing else: it started, resumed and repeated no run. `runbook_pages` says when you hold the whole runbook."
+    },
+    "references": "Every `references/<file>.md` this runbook names, or a file it sends you to names, is the file of that name in `{dir}`: read it there when a step says to.",
+    "core_file": {
+      "option": "--to-file",
+      "marker": "[CORE_FILE]",
+      "read": "The {mode} core instructions, this host's capability verbs included, are in the file the line above names. Read that file in full, through line {lines}, before your next command or call: a read that stops early names the offset to go on from. Do not run any step of it until you have read all of it."
+    }
   }
 }

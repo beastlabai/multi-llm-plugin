@@ -1,0 +1,347 @@
+schema_version: 1
+provider: codex
+cli_version: "0.167.0"
+captured: "2026-11-10"
+method: >-
+  §6 step 5, captured 2026-11-10 by tests/fixtures/row_capture/ (its README is
+  the recipe; `batch.sh codex` reruns this set, $0) in the pinned image built
+  from tests/container/Dockerfile at the cli-versions.lock pins
+  (`mllm-e2e:local`, image sha256:e3c989b495cf…, `codex --version` =
+  `codex-cli 0.167.0`), one container per row, `--network none`, uid 10001,
+  read-only root, and NO credential: the only key anywhere is the PATH
+  wrapper's per-exec `mllm-stub-<id>` in STUB_API_KEY, meaningful only on
+  127.0.0.1. The server ran inside the container on 127.0.0.1:8099:
+  `/rig/stub_server.py` with the kit's `success` or `empty-answer` scenario,
+  the kit's `scriptserver.py` for `multi-assistant`, and `/rig/failserver.py
+  --mode <m>` for every failure row. The CLI was driven through the PATH
+  wrapper (`/opt/mllm/bin/codex` IS wrapper.py), so redirect.yaml's codex row
+  applied itself: a per-invocation CODEX_HOME seeded with
+  `home_seed/codex/.codex/config.toml` (a `[model_providers.stub]` block at the
+  stub's `/s/<id>/v1` session prefix, Responses wire API) and `auth.json`.
+  argv is `CodexProvider.build_command`'s output for a 230 s dispatch timeout,
+  verbatim (`argv.json`, held there by tests/test_row_capture_kit.py): `codex
+  exec --sandbox workspace-write --json -c features.plugins=false --ephemeral
+  --skip-git-repo-check --model gpt-5.5 <4,844-byte review prompt>`. stdin
+  /dev/null, cwd a git repository holding plans/auth-feature.md, never wrapped
+  in timeout(1). The bytes are raw; `requests` counts the POSTs the server
+  logged. Every stderr here starts with `Reading additional input from
+  stdin...`, codex's notice that it read the empty stdin; it is the whole of
+  stderr on every row but `multi-assistant`.
+notes: >-
+  The rows live in `rows/` rather than beside the version folders: those are
+  the stream captures `test_provider_codex.py` and `test_codex_stream_audit.py`
+  read, and a digit-named folder is what `verified_version` is held to
+  (`test_the_verified_version_is_the_newest_recapture`), so this set does not
+  move the pin. 0.167.0 is newer than `verified_version` (0.163.0); every row
+  below parsed and classified with no adapter change.
+rows:
+  success:
+    stdout: rows/success.stdout.txt
+    stderr: rows/success.stderr.txt
+    exit_code: 0
+    wall_s: 5.28
+    requests: 1
+    notes: >-
+      The `--json` event stream: `thread.started`, `turn.started`, one
+      `item.completed` whose item is an `agent_message` carrying the answer as a
+      JSON-escaped string, then `turn.completed` with usage. The parser reads
+      the last `agent_message` text and extracts the document from it.
+    expect:
+      lane_status: {lane_a: ok, lane_b: ok}
+      salvage: answer
+      success: true
+      data:
+        - {id: "S001", title: "Bound the retry ladder", severity: "high"}
+        - {id: "S002", title: "Strip the vendor token", severity: "medium"}
+      raw_contains: ['"type":"agent_message"', '"type":"turn.completed"']
+      classify_failure: null
+
+  truncated:
+    stdout: rows/truncated.stdout.txt
+    stderr: rows/truncated.stderr.txt
+    exit_code: 1
+    wall_s: 6.48
+    requests: 6
+    notes: >-
+      failserver `--mode trunc`: a cut SSE stream. codex reconnects five times
+      (six requests in 6.5 s), printing each attempt as an `error` event
+      (`Reconnecting... n/5 (stream disconnected before completion: stream
+      closed before response.completed)`), then `turn.failed` and exit 1. The
+      whole diagnosis is on stdout. Nothing classifies it (`stream
+      disconnected` is no connection marker), so both lanes treat it as a
+      plain failed run.
+    expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
+      salvage: none
+      success: false
+      error_contains: ["Codex reported an error: Reconnecting... 1/5"]
+      raw_contains: ["stream closed before response.completed", '"type":"turn.failed"']
+      classify_failure: null
+
+  ephemeral-only:
+    stdout: rows/ephemeral-only.stdout.txt
+    stderr: rows/ephemeral-only.stderr.txt
+    exit_code: 0
+    wall_s: 5.28
+    requests: 1
+    notes: >-
+      The stub answered the empty string (the kit's `empty-answer` scenario).
+      codex accepts it as a finished turn and exits **0**: an `agent_message`
+      with `"text":""`, then `turn.completed`. Every record is one the parser
+      skips, so the run is a failure (`Empty text response`), not an empty
+      success. It is also the only exit-0 failure the rig produces, so the
+      `exit-zero-failure` row grades these same bytes.
+    expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
+      salvage: none
+      success: false
+      error_contains: ["Empty text response"]
+      raw_contains: ['"type":"agent_message","text":""']
+      classify_failure: null
+
+  multi-assistant:
+    stdout: rows/multi-assistant.stdout.txt
+    stderr: rows/multi-assistant.stderr.txt
+    exit_code: 0
+    wall_s: 5.28
+    requests: 2
+    notes: >-
+      Captured, not synthesized: the kit's `scriptserver.py` answered the
+      first turn with a decoy text and a `get_goal` call (`get_goal` because
+      codex runs it with no shell and no sandbox), and the request carrying
+      its output with the findings. codex prints TWO `agent_message` items,
+      the first reading `FIRST ANSWER (must NOT be selected)` above a D999
+      array. It prints no item for the function call itself; the tool's
+      refusal (`Goal tools require a persistent thread`, since `--ephemeral`)
+      is a log line on stderr, and it went back to the model as the call's
+      output. The parser takes the LAST message.
+    expect:
+      lane_status: {lane_a: ok, lane_b: ok}
+      salvage: answer
+      success: true
+      data:
+        - {id: "S001", title: "Bound the retry ladder", severity: "high"}
+        - {id: "S002", title: "Strip the vendor token", severity: "medium"}
+      raw_contains: ["FIRST ANSWER (must NOT be selected)", "Goal tools require a persistent thread"]
+      classify_failure: null
+
+  error-envelope:
+    stdout: rows/error-envelope.stdout.txt
+    stderr: rows/error-envelope.stderr.txt
+    exit_code: 1
+    wall_s: 6.39
+    requests: 6
+    notes: >-
+      failserver `--mode errbody`: HTTP 200 whose body is an error object
+      carrying the 401 wording. codex is reading an SSE stream, so the body is
+      no event at all: it reports the same `stream closed before
+      response.completed` as `truncated`, reconnects five times and exits 1.
+      The vendor's wording is lost (it is nowhere in the capture), so nothing
+      can classify the failure as the auth error the body named.
+    expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
+      salvage: none
+      success: false
+      error_contains: ["stream disconnected before completion"]
+      raw_contains: ["stream closed before response.completed"]
+      classify_failure: null
+
+  exit-zero-failure:
+    stdout: rows/ephemeral-only.stdout.txt
+    stderr: rows/ephemeral-only.stderr.txt
+    exit_code: 0
+    wall_s: 5.28
+    requests: 1
+    notes: >-
+      The same capture as `ephemeral-only`: codex exits 0 on an empty answer,
+      and on nothing else the rig can inject. Every failserver mode (`trunc`,
+      `errbody`, `500`, `401`, `429`, `404`, `ctx`, `empty`) exits **1** with a
+      `turn.failed` event. `EXIT0_CLASSIFIABLE` is true for codex, so the
+      fan-out reads this exit 0 and gives `runner_error` rather than stopping.
+    expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
+      salvage: none
+      success: false
+      error_contains: ["Empty text response"]
+      classify_failure: null
+
+  stdout-error:
+    stdout: rows/stdout-error.stdout.txt
+    stderr: rows/stdout-error.stderr.txt
+    exit_code: 1
+    wall_s: 24.02
+    requests: 30
+    notes: >-
+      failserver `--mode 500`, fail-forever. Exit 1, and the whole diagnosis is
+      on **stdout** as `error` and `turn.failed` events; stderr holds only the
+      stdin notice. codex does not quote the vendor's 500 sentence: it
+      substitutes its own `We’re currently experiencing high demand, which may
+      cause temporary errors.` (with a curly apostrophe). The retry envelope is
+      measured here: 30 requests in 24.0 s across the five reconnects, which
+      is `internal_retries` (30 requests, 25 s) exactly. That sentence is
+      codex's gloss of the 500, and the shared server table carries it, so the
+      row classifies `server_error`; both lanes keep their transport-retry
+      statuses (the fan-out puts `server_error` on `runner_error`'s rung, the
+      executor forwards no server verdict).
+    expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
+      salvage: none
+      success: false
+      error_contains: ["experiencing high demand"]
+      raw_contains: ["We’re currently experiencing high demand, which may cause temporary errors.", '"type":"turn.failed"']
+      classify_failure: "server_error"
+
+  empty:
+    not_applicable: >-
+      Zero bytes on both channels never happened: codex prints
+      `thread.started` and `turn.started` before its first request and its
+      stdin notice on stderr at start-up, so the smallest capture in this set
+      is `rate-limit`, 289 bytes on stdout and 39 on stderr. Every one of the
+      eleven runs exited on its own, the longest after 24.7 s.
+
+  auth-error:
+    stdout: rows/auth-error.stdout.txt
+    stderr: rows/auth-error.stderr.txt
+    exit_code: 1
+    wall_s: 6.28
+    requests: 6
+    notes: >-
+      failserver `--mode 401`. codex RETRIES a 401: five reconnects, six
+      requests in 6.3 s, each `error` event quoting `unexpected status 401
+      Unauthorized: Incorrect API key provided: sk-stub***. …, url: <the stub's
+      session URL>`. `Unauthorized` is an auth pattern, so it classifies
+      `auth_failed` and both lanes stop.
+    expect:
+      lane_status: {lane_a: auth_failed, lane_b: auth_failed}
+      salvage: none
+      success: false
+      error_contains: ["401 Unauthorized"]
+      raw_contains: ["Incorrect API key provided: sk-stub***"]
+      classify_failure: "auth_failed"
+
+  rate-limit:
+    stdout: rows/rate-limit.stdout.txt
+    stderr: rows/rate-limit.stderr.txt
+    exit_code: 1
+    wall_s: 0.22
+    requests: 1
+    notes: >-
+      failserver `--mode 429` (no Retry-After), fail-forever. codex does NOT
+      retry it: one request, 0.22 s, then `exceeded retry limit, last status:
+      429 Too Many Requests` and exit 1 (the declared envelope's
+      `retries_rate_limit: false`). The vendor's sentence is not quoted; the
+      status line classifies it.
+    expect:
+      lane_status: {lane_a: rate_limited, lane_b: rate_limited}
+      salvage: none
+      success: false
+      error_contains: ["429 Too Many Requests"]
+      raw_contains: ["exceeded retry limit, last status: 429 Too Many Requests"]
+      classify_failure: "rate_limited"
+
+  invalid-model:
+    stdout: rows/invalid-model.stdout.txt
+    stderr: rows/invalid-model.stderr.txt
+    exit_code: 1
+    wall_s: 0.27
+    requests: 1
+    notes: >-
+      failserver `--mode 404`, the vendor body naming the model. One request,
+      no retry, and the sentence reaches stdout verbatim, naming `gpt-5.5`, so
+      a stray suffix on a configured model is findable.
+    expect:
+      lane_status: {lane_a: invalid_model, lane_b: invalid_model}
+      salvage: none
+      success: false
+      error_contains: ["does not exist or you do not have access to it"]
+      raw_contains: ["The model `gpt-5.5` does not exist or you do not have access to it."]
+      classify_failure: "invalid_model"
+
+  context-overflow:
+    stdout: rows/context-overflow.stdout.txt
+    stderr: rows/context-overflow.stderr.txt
+    exit_code: 1
+    wall_s: 0.27
+    requests: 1
+    notes: >-
+      failserver `--mode ctx` (400 `context_length_exceeded`). One request; the
+      whole vendor body is quoted as a JSON string inside the `error` event's
+      message.
+    expect:
+      lane_status: {lane_a: context_length_exceeded, lane_b: context_length_exceeded}
+      salvage: none
+      success: false
+      error_contains: ["maximum context length is 8192 tokens"]
+      raw_contains: ['\"code\": \"context_length_exceeded\"']
+      classify_failure: "context_length_exceeded"
+
+  zero-body:
+    stdout: rows/zero-body.stdout.txt
+    stderr: rows/zero-body.stderr.txt
+    exit_code: 1
+    wall_s: 24.67
+    requests: 30
+    notes: >-
+      Not a canonical row. failserver `--mode empty`: the request is accepted
+      and the socket closed with zero bytes written. The same 30-request,
+      ~25 s envelope as `stdout-error`, each attempt reported as `stream
+      disconnected before completion: error sending request`, which no
+      connection marker matches, so it classifies None.
+    expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
+      salvage: none
+      success: false
+      error_contains: ["error sending request"]
+      raw_contains: ["stream disconnected before completion: error sending request"]
+      classify_failure: null
+
+  # ----- synthetic: stderr shapes no capture shows yet ---------------------- #
+
+  hook-command-not-found:
+    stdout: rows/stdout-error.stdout.txt
+    stderr: rows/hook-command-not-found.stderr.txt
+    exit_code: 1
+    synthesized: true
+    provenance: >-
+      SYNTHETIC, built 2026-11-10: `stdout-error`'s stdout and stderr as
+      captured, plus one stderr line `bash: line 1: uvx: command not found`,
+      the refusal a shell prints when an MCP server or hook the CLI starts is
+      missing. No capture runs codex with MCP servers or hooks configured.
+    notes: >-
+      The classifier still reads the shell's phrase as `spawn_failed`, but the
+      run made progress (its events on stdout), so both lanes take the adapter's
+      reading with that phrase blanked (`failure_classifier.launch_refusal`):
+      the 500 gloss, `server_error`, one transport retry each, where the
+      batch would otherwise have failed whole.
+    expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
+      salvage: none
+      success: false
+      error_contains: ["experiencing high demand"]
+      raw_contains: ["bash: line 1: uvx: command not found"]
+      classify_failure: "spawn_failed"
+
+  bwrap-unmeasured:
+    stdout: rows/bwrap-unmeasured.stdout.txt
+    stderr: rows/bwrap-unmeasured.stderr.txt
+    exit_code: 1
+    synthesized: true
+    provenance: >-
+      SYNTHETIC, built 2026-11-10: the first two lines of `rate-limit`'s stdout
+      (`thread.started`, `turn.started`) and `stdout-error`'s stderr plus one
+      bubblewrap refusal no capture holds, `bwrap: Creating new namespace
+      failed: Operation not permitted`.
+    notes: >-
+      Not one of `SANDBOX_MARKERS`' measured refusals, so not batch-fatal: the
+      tables read `permission_denied` (the fan-out stops the slot, the
+      deliberate exception), and the executor records `runner_error`, one
+      transport retry, with a reason that names `multi_llm.py doctor`
+      (`attempt_classifier._sandbox_hinted`); the fan-out's error line carries
+      the same pointer.
+    expect:
+      lane_status: {lane_a: permission_denied, lane_b: runner_error}
+      salvage: none
+      success: false
+      error_contains: ["No text events found in output"]
+      raw_contains: ["bwrap: Creating new namespace failed"]
+      classify_failure: "permission_denied"

@@ -16,16 +16,10 @@ as the ready section prints it above its command.
 
 from __future__ import annotations
 
-import json
 
-import pytest
-
-from tests.test_check_gate_fixture import CHECK_GATE, DENY, PLAN, _policy  # noqa: E402
-from tests.test_implement_stop_account import make_repo  # noqa: E402
 from tests.test_write_executor import FakeState, env  # noqa: E402,F401 - the fixture
 
 import multi_llm  # noqa: E402
-from utils import provider_registry as registry  # noqa: E402
 from utils import run_status  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
 from utils import write_batch_scheduler as scheduler  # noqa: E402
@@ -52,18 +46,6 @@ def _util(capsys, *argv):
     code = multi_llm.main(["util", *argv])
     captured = capsys.readouterr()
     return code, captured.out, captured.err
-
-
-@pytest.fixture
-def repo(tmp_path, monkeypatch):
-    obj = make_repo(tmp_path, monkeypatch, PLAN)
-    _policy(obj, DENY)
-    monkeypatch.setenv("MOCK_LLM_WRITE_IDS", json.dumps(
-        [f"T00{n}" for n in range(1, 8)]))
-    monkeypatch.setenv("MOCK_LLM_WRITE_CHECK_IF_PROMPT_HAS", CHECK_GATE)
-    yield obj
-    registry._config = None
-    registry._config_key = None
 
 
 def _native_stop(repo, capsys) -> str:

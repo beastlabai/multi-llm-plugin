@@ -53,6 +53,7 @@ rows:
       (extract_json_from_text over the whole of stdout) is the path a normal run
       takes — not the marker path the unit tests exercise.
     expect:
+      lane_status: {lane_a: ok, lane_b: ok}
       success: true
       data:
         - {id: "S001", title: "Bound the retry ladder", severity: "high"}
@@ -84,6 +85,7 @@ rows:
       gloss (asserted below), and both classify on litellm's words instead of
       on it.
     expect:
+      lane_status: {lane_a: null, lane_b: unparseable_result, by_design: "not EXIT0_CLASSIFIABLE: aider's diagnostics are plain lines in the stream that carries the answer, and an answer can quote them verbatim; the fan-out stops on it, the executor keeps its one parse-failure retry"}
       success: false
       # D4.1: the litellm line itself, not "No JSON found".
       error_contains: ["litellm.InternalServerError: InternalServerError: OpenAIException - Connection error."]
@@ -121,6 +123,7 @@ rows:
       `reasoning_content` in), because stub_server.py serves no `reasoning_content`
       field; the marker bytes are still aider's, from `replace_reasoning_tags`.
     expect:
+      lane_status: {lane_a: null, lane_b: unparseable_result, by_design: "not EXIT0_CLASSIFIABLE: aider's diagnostics are plain lines in the stream that carries the answer, and an answer can quote them verbatim; the fan-out stops on it, the executor keeps its one parse-failure retry"}
       success: false
       error_contains: ["Empty answer after ANSWER marker"]
       raw_contains: ["► **THINKING**", "► **ANSWER**", "Tokens: 1 sent"]
@@ -140,6 +143,7 @@ rows:
       first-wins or silent concatenation — the muse trap. Same tag mechanism as
       `ephemeral-only`; the markers are aider's rendering, not text pasted here.
     expect:
+      lane_status: {lane_a: ok, lane_b: ok}
       success: true
       data:
         - {id: "S001", title: "Bound the retry ladder", severity: "high"}
@@ -164,6 +168,7 @@ rows:
       `exit_zero_failure_markers`. **This is the one row where that table is
       load-bearing**, and it is consulted last by construction (§7.2 step 6).
     expect:
+      lane_status: {lane_a: null, lane_b: unparseable_result, by_design: "not EXIT0_CLASSIFIABLE: aider's diagnostics are plain lines in the stream that carries the answer, and an answer can quote them verbatim; the fan-out stops on it, the executor keeps its one parse-failure retry"}
       success: false
       error_contains: ["litellm.APIError: APIError: OpenAIException -"]
       raw_contains: ["litellm.APIError: APIError: OpenAIException - "]
@@ -184,14 +189,15 @@ rows:
       aider's gloss for a 5xx contains `overloaded`, a base rate-limit pattern,
       and the auth/rate step precedes both the server table and the exit-0
       markers. `AiderProvider._ADAPTER_GLOSS_LINES` now excises that one gloss
-      line before the rule runs, so the verdict is `runner_error`: the exit-0
-      marker `litellm.*Error`, consulted last. **Not** `server_error`, measured
-      and recorded rather than assumed — base.SERVER_ERROR_MARKERS spells the
-      phrase with separators (`internal server error`) while litellm prints the
-      class name `InternalServerError`, and this run carries no bare `500`.
-      Lane A puts `server_error` and `runner_error` on the same rung 4, so the
-      residual is the `Reason:` line's specificity, not the ladder.
+      line before the rule runs. litellm's class name `InternalServerError`
+      matches no server row (they spell the phrase with separators) and the run
+      carries no bare `500`, but it quotes OpenAI's 500 sentence, which the
+      shared server table carries, so the verdict is `server_error`, ahead of the
+      exit-0 marker `litellm.*Error` (consulted last). Lane A puts `server_error`
+      and `runner_error` on the same rung 4, and an exit 0 of this adapter is
+      not classified there at all, so the ladder is unmoved.
     expect:
+      lane_status: {lane_a: null, lane_b: unparseable_result, by_design: "not EXIT0_CLASSIFIABLE: aider's diagnostics are plain lines in the stream that carries the answer, and an answer can quote them verbatim; the fan-out stops on it, the executor keeps its one parse-failure retry"}
       success: false
       error_contains: ["litellm.InternalServerError: InternalServerError: OpenAIException - The server had an error"]
       raw_contains:
@@ -201,7 +207,7 @@ rows:
         # Still in the bytes, as in `truncated`: C7 excises the gloss at
         # classification time and never touches a capture.
         - "The API provider's servers are down or overloaded."
-      classify_failure: "runner_error"
+      classify_failure: "server_error"
       salvage: none
 
   stdout-error:
@@ -224,7 +230,7 @@ rows:
       a harness artifact rather than a CLI behaviour — and manufacturing one with
       `timeout(1)` is the known zero-byte-hang trap §6 step 3 forbids.
       parse_output's empty branch is still covered, by unit assertion in
-      test_providers.py::TestAiderProvider.
+      test_provider_aider.py::TestAiderProvider.
 
   auth-error:
     stdout: auth-error.stdout.txt
@@ -239,6 +245,7 @@ rows:
       appears anywhere in this capture, which is what the adapter's two added
       patterns are for.
     expect:
+      lane_status: {lane_a: null, lane_b: unparseable_result, by_design: "not EXIT0_CLASSIFIABLE: aider's diagnostics are plain lines in the stream that carries the answer, and an answer can quote them verbatim; the fan-out stops on it, the executor keeps its one parse-failure retry"}
       success: false
       error_contains: ["litellm.AuthenticationError: AuthenticationError: OpenAIException - Incorrect API key provided"]
       raw_contains:
@@ -259,6 +266,7 @@ rows:
       an executor-level re-dispatch of a rate-limited aider slot doubles a wait
       that already ran for a minute and a quarter (§7.6(b)'s rule 6b).
     expect:
+      lane_status: {lane_a: null, lane_b: unparseable_result, by_design: "not EXIT0_CLASSIFIABLE: aider's diagnostics are plain lines in the stream that carries the answer, and an answer can quote them verbatim; the fan-out stops on it, the executor keeps its one parse-failure retry"}
       success: false
       error_contains: ["litellm.RateLimitError: RateLimitError: OpenAIException - Rate limit reached"]
       raw_contains:
@@ -280,6 +288,7 @@ rows:
       dispatch. That asymmetry is what makes a stray `:effort` suffix findable at
       all, and it is why the assertion below is on the bare slug.
     expect:
+      lane_status: {lane_a: null, lane_b: unparseable_result, by_design: "not EXIT0_CLASSIFIABLE: aider's diagnostics are plain lines in the stream that carries the answer, and an answer can quote them verbatim; the fan-out stops on it, the executor keeps its one parse-failure retry"}
       success: false
       error_contains: ["litellm.NotFoundError: OpenAIException - The model `stub-model` does not exist"]
       raw_contains:
@@ -308,6 +317,7 @@ rows:
       carrying this capture as their recorded evidence. The bytes are unchanged;
       only the expectation moved, and it moved because the product did.
     expect:
+      lane_status: {lane_a: null, lane_b: unparseable_result, by_design: "not EXIT0_CLASSIFIABLE: aider's diagnostics are plain lines in the stream that carries the answer, and an answer can quote them verbatim; the fan-out stops on it, the executor keeps its one parse-failure retry"}
       success: false
       # D4.1's fallback wording, exactly: aider's own block states no counts,
       # and its `~103 of 0` lines are approximate, so neither number is used.
@@ -346,6 +356,7 @@ rows:
       rejected — not aider's own estimate. No `Tokens:` line: the request never
       completed, so every line is scanned.
     expect:
+      lane_status: {lane_a: null, lane_b: unparseable_result, by_design: "not EXIT0_CLASSIFIABLE: aider's diagnostics are plain lines in the stream that carries the answer, and an answer can quote them verbatim; the fan-out stops on it, the executor keeps its one parse-failure retry"}
       success: false
       error_contains:
         - "aider: prompt exceeds the model's context window (1,083,501 > 1,048,576 tokens)"
@@ -371,6 +382,7 @@ rows:
       the aider row whose RAW stdout passes the salvage gate (the array), so the
       `none` label is what shows the hook moved it.
     expect:
+      lane_status: {lane_a: null, lane_b: unparseable_result, by_design: "not EXIT0_CLASSIFIABLE: aider's diagnostics are plain lines in the stream that carries the answer, and an answer can quote them verbatim; the fan-out stops on it, the executor keeps its one parse-failure retry"}
       success: false
       error_contains:
         - "aider: prompt exceeds the model's context window (1,083,501 > 1,048,576 tokens)"
@@ -406,6 +418,7 @@ rows:
       (`none`); tests/test_aider_provider.py pins that the hook returns the
       answer whole with no prompt text.
     expect:
+      lane_status: {lane_a: null, lane_b: unparseable_result, by_design: "not EXIT0_CLASSIFIABLE: aider's diagnostics are plain lines in the stream that carries the answer, and an answer can quote them verbatim; the fan-out stops on it, the executor keeps its one parse-failure retry"}
       success: false
       error_contains: ["No JSON found in aider output", "Relevant files:"]
       raw_contains:

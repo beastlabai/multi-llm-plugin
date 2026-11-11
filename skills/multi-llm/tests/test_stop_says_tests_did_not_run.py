@@ -19,12 +19,7 @@ import pytest
 import multi_llm  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
 from utils.state_manager import get_or_create_state  # noqa: E402
-from tests.test_check_gate_fixture import (  # noqa: E402,F401
-    DENY,
-    _check,
-    _policy,
-    repo,
-)
+from tests.support.gate_fixture import DENY, _check, _policy  # noqa: E402
 
 #: The fixture's T002 is a check that reports problems: the line leads with
 #: it (fix round 24); "Nothing ran" only when no check ran.
@@ -121,8 +116,8 @@ Add the greeting.
 
 @pytest.fixture
 def check_first(tmp_path, monkeypatch):
-    from tests.test_check_gate_fixture import CHECK_GATE, FINDINGS
-    from tests.test_implement_stop_account import make_repo
+    from tests.support.gate_fixture import CHECK_GATE, FINDINGS
+    from tests.support.implement_world import make_repo
 
     obj = make_repo(tmp_path, monkeypatch, CHECK_FIRST)
     monkeypatch.setenv("MOCK_LLM_WRITE_IDS", json.dumps(["T001", "T002", "T003"]))
@@ -135,7 +130,6 @@ def check_first(tmp_path, monkeypatch):
     monkeypatch.setenv("MOCK_LLM_EDITS_IF_PROMPT_HAS", "Title: Edit: write the release note")
     yield obj
     registry._config = None
-    registry._config_key = None
 
 
 def test_a_stop_after_only_a_check_ran_says_nothing(check_first, capsys):
@@ -196,15 +190,14 @@ def test_a_finished_run_of_a_check_alone_runs_no_verify_command(
     """`_run_verification` asks the same question as the stop's line: a
     run whose tasks edited nothing has no edit for `driver.verify_command`
     to judge (it used to run on any dispatched batch)."""
-    from tests.test_check_gate_fixture import CHECK_GATE
-    from tests.test_implement_stop_account import make_repo
+    from tests.support.gate_fixture import CHECK_GATE
+    from tests.support.implement_world import make_repo
 
     repo = make_repo(tmp_path, monkeypatch, CHECK_ONLY)
     (tmp_path / "driver.yaml").write_text(
         "driver:\n  subagent_runner: codex:gpt-5.5\n"
         "  verify_command: \"touch verify-ran\"\n", encoding="utf-8")
     registry._config = None
-    registry._config_key = None
     monkeypatch.setenv("MOCK_LLM_WRITE_IDS", json.dumps(["T001"]))
     monkeypatch.setenv("MOCK_LLM_WRITE_CHECK_IF_PROMPT_HAS", CHECK_GATE)
     monkeypatch.setenv("MOCK_LLM_WRITE_CHECK", json.dumps(
@@ -215,7 +208,6 @@ def test_a_finished_run_of_a_check_alone_runs_no_verify_command(
         ]) == 0
     finally:
         registry._config = None
-        registry._config_key = None
     captured = capsys.readouterr()
     assert not (repo.root / "verify-ran").exists()
     assert NOT_SET not in captured.out + captured.err

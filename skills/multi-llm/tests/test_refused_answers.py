@@ -19,13 +19,9 @@ import json
 import pytest
 
 from tests.test_write_executor import FakeState, env  # noqa: F401
-from tests.test_write_batch_declined import (
-    SKIP_FLAGS,
-    _codex_08_respond,
-    _codex_08_tasks,
-    _PairRig,
-)
-from tests.test_write_executor_orchestrators import repo  # noqa: F401
+from utils.task_ledger import mirror_ids
+from tests.support.declined_world import SKIP_FLAGS, _PairRig, _codex_08_respond, _codex_08_tasks
+from tests.support.write_orchestrators import orchestrator_repo  # noqa: F401 - the repo fixture
 
 
 def _mirror(phase_dir):
@@ -73,7 +69,7 @@ class TestTheSchedulerRecordsTheRefusal:
         assert mirror["stop"]["kind"] == "answer-refused"
         assert "answers" not in mirror["stop"]
         # The earlier run's rows stand: this run dispatched nothing.
-        assert mirror["failed_task_ids"] == ["apply-batch-0"]
+        assert mirror_ids(mirror, "failed_task_ids") == ["apply-batch-0"]
         assert [row["task_id"] for row in mirror["tasks"]] == ["apply-batch-0"]
 
     def test_an_answer_for_another_batch_leaves_the_right_one_offered(self, env):
@@ -171,7 +167,7 @@ class TestImplementNamesARefusedAnswer:
     def test_an_answer_for_a_task_that_did_not_fail_is_the_error(
         self, tmp_path, monkeypatch, capsys,
     ):
-        from tests.test_check_gate_fixture import repo as gate_repo  # noqa: F401
+        from tests.support.gate_fixture import repo as gate_repo
         import multi_llm
 
         fixture = gate_repo.__wrapped__(tmp_path, monkeypatch)

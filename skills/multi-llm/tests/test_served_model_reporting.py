@@ -1,7 +1,7 @@
 """§3.6 (task L7) — `served_model` travels from the envelope to every report.
 
 The adapter half (``utils/providers/claude_code.py``) is covered by
-``tests/test_providers.py::TestClaudeCodeServedModel``. This file covers the
+``tests/test_provider_claude_code.py::TestClaudeCodeServedModel``. This file covers the
 *carriage*: adapter → ``invoke_with_provider`` → ``invoke_with_file_output`` →
 the fan-out result records → the markdown/HTML surfaces that name a model.
 
@@ -310,6 +310,8 @@ class TestFanOutResultRecords:
         assert set(result) == {
             "success", "output", "error", "prompt", "stdout", "stderr",
             "duration_seconds", "model_spec", "source",
+            # The slot's checks passed (review_lane.run_slot).
+            "checks_passed",
         }
 
 
@@ -724,7 +726,7 @@ class TestTheBypassProvenanceRidesTheServedModelCarriage:
             phase_name="review-plan", plan_path=str(plan),
             args=argparse.Namespace(
                 skip_validation=True, validation_model="auto", timeout=None,
-                internal_validation=False, force=False,
+                force=False,
             ),
             orchestrator_script="review_plan_orchestrator.py",
         ))

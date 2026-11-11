@@ -35,10 +35,10 @@ from utils import cli_common, report_check, run_status, status_file  # noqa: E40
 from utils import next_phase as np_  # noqa: E402
 from utils.output_handler import output_dir_path  # noqa: E402
 
-from tests.test_manual_tasks_on_completion import (  # noqa: E402,F401
-    P, TITLES, _complete_plan, _run, workdir,
-)
-from tests.test_report_check import Transcript, decision_of, run_check  # noqa: E402
+from tests.support.next_phase_world import P  # noqa: E402
+from tests.support.manual_tasks import TITLES, _complete_plan  # noqa: E402
+from tests.support.main_runs import _run  # noqa: E402
+from tests.support.transcripts import Transcript, decision_of, run_check  # noqa: E402
 
 CLOSE = "$multi-llm:multi-llm --implement plans/r.md --resume --human-task T008=done"
 LEAD = np_.manual_close_lead()
@@ -187,7 +187,7 @@ class TestTheNoticeDoesNotRepeatTheStep:
         and OpenCode 03 reordered the step after the notice's words. The
         notice leaves the next step to `user_next_step`; the text view a
         person reads keeps the line."""
-        from tests.test_next_phase import RT_ACTIONABLE, S, UP_TO_REVIEW_TASKS, _build
+        from tests.support.next_phase_world import RT_ACTIONABLE, S, UP_TO_REVIEW_TASKS, _build
 
         plan = _build(tmp_path, S(UP_TO_REVIEW_TASKS, files=RT_ACTIONABLE))
         monkeypatch.chdir(tmp_path)

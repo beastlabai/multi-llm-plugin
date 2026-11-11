@@ -55,7 +55,7 @@ sniffed**), an unknown id is exit 3, `require_executor_runner()` makes `--exec-s
 host whose entry declares no `agent-readonly`/`agent-write` runner, and
 `verb_sentence()` renders the one fixed phrasing per enum value that a shim bakes in.
 
-`subagent_executor.effective_ceiling()` takes the host leg of D3i's minimum from the same entry.
+`task_batch.effective_ceiling()` takes the host leg of D3i's minimum from the same entry.
 `references/host-capabilities.md` is **generated** by `hosts/render_capabilities.py` (`--check` is the CI
 staleness guard, byte-compared); `hosts/snippets/*.md` are the host-independent shim partials (uv
 preflight, `--detach` poll loop) `install-host` interpolates into any template
@@ -143,13 +143,183 @@ manifest, whose one non-zero `${CLAUDE_SKILL_DIR}` row is `SKILL.md` — the Cla
 shim, where the host expands the variable at load time. Each verb is resolved to exactly one
 concrete mechanism *in the shim*; the matrix is never on an agent read path.
 
-**The way back is `legacy/`**: the frozen pre-refactor tree, served instead of the
-rewritten core when `MULTI_LLM_LEGACY_INSTRUCTIONS=1` (read path only, Claude Code only, unmaintained — see
-`legacy/README.md`), so the rewrite can be backed out without reverting the dispatcher, the
-executor or the unattended work with it. The regression guard is `tests/test_instruction_refactor_guard.py`: a
-normalized golden bundle of one fully mocked workflow run over `tests/fixtures/e2e/plans/auth-feature.md` ×
-`full_workflow.yaml`, captured on the `phase3-pre-refactor` tag and reproduced with a **zero**
-diff outside `tests/golden/expected_changes.yaml`.
+**The read step comes in three forms, and the printed one never changes.** `util instructions <mode>`
+prints a head banner, the rendered core and the `MULTI_LLM_CORE_END: <mode>` line (`CORE_END_MARKER`),
+then the `--host` verb section when asked. The Codex package server reads that stdout through a
+pipe: it checks the end line, refuses a stdout it had to cut, and drops the banner by
+`TRUNCATION_BANNER_OPENING`, so the banner stays byte for byte. The OpenCode package asks for the
+file form instead (below).
+`--to-file` writes the same text without the banner to
+`<repository root>/.multi-llm/tmp/cores/core-<mode>-<sha12>.md` and prints one
+`[CORE_FILE] <path> lines=<n> bytes=<n>` line. `cores/` is this command's own folder inside the
+self-ignoring workspace temp dir the write phases use, inside the workspace so the host's file tool
+and its shell name the same file (the cwd stands in for the root outside a repository). The file is
+written link-safe and renamed into place (`utils/prompt_files`), named by the hash of its bytes so
+concurrent runs never read each other's. The next write removes core files older than seven days:
+only in `cores/`, only names of the generated format (`CORE_FILE_NAME`), and only regular files,
+each inspected through the folder's descriptor without following a link, so a link, a folder or a
+file of any other name stays. A folder that cannot be written prints the stdout form instead, after
+one stderr line, and still exits 0.
+
+Which shim uses which form follows each host's measured tool-result cap. Claude Code (`SKILL.md`
+section 4) persists a Bash result over about 30,000 characters behind a 2 KB stub, and the OpenCode
+file shim's host (1.19.5, read off the shipped binary on 2026-11-08) cuts a tool result at 51,200
+bytes or 2,000 lines, keeps the head and tells the model to hand the saved output to a subagent
+rather than read it. Four cores are over that (`apply-suggestions`, `apply-task-suggestions`,
+`apply-code-fixes`, `implement`), so both shims read the file, through line `<n>`, paging as their
+read tool asks. The OpenCode package does the same on its tool route: `fetchInstructions` adds the
+surface's `runbook.core_file.option` to its fetch, and the result's `instructions` carries the
+`[CORE_FILE]` line and `runbook.core_file.read` (`multi_llm.TOOL_CORE_FILE_READ`) rather than the
+core. Its result is one JSON line, and opencode's cut keeps whole lines from the head (its
+`Truncate.output`, read off the shipped 1.19.5 binary, applies to a plugin tool's result too), so a
+result over the cap would keep none of itself: those four cores are each over 51,200 bytes once
+JSON-escaped. When the file cannot be written the dispatcher prints the core instead, and the package
+attaches that only whole, its end line there and its stdout uncut, and only while the result can
+still be shown whole with it. Otherwise, and when the fetch failed, the result carries
+`instructions_error`: why no core is attached (the dispatcher's own reason and the fix when the file
+could not be written), and that the model tells the user and stops rather than run the steps from
+memory, every other field as the run left it, as the codex route's `runbook_error` does. Every result
+is bounded besides (`execute` → `boundResult`, `RESULT_MAX_BYTES` = 48 KiB, below opencode's
+default): its long strings are cut in the middle, longest first (the 64 KiB `output` tail before
+anything else that long), the core kept until nothing else is left to cut, and a result that still
+does not fit keeps its way forward and a `result_error`. A file a host reads is read line by
+line, and opencode's read tool clips a line over 2,000 characters, so no line of an instruction or a
+reference is longer (`tests/test_instruction_line_length.py`, with every placeholder rendered against
+a long skill directory). The Codex file shim reads pages instead: codex has no file-read tool, and its shell
+keeps the head and the tail of an output over its budget and drops the middle (`…N tokens
+truncated…`), so a printed core, or a `cat` of the file, loses workflow steps while its end line
+survives. The printed banner therefore also counts a truncation or omission note from the host as an
+incomplete core, end line or not.
+
+**Paged delivery** (`--page <i>`, optionally `--page-size <bytes>`) prints one page of the text
+`--to-file` writes: the core, its end line and the `--host` section, placeholders substituted. A page
+opens with `[CORE_PAGE] mode=<m> page=<i>/<n> sha=<sha12> bytes=<b>` and closes with
+`[CORE_PAGE_END] mode=<m> page=<i>/<n> sha=<sha12>`; `sha` is the first 12 hex digits of the sha256
+of that whole text (the digest the core file is named by) and `bytes` the page's share of it. Pages
+split on line boundaries, packed greedily from the start, so every byte is on exactly one page and
+the pages' bodies joined are the `--to-file` text byte for byte; a line longer than the page size gets
+a page of its own. Page 1 carries, after its header, a banner that opens with
+`TRUNCATION_BANNER_OPENING` and replaces the printed banner, whose one-end-line test is the wrong
+test for a page; its room is the page size less the longest banner it could carry, so no page prints
+more than `--page-size` bytes between its two lines unless one line alone is longer. The completeness
+rule, stated in that banner and in the Codex shim's step 3:
+
+- fetch pages 1 to `<n>` with one page size, changing only `--page`;
+- each page must open with its header and close with its end line, and every one of those lines
+  carries the same `sha`;
+- a note from the host anywhere in a page's output that it truncated or omitted part of it makes the
+  page incomplete, both lines or not. The reader fetches again at half the size (the banner names
+  the number); a new size cuts the core afresh, so it starts over at page 1 and never combines pages
+  of two sizes. At `CORE_PAGE_SIZE_MIN` (2,000 bytes) it stops and tells the user instead.
+
+The composite cores (`full-workflow`, the `improve-*` cores and the commit modes) load each phase's
+core with the host-neutral `util instructions <phase>`, which carries no read form of its own, so
+every file shim says to load every core its own way, those phase cores included: `SKILL.md` and the
+OpenCode shim add `--to-file`, the Codex shim pages. Every phase core is over the Claude Code cap
+and the largest are over OpenCode's, so a printed phase core reaches the host as a stub or a cut.
+
+The default size, `CORE_PAGE_SIZE_DEFAULT`, is 16,000 bytes: about 4,000 tokens as codex counts them
+(4 bytes a token), 40% of the 10,000-token budget its models' `truncation_policy` and both its shell
+tools document (codex-cli 0.167.0; `hosts/capabilities.yaml` has the source). The model may lower that
+budget per call (the code-mode `exec` tool's own example passes 1,000, and one measured read kept
+about 4,600 tokens), so the default sits well below the documented figure rather than filling it:
+the biggest core takes four pages, and a page cut anyway costs one re-read at half the size. A page
+number past the last, `--page-size` without `--page`, `--page` with `--to-file` and a size under the
+minimum are exit 3, with the core printed nowhere. Without `--page` both other forms are byte for
+byte what they were.
+
+**Paged delivery on the Codex tool route.** The package server reads the printed core through a
+pipe, whole, and attaches it to a tool result, and codex cuts a tool result as it cuts shell output:
+measured on 0.160.0 (racing re-run 3, 06b), a 50,355-character result read through a code-mode
+`exec` cell kept its head and tail, and the runbook sat in the dropped middle with its closing line
+kept. So the server drops the banner, scrubs the runbook, and cuts the rest (the runbook and its last
+line's newline) the way `--page` cuts the core: the same greedy line packing and the same two lines,
+whose `sha` is the digest of that text. Every page has the whole size as room, since this route's
+rule is a key of its own rather than a banner on page 1. An unfinished run's result carries page 1
+as `runbook` and then `runbook_pages`: the page, the count, the sha, the size, the rule, and the calls
+`next_page` and `smaller`, for the next page and for page 1 at half the size (absent on the last page
+and at the floor). Both keys close the result (`LAST_KEYS`), because a head-and-tail cut keeps the
+tail at any budget while a needs-human `message` alone can fill a small head; the way forward still
+leads (`WAY_FORWARD_KEYS`). The rule, the surface's `runbook.pages.rule` (`rule_one` for one page):
+
+- fetch pages 1 to `<n>` at one size, with calls whose `extra_flags` are
+  `["--page", "<i>", "--page-size", "<size>"]`;
+- each page opens with its header and closes with its end line, all with one `sha`, and one page
+  carries `MULTI_LLM_CORE_END: <mode>`;
+- a note from the host that it truncated or omitted part of a result makes that page incomplete: fetch
+  again with `smaller`, start over at page 1 and never combine sizes; at the floor, stop and tell the
+  user.
+
+Every runbook is framed, one-page ones included. `review-commits` and `apply-commit-fixes` fit on one
+page (12.6 and 11.6 KB scrubbed), and at the 06b budget (about 4,600 tokens) a cut of such a result
+still keeps the closing line, so the rule has to come with every runbook.
+
+A page request needs no schema bump: it is an ordinary call whose `extra_flags`, an array of strings
+the schema has always accepted, carry `--page <i>` and optionally `--page-size <bytes>`.
+`runbook_page_request` recognizes it before validation, from the mode word alone. The server answers
+with the one `util instructions <mode> --host <id>` fetch the result makes, cut the same way, so page 1
+of a request is page 1 of the result. Its plan, question, range, write posture and every other flag go
+unread, so fetching a page never starts, resumes or repeats a run, and a malformed one is an argument
+error before any spawn. The rule's words are `multi_llm.TOOL_PAGES_*`, built from the page constants,
+and the server spells none of them. The `runbook.pages` block is additive within surface schema v7: a
+server whose surface lacks it attaches the runbook whole and forwards a page flag as before. The
+OpenCode package does not page: its tool result names the core file (see the file form above).
+
+The fetch behind both keeps its child's whole stdout, up to `RUNBOOK_STDOUT_CHARS` (1 MiB), where
+every other child keeps a 64 KiB tail: a tail keeps the closing line and loses the head, and paging
+a head-cut runbook would frame the rest as complete. A stdout cut anyway (over that size, or a line
+over the line bound) is a `runbook_error`, like a missing closing line. The scrub removes every
+dispatcher command line, and those are the only lines of a served core that name the skill
+directory, while a core names its conditional runbooks by a relative `references/<file>.md`. So a
+runbook that names one opens with `runbook.references` (`multi_llm.TOOL_REFERENCES_LINE`), its
+`{dir}` filled with the server's own `skills/multi-llm/references`, inside the paged text and its
+sha. The cores keep the relative spelling, since a `{SKILL_DIR}` outside the dispatcher prefix
+breaks rule 1 of `tests/test_instruction_portability.py`; the file-shim routes and the OpenCode
+package keep the command lines, which name the directory.
+
+**Steps a clean run never takes live in `references/`, behind a trigger sentence.** A served core
+stays in the host's context for the whole phase, so a conditional branch (interrupted-run recovery,
+review-plan's optional consolidation, apply revalidation, review-code's `--apply-fixes`, implement's
+prerequisite markers, the apply modes' and implement's Python write executor) is a runbook in
+`references/`, and the core keeps a trigger that names the file, says to read it in full, and
+carries every condition that can send a host there: each marker, flag or state the moved block
+handled, work already pending included (a `[CONSOLIDATION_PENDING]` from an explicit
+`--consolidate` as well as the recommendation), so searching the core for a printed marker finds
+it. A branch with several ways in names each case and where in the runbook it starts, and a
+sentence saying when to skip the branch spells out every one of those conditions itself, so it
+cannot quietly drop a case (apply revalidation's failed items print no marker until a retry is
+requested, so a skip clause about the markers alone would exclude them). A branch the dispatcher
+reaches by flags names every flag that reaches it: the write executor is `--exec-subagents`,
+`--detach` (which implies it) and `--dry-run-subagents`, on every host alike, since a host's
+capability is its default route and never a prohibition (Claude Code's `subagents: native` still
+takes the executor when one of them is passed), so no host's core leaves the branch out. Keep
+inline anything a host must act on without that read: the `--yes` resolution of the branch's gate
+(its D6 row), any rule that also applies outside the branch (the `[SKIP]` retry line, for one,
+belongs to every `--force` retry), and what the default path must not do when the branch was taken
+(an executor run, a dry run included, leaves no work for the core's own steps). Say each rule once:
+what the trigger carries is not repeated in the reference, and the reference opens with one
+sentence of ways in and when it is not needed. A host that always takes the branch reads trigger
+and reference both (Codex and OpenCode pass `--exec-subagents` on every write run), so the move
+pays only while that route stays within the moved block plus the trigger's own few hundred
+characters. A reference is read as it is, never through `render_instruction_text`, so it carries
+no template token; its commands are spelled from the mode word on behind a `<prefix>` the file
+defines as the core's own dispatcher prefix. `tests/test_instruction_references.py` holds all of
+it: every named reference exists; every moved block lives only in its reference, and its trigger
+and the reference's opening name every entry condition in the test's inventory; every marker a
+reference handles is in that inventory, as a way in, a line the trigger itself resolves, or a line
+met only inside the runbook; every skip sentence names all the ways in; every rule the executor
+sections held is still in their trigger or their reference; each of the executor's flags, and an
+abbreviation of each, reaches it through the real dispatcher on every host while no other option
+does; and no reference carries a token.
+
+**The frozen pre-refactor core (`legacy/`) was removed on 2026-11-08**; it lives at tag `phase3-pre-refactor`,
+and `MULTI_LLM_LEGACY_INSTRUCTIONS=1` now only earns a stderr line saying so. The regression guard is
+`tests/test_instruction_refactor_guard.py`: a normalized golden bundle of one fully mocked workflow run over
+`tests/fixtures/e2e/plans/auth-feature.md` × `full_workflow.yaml`, captured on the `phase3-pre-refactor` tag and reproduced with a **zero**
+diff outside `tests/golden/expected_changes.yaml`. Record lists (`batches`, grouped.json's `groups` and
+their `suggestions`, `to_apply`) are compared by each record's stable identity, with the order as one
+`@dispatch_order` or `@order` leaf (`tests/golden/bundle_compare.py`), so an entry names a leaf or an
+order, never a whole record.
 
 **No spelled invocation in the corpus** (plans/next-phase-command.md T6): the lint also forbids, as
 a plain substring on every line of `instructions/*.md` and `references/*.md`
@@ -177,9 +347,13 @@ is *output* (D7).** `install-host <host> [--global|--project] [--check] [--all] 
 from the capability data, `{{uv_missing_file}}`/`{{uv_missing_text}}` and every
 `hosts/snippets/*.md` slot, then `{SKILL_DIR}` and the baked `--host <id>` — and
 writes it as a **rendered copy, never a symlink or junction** (which is what keeps
-`SeCreateSymbolicLinkPrivilege` out of the Windows story): temp file *in the target directory* →
-`fsync` → `os.replace`, `newline="\n"` so the bytes are identical
-on every platform.
+`SeCreateSymbolicLinkPrivilege` out of the Windows story), by the shared atomic write
+([Atomic file writes](runtime.md#atomic-file-writes)): temp file *in the target directory* →
+`fsync` → `os.replace`, owner-only, the text encoded with `\n` newlines so the bytes are identical
+on every platform. `host_install.py` keeps the check, the write and the CLI; scopes and locations
+are `utils/host_paths.py`, rendering and the header are `utils/host_shim.py`, and the package-route
+resolvers are `utils/host_routes/` (`npm.py`, and `codex.py`, the one per-host piece that is code
+because it reads Codex's own config). `host_install` re-exports every name.
 
 **Verification is part of the write**: after the replace the same `--check` runs, and a
 shape failure (rows 1–4) is a *failed install* — previous bytes restored, or nothing left behind —
@@ -252,6 +426,14 @@ asserts a required inventory, sweeps for credentials and **never invokes npm**;
 `packaging/common/payload.py` is that machinery, shared so a second host's packaging plan is a thin driver
 over it.
 
+**Every npm release after the first goes through `publish-opencode-plugin.yml`.** npm configures a trusted
+publisher only on a package that already exists, so 0.1.1 (tag `opencode-v0.1.1`) was a one-off upload from the
+maintainer's machine, and its evidence is
+`tests/container/records/20261026T175524Z-opencode-release-network-check.json`. The laptop target and
+`packaging/opencode/first_release.py` were removed once that release shipped, since they could only refuse
+after it. A second npm package needing its own first upload would restore them from git history
+(`git log --diff-filter=D -- packaging/opencode/first_release.py`).
+
 The JS holds no mode word, alias, summary, flag name, exit code or message of its own — everything
 the model reads is generated into `dist/cli-surface.json` from
 `modes.py`/`cli_common.py`, and `tests/test_opencode_package.py` greps the committed
@@ -289,7 +471,9 @@ is echoed.
 `next`, or a state that is not `done`); reading
 `row.supports_detach` alone shipped the whole rendered runbook with every finished run, measured
 2026-09-16 at 22 860 of a 25 829-char result, fifteen of its lines `uv run …` commands
-the same result's message forbids the model to run.
+the same result's message forbids the model to run. What it attaches is the core file's
+`[CORE_FILE]` line and the surface's read rule, never the core itself, or `instructions_error` when
+there is no core it can attach (the file form, in "Host-neutral instruction core").
 
 And `normalizePlan` strips **one** leading `@` — this host's
 file-attachment sigil, which is how a user names a file here and which reaches the model verbatim —
@@ -339,9 +523,9 @@ guide; the procedures below are the same ones.
 
 **Staging covers the whole plugin, not just the payload.** `payload.stage`'s swap and sweep reach
 `skills/multi-llm/` alone, and this plugin's manifest and hooks live outside it. So `build()` assembles the
-complete plugin in a scratch directory: the shared allowlist plus the legacy files through
-`stage(extra_allowlist=…)`, then the manifest, hooks and licence with the mode the git index records. It
-sweeps the complete root for credentials and asserts the result before anything moves: the exact file
+complete plugin in a scratch directory: the shared allowlist through `stage`, then the manifest, hooks and
+licence with the mode the git index records. It sweeps the complete root for credentials and asserts the result
+before anything moves: the exact file
 list both ways, the manifest's name, version and `hooks` pointer, every hook command resolving from
 `${CLAUDE_PLUGIN_ROOT}` to a file in the tree, each hook script executable, `SKILL.md`, the marketplace
 entry, and the `claude-code` entry of `DISTRIBUTION_BUDGETS` in `packaging/common/payload.py`. Only then is
@@ -353,35 +537,6 @@ untracked ones. `make claude-package` is the clean rebuild after it, which must 
 registry. `make claude-package-container` installs the plugin in the test image through the published sparse
 form and grades what a session really loads: Docker, no key, no network. `make claude-check-release` is the moved-tree rule below, and `make claude-check-bump` adds the
 shared-version check and reads the registry.
-
-**The legacy files are a Claude-only inventory, named rather than globbed.**
-`MULTI_LLM_LEGACY_INSTRUCTIONS=1` serves `legacy/instructions/<mode>.md`, and a missing frozen copy silently
-falls back to the current core, so a non-empty directory proves nothing. The build requires exactly these
-17 files under `skills/multi-llm/legacy/`, both ways:
-
-```text
-README.md
-instructions/apply-code-fixes.md
-instructions/apply-suggestions.md
-instructions/apply-task-suggestions.md
-instructions/ask.md
-instructions/full-workflow.md
-instructions/generate-tasks.md
-instructions/implement.md
-instructions/init-config.md
-instructions/review-code.md
-instructions/review-plan.md
-instructions/review-tasks.md
-references/human-decision-batch.md
-references/resume-detection.md
-references/salvage-handling.md
-references/uv-check.md
-references/wave-batching.md
-```
-
-`legacy/README.md` is the one exception to the rule that development documentation stays out of a payload,
-because the runtime's stderr notice points operators at it. The shared allowlist is not widened, so the
-Codex and OpenCode builders carry none of these files.
 
 **`docs/` is in no host's payload, and two links point at it online.** `SKILL.md` and
 `instructions/init-config.md` name the user documentation by URL:
@@ -419,7 +574,7 @@ changes stay off `master` until ready to release. Every change is held to this f
 on `master`, tag or no tag, because `packaging/claude/build.py --check-release` also compares with
 `CLAUDE_RELEASE_BASE`, which the `package` job sets to a pull request's target, or on a push to the commit
 `master` was at before it. It compares
-git tree ids, so hooks, legacy files and the executable bit all count, none of which the shared-payload digest
+git tree ids, so hooks and the executable bit both count, neither of which the shared-payload digest
 sees. The shared-version check itself (`--check-bump`) reads the registry and stays out of the `tests` workflow.
 
 ## Detecting the active route

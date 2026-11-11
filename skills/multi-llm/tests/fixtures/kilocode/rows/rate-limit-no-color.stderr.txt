@@ -1,0 +1,4 @@
+
+> code · stub-model
+
+Error: Rate limit reached for stub-model in organization org-stub on requests per min (RPM): Limit 3, Used 3. Please try again in 20s.

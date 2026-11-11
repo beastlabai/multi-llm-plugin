@@ -30,11 +30,8 @@ from utils.write_batch_scheduler import (
     unverified_with_report,
 )
 from tests.test_write_executor import env  # noqa: E402,F401
-from tests.test_check_gate_fixture import (  # noqa: E402,F401
-    _check,
-    _implement,
-    repo,
-)
+from tests.support.gate_fixture import _check  # noqa: E402
+from tests.support.implement_world import _implement  # noqa: E402
 
 PASSED = json.dumps({"passed": True, "findings": []})
 NPM = 'add verify_command: "npm test" under driver: in .multi-llm/providers.yaml'
@@ -117,7 +114,7 @@ class TestTheExecutorLeg:
         self, repo, capsys, monkeypatch,
     ):
         """Codex racing 06: every task's own check passed."""
-        from tests.test_check_gate_fixture import ALLOW, _policy
+        from tests.support.gate_fixture import ALLOW, _policy
 
         _policy(repo, ALLOW)
         _npm(repo.root)
@@ -398,7 +395,7 @@ class TestAnAcceptedRerunOnBothLegs:
         """The executor refuses T005 before T007 is dispatched, so its leg
         is shown on the accept answers' clean finish: the notice and
         summary.md."""
-        from tests.test_accepted_check_rerun import (
+        from tests.support.accepted_rerun import (
             RERUN, RESUME, _first_stop, _own_check, _result_line,
         )
 
@@ -418,7 +415,7 @@ class TestAnAcceptedRerunOnBothLegs:
 
     def test_the_native_stop(self, repo, capsys):
         import implement_orchestrator
-        from tests.test_accepted_check_rerun import NATIVE, RERUN
+        from tests.support.accepted_rerun import NATIVE, RERUN
 
         _npm(repo.root)
         util = TestTheNativeLeg._util

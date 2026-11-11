@@ -23,7 +23,7 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Optional
 
 import pytest
 
@@ -36,13 +36,22 @@ sys.path.insert(0, str(SKILL_ROOT))
 
 import multi_llm  # noqa: E402
 from utils import cli_common, report_check, unattended  # noqa: E402
+from tests.support.transcripts import (  # noqa: E402
+    COMMAND,
+    COMPLETE_OUTPUT,
+    OPTIONAL,
+    Transcript,
+    WHY,
+    _fake_uv,
+    block_output,
+    decision_of,
+    report,
+    run_check,
+)
 
 PLAN = "plans/my plan.md"
-COMMAND = "/multi-llm:multi-llm --generate-tasks 'plans/my plan.md'"
 #: The same command with one character dropped: the closing quote.
 ALTERED = "/multi-llm:multi-llm --generate-tasks 'plans/my plan.md"
-OPTIONAL = "/multi-llm:multi-llm --review-plan 'plans/my plan.md'"
-WHY = "Have the models review the plan again; skipping this keeps the plan as it stands."
 
 
 @pytest.fixture(autouse=True)
@@ -50,113 +59,6 @@ def _short_settle(monkeypatch):
     """A reply the hook input names that the transcript never gets costs this
     long here, not the hook's 2 s (fix round 27, ``settled_turn``)."""
     monkeypatch.setattr(report_check, "SETTLE_BUDGET_S", 0.3, raising=False)
-
-
-# ---------------------------------------------------------------------------
-# Fixture transcripts
-# ---------------------------------------------------------------------------
-
-class Transcript:
-    """Builds a Claude Code JSONL transcript, one entry per call."""
-
-    def __init__(self):
-        self.entries: List[Dict[str, Any]] = []
-        self._n = 0
-
-    def _add(self, entry: Dict[str, Any]) -> "Transcript":
-        self._n += 1
-        entry.setdefault("uuid", f"u{self._n}")
-        entry.setdefault("sessionId", "s1")
-        self.entries.append(entry)
-        return self
-
-    def prompt(self, text: str, as_list: bool = False) -> "Transcript":
-        content: Any = [{"type": "text", "text": text}] if as_list else text
-        return self._add({"type": "user", "message": {"role": "user", "content": content}})
-
-    def meta(self, text: str) -> "Transcript":
-        return self._add({"type": "user", "isMeta": True,
-                          "message": {"role": "user", "content": text}})
-
-    def say(self, text: str) -> "Transcript":
-        return self._add({"type": "assistant", "message": {
-            "role": "assistant", "content": [{"type": "text", "text": text}]}})
-
-    def think(self) -> "Transcript":
-        return self._add({"type": "assistant", "message": {
-            "role": "assistant",
-            "content": [{"type": "thinking", "thinking": "hmm", "signature": "x"}]}})
-
-    def bash(self, output: str, as_list: bool = False) -> "Transcript":
-        tool_id = f"toolu_{self._n + 1}"
-        self._add({"type": "assistant", "message": {"role": "assistant", "content": [
-            {"type": "tool_use", "id": tool_id, "name": "Bash",
-             "input": {"command": "uv run … multi_llm.py util next-command"}}]}})
-        inner: Any = [{"type": "text", "text": output}] if as_list else output
-        return self._add({"type": "user", "toolUseResult": {"stdout": output},
-                          "message": {"role": "user", "content": [
-                              {"type": "tool_result", "tool_use_id": tool_id,
-                               "content": inner}]}})
-
-    def other(self, kind: str) -> "Transcript":
-        return self._add({"type": kind, "content": "noise"})
-
-    def write(self, path: Path) -> Path:
-        path.write_text(
-            "".join(json.dumps(entry) + "\n" for entry in self.entries),
-            encoding="utf-8",
-        )
-        return path
-
-
-def block_output(command: str = COMMAND, optional: Optional[List[tuple]] = None) -> str:
-    """A phase result's stdout: the block above the result line."""
-    lines = ["Tasks written to plans/my plan/tasks/tasks.md", f"[NEXT_COMMAND] {command}"]
-    for why, opt in optional or []:
-        lines += [f"[NEXT_COMMAND_OPTIONAL_WHY] {why}", f"[NEXT_COMMAND_OPTIONAL] {opt}"]
-    lines.append('MULTI_LLM_RESULT: {"mode": "util next-command", "phase": null, '
-                 '"state": "done", "exit": 0, "artifacts": [], "next": null}')
-    return "\n".join(lines) + "\n"
-
-
-COMPLETE_OUTPUT = (
-    "[WORKFLOW_COMPLETE]\n"
-    'MULTI_LLM_RESULT: {"mode": "util next-command", "phase": null, "state": "done", '
-    '"exit": 0, "artifacts": [], "next": null}\n'
-)
-
-
-def report(*commands: str, prose: str = "") -> str:
-    """A final message ending with each command in its own fenced block."""
-    parts = ["## Summary", "Generated 7 tasks.", prose, "### Next Steps"]
-    for command in commands:
-        parts.append(f"```\n{command}\n```")
-    return "\n\n".join(part for part in parts if part)
-
-
-def run_check(capsys, transcript: Path, hook: Optional[Dict[str, Any]] = None,
-              tmp_path: Optional[Path] = None) -> str:
-    """``report_check.main`` on a transcript (or a hook input); returns stdout."""
-    argv = ["--transcript", str(transcript)]
-    if hook is not None:
-        assert tmp_path is not None
-        hook_file = tmp_path / "hook-input.json"
-        hook_file.write_text(json.dumps(hook), encoding="utf-8")
-        argv = ["--hook-input", str(hook_file)]
-    assert report_check.main(argv) == 0
-    captured = capsys.readouterr()
-    assert captured.err == ""
-    return captured.out
-
-
-def decision_of(out: str) -> Dict[str, Any]:
-    lines = out.splitlines()
-    assert len(lines) == 1, out
-    assert lines[0].startswith(report_check.DECISION_PREFIX)
-    decision = json.loads(lines[0])
-    assert list(decision) == ["decision", "reason"]
-    assert decision["decision"] == "block"
-    return decision
 
 
 # ---------------------------------------------------------------------------
@@ -524,23 +426,6 @@ class TestTheScript:
         assert "util report-check --hook-input -" in text
         assert "grep '^{\"decision\"'" in text
         assert "python3 -m" not in text and "python -m" not in text
-
-
-def _fake_uv(tmp_path: Path) -> Path:
-    """A ``uv`` that logs its argv and runs the rest on this test's Python."""
-    fake = tmp_path / "bin" / "uv"
-    fake.parent.mkdir()
-    fake.write_text(
-        "#!/bin/sh\n"
-        "printf '%s\\n' \"$@\" > \"$ARGV_LOG\"\n"
-        "while [ \"$#\" -gt 0 ] && [ \"$1\" != \"--\" ]; do shift; done\n"
-        "shift\n"   # --
-        "shift\n"   # python
-        "exec \"$REAL_PYTHON\" \"$@\"\n",
-        encoding="utf-8",
-    )
-    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
-    return fake
 
 
 def _run_hook(tmp_path: Path, hook_input: str, fake_uv: Optional[Path] = None):

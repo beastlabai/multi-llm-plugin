@@ -1,0 +1,5 @@
+[0m
+> code · stub-model
+[0m
+[91m[1mError: [0mProvider returned error
+{"error":{"message":"Rate limit exceeded: free-models-per-min. ","code":429,"metadata":{"headers":{"X-RateLimit-Limit":"20"}}}}

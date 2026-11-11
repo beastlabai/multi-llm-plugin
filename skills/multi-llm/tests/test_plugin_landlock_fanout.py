@@ -42,6 +42,7 @@ import sys
 import tempfile
 import threading
 import time
+from functools import partial
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -58,6 +59,7 @@ from utils import subagent_executor as executor  # noqa: E402
 from utils.provider_registry import get_provider  # noqa: E402
 from utils.providers.base import (  # noqa: E402
     CODEX_HOME_CHECK_MARKER,
+    INCIDENTAL_LANE_FANOUT,
     JAIL_DENIED_MARKER,
     MODE_CHECK_MARKER,
     SANDBOX_BYPASSED_MARKER,
@@ -66,6 +68,10 @@ from utils.providers.base import (  # noqa: E402
 )
 from utils.providers.codex import PLUGIN_LANDLOCK_RUNG, CodexProvider  # noqa: E402
 from utils.subagent_executor import SandboxProbeResult  # noqa: E402
+from tests.support.gitrepo import git  # noqa: E402
+
+#: Hermetic git (tests/support/gitrepo.py), returning the CompletedProcess.
+_git = partial(git, text_out=False)
 
 # The fan-out's jailed slots are measured through POSIX things: a shebang fake
 # codex on PATH, 0700 slot directories, tracked file modes, hardlinks on a
@@ -120,13 +126,6 @@ def _pin_verdict(monkeypatch, rung):
         )
     monkeypatch.setattr(base, "_fanout_sandbox_verdict", lambda _p, _cwd: verdict)
     return verdict
-
-
-def _git(repo, *args):
-    return subprocess.run(
-        ["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *args],
-        cwd=str(repo), check=True, capture_output=True, text=True,
-    )
 
 
 def _stream(command=None, *, output="", findings=True):
@@ -294,7 +293,7 @@ def fake_codex(scratch, monkeypatch):
     monkeypatch.setenv("FAKE_WRAPPER_LOG", str(log))
     monkeypatch.setenv("FAKE_CODEX_COUNT", str(count))
     monkeypatch.setenv("FAKE_CODEX_STREAM", _stream(HEREDOC_COMMAND))
-    monkeypatch.setattr(base, "PROVIDER_STAGGER_DELAY", 0.0)
+    monkeypatch.setattr("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0)
 
     def wrapper_calls():
         if not log.exists():
@@ -819,7 +818,7 @@ class TestTheIncidentalNotice:
         monkeypatch.setattr(base, "sandbox_refusal", gate)
         monkeypatch.setattr(base, "invoke_with_file_output", invoke)
         monkeypatch.setattr(base, "porcelain_snapshot", lambda *_a, **_k: None)
-        monkeypatch.setattr(base, "PROVIDER_STAGGER_DELAY", 0.0)
+        monkeypatch.setattr("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0)
         argv = [
             "--plan-file", str(scratch["plan"]), "--models", SPEC, "claude-code:sonnet",
             "--skip-validation", "--timeout", "3600", "--max-parallel", "2",
@@ -1065,6 +1064,32 @@ class TestCarryingTheGrant:
         assert details["jail_failure"]["path"] == str(gone)
         assert details["sandbox"] == RUNG
 
+    @pytest.mark.parametrize("straddle", [False, True])
+    def test_a_credential_in_the_denied_path_is_redacted(self, scratch, straddle):
+        """The error and the notice name the denied path on their own, beside
+        the excerpt: a key in it is redacted whole, even where the excerpt's
+        300-character cut falls inside it."""
+        secret = "sk-proj-" + "A1b2C3d4" * 6
+        head = "Error: Permission denied (os error 13) at "
+        parent = scratch["tmp"] / "cache"
+        if straddle:
+            pad = 294 - len(head) - len(str(parent)) - 2
+            assert 0 < pad < 250, "the tmp path is too long for this layout"
+            parent = parent / ("p" * pad)
+        line = f"{head}{parent / secret / 'state'}"
+        assert (line.index(secret) == 294) is straddle
+
+        with _patch_spawn(side_effect=lambda cmd, **kw: _completed("", 1, line + "\n")):
+            result = _invoke(scratch)
+        details = result["details"]
+        assert details["failure_reason"] == "jail-denied" and details["retryable"] is False
+        failure = details["jail_failure"]
+        assert failure["path"] == str(parent / "<redacted:sk-family>" / "state")
+        assert JAIL_DENIED_MARKER in failure["notice"]
+        assert "<redacted:sk-family>/state" in result["error"]
+        for text in (result["error"], json.dumps(failure)):
+            assert "A1b2C3d4" not in text and "sk-pro" not in text
+
     def test_an_ordinary_permission_error_says_it_is_not_a_jail_denial(self, scratch):
         def fake_run(cmd, **kwargs):
             inside_tmp = os.path.join(_tmpdir_of(cmd), "x")
@@ -1198,7 +1223,7 @@ class TestTheOtherTwoLanes:
         _pin_verdict(monkeypatch, RUNG)
         monkeypatch.setattr(cro, "get_project_root", lambda _p: str(scratch["repo"]))
         porcelain = MagicMock(side_effect=AssertionError("no porcelain check on the jail"))
-        monkeypatch.setattr(cro, "porcelain_snapshot", porcelain)
+        monkeypatch.setattr(base, "porcelain_snapshot", porcelain)
         seen = []
 
         def invoke(**kwargs):
@@ -1256,10 +1281,17 @@ class TestTheOtherTwoLanes:
         assert SANDBOX_INCIDENTAL_MARKER in out and SANDBOX_BYPASSED_MARKER not in out
 
 
+def _fanout_notice(evidence, allow_list, installed):
+    """The fan-out lane's ``[JAIL_DENIED]`` line, as ``llm_client`` builds it."""
+    return landlock_dispatch.jail_denied_text(
+        spec=SPEC, rung=PLUGIN_LANDLOCK_RUNG, evidence=evidence,
+        allow_list=allow_list, installed=installed, lane=INCIDENTAL_LANE_FANOUT,
+    )
+
+
 class TestTheJailDeniedLine:
     def _notice(self, installed, path="/elsewhere/x"):
-        return llm_client.jail_denied_notice(
-            "codex", SPEC, PLUGIN_LANDLOCK_RUNG,
+        return _fanout_notice(
             {"where": "stderr", "line": "Permission denied (os error 13)", "path": path,
              "class": "jail"},
             "dir:~/.codex", installed,
@@ -1274,8 +1306,7 @@ class TestTheJailDeniedLine:
         assert "the likely cause" in self._notice(f"codex-cli {major}.{int(minor) + 1}.0")
 
     def test_an_unnamed_path_is_a_probable_denial(self):
-        notice = llm_client.jail_denied_notice(
-            "codex", SPEC, PLUGIN_LANDLOCK_RUNG,
+        notice = _fanout_notice(
             {"where": "event", "line": "Permission denied", "path": None, "class": "probable"},
             "", "",
         )
@@ -1286,13 +1317,25 @@ class TestTheJailDeniedLine:
         """The line is codex's raw stderr; the notice reaches stdout, the run
         log and the closing summary, so it goes through the redaction boundary."""
         key = "sk-proj-" + "A1b2C3d4" * 6
-        notice = llm_client.jail_denied_notice(
-            "codex", SPEC, PLUGIN_LANDLOCK_RUNG,
+        notice = _fanout_notice(
             {"where": "stderr", "path": "/elsewhere/x", "class": "jail",
              "line": f"Permission denied (os error 13) /elsewhere/x token {key}"},
             "", "",
         )
         assert key not in notice and "<redacted:" in notice
+
+    def test_the_whole_notice_is_redacted_whatever_the_evidence_held(self):
+        """The evidence comes redacted, but the notice reaches stdout, the run
+        log and the closing summary, so it goes through the boundary itself."""
+        key = "sk-proj-" + "A1b2C3d4" * 6
+        notice = _fanout_notice(
+            {"where": "stderr", "path": f"/srv/{key}/x", "class": "jail",
+             "line": "Permission denied (os error 13)"},
+            f"dir:/srv/{key}", "",
+        )
+        assert notice.startswith(JAIL_DENIED_MARKER)
+        assert "/srv/<redacted:sk-family>/x;" in notice
+        assert "A1b2C3d4" not in notice
 
 
 class TestAJailDeniedSlotInAPartialRun:

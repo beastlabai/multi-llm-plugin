@@ -937,6 +937,7 @@ def _audit_of(name_or_stream):
     return audit_codex_stream(text).to_dict()
 
 
+@pytest.mark.shell_probe
 class TestTheReviewPlanCallSite:
     """review-plan's file-output lane: the retry ladder's attempts are ANDed."""
 
@@ -945,7 +946,8 @@ class TestTheReviewPlanCallSite:
         from utils import review_orchestrator_base as rob
 
         _Fanout._git_repo(tmp_path)
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+        from utils import subagent_executor
+        subagent_executor._SANDBOX_PROBE_CACHE.clear()
         monkeypatch.setattr(rob, "get_provider", lambda _n: _Fanout._AutoFallback())
         monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
         monkeypatch.setenv("MULTI_LLM_TEST_FAST_BACKOFF", "1")

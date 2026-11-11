@@ -3,34 +3,24 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
 import implement_orchestrator as implement
-from tests.test_implement_stop_account import (
-    _dispatched_titles, _implement, make_repo,
-)
-from utils import provider_registry as registry
+from tests.scheduler_support import make_scheduler
+from tests.support.implement_world import _dispatched_titles, _implement
 from utils.batch_done import record_batch
 from utils.state_manager import (
     get_or_create_state, set_task_batch_check_in_state,
     set_task_check_findings_in_state, set_task_check_tree_in_state,
 )
 from utils.subagent_tasks import implement_output_name
-from utils.write_batch_scheduler import WriteBatchScheduler
 from utils.write_prompt import (
     WritePromptError, changed_since_bound, check_tree_fingerprint,
     record_check_tree,
 )
 from utils.write_safety import TaskSnapshot
-
-
-@pytest.fixture
-def repo(tmp_path, monkeypatch):
-    yield make_repo(tmp_path, monkeypatch)
-    registry._config = None
-    registry._config_key = None
+from tests.support.implement_world import implement_repo  # noqa: F401 - the repo fixture
 
 
 def _emit(repo, *flags):
@@ -174,11 +164,11 @@ class TestColocatedCodeIsInTheCheckTree:
         return path
 
     def _executor_tree(self, repo):
-        scheduler = WriteBatchScheduler.__new__(WriteBatchScheduler)
-        scheduler.repo_root = str(repo.root)
-        scheduler.phase_dir = str(repo.phase_dir)
-        scheduler.output_dir = str(repo.phase_dir.parent)
-        return scheduler._tree_fingerprint()
+        scheduler = make_scheduler(
+            repo.phase_dir.parent, kind="implement", phase_dir=repo.phase_dir,
+            repo_root=repo.root,
+        )
+        return scheduler._checks.tree_fingerprint()
 
     def test_both_legs_see_colocated_source_but_ignore_workflow_bookkeeping(self, repo):
         code = self._code(repo)

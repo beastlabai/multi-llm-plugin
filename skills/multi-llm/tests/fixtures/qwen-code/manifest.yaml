@@ -1,0 +1,325 @@
+schema_version: 1
+provider: qwen-code
+cli_version: "0.26.8"
+captured: "2026-11-10"
+method: >-
+  §6 step 5, captured 2026-11-10 by tests/fixtures/row_capture/ (its README is
+  the recipe; `batch.sh qwen-code` reruns this set, $0) in the pinned image
+  built from tests/container/Dockerfile at the cli-versions.lock pins
+  (`mllm-e2e:local`, image sha256:e3c989b495cf…, `qwen --version` = 0.26.8),
+  one container per row, `--network none`, uid 10001, read-only root, and NO
+  credential: the only key anywhere is the PATH wrapper's per-exec
+  `mllm-stub-<id>` in OPENAI_API_KEY, meaningful only on 127.0.0.1. The server
+  ran inside the container on 127.0.0.1:8099: `/rig/stub_server.py` with the
+  kit's `success` or `empty-answer` scenario, the kit's `scriptserver.py` for
+  the tool-call row, and `/rig/failserver.py --mode <m>` for every failure row.
+  The CLI was driven through the PATH wrapper (`/opt/mllm/bin/qwen` IS
+  wrapper.py), so redirect.yaml's qwen-code row applied itself: the
+  OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL trio at the stub's `/s/<id>/v1`
+  session prefix, a per-invocation QWEN_HOME and the telemetry and update
+  opt-outs. argv is `QwenCodeProvider.build_command`'s output for a 230 s
+  dispatch timeout, verbatim (`argv.json`, held there by
+  tests/test_row_capture_kit.py): `qwen --bare --chat-recording false -o json
+  --max-tool-calls 0 --max-session-turns 25 --max-wall-time 200 -m stub-model
+  <4,844-byte review prompt>`; the review fan-out always passes its timeout, so
+  `--max-wall-time` is part of the shipped argv, and it is what ends the two
+  fail-forever rows here on qwen's own budget. stdin /dev/null, cwd a git
+  repository holding plans/auth-feature.md, never wrapped in timeout(1). The
+  bytes are raw; `requests` counts the POSTs the server logged. Two rows grade
+  older captures kept beside this file, each saying so: `exit-zero-failure`
+  (0.21.13, the adapter's `min_version`) and `stdout-error` (0.25.0 with
+  `--json-schema`).
+notes: >-
+  The rows live in `rows/`. The top-level captures beside this file are the
+  0.25.0 / 0.21.13 set `TestQwenCodeProvider` (test_provider_qwen_code.py)
+  asserts on and the salvage table in test_salvage_text.py labels; they stay as
+  they are. 0.26.8 is newer than `verified_version` (0.25.0); every row below
+  parsed and classified with no adapter change. The shape of every row: stdout
+  is one JSON array (`system`/`init`, `system`/`retry` records, the assistant
+  record, a terminal `result` record) or zero bytes on a hard abort (exit 55);
+  a failed `result` record is `subtype: error_during_execution`, `is_error:
+  true`, with qwen's `[API Error: <status> <vendor text>]` under
+  `error.message`, and stderr repeats it in an `AlreadyReportedError` envelope
+  after one `Retrying provider attempt` line per retry.
+rows:
+  success:
+    stdout: rows/success.stdout.txt
+    stderr: rows/success.stderr.txt
+    exit_code: 0
+    wall_s: 0.77
+    requests: 1
+    notes: >-
+      The `-o json` array: `system`/`init` (cwd, model, `qwen_code_version`),
+      one assistant record, and the `result` record (`subtype: success`,
+      `is_error: false`) whose `result` is the answer. stderr is 0 bytes.
+    expect:
+      lane_status: {lane_a: ok, lane_b: ok}
+      salvage: answer
+      success: true
+      data:
+        - {id: "S001", title: "Bound the retry ladder", severity: "high"}
+        - {id: "S002", title: "Strip the vendor token", severity: "medium"}
+      raw_contains: ['"qwen_code_version":"0.26.8"', '"subtype":"success"']
+      classify_failure: null
+
+  truncated:
+    stdout: rows/truncated.stdout.txt
+    stderr: rows/truncated.stderr.txt
+    exit_code: 1
+    wall_s: 20.76
+    requests: 5
+    notes: >-
+      failserver `--mode trunc`: 5 requests over 20.8 s, eight `system`/`retry`
+      records in the array, then `[API Error: Model stream ended without a
+      finish reason.]`. The `[API Error:` prefix classifies it `server_error`
+      (the `api error` rung); the fan-out still reads a plain failed run.
+    expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
+      salvage: none
+      success: false
+      error_contains: ["Model stream ended without a finish reason"]
+      raw_contains: ['"subtype":"error_during_execution"', "Retrying provider attempt"]
+      classify_failure: "server_error"
+
+  ephemeral-only:
+    not_applicable: >-
+      `-o json` writes one array ending in a `result` record, or zero bytes on
+      a hard abort; `system`/`retry` records ride inside that array beside the
+      result, never in its place (`truncated`). So there is no "records
+      present, no answer among them" stdout (the top-level
+      ephemeral-only.NOT-APPLICABLE.md has the measurement on 0.25.0). Re-checked
+      on 0.26.8: an empty completion is retried 5 times and ends in a failed
+      `result` record, `[API Error: Model stream ended with empty response
+      text.]`, graded as the extra `empty-answer` row.
+
+  multi-assistant:
+    not_applicable: >-
+      The shipped argv carries `--max-tool-calls 0`, so a run never reaches a
+      second assistant message: the model's first tool call aborts it. Measured
+      with the kit's scriptserver offering a `read_file` call: exit 55, zero
+      bytes on stdout, `FatalBudgetExceededError: Run aborted: tool-call budget
+      of 0 exceeded (--max-tool-calls); observed 1.` on stderr, one request.
+      That capture is graded as the extra `tool-call-budget` row. (The
+      top-level multi-assistant.stdout.json was taken with the probe's own
+      argv, without the cap.)
+
+  error-envelope:
+    stdout: rows/error-envelope.stdout.txt
+    stderr: rows/error-envelope.stderr.txt
+    exit_code: 1
+    wall_s: 0.77
+    requests: 1
+    notes: >-
+      failserver `--mode errbody`: HTTP 200 whose body is an error object
+      carrying the 401 wording. qwen keeps the vendor's words: `[API Error:
+      Streaming request received a non-SSE response (HTTP 200, Content-Type:
+      application/json). Body prefix: {"error": {"message": "Incorrect API key
+      provided: …`, one request, exit 1. The quoted body classifies it
+      `auth_failed`, so both lanes stop: the one adapter of these five that
+      reads an error delivered on the success channel for what it is.
+    expect:
+      lane_status: {lane_a: auth_failed, lane_b: auth_failed}
+      salvage: none
+      success: false
+      error_contains: ["non-SSE response (HTTP 200"]
+      raw_contains: ["Body prefix: {\\\"error\\\": {\\\"message\\\": \\\"Incorrect API key provided"]
+      classify_failure: "auth_failed"
+
+  exit-zero-failure:
+    stdout: exit-zero-failure.0.21.13.stdout.json
+    exit_code: 0
+    notes: >-
+      CAPTURED ON 0.21.13 AND KEPT (the copilot precedent): 0.25.0 and 0.26.8
+      no longer produce this shape, and 0.21.13 is still the adapter's
+      `min_version`. failserver `--mode 500`, fail-forever, through the §6
+      probe: rc 0, a `result` record marked `subtype: success`, `is_error:
+      false`, whose text is `[API Error: 500 internal server error]`, and an
+      empty stderr (redirect.yaml's measurement, hence no stderr file). On
+      0.26.8 every failure mode exits 1 or 55 (this manifest's other cells).
+      `[API Error:` classifies it `server_error`, but the adapter is not
+      `EXIT0_CLASSIFIABLE`, so the fan-out stops on the exit 0.
+    expect:
+      lane_status: {lane_a: null, lane_b: unparseable_result, by_design: "not EXIT0_CLASSIFIABLE: qwen's exit-0 answer text reaches the pattern tables whole, so a review quoting a rate limit or a 401 would classify as one; only 0.21.13 exits 0 on a failure, the fan-out stops on it, the executor keeps its one parse-failure retry"}
+      salvage: none
+      success: false
+      error_contains: ["[API Error: 500 internal server error]"]
+      raw_contains: ['"subtype":"success"', '"is_error":false']
+      classify_failure: "server_error"
+
+  stdout-error:
+    stdout: stdout-error.stdout.json
+    exit_code: 1
+    notes: >-
+      CAPTURED ON 0.25.0 AND KEPT: the shipped argv with `--json-schema` (what
+      `build_command` adds for a structured-output schema) against a stub that
+      answered plain text. rc 1, stderr empty, and the whole diagnosis on
+      stdout inside the array: `Model produced plain text instead of calling
+      the structured_output tool as required by --json-schema`, with no
+      `result` key. Without a schema, 0.26.8 writes an `AlreadyReportedError`
+      or `FatalBudgetExceededError` envelope to stderr on every failure, so
+      only the schema path has this shape.
+    expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
+      salvage: none
+      success: false
+      error_contains: ["instead of calling the structured_output tool"]
+      raw_contains: ["as required by --json-schema"]
+      classify_failure: null
+
+  empty:
+    not_applicable: >-
+      Zero bytes on both channels never happened. qwen's hard aborts (exit 55:
+      `rate-limit`, `zero-body`, `tool-call-budget`) write zero bytes to stdout
+      but always a `FatalBudgetExceededError` envelope to stderr (170 bytes at
+      the least), and every other run writes its JSON array. All twelve runs
+      exited on their own, the longest at qwen's own 200 s budget.
+
+  auth-error:
+    stdout: rows/auth-error.stdout.txt
+    stderr: rows/auth-error.stderr.txt
+    exit_code: 1
+    wall_s: 0.77
+    requests: 1
+    notes: >-
+      failserver `--mode 401`. One request, no retry; `[API Error: 401
+      Incorrect API key provided: …]`, classified by the adapter's own `[api
+      error: 401` pattern.
+    expect:
+      lane_status: {lane_a: auth_failed, lane_b: auth_failed}
+      salvage: none
+      success: false
+      error_contains: ["[API Error: 401 Incorrect API key provided"]
+      raw_contains: ['"type": "AlreadyReportedError"']
+      classify_failure: "auth_failed"
+
+  rate-limit:
+    stdout: rows/rate-limit.stdout.txt
+    stderr: rows/rate-limit.stderr.txt
+    exit_code: 55
+    wall_s: 200.72
+    requests: 48
+    notes: >-
+      failserver `--mode 429`, fail-forever. qwen never gives up on a 429 by
+      itself (the top-level rate-limit.NOT-APPLICABLE.md has the unbounded
+      measurement); the shipped `--max-wall-time 200` ends it: 48 requests,
+      exit 55, zero bytes on stdout, and stderr names the 429 (`Retrying in 60s
+      (attempt 1/10): [API Error: 429 Rate limit reached …]`) ahead of the
+      `FatalBudgetExceededError` envelope, so it classifies `rate_limited`.
+    expect:
+      lane_status: {lane_a: rate_limited, lane_b: rate_limited}
+      salvage: none
+      success: false
+      error_contains: ["wall-clock budget of 200s exceeded"]
+      raw_contains: ["[API Error: 429 Rate limit reached for stub-model", "FatalBudgetExceededError"]
+      classify_failure: "rate_limited"
+
+  invalid-model:
+    stdout: rows/invalid-model.stdout.txt
+    stderr: rows/invalid-model.stderr.txt
+    exit_code: 1
+    wall_s: 0.77
+    requests: 1
+    notes: >-
+      failserver `--mode 404`, naming the model. One request; `[API Error: 404
+      The model `stub-model` does not exist …]`.
+    expect:
+      lane_status: {lane_a: invalid_model, lane_b: invalid_model}
+      salvage: none
+      success: false
+      error_contains: ["does not exist or you do not have access to it"]
+      raw_contains: ["The model `stub-model` does not exist or you do not have access to it."]
+      classify_failure: "invalid_model"
+
+  context-overflow:
+    stdout: rows/context-overflow.stdout.txt
+    stderr: rows/context-overflow.stderr.txt
+    exit_code: 1
+    wall_s: 0.82
+    requests: 1
+    notes: >-
+      failserver `--mode ctx`. One request, no compaction attempt; `[API Error:
+      400 This model's maximum context length is 8192 tokens. …]`.
+    expect:
+      lane_status: {lane_a: context_length_exceeded, lane_b: context_length_exceeded}
+      salvage: none
+      success: false
+      error_contains: ["maximum context length is 8192 tokens"]
+      raw_contains: ["[API Error: 400 This model's maximum context length"]
+      classify_failure: "context_length_exceeded"
+
+  empty-answer:
+    stdout: rows/empty-answer.stdout.txt
+    stderr: rows/empty-answer.stderr.txt
+    exit_code: 1
+    wall_s: 20.86
+    requests: 5
+    notes: >-
+      Not a canonical row (see `ephemeral-only`). The stub answered the empty
+      string: 5 requests over 20.9 s, then `[API Error: Model stream ended with
+      empty response text.]`, which the `api error` rung classifies
+      `server_error`.
+    expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
+      salvage: none
+      success: false
+      error_contains: ["Model stream ended with empty response text"]
+      raw_contains: ['"subtype":"error_during_execution"']
+      classify_failure: "server_error"
+
+  server-error:
+    stdout: rows/server-error.stdout.txt
+    stderr: rows/server-error.stderr.txt
+    exit_code: 1
+    wall_s: 105.3
+    requests: 28
+    notes: >-
+      Not a canonical row. failserver `--mode 500`, fail-forever: 28 requests
+      over 105 s (the declared envelope's 28), then `[API Error: 500 The server
+      had an error while processing your request. …]`, exit 1.
+    expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
+      salvage: none
+      success: false
+      error_contains: ["[API Error: 500 The server had an error"]
+      raw_contains: ['"type": "AlreadyReportedError"']
+      classify_failure: "server_error"
+
+  zero-body:
+    stdout: rows/zero-body.stdout.txt
+    stderr: rows/zero-body.stderr.txt
+    exit_code: 55
+    wall_s: 200.67
+    requests: 64
+    notes: >-
+      Not a canonical row. failserver `--mode empty` (the socket closed with
+      zero bytes): qwen retries the transport error without end, 64 requests,
+      until `--max-wall-time 200` aborts it (exit 55, zero bytes on stdout).
+      stderr's retry lines say `transport-error, transportCode=UND_ERR_SOCKET`,
+      which no connection marker matches, so it classifies None.
+    expect:
+      lane_status: {lane_a: runner_error, lane_b: runner_error}
+      salvage: none
+      success: false
+      error_contains: ["wall-clock budget of 200s exceeded"]
+      raw_contains: ["transportCode=UND_ERR_SOCKET"]
+      classify_failure: null
+
+  tool-call-budget:
+    stdout: rows/tool-call-budget.stdout.txt
+    stderr: rows/tool-call-budget.stderr.txt
+    exit_code: 55
+    wall_s: 0.77
+    requests: 1
+    notes: >-
+      Not a canonical row (see `multi-assistant`). The kit's scriptserver
+      answered the first turn with a decoy text and a `read_file` call; the
+      shipped `--max-tool-calls 0` aborts the run on it: exit 55, zero bytes on
+      stdout, the `FatalBudgetExceededError` envelope on stderr. Nothing
+      classifies it; the adapter's error names the abort.
+    expect:
+      lane_status: {lane_a: runner_error, lane_b: runner_error}
+      salvage: none
+      success: false
+      error_contains: ["tool-call budget of 0 exceeded"]
+      raw_contains: ["tool-call budget of 0 exceeded (--max-tool-calls); observed 1."]
+      classify_failure: null

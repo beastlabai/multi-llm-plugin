@@ -25,12 +25,11 @@ from pathlib import Path
 import pytest
 
 import multi_llm
-from utils import cli_common, detach, next_phase, process_control, run_status, status_file
+from utils import cli_common, detach, next_phase, process_control, run_record, run_status, status_file
 from utils.state_manager import get_or_create_state
 
 import tests.test_check_gate_fixture as gate
-from tests.test_check_gate_fixture import _first_run, repo  # noqa: F401
-from tests.test_manual_tasks_on_completion import workdir  # noqa: F401
+from tests.support.gate_fixture import _first_run
 
 TYPED = "plans/p.md"
 CODEX_TOOL = "$multi-llm:multi-llm "
@@ -86,7 +85,7 @@ class TestTheWorkerRecordsItsRoute:
         tmp_path.mkdir()
         monkeypatch.setattr(
             process_control, "install_worker_signal_handlers", lambda _cb: None)
-        monkeypatch.setattr(detach, "_ACTIVE", None)
+        monkeypatch.setattr(run_record, "_ACTIVE", None)
         monkeypatch.setattr(detach, "_sweep_live_clis", lambda: None)
         monkeypatch.setattr(detach, "_restore_codex_trust", lambda: None)
         monkeypatch.chdir(tmp_path)
@@ -121,6 +120,32 @@ class TestTheWorkerRecordsItsRoute:
         assert "route" not in self._start(tmp_path, monkeypatch, "claude-code")
         monkeypatch.setenv("MULTI_LLM_ROUTE", "plugin")
         assert "route" not in self._start(tmp_path, monkeypatch, "codex")
+
+    def test_an_import_failure_costs_the_route_and_not_the_run(
+        self, tmp_path, monkeypatch, lenient_advisory,
+    ):
+        """The route is advisory: a failed import inside the route lookup
+        records nothing, the run still starts, and the swallow is noted."""
+        import builtins
+
+        real_import = builtins.__import__
+
+        def planted(name, globals=None, locals=None, fromlist=(), level=0):
+            if (level == 1 and (globals or {}).get("__name__") == "utils.detach"
+                    and {"host_capabilities", "routes"} <= set(fromlist or ())):
+                raise ImportError("planted: the route lookup cannot import")
+            return real_import(name, globals, locals, fromlist, level)
+
+        monkeypatch.setattr(builtins, "__import__", planted)
+        monkeypatch.setenv("MULTI_LLM_ROUTE", "package")
+        record = self._start(tmp_path, monkeypatch, "codex")
+        assert record["run_id"] == "run-route" and "route" not in record
+        assert lenient_advisory == ["detach: tool route"]
+
+    def test_a_host_the_capability_data_does_not_list_is_silent(self, monkeypatch):
+        """Expected, so silent even under the strict guard this file runs in."""
+        monkeypatch.setenv("MULTI_LLM_ROUTE", "package")
+        assert detach._tool_route("no-such-host") is None
 
 
 class TestStatusSpellsTheRunsOwnRoute:
@@ -299,7 +324,7 @@ class TestThePlansManualTasksAndNextStep:
     route ran detached."""
 
     def _plan(self, workdir, route="package", state="done", exit_code=0):
-        from tests.test_manual_tasks_on_completion import _complete_plan
+        from tests.support.manual_tasks import _complete_plan
 
         plan = _complete_plan(workdir)
         phase = plan.parent / plan.stem / "apply-fixes"

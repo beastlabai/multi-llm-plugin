@@ -5,10 +5,6 @@ This module tests the LLM client wrapper functionality including:
 - invoke_with_provider() - primary LLM invocation
 - _is_valid_parsed_data() - parsed data validation
 - invoke_with_file_output() - LLM with file output
-- invoke_subagent() - backward-compatible wrapper with retry logic
-- parse_subagent_response() - structured output parsing
-- _extract_json_from_text() - JSON extraction from text
-- invoke_for_json() - invoke expecting JSON response
 
 All tests use mocking to avoid actual LLM provider calls.
 """
@@ -28,9 +24,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import llm_client
+from utils import provider_outcome
 from utils.llm_client import (
-    LLMClientError,
-    SubagentTimeoutError,
     ERROR_TIMEOUT,
     ERROR_PARSE_ERROR,
     ERROR_BINARY_NOT_FOUND,
@@ -56,10 +51,6 @@ from utils.llm_client import (
     STDOUT_OUTPUT_LOCATION,
     render_output_location,
     describe_output_file,
-    invoke_subagent,
-    parse_subagent_response,
-    _extract_json_from_text,
-    invoke_for_json,
 )
 from utils.providers.cursor_agent import CursorAgentProvider
 
@@ -71,12 +62,8 @@ from utils.providers.cursor_agent import CursorAgentProvider
 from .test_no_committed_secrets import _synthesize  # noqa: E402
 
 
-# `check_cursor_agent_available()` and its three tests are deleted (§9.5): the
-# helper had no caller anywhere in the skill, and availability is the adapter's
-# own `CursorAgentProvider.is_available()` — which is what
-# `tests/test_providers.py` covers. The rest of this module's legacy surface
-# (`invoke_subagent`, `parse_subagent_response`, `invoke_for_json`) stays: it is
-# live behind the shipped `--internal-validation` flag.
+# Availability is the adapter's own `CursorAgentProvider.is_available()`, which
+# `tests/test_provider_cursor_agent.py` covers.
 
 
 class TestSaveLog:
@@ -641,6 +628,164 @@ class TestInvokeWithProvider:
         assert result["details"]["duration_seconds"] >= 0
 
 
+class TestTheAdapterVerdictRidesAFailedChild:
+    """``details["failure_category"]``: what the fan-out's ladder obeys.
+
+    Set from the adapter's ``classify_failure`` on a non-zero exit, from
+    ``exit_zero_failure_category`` on an exit 0 that left no answer, and on a
+    deadline kill as ``timeout``; absent on a parsed exit 0, for an adapter
+    that is not ``EXIT0_CLASSIFIABLE`` and when the adapter raised, which is
+    how ``attempt_ladder_status`` knows to fall back to the error line.
+    """
+
+    @pytest.fixture
+    def run(self):
+        def _run(stdout="", stderr="", returncode=1, side_effect=None):
+            completed = subprocess.CompletedProcess(
+                ["cursor-agent"], returncode, stdout=stdout, stderr=stderr
+            )
+            with patch("shutil.which", return_value="/usr/bin/cursor-agent"), \
+                    patch("utils.llm_client.subprocess.run",
+                          return_value=completed, side_effect=side_effect):
+                return invoke_with_provider(prompt="Test", model_spec="cursor-agent:auto")
+        return _run
+
+    def test_a_non_zero_exit_carries_the_category_and_names_it(self, run):
+        result = run(stderr="HTTP 429 Too Many Requests")
+        assert result["details"]["failure_category"] == "rate_limited"
+        assert result["error"].endswith(" [rate_limited]")
+
+    def test_an_unrecognised_failure_is_a_none_verdict_with_no_tag(self, run):
+        result = run(stderr="something went sideways")
+        assert "failure_category" in result["details"]
+        assert result["details"]["failure_category"] is None
+        assert not result["error"].endswith("]")
+
+    def test_an_adapter_that_raises_leaves_the_key_absent(self, run):
+        def boom(self, *args, **kwargs):
+            raise RuntimeError("adapter bug")
+
+        with patch.object(CursorAgentProvider, "classify_failure", boom):
+            result = run(stderr="HTTP 429 Too Many Requests")
+        assert result["success"] is False
+        assert "failure_category" not in result["details"]
+        assert "[rate_limited]" not in result["error"]
+
+    def test_only_the_category_leaves_never_the_stream(self, run):
+        secret = _synthesize("anthropic-api-key", "failure-category")
+        result = run(stderr=f"HTTP 401 Unauthorized: invalid api key {secret}")
+        assert result["details"]["failure_category"] == "auth_failed"
+        assert secret not in result["error"]
+
+    def test_a_deadline_kill_is_a_timeout_whatever_it_streamed(self, run):
+        exc = subprocess.TimeoutExpired(
+            cmd=["cursor-agent"], timeout=5,
+            output="HTTP 401 Unauthorized: not logged in", stderr="",
+        )
+        result = run(side_effect=exc)
+        assert result["error_code"] == ERROR_TIMEOUT
+        assert result["details"]["failure_category"] == "timeout"
+        assert not result["error"].endswith("]"), "the line already says timed out"
+
+    def test_an_exit_zero_failure_carries_the_adapters_verdict(self, run):
+        result = run(stdout="This is plain text without any JSON", returncode=0)
+        assert result["success"] is False
+        assert "failure_category" in result["details"]
+        assert result["details"]["failure_category"] is None
+
+    def test_an_exit_zero_error_envelope_is_read_without_its_result(self, run):
+        """cursor-agent's ``is_error`` envelope can still hold the model's
+        answer in ``result`` (its ``exit-zero-failure`` row), so on an exit 0
+        the flag decides and the text never does."""
+        envelope = json.dumps({
+            "type": "result", "subtype": "success", "is_error": True,
+            "result": "HTTP 429 Too Many Requests",
+        })
+        result = run(stdout=envelope, returncode=0)
+        assert result["success"] is False
+        assert result["details"]["failure_category"] == "runner_error"
+
+    def test_an_exit_zero_error_envelopes_status_still_classifies(self, run):
+        envelope = json.dumps({
+            "type": "result", "subtype": "success", "is_error": True,
+            "api_error_status": 429, "result": "anything at all",
+        })
+        result = run(stdout=envelope, returncode=0)
+        assert result["details"]["failure_category"] == "rate_limited"
+
+    def test_an_adapter_that_is_not_exit0_classifiable_leaves_the_key_absent(self, run):
+        with patch.object(CursorAgentProvider, "EXIT0_CLASSIFIABLE", False):
+            result = run(stdout="This is plain text without any JSON", returncode=0)
+        assert result["success"] is False
+        assert "failure_category" not in result["details"]
+
+    def test_an_exit_zero_answer_is_never_the_verdict(self, run):
+        """A clean envelope's ``result`` is the model's prose: cursor-agent's
+        ``vendor_text`` drops it, so a review that discusses rate limits and
+        missing credentials is a run nothing recognised, not a backoff or a
+        batch-wide auth failure."""
+        envelope = json.dumps({
+            "type": "result", "subtype": "success", "is_error": False,
+            "result": "The plan retries on HTTP 429 Too Many Requests and "
+                      "stops on 401 Unauthorized: invalid api key.",
+        })
+        result = run(stdout=envelope, returncode=0)
+        assert result["success"] is False
+        assert result["details"]["failure_category"] is None
+
+    def test_a_parsed_exit_zero_carries_no_category(self, run):
+        envelope = json.dumps({
+            "type": "result", "subtype": "success", "is_error": False,
+            "result": '["ok"]',
+        })
+        result = run(stdout=envelope, returncode=0)
+        assert result["success"] is True
+        assert "failure_category" not in result["details"]
+
+    @pytest.mark.parametrize("stderr,expected", [
+        ("HTTP 401 Unauthorized", "auth_failed"),
+        ("HTTP 429 Too Many Requests", "rate_limited"),
+        ("This model's maximum context length is 128000 tokens",
+         "context_length_exceeded"),
+        ("", "unparseable_result"),
+    ])
+    def test_a_rejected_answer_takes_the_executors_verdict(
+        self, tmp_path, stderr, expected
+    ):
+        """A clean envelope whose answer is a bare ``{"raw": …}`` wrapper, no
+        result file: ``invoke_with_file_output`` rejects it with the category
+        the executor gives the same capture after its own rejection, a real
+        diagnosis on stderr first (``rejected_answer_category``)."""
+        from utils import subagent_executor as executor
+
+        envelope = json.dumps({
+            "type": "result", "subtype": "success", "is_error": False,
+            "result": '{"raw":"hello"}',
+        })
+        completed = subprocess.CompletedProcess(
+            ["cursor-agent"], 0, stdout=envelope, stderr=stderr
+        )
+        with patch("shutil.which", return_value="/usr/bin/cursor-agent"), \
+                patch("utils.llm_client.subprocess.run", return_value=completed):
+            result = invoke_with_file_output(
+                prompt_template="Write to {output_json_path}",
+                model_spec="cursor-agent:auto", prompt_context={},
+                output_dir=tmp_path, phase="review-plan", cwd=str(tmp_path),
+            )
+        assert result["success"] is False
+        assert result["details"]["failure_category"] == expected
+
+        capture = executor._Capture(
+            argv=["/bin/true"], stdout=envelope, stderr=stderr, exit_code=0,
+        )
+        with pytest.raises(executor.ResultRejected) as rejected:
+            executor._extract_result_and_syntax(
+                CursorAgentProvider(), envelope, stderr, prefer_arrays=True,
+            )
+        verdict = executor._classify_failed_run(CursorAgentProvider(), capture, "m")
+        assert (verdict[0] if verdict else rejected.value.status) == expected
+
+
 class TestHardFailureStdoutExcerpt:
     """``details["stdout_excerpt"]`` on the two paths that used to drop stdout.
 
@@ -1050,8 +1195,9 @@ class TestHardFailureStdoutExcerpt:
         output is what makes an inlined fourth copy fail here instead of shipping.
         """
         seen = []
+        # The helper lives with the outcome rules (`utils.provider_outcome`).
         with patch.object(
-            llm_client,
+            provider_outcome,
             "_attach_stdout_excerpt",
             side_effect=lambda details, stdout: seen.append(stdout),
         ):
@@ -1231,7 +1377,7 @@ class TestSalvageTextOnTheLosingPaths:
     def test_all_three_losing_paths_route_through_the_one_helper(self):
         seen = []
         with patch.object(
-            llm_client, "_attach_salvage_text",
+            provider_outcome, "_attach_salvage_text",
             # `**_`: the sites now pass the one hook reading as `hook_text`
             # (plans/ask-answer-recovery-and-false-success.md D2.2).
             side_effect=lambda details, provider, stdout, **_: seen.append(stdout),
@@ -1844,9 +1990,9 @@ def test_goal_3_answer_text_is_never_transport(provider, relative):
     ``success`` rows unwrap to a findings array), so "never parses as JSON"
     would fail on correct output. A ``"plain"``-framed adapter's JSON or NDJSON
     answer *is* its raw stdout, so it is exempt from the first two clauses and
-    from matching its own records; the envelope-key clause still holds. No
-    ``"plain"`` adapter has a committed capture today (kilocode has none), so
-    the exemption covers no row yet.
+    from matching its own records; the envelope-key clause still holds.
+    kilocode is the one ``"plain"`` adapter with captures (its manifest's
+    ``rows/``).
     """
     stdout = _fixture(f"{provider}/{relative}")
     adapter = get_provider(provider)
@@ -1887,8 +2033,7 @@ def test_the_goal_3_sweep_covers_every_adapter_with_captures():
     with_dirs = {
         p.name for p in FIXTURES.iterdir() if p.is_dir() and p.name in _PROVIDERS
     }
-    # kilocode's directory holds only its model catalog (§14).
-    assert swept == with_dirs - {"kilocode"}
+    assert swept == with_dirs
     # Not vacuous. Since 2026-10-02 opencode commits one release's captures
     # (the 72 rig cases of its pin), not five releases', so the sweep is ~280.
     assert len(GOAL_3_ROWS) > 250
@@ -3493,452 +3638,6 @@ class TestDescribeOutputFile:
         assert line.startswith("Result will be saved to:")
 
 
-class TestInvokeSubagent:
-    """Tests for invoke_subagent() function."""
-
-    @pytest.fixture
-    def mock_invoke_with_provider(self):
-        """Mock invoke_with_provider."""
-        with patch("utils.llm_client.invoke_with_provider") as mock:
-            yield mock
-
-    def test_success_returns_output(self, mock_invoke_with_provider):
-        """Successful invocation returns output in legacy format."""
-        mock_invoke_with_provider.return_value = {
-            "success": True,
-            "data": [{"item": 1}],
-            "details": {"stderr": ""},
-        }
-
-        result = invoke_subagent(
-            prompt="Test prompt",
-            model="gpt-4",
-        )
-
-        assert result["success"] is True
-        assert "output" in result
-        # Data should be JSON-serialized
-        assert json.loads(result["output"]) == [{"item": 1}]
-
-    def test_failure_returns_error(self, mock_invoke_with_provider):
-        """Failed invocation returns error in legacy format."""
-        mock_invoke_with_provider.return_value = {
-            "success": False,
-            "error": "Provider failed",
-            "error_code": ERROR_SUBPROCESS_FAILED,
-            "details": {"stderr": "error details"},
-        }
-
-        result = invoke_subagent(
-            prompt="Test prompt",
-            model="gpt-4",
-            max_retries=0,  # No retries
-        )
-
-        assert result["success"] is False
-        assert result["error"] == "Provider failed"
-
-    def test_timeout_raises_exception(self, mock_invoke_with_provider):
-        """Timeout raises SubagentTimeoutError after retries."""
-        mock_invoke_with_provider.return_value = {
-            "success": False,
-            "error": "cursor-agent timed out",
-            "error_code": ERROR_TIMEOUT,
-            "details": {},
-        }
-
-        with pytest.raises(SubagentTimeoutError):
-            invoke_subagent(
-                prompt="Test prompt",
-                max_retries=0,
-            )
-
-    def test_binary_not_found_raises_exception(self, mock_invoke_with_provider):
-        """Binary not found raises LLMClientError immediately."""
-        mock_invoke_with_provider.return_value = {
-            "success": False,
-            "error": "cursor-agent CLI not found",
-            "error_code": ERROR_BINARY_NOT_FOUND,
-            "details": {},
-        }
-
-        with pytest.raises(LLMClientError) as exc_info:
-            invoke_subagent(prompt="Test")
-
-        assert "cursor-agent CLI not found" in str(exc_info.value)
-
-    def test_retry_logic_with_backoff(self, mock_invoke_with_provider):
-        """Retry with exponential backoff on failure."""
-        # First two calls fail, third succeeds
-        mock_invoke_with_provider.side_effect = [
-            {
-                "success": False,
-                "error": "Temporary failure",
-                "error_code": ERROR_SUBPROCESS_FAILED,
-                "details": {},
-            },
-            {
-                "success": False,
-                "error": "Temporary failure",
-                "error_code": ERROR_SUBPROCESS_FAILED,
-                "details": {},
-            },
-            {
-                "success": True,
-                "data": [{"item": 1}],
-                "details": {},
-            },
-        ]
-
-        with patch("utils.llm_client.time.sleep") as mock_sleep:
-            result = invoke_subagent(
-                prompt="Test",
-                max_retries=2,
-                retry_backoff=[1, 2],
-            )
-
-            assert result["success"] is True
-            # Should have slept twice (after first and second failure)
-            assert mock_sleep.call_count == 2
-            mock_sleep.assert_any_call(1)
-            mock_sleep.assert_any_call(2)
-
-    def test_retry_uses_last_backoff_value(self, mock_invoke_with_provider):
-        """Use last backoff value when retries exceed backoff list length."""
-        mock_invoke_with_provider.side_effect = [
-            {
-                "success": False,
-                "error": "Failure",
-                "error_code": ERROR_SUBPROCESS_FAILED,
-                "details": {},
-            },
-            {
-                "success": False,
-                "error": "Failure",
-                "error_code": ERROR_SUBPROCESS_FAILED,
-                "details": {},
-            },
-            {
-                "success": False,
-                "error": "Failure",
-                "error_code": ERROR_SUBPROCESS_FAILED,
-                "details": {},
-            },
-            {
-                "success": True,
-                "data": [],
-                "details": {},
-            },
-        ]
-
-        with patch("utils.llm_client.time.sleep") as mock_sleep:
-            invoke_subagent(
-                prompt="Test",
-                max_retries=3,
-                retry_backoff=[1],  # Only one value
-            )
-
-            # All retries should use the same backoff
-            assert mock_sleep.call_count == 3
-            for call in mock_sleep.call_args_list:
-                assert call[0][0] == 1
-
-    def test_log_file_only_on_final_attempt(self, mock_invoke_with_provider, tmp_path):
-        """Only save log file on final attempt."""
-        log_file = tmp_path / "test.log"
-
-        mock_invoke_with_provider.side_effect = [
-            {
-                "success": False,
-                "error": "Failure",
-                "error_code": ERROR_SUBPROCESS_FAILED,
-                "details": {},
-            },
-            {
-                "success": True,
-                "data": [],
-                "details": {},
-            },
-        ]
-
-        with patch("utils.llm_client.time.sleep"):
-            invoke_subagent(
-                prompt="Test",
-                max_retries=1,
-                log_file=log_file,
-            )
-
-        # First call should have log_file=None, second should have the path
-        calls = mock_invoke_with_provider.call_args_list
-        assert calls[0].kwargs["log_file"] is None
-        assert calls[1].kwargs["log_file"] == log_file
-
-    def test_model_spec_formatting(self, mock_invoke_with_provider):
-        """Format model spec correctly for provider."""
-        mock_invoke_with_provider.return_value = {
-            "success": True,
-            "data": [],
-            "details": {},
-        }
-
-        invoke_subagent(prompt="Test", model="gpt-4")
-
-        call_kwargs = mock_invoke_with_provider.call_args.kwargs
-        assert call_kwargs["model_spec"] == "cursor-agent:gpt-4"
-
-    def test_default_model_spec(self, mock_invoke_with_provider):
-        """Use 'cursor-agent:auto' when no model specified."""
-        mock_invoke_with_provider.return_value = {
-            "success": True,
-            "data": [],
-            "details": {},
-        }
-
-        invoke_subagent(prompt="Test")
-
-        call_kwargs = mock_invoke_with_provider.call_args.kwargs
-        assert call_kwargs["model_spec"] == "cursor-agent:auto"
-
-
-class TestParseSubagentResponse:
-    """Tests for parse_subagent_response() function."""
-
-    def test_valid_json_array(self):
-        """Parse valid JSON array."""
-        result = parse_subagent_response('[{"id": 1}, {"id": 2}]')
-
-        assert result == [{"id": 1}, {"id": 2}]
-
-    def test_cursor_agent_wrapper_format(self):
-        """Parse cursor-agent JSON wrapper format."""
-        inner_data = [{"title": "Test"}]
-        wrapper = {"type": "result", "result": json.dumps(inner_data)}
-
-        result = parse_subagent_response(json.dumps(wrapper))
-
-        assert result == inner_data
-
-    def test_cursor_agent_wrapper_with_object_result(self):
-        """Parse cursor-agent wrapper with object in result."""
-        inner_data = {"key": "value"}
-        wrapper = {"type": "result", "result": json.dumps(inner_data)}
-
-        result = parse_subagent_response(json.dumps(wrapper))
-
-        assert result == inner_data
-
-    def test_code_block_in_wrapper_result(self):
-        """Extract JSON from code block in wrapper result."""
-        inner_json = [{"item": 1}]
-        text_with_block = f"Here is the result:\n```json\n{json.dumps(inner_json)}\n```"
-        wrapper = {"type": "result", "result": text_with_block}
-
-        result = parse_subagent_response(json.dumps(wrapper))
-
-        assert result == inner_json
-
-    def test_raw_output_without_json(self):
-        """Return raw wrapper for plain text output."""
-        result = parse_subagent_response("Just plain text without any JSON")
-
-        assert result == {"raw": "Just plain text without any JSON"}
-
-    def test_direct_json_object(self):
-        """Parse direct JSON object (not wrapped)."""
-        data = {"key": "value", "nested": {"a": 1}}
-
-        result = parse_subagent_response(json.dumps(data))
-
-        assert result == data
-
-    def test_empty_result_in_wrapper(self):
-        """Handle empty result in wrapper."""
-        wrapper = {"type": "result", "result": ""}
-        wrapper_json = json.dumps(wrapper)
-
-        result = parse_subagent_response(wrapper_json)
-
-        # Empty result triggers _extract_json_from_text on the empty string
-        # which returns {"raw": ""} (the empty inner result)
-        assert result == {"raw": ""}
-
-    def test_whitespace_handling(self):
-        """Handle whitespace around output."""
-        data = [1, 2, 3]
-        output = f"  \n  {json.dumps(data)}  \n  "
-
-        result = parse_subagent_response(output)
-
-        assert result == data
-
-    def test_json_embedded_in_text(self):
-        """Extract JSON embedded in text."""
-        json_data = {"found": True}
-        text = f"Some prefix text {json.dumps(json_data)} some suffix text"
-        wrapper = {"type": "result", "result": text}
-
-        result = parse_subagent_response(json.dumps(wrapper))
-
-        assert result == json_data
-
-
-class TestExtractJsonFromText:
-    """Tests for _extract_json_from_text() function."""
-
-    def test_code_block_with_json_label(self):
-        """Extract JSON from labeled code block."""
-        text = """Here is the JSON:
-
-```json
-[{"id": 1}, {"id": 2}]
-```
-
-End of output."""
-
-        result = _extract_json_from_text(text)
-
-        assert result == [{"id": 1}, {"id": 2}]
-
-    def test_code_block_without_json_label(self):
-        """Extract JSON from unlabeled code block."""
-        text = """Output:
-```
-{"status": "ok"}
-```
-"""
-
-        result = _extract_json_from_text(text)
-
-        assert result == {"status": "ok"}
-
-    def test_inline_json_array(self):
-        """Extract inline JSON array."""
-        text = "The results are: [1, 2, 3] as shown."
-
-        result = _extract_json_from_text(text)
-
-        assert result == [1, 2, 3]
-
-    def test_inline_json_object(self):
-        """Extract inline JSON object."""
-        text = 'Found: {"key": "value"} in response'
-
-        result = _extract_json_from_text(text)
-
-        assert result == {"key": "value"}
-
-    def test_no_json_returns_raw(self):
-        """Return raw wrapper when no JSON found."""
-        text = "Just plain text without any JSON structure"
-
-        result = _extract_json_from_text(text)
-
-        assert result == {"raw": text}
-
-    def test_invalid_json_returns_raw(self):
-        """Return raw wrapper for malformed JSON."""
-        text = "[1, 2, 3"  # Missing closing bracket
-
-        result = _extract_json_from_text(text)
-
-        assert result == {"raw": text}
-
-    def test_prefers_code_block_over_inline(self):
-        """Prefer code block JSON over inline JSON."""
-        text = """Found [1, 2, 3] inline
-```json
-[4, 5, 6]
-```
-"""
-
-        result = _extract_json_from_text(text)
-
-        # Should return code block content
-        assert result == [4, 5, 6]
-
-    def test_array_before_object(self):
-        """Try array pattern before object pattern."""
-        text = '{"obj": 1} and [1, 2] are both valid'
-
-        result = _extract_json_from_text(text)
-
-        # Should find array first (appears after object in text)
-        assert result == [1, 2]
-
-
-class TestInvokeForJson:
-    """Tests for invoke_for_json() function."""
-
-    @pytest.fixture
-    def mock_invoke_subagent(self):
-        """Mock invoke_subagent."""
-        with patch("utils.llm_client.invoke_subagent") as mock:
-            yield mock
-
-    def test_valid_json_response(self, mock_invoke_subagent):
-        """Parse valid JSON response."""
-        mock_invoke_subagent.return_value = {
-            "success": True,
-            "output": json.dumps([{"id": 1}]),
-        }
-
-        result = invoke_for_json(
-            prompt="Return JSON",
-            model="gpt-4",
-        )
-
-        assert result["success"] is True
-        assert result["data"] == [{"id": 1}]
-        assert result["raw_output"] == json.dumps([{"id": 1}])
-
-    def test_parse_failure_propagates(self, mock_invoke_subagent):
-        """Propagate subagent failure."""
-        mock_invoke_subagent.return_value = {
-            "success": False,
-            "error": "Subagent failed",
-            "output": "",
-        }
-
-        result = invoke_for_json(prompt="Test")
-
-        assert result["success"] is False
-        assert result["error"] == "Subagent failed"
-
-    def test_parse_cursor_agent_wrapper(self, mock_invoke_subagent):
-        """Parse cursor-agent wrapper format."""
-        inner_data = {"status": "ok"}
-        wrapper = {"type": "result", "result": json.dumps(inner_data)}
-        mock_invoke_subagent.return_value = {
-            "success": True,
-            "output": json.dumps(wrapper),
-        }
-
-        result = invoke_for_json(prompt="Test")
-
-        assert result["success"] is True
-        assert result["data"] == inner_data
-
-    def test_passes_parameters_to_subagent(self, mock_invoke_subagent):
-        """Pass parameters to invoke_subagent."""
-        mock_invoke_subagent.return_value = {
-            "success": True,
-            "output": "[]",
-        }
-
-        invoke_for_json(
-            prompt="Test prompt",
-            model="custom-model",
-            context_files=["file1.py", "file2.py"],
-            timeout=300,
-        )
-
-        call_kwargs = mock_invoke_subagent.call_args.kwargs
-        assert call_kwargs["prompt"] == "Test prompt"
-        assert call_kwargs["model"] == "custom-model"
-        assert call_kwargs["context_files"] == ["file1.py", "file2.py"]
-        assert call_kwargs["timeout"] == 300
-
-
 class TestErrorConstants:
     """Tests for error code constants."""
 
@@ -3971,33 +3670,6 @@ class TestErrorConstants:
         assert ERROR_SUBPROCESS_FAILED == "SUBPROCESS_FAILED"
         assert ERROR_FILE_NOT_FOUND == "FILE_NOT_FOUND"
         assert ERROR_PROMPT_TOO_LONG == "PROMPT_TOO_LONG"
-
-
-class TestExceptions:
-    """Tests for exception classes."""
-
-    def test_llm_client_error_is_exception(self):
-        """LLMClientError is an Exception subclass."""
-        assert issubclass(LLMClientError, Exception)
-
-    def test_subagent_timeout_error_is_llm_client_error(self):
-        """SubagentTimeoutError is an LLMClientError subclass."""
-        assert issubclass(SubagentTimeoutError, LLMClientError)
-
-    def test_exception_message(self):
-        """Exceptions preserve message."""
-        error = LLMClientError("Test error message")
-        assert str(error) == "Test error message"
-
-        timeout = SubagentTimeoutError("Timeout occurred")
-        assert str(timeout) == "Timeout occurred"
-
-    def test_exception_can_be_caught_as_base(self):
-        """SubagentTimeoutError can be caught as LLMClientError."""
-        try:
-            raise SubagentTimeoutError("timeout")
-        except LLMClientError as e:
-            assert "timeout" in str(e)
 
 
 class TestResolveExecutable:
@@ -4874,6 +4546,48 @@ class TestHardFailureOnAnExitZeroRunWritesItsLog:
         assert "the stream reported a terminal error" in written
 
 
+class TestTheLogIsWrittenBeforeTheRestOfTheReading:
+    """The provider log is written where each path writes it: a hard failure
+    once its error line is final, before the excerpt, salvage, answer and usage
+    steps; an exit 0 after its salvage, before its answer text. Whatever raises
+    later in the reading, an interrupt included, leaves the log behind
+    (docs/development/providers.md#reading-a-capture)."""
+
+    class _Interrupted(BaseException):
+        """Raised by a later step of the reading; a ``BaseException``, as a
+        Ctrl-C is, so no handler on the way out can swallow it."""
+
+    @pytest.mark.parametrize("ending,stdout,step,return_code", [
+        ("nonzero", "the partial answer\n", "_attach_stdout_excerpt", "1"),
+        ("nonzero", "the partial answer\n", "_attach_answer_text", "1"),
+        ("nonzero", "the partial answer\n", "_attach_usage", "1"),
+        ("timeout", "the partial answer\n", "_attach_stdout_excerpt", "-1"),
+        ("timeout", "the partial answer\n", "_attach_answer_text", "-1"),
+        ("timeout", "the partial answer\n", "_attach_usage", "-1"),
+        ("exit0", "[]\n", "_attach_answer_text", "0"),
+        ("exit0", "the partial answer\n", "_attach_answer_text", "0"),
+    ])
+    def test_a_step_that_raises_after_the_log_leaves_it(
+        self, tmp_path, monkeypatch, ending, stdout, step, return_code,
+    ):
+        def interrupted(*_args, **_kwargs):
+            raise self._Interrupted(step)
+
+        monkeypatch.setattr(provider_outcome, step, interrupted)
+        log = tmp_path / "log.txt"
+
+        with pytest.raises(self._Interrupted):
+            _invoke_answer(
+                KILO_SPEC, stdout, returncode=0 if ending == "exit0" else 1,
+                timeout=ending == "timeout", log_file=log,
+            )
+
+        assert log.exists(), f"the {ending} log was lost to a raise in {step}"
+        text = log.read_text(encoding="utf-8")
+        assert f"Return Code: {return_code}\n" in text
+        assert stdout.strip() in text
+
+
 # --------------------------------------------------------------------------- #
 # omp — the production path, with a real fake binary on PATH
 #
@@ -5428,9 +5142,9 @@ class TestAStoppedLaneACliTakesItsTreeWithIt:
         the call simply returns. Its detached tree is swept from the registry's
         last snapshot, the only thing that still links it to the slot.
 
-        pi's shape (the shell read through pi's own pipe), because a child that
-        holds the CALLER's pipe keeps ``communicate()`` waiting until the
-        slot's deadline, where the timeout path sweeps it instead.
+        pi's shape (the shell read through pi's own pipe). A child that holds
+        the CALLER's pipe is the held-pipe case, which
+        ``TestLaneACaptureEndsWithTheCliAndIsBounded`` covers.
         """
         from tests.harness import cli_tree
 
@@ -5502,6 +5216,225 @@ class TestAStoppedLaneACliTakesItsTreeWithIt:
             capture_output=True, text=True, timeout=30, input=text,
         )
         assert completed.stdout.split() == [str(len(text)), "END"]
+
+
+# =========================================================================== #
+# PROV-4 / PROV-11: Lane A reads its CLI through `process_capture.PipeCapture`.
+# The wait ends with the CLI, not with the last process holding an inherited
+# pipe, and each stream is kept to a bound. Real processes throughout.
+# =========================================================================== #
+
+def _alive(pid):
+    """Is *pid* still running (a zombie is not)?"""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as handle:
+            return handle.read().rsplit(b")", 1)[-1].split()[0] != b"Z"
+    except OSError:
+        pass
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return not os.path.exists("/proc/self/stat")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX shell scripts")
+class TestLaneACaptureEndsWithTheCliAndIsBounded:
+    MODEL_SPEC = "pi:stub/stub-model"
+
+    @pytest.mark.parametrize("own_session", [False, True], ids=["inherited", "setsid"])
+    def test_a_cli_that_exits_with_a_held_pipe_returns_its_answer_promptly(
+        self, tmp_path, monkeypatch, own_session
+    ):
+        """The CLI prints its answer and exits 0 while a process it started
+        keeps stdout open: the call returns once the CLI is gone (plus the
+        drain), with the answer and the real exit code, not at the deadline.
+        SP-1: what the CLI left is swept exactly as at the deadline before
+        the call returns. A holder the sweep reaches (here one the registry
+        snapshotted) is stopped and the answer stands; one it does not reach
+        (a session of its own, started too late for the snapshot) keeps the
+        pipe, so the call ends as the deadline's ``TimeoutExpired``, as at the
+        base, saying so, and nothing outside the sweep is signalled."""
+        import signal as _signal
+
+        from utils import process_control
+
+        monkeypatch.setattr(llm_client, "LANE_A_DRAIN_S", 1.0)
+        marker = tmp_path / "holder.pid"
+        if own_session:
+            script = (
+                'echo "[{\\"answer\\":1}]"; '
+                f'setsid sleep 30 & echo $! > "{marker}"; exit 0'
+            )
+        else:
+            # Alive long enough for the registry to snapshot the holder.
+            script = (
+                'echo "[{\\"answer\\":1}]"; '
+                f'sleep 30 & echo $! > "{marker}"; sleep 1.5; exit 0'
+            )
+        holder = None
+        try:
+            started = time.monotonic()
+            if own_session:
+                with pytest.raises(subprocess.TimeoutExpired) as caught:
+                    llm_client._run_provider_cli(
+                        ["sh", "-c", script], capture_output=True, text=True,
+                        encoding="utf-8", errors="replace", timeout=60,
+                        stdin=subprocess.DEVNULL,
+                    )
+                holder = int(marker.read_text(encoding="utf-8").strip())
+                assert time.monotonic() - started < 10
+                assert caught.value.stdout == '[{"answer":1}]\n'
+                assert "a process the sweep did not reach holds it" in caught.value.held_pipe
+                assert "ended as a timeout" in caught.value.held_pipe
+                assert caught.value.stream_stop is None
+                assert len(process_control.live_cli_registry) == 0
+                assert _alive(holder), "a process outside the sweep was signalled"
+                return
+            completed = llm_client._run_provider_cli(
+                ["sh", "-c", script], capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=60,
+                stdin=subprocess.DEVNULL,
+            )
+            elapsed = time.monotonic() - started
+            holder = int(marker.read_text(encoding="utf-8").strip())
+            assert elapsed < 8, f"{elapsed:.1f}s: the call waited on the held pipe"
+            assert completed.returncode == 0
+            assert completed.stdout == '[{"answer":1}]\n'
+            assert completed.capped_streams == frozenset()
+            assert len(process_control.live_cli_registry) == 0
+            assert "swept before the slot's checks" in completed.pipe_held
+            gone_by = time.monotonic() + 5
+            while time.monotonic() < gone_by and _alive(holder):
+                time.sleep(0.05)
+            assert not _alive(holder), "the pipe's holder outlived the call"
+        finally:
+            if holder is not None:
+                try:
+                    os.kill(holder, _signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    @staticmethod
+    def _stub_pi(tmp_path, monkeypatch, stdout_expr):
+        """A ``pi`` on PATH that answers the flag probes and writes
+        *stdout_expr* (a Python expression) on stdout, with the Lane A capture
+        bound lowered to 4096 bytes."""
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        fake = bin_dir / "pi"
+        fake.write_text(
+            f"#!{sys.executable}\n"
+            "import sys\n"
+            "args = sys.argv[1:]\n"
+            "if '--help' in args:\n"
+            "    print('  --tools, -t <tools>            Comma-separated allowlist "
+            "of tool names to enable')\n"
+            "    sys.exit(0)\n"
+            "if '--version' in args:\n"
+            "    print('0.87.1'); sys.exit(0)\n"
+            "sys.stdin.read()\n"
+            f"sys.stdout.write({stdout_expr})\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+        monkeypatch.setattr(llm_client, "LANE_A_MAX_STREAM_BYTES", 4096)
+
+    @pytest.fixture(autouse=True)
+    def _fresh_flag_gate(self):
+        from utils.providers import base as providers_base
+
+        providers_base.reset_flag_gate_cache()
+        yield
+        providers_base.reset_flag_gate_cache()
+
+    def test_a_stdout_past_the_bound_is_refused_not_parsed(self, tmp_path, monkeypatch):
+        """A stdout cut at the capture bound is never parsed from its head: the
+        slot fails with the executor's wording and names the capped stream."""
+        self._stub_pi(tmp_path, monkeypatch, "'[]' + ' ' * 20000")
+        result = invoke_with_provider("Review this", self.MODEL_SPEC, timeout=60)
+
+        assert result["success"] is False
+        assert result["error_code"] == ERROR_PARSE_ERROR
+        assert (
+            "the runner produced more than 4096 bytes on stdout; refusing to parse it"
+            in result["error"]
+        )
+        assert result["details"]["stream_capped"] == ["stdout"]
+
+    def test_a_capped_stdout_is_partial_evidence_never_a_finished_answer(
+        self, tmp_path, monkeypatch
+    ):
+        """Ask counts an exit-0 ``PARSE_ERROR`` as a finished prose answer, so
+        a capped stdout must say it is not one: ``incomplete``, which
+        ``answer_finished`` honours, and the head stays partial evidence."""
+        import ask_orchestrator
+
+        self._stub_pi(tmp_path, monkeypatch, "'An answer that goes on. ' * 1100")
+        result = invoke_with_provider(
+            "Question", self.MODEL_SPEC, timeout=60, want_answer_text=True,
+        )
+
+        assert result["error_code"] == ERROR_PARSE_ERROR
+        assert result["details"]["incomplete"] is True
+        assert result["details"]["stream_capped"] == ["stdout"]
+        assert ask_orchestrator.answer_finished(result) is False
+        # The head is still there, for step 3 to keep as the partial.
+        assert result["details"]["answer_text"].startswith("An answer that goes on.")
+        # The ask gate reads the cap itself too, not only `incomplete`.
+        bare = {"success": False, "error_code": ERROR_PARSE_ERROR,
+                "details": {"stream_capped": ["stdout"]}}
+        assert ask_orchestrator.answer_finished(bare) is False
+        bare["details"]["stream_capped"] = ["stderr"]
+        assert ask_orchestrator.answer_finished(bare) is True
+
+    def test_a_capped_stdout_is_retried_by_the_review_ladder_as_on_the_executor(
+        self, tmp_path, monkeypatch
+    ):
+        """The executor refuses a capped stdout at rung 5 (``unparseable_result``,
+        retried); the fan-out's refusal carries the same category, so the review
+        caller's ladder retries it too instead of stopping on an unrecognised
+        error line."""
+        import asyncio
+
+        from utils import review_orchestrator_base as rob
+        from utils.retry_ladder import STATUS_UNPARSEABLE
+
+        self._stub_pi(tmp_path, monkeypatch, "'[]' + ' ' * 20000")
+        out_dir = tmp_path / "out"
+        out_dir.mkdir()
+        results = []
+
+        async def dispatch(attempt_timeout):
+            result = invoke_with_file_output(
+                prompt_template="WRITE-TO {output_json_path}",
+                model_spec=self.MODEL_SPEC,
+                prompt_context={},
+                output_dir=out_dir,
+                phase="review-plan",
+                timeout=attempt_timeout,
+            )
+            results.append(result)
+            return result
+
+        run = asyncio.run(rob.dispatch_with_ladder(
+            dispatch,
+            ladder=rob.slot_ladder("pi", 120, anchor=None),
+            model_spec=self.MODEL_SPEC,
+            display_name=self.MODEL_SPEC,
+            timeout=120,
+            start_line=lambda attempt, slice_s: f"attempt {attempt}",
+            jail_summary_key=None,
+        ))
+
+        assert results[0]["details"]["failure_category"] == STATUS_UNPARSEABLE
+        assert rob.attempt_ladder_status(results[0], results[0]["details"]) == (
+            STATUS_UNPARSEABLE)
+        assert run.status == STATUS_UNPARSEABLE
+        assert len(results) == 2, "rung 5: driver.subagent_retries=1"
 
 
 def process_control_interval() -> float:

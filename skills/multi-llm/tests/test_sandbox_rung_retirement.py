@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import review_orchestrator_base as rob  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from utils import sandbox_walk  # noqa: E402
 from utils.providers.base import (  # noqa: E402
     PROFILE_AGENT_READONLY,
     PROFILE_GENERATE,
@@ -112,7 +113,7 @@ def lanes(monkeypatch):
         spawned.append(list(argv))
         return real(argv, **kwargs)
 
-    monkeypatch.setattr(executor, "_run_sandbox_probe", counting)
+    monkeypatch.setattr(sandbox_walk, "_run_sandbox_probe", counting)
     executor.reset_sandbox_cache()
     executor._VERSION_CACHE.pop("fakecodex", None)
 
@@ -123,7 +124,7 @@ def lanes(monkeypatch):
         def use(self, adapter):
             self.adapter = adapter
             monkeypatch.setattr(rob, "get_provider", lambda _name: adapter)
-            monkeypatch.setattr(executor, "get_provider", lambda _name: adapter)
+            monkeypatch.setattr(sandbox_walk, "get_provider", lambda _name: adapter)
             return self
 
         def fanout(self):
@@ -153,6 +154,7 @@ def _retired_lines(text):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.shell_probe
 class TestTheBypassLineNamesTheRungTried:
     def test_a_first_run_with_a_cold_cache_and_no_prior_record(self, lanes, capsys):
         lanes.use(_Codexish(version="0.155.1", landlock=UNRELATED_ERROR))
@@ -192,6 +194,7 @@ class TestTheBypassLineNamesTheRungTried:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.shell_probe
 class TestAtOrAboveRemovedAt:
     @pytest.mark.parametrize("version", ["0.156.1", "0.157.0"])
     def test_the_fanout_spawns_no_rung_probe_and_says_so_once(
@@ -243,6 +246,7 @@ class TestAtOrAboveRemovedAt:
         assert len(lines) == 1 and "unavailable since fakecodex 0.156.1 (measured)" in lines[0]
 
 
+@pytest.mark.shell_probe
 class TestUnderContained:
     """`sandbox_fallback: contained` refuses the slot — and still says why."""
 
@@ -264,6 +268,7 @@ class TestUnderContained:
         assert "this run refused fakecodex:m" in line
 
 
+@pytest.mark.shell_probe
 class TestBetweenDeprecatedAtAndRemovedAt:
     def test_a_passing_probe_uses_the_rung_and_announces_nothing(self, lanes, capsys):
         lanes.use(_Codexish(version="0.155.1", landlock=CANARY_DENIED))
@@ -302,7 +307,7 @@ class TestBetweenDeprecatedAtAndRemovedAt:
         assert _retired_lines(capsys.readouterr().out) == []
 
     def test_a_timeout_is_named_as_itself(self, lanes, monkeypatch, capsys):
-        monkeypatch.setattr(executor, "SANDBOX_PROBE_TIMEOUT_S", 0.5)
+        monkeypatch.setattr(sandbox_walk, "SANDBOX_PROBE_TIMEOUT_S", 0.5)
         lanes.use(_Codexish(version="0.155.1", landlock=HANGS))
         verdict = lanes.fanout()
         assert verdict.refused
@@ -313,7 +318,7 @@ class TestBetweenDeprecatedAtAndRemovedAt:
         assert _retired_lines(capsys.readouterr().out) == []
 
     def test_a_canary_setup_failure_is_named_as_itself(self, lanes, monkeypatch, capsys):
-        monkeypatch.setattr(executor, "_prepare_probe_workdir", lambda cwd, workdir: None)
+        monkeypatch.setattr(sandbox_walk, "_prepare_probe_workdir", lambda cwd, workdir: None)
         adapter = _Codexish(version="0.155.1", landlock=CANARY_DENIED)
         rung = replace(_rung(CANARY_DENIED), probe_workdir=".multi-llm/tmp")
         monkeypatch.setattr(
@@ -354,6 +359,7 @@ class TestThePanicIsClassifiedByText:
         (f"echo \"{PANIC_LINE}\" >&2; exit 1", "retired"),
         (EXIT_101_OTHER, "unavailable"),
     ])
+    @pytest.mark.shell_probe
     def test_the_walk_reads_the_text_not_the_exit_code(self, script, outcome):
         tails = []
         rung, walk = executor._walk_fallback_rungs(
@@ -371,6 +377,7 @@ class TestThePanicIsClassifiedByText:
 
 
 class TestOneProbePerVersion:
+    @pytest.mark.shell_probe
     def test_both_lanes_in_one_process_spawn_exactly_one_rung_probe(self, lanes):
         lanes.use(_Codexish(version="0.155.1", landlock=UNRELATED_ERROR))
         assert lanes.fanout().bypass
@@ -380,6 +387,7 @@ class TestOneProbePerVersion:
         # One version read too: the preflight's own, or the probe's.
         assert sum(1 for argv in lanes.probes if "codex-cli" in argv[-1]) == 1
 
+    @pytest.mark.shell_probe
     def test_a_new_version_is_a_new_probe(self, lanes):
         lanes.use(_Codexish(version="0.155.1", landlock=UNRELATED_ERROR))
         lanes.fanout()
@@ -388,6 +396,7 @@ class TestOneProbePerVersion:
         lanes.fanout()
         assert len(lanes.rung_probes()) == 2
 
+    @pytest.mark.shell_probe
     def test_concurrent_specs_read_the_version_once(self, lanes):
         import threading
 
@@ -426,7 +435,7 @@ class TestOneProbePerVersion:
         guard on real CLIs answers it and no real codex is spawned."""
         seen = []
         monkeypatch.setattr(
-            executor, "_run_sandbox_probe",
+            sandbox_walk, "_run_sandbox_probe",
             lambda argv, **kwargs: seen.append(list(argv)) or subprocess.CompletedProcess(
                 argv, 0, "codex-cli 0.156.1\n", ""
             ),

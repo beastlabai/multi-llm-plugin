@@ -7,22 +7,23 @@ from pathlib import Path
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from utils import suggestion_processor as _sp
 from utils.suggestion_processor import (
     DEFAULT_SIMILARITY_THRESHOLD,
     SuggestionGroup,
     extract_suggestions_from_review,
-    compute_similarity,
     compute_section_weights,
     compute_token_weights,
     group_similar_suggestions,
     deduplicate_suggestions,
-    merge_suggestions_by_model,
     normalize_tokens,
-    filter_by_importance,
     summarize_theme,
-    export_groups_to_json,
-    import_groups_from_json,
 )
+
+
+def compute_similarity(s1, s2, token_weights=None, section_weights=None):
+    """The score ``group_similar_suggestions`` clusters by, for one pair."""
+    return _sp._similarity(_sp._prepare(s1), _sp._prepare(s2), token_weights, section_weights)
 
 
 class TestSuggestionGroup:
@@ -700,24 +701,12 @@ class TestMergeSuggestions:
 ```'''
         }
 
-        merged = merge_suggestions_by_model(reviews)
+        merged = deduplicate_suggestions([
+            suggestion
+            for model, text in reviews.items()
+            for suggestion in extract_suggestions_from_review(text, model)
+        ])
         assert len(merged) == 2
-
-
-class TestFilterByImportance:
-    """Tests for importance filtering."""
-
-    def test_filter_high_only(self, sample_suggestions):
-        """Test filtering for high importance only."""
-        groups = group_similar_suggestions(sample_suggestions)
-        filtered = filter_by_importance(groups, "high")
-
-        for group in filtered:
-            has_high = any(
-                s.get("importance") == "high"
-                for s in group.suggestions
-            )
-            assert has_high
 
 
 class TestExportImport:
@@ -727,8 +716,8 @@ class TestExportImport:
         """Test that export and import preserve data."""
         groups = group_similar_suggestions(sample_suggestions)
 
-        json_str = export_groups_to_json(groups)
-        restored = import_groups_from_json(json_str)
+        json_str = json.dumps([g.to_dict() for g in groups])
+        restored = [SuggestionGroup.from_dict(item) for item in json.loads(json_str)]
 
         assert len(restored) == len(groups)
 

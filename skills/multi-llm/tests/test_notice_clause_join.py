@@ -124,8 +124,10 @@ class TestTheWorkersOwnNotice:
 # A declined reason that ends the notice keeps its stop (the real orchestrator)
 # ===========================================================================
 
-from tests.test_write_batch_declined import _PairRig  # noqa: E402
-from tests.test_write_executor_orchestrators import repo  # noqa: E402,F401
+from tests.support.declined_world import _PairRig  # noqa: E402
+from tests.support.write_orchestrators import (  # noqa: E402
+    orchestrator_repo,  # noqa: F401 - the repo fixture
+)
 
 
 class TestADeclinedReasonEndingTheNoticeKeepsItsStop(_PairRig):
@@ -156,7 +158,7 @@ class TestADeclinedReasonEndingTheNoticeKeepsItsStop(_PairRig):
 # ===========================================================================
 
 from tests.test_relay_says_it_once import _detached_stop, _poll  # noqa: E402
-from tests.test_check_gate_fixture import repo as gate_repo  # noqa: E402,F401
+from tests.support.gate_fixture import repo as gate_repo  # noqa: E402,F401
 
 
 class TestAPollsNoticeJoinsItsClausesOnce:

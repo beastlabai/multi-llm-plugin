@@ -39,7 +39,7 @@ from utils import improve_steps  # noqa: E402
 from utils import improve_workflow as iw  # noqa: E402
 from utils.state_manager import StateManager  # noqa: E402
 
-from tests.test_improve_orchestrator import (  # noqa: E402,F401
+from tests.support.improve_world import (  # noqa: E402
     APPLY_FLAGS,
     APPLY_PHASE,
     CODE,
@@ -58,7 +58,7 @@ from tests.test_improve_orchestrator import (  # noqa: E402,F401
     _plan,
     _write_manifest,
     _write_state,
-    stub,
+    improve_stub,  # noqa: F401 - the stub fixture
 )
 
 SKILL_ROOT = Path(__file__).parent.parent

@@ -73,6 +73,7 @@ rows:
       and that classify_failure is None — the assertion that catches an adapter
       reading its own happy path as a failure.
     expect:
+      lane_status: {lane_a: ok, lane_b: ok}
       salvage: answer
       success: true
       data:
@@ -100,6 +101,7 @@ rows:
       README), though the wire condition is still not named — no decode error, no
       byte count, no partial frame. Byte-shape identical to `error-envelope`.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       salvage: none
       success: false
       error_contains: ["Response stream ended without a finish reason."]
@@ -129,6 +131,7 @@ rows:
       3.0.70 say it of this row alone, and this is the one failure row with no
       `"errorClass":` key.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       salvage: none
       success: false
       error_contains: ["Model returned empty response"]
@@ -161,6 +164,7 @@ rows:
       carries `FIRST ANSWER (must NOT be selected)`; a first-wins parser returns
       the D999 document and a concatenating one returns neither.
     expect:
+      lane_status: {lane_a: ok, lane_b: ok}
       salvage: answer
       success: true
       data:
@@ -187,6 +191,7 @@ rows:
       pattern table. The only thing that says this run failed is the adapter's
       own `finishReason` marker.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       salvage: none
       success: false
       error_contains: ["Response stream ended without a finish reason."]
@@ -234,7 +239,7 @@ rows:
       channels would mean the process was killed before it wrote a line, which
       is a harness artifact rather than a CLI behaviour — and manufacturing one
       with `timeout(1)` is the known zero-byte-hang trap §6 step 3 forbids. parse_output's no-run_result branch
-      is still covered, by the fallback assertion in test_providers.py.
+      is still covered, by the fallback assertion in test_provider_cline.py.
 
   auth-error:
     stdout: auth-error.stdout.txt
@@ -263,6 +268,7 @@ rows:
       moves. At 3.0.69 and 3.0.70 cline also tags this error `errorClass: "auth"` (3.0.55:
       `"unknown"`); the adapter reads the key's presence, never its value.
     expect:
+      lane_status: {lane_a: auth_failed, lane_b: auth_failed}
       salvage: none
       success: false
       error_contains: ["Incorrect API key provided"]
@@ -292,6 +298,7 @@ rows:
       `rate limit` in base.rate_limit_patterns matches before the exit-0 marker
       gets its turn.
     expect:
+      lane_status: {lane_a: rate_limited, lane_b: rate_limited}
       salvage: none
       success: false
       error_contains: ["Rate limit reached"]
@@ -312,6 +319,7 @@ rows:
       the `openai/stub-model` spec the config used — which is the asymmetry that
       makes a stray `:effort` suffix findable at all.
     expect:
+      lane_status: {lane_a: invalid_model, lane_b: invalid_model}
       salvage: none
       success: false
       raw_contains:
@@ -336,6 +344,7 @@ rows:
       reached with no retry budget spent — one request, under 1 s (3.0.69:
       0.96 s, 3.0.70: 0.73 s).
     expect:
+      lane_status: {lane_a: context_length_exceeded, lane_b: context_length_exceeded}
       salvage: none
       success: false
       error_contains: ["exceeds the model's context window"]
@@ -383,6 +392,7 @@ rows:
       `Reason:` line does move, "the runner reported a failure" →
       "Connection/network error", which is the point.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       salvage: none
       success: false
       error_contains: ["Cannot connect to API"]
@@ -411,18 +421,19 @@ rows:
       request per dispatch (§7.5 rule 6(c)) and makes no admission test. The
       row is here rather than under
       `exit-zero-failure` because cline's exit code is 1; it classifies
-      `runner_error` because OpenAI's 500 sentence ("The server had an error
-      while processing your request") matches no member of
-      base.SERVER_ERROR_MARKERS — every entry there wants the literal words
-      "server error", "internal server error" or "api error".
+      `server_error` on the shared server table's row for OpenAI's 500 sentence
+      ("The server had an error while processing your request"), which is
+      consulted before the `exit_zero_failure_markers` that used to answer
+      `runner_error`. Both lanes keep their statuses.
     expect:
+      lane_status: {lane_a: runner_error, lane_b: unparseable_result}
       salvage: none
       success: false
       error_contains: ["The server had an error while processing your request"]
       raw_contains:
         - "The server had an error while processing your request. Sorry about that!"
         - '"finishReason":"error"'
-      classify_failure: "runner_error"
+      classify_failure: "server_error"
 
   stall:
     stdout: stall.stdout.txt
@@ -446,6 +457,7 @@ rows:
       timeout pattern, so the row reads `timeout` rather than falling to the
       adapter's `finishReason` marker.
     expect:
+      lane_status: {lane_a: timeout, lane_b: unparseable_result}
       salvage: none
       success: false
       error_contains: ["The operation timed out."]
@@ -453,3 +465,26 @@ rows:
         - "The operation timed out."
         - '"finishReason":"error"'
       classify_failure: "timeout"
+
+  parsed-raw-wrapper:
+    stdout: parsed-raw-wrapper.stdout.txt
+    stderr: success.stderr.txt
+    exit_code: 0
+    synthesized: true
+    provenance: >-
+      The `success` capture with its answer text replaced by `{"raw": "hello"}`
+      in all five places it appears (`content_start`, `content_end`, `done`,
+      `run_result` and the stream's other copy), JSON-escaped as cline writes
+      it; every other byte is the 3.0.70 capture. It stands for a model that
+      answered with valid JSON that is not an answer.
+    notes: >-
+      The stream form of cursor-agent's row of the same name: the answer
+      parses, the file-output layer and the executor both reject the bare
+      `raw` wrapper, and both lanes retry it once as `unparseable_result`.
+    expect:
+      lane_status: {lane_a: unparseable_result, lane_b: unparseable_result}
+      salvage: none
+      success: true
+      data: {raw: "hello"}
+      raw_contains: ['"finishReason":"completed"']
+      classify_failure: null

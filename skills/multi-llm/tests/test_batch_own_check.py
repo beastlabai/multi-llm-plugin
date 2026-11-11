@@ -28,6 +28,7 @@ import pytest
 from tests import test_write_executor
 from tests.test_write_executor import FakeState
 from utils import subagent_executor as executor
+from utils.task_ledger import mirror_ids
 from utils.subagent_tasks import (
     PRIOR_CHANGES_TOKEN,
     build_inputs,
@@ -211,7 +212,7 @@ class TestAFailingCheckOfAnAppliedBatch:
         # The status mirror, the progress line and the notice a poll relays.
         mirror = json.loads((env.phase_dir / ".status.json").read_text())
         write = mirror["progress"]["write_subagents"]
-        assert write["batch_check_task_ids"] == ["apply-fix-batch-0"]
+        assert mirror_ids(write, "batch_check_task_ids") == ["apply-fix-batch-0"]
         assert write["tasks"][0]["batch_check_findings"] == [FAILING]
         view = {"progress": mirror["progress"]}
         assert "own check fails apply-fix-batch-0" in ", ".join(
@@ -559,7 +560,7 @@ class TestImplementsResultLineSaysTheCheckFails:
         self, tmp_path, monkeypatch, capsys,
     ):
         import multi_llm
-        from tests.test_implement_stop_account import make_repo
+        from tests.support.implement_world import make_repo
         from utils import provider_registry as registry
         from utils.cli_common import parse_result_line
 
@@ -575,7 +576,6 @@ class TestImplementsResultLineSaysTheCheckFails:
             out = capsys.readouterr().out
         finally:
             registry._config = None
-            registry._config_key = None
         assert f"{BATCH_CHECK_MARKER} T001: its edits were applied" in out
         notice = parse_result_line(out)["notice"]
         assert notice.startswith(
@@ -594,7 +594,7 @@ class TestTheApplyReport:
     both, from the scheduler's rows)."""
 
     def _orchestrator(self, tmp_path, rows, unverified=None):
-        from tests.test_apply_orchestrator_base import _orchestrator_on
+        from tests.support.apply_base import _orchestrator_on
 
         class Result:
             outcomes = []
@@ -625,7 +625,7 @@ class TestTheApplyReport:
         self, tmp_path,
     ):
         orch = self._orchestrator(tmp_path, self.ROWS, unverified=unverified_line(None))
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "### apply-batch-0 — ok (applied, its check fails)" in text
         assert "### apply-batch-1 — ok (applied)" in text
         assert "## Check Findings" in text
@@ -639,7 +639,7 @@ class TestTheApplyReport:
         brief told the user to run review-code and then apply-code-fixes, the
         phases the commit modes front (plans/review-commits.md §2.8)."""
         def check_findings(orch):
-            text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+            text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
             return text.split("## Check Findings", 1)[1].split("\n## ", 1)[0]
 
         orch = self._orchestrator(tmp_path, self.ROWS)
@@ -659,7 +659,7 @@ class TestTheApplyReport:
 
     def test_the_result_block_says_it_too(self, tmp_path, capsys):
         orch = self._orchestrator(tmp_path, self.ROWS, unverified=unverified_line(None))
-        orch.print_write_outcome_summary()
+        orch.phase_report().print_write_outcome_summary()
         out = capsys.readouterr().out
         assert "Not a clean finish: 1 batch(es) applied their edits, but their own " \
                "report says a check they ran fails: apply-batch-0" in out
@@ -670,9 +670,9 @@ class TestTheApplyReport:
     def test_a_clean_run_reads_as_before(self, tmp_path, capsys):
         rows = [dict(self.ROWS[1])]
         orch = self._orchestrator(tmp_path, rows)
-        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        text = Path(orch.phase_report().write_apply_summary_report()).read_text(encoding="utf-8")
         assert "## Check Findings" not in text and "its check fails" not in text
-        orch.print_write_outcome_summary()
+        orch.phase_report().print_write_outcome_summary()
         assert "Not a clean finish" not in capsys.readouterr().out
 
 

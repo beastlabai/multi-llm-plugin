@@ -33,7 +33,7 @@ from mocks.mock_llm import echo_subagent_answer  # noqa: E402
 from utils import validation as validation_mod  # noqa: E402
 from utils.output_handler import output_dir_path  # noqa: E402
 from utils.state_manager import save_groups_payload, stamp_stable_ids  # noqa: E402
-from utils.subagent_executor import simulate_native_invoker  # noqa: E402
+from tests.harness.native_invoker import simulate_native_invoker  # noqa: E402
 from utils.subagent_tasks import (  # noqa: E402
     validate_subagent_task, validate_subagent_task_file,
 )
@@ -130,7 +130,7 @@ class TestConsolidationBatchesCarryTheirPromptFile:
             kind="consolidation", respond=from_the_file,
         )
         assert report.ok, report.failure_summary()
-        rpo.reaggregate_consolidation_mode(str(phase_dir), str(plan), "plan", [])
+        rpo.reaggregate_consolidation_mode(str(phase_dir), str(plan), "plan")
         assert (phase_dir / "consolidated.json").exists()
 
     def test_a_narrower_round_leaves_no_prompt_file_of_the_wider_one(self, tmp_path):
@@ -228,7 +228,10 @@ class TestTaskGenerationCarriesItsPromptFile:
 class TestTheHostIsToldToUseThem:
 
     def test_review_plan_hands_consolidation_subagents_the_file(self):
-        text = _flat("instructions/review-plan.md")
+        # The optional pass is a runbook review-plan's step 9 names by a trigger.
+        assert "read `references/consolidation.md` in full" in _flat(
+            "instructions/review-plan.md")
+        text = _flat("references/consolidation.md")
         assert ("carries a complete `prompt`, and `prompt_path` "
                 "(`consolidation_batch_N.prompt.txt` in the same directory") in text
         assert ("when the task carries `prompt_path`, the subagent reads that file "

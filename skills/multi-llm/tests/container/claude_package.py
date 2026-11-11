@@ -577,8 +577,6 @@ def dispatch_leg(ctx: Context, root: Path) -> dict:
         "skill_dir": str(skill),
         "help": dispatch("--help"),
         "instructions": dispatch("util", "instructions", "ask"),
-        "legacy_instructions": dispatch("util", "instructions", "ask",
-                                        MULTI_LLM_LEGACY_INSTRUCTIONS="1"),
         "doctor": dispatch("doctor", "--warn-only"),
         "install_host_check": dispatch("install-host", "claude-code", "--check",
                                        "--project-root", str(ctx.workspace)),

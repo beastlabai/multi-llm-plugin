@@ -24,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.llm_client import expand_env_home, invoke_with_provider  # noqa: E402
 from utils.providers.base import LLMProvider  # noqa: E402
+from tests.source_cache import source_tree
 
 
 HOME_RELATIVE = "~/.codex_work"
@@ -157,7 +158,7 @@ class TestLaneBSpawnSiteExpands:
         assert captured["env"]["MLLM_ABSOLUTE"] == "/etc/multi-llm"
 
     @pytest.mark.parametrize(
-        "module_name", ["llm_client.py", "subagent_executor.py"]
+        "module_name", ["llm_client.py", "dispatch_spawn.py"]
     )
     def test_every_spawn_site_wraps_its_env_block_in_the_expander(self, module_name):
         """Pin the invariant, not the spelling (§2.5: "exactly two spawn sites").
@@ -172,7 +173,7 @@ class TestLaneBSpawnSiteExpands:
         import ast
 
         source = Path(__file__).parent.parent / "utils" / module_name
-        tree = ast.parse(source.read_text(encoding="utf-8"))
+        tree = source_tree(source)
 
         wrapped = []
         for node in ast.walk(tree):

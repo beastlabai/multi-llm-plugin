@@ -73,6 +73,7 @@ sys.path.insert(0, str(PACKAGE_DIR))
 import build as pkg_build  # noqa: E402
 from common import payload  # noqa: E402
 from tests.generated_distributions import DISTRIBUTIONS  # noqa: E402
+from tests.source_cache import source_tree  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -5102,6 +5103,187 @@ class TestInstructionsSurface:
         for sentence in caps.verb_sentences("opencode"):
             assert sentence not in text
 
+    @staticmethod
+    def _owing_run(built_package, uv_stub, instructions, mode="implement"):
+        """A run whose terminal poll hands back a non-mechanical ``next``, the
+        one outcome that owes the model its instructions, with *instructions*
+        as the ``util instructions`` child's scripted output."""
+        follow = "uv run -- python multi_llm.py review-code p.md"
+        launch = {
+            "exit": 0,
+            "stdout": ["run_id: R", "log: /l",
+                       'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}'],
+        }
+        done = {"exit": 0, "stdout": [
+            'MULTI_LLM_RESULT: {"state":"done","exit":0,"artifacts":["a"],'
+            '"next":' + json.dumps(follow) + '}']}
+        result, calls = uv_stub.run(
+            built_package,
+            {"mode": mode, "plan": "p.md", "question": "", "extra_flags": []},
+            [launch, done, instructions],
+        )
+        assert result["ok"] is True
+        fetch = [call for call in calls if "instructions" in _dispatcher_argv(call)]
+        assert len(fetch) == 1
+        return result, _dispatcher_argv(fetch[0])
+
+    def test_the_core_arrives_as_a_file_the_model_reads(
+        self, built_package, uv_stub, tmp_path
+    ):
+        """opencode cuts a tool result at 51,200 bytes, and the result is one
+        JSON line, so the cut keeps none of it: implement's core alone is over
+        the cap once JSON-escaped. The fetch asks for the file form and the
+        result carries the ``[CORE_FILE]`` line and the read rule, never the
+        core (docs/development/hosts.md, "Host-neutral instruction core")."""
+        from utils import host_capabilities as caps
+
+        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text(
+            encoding="utf-8"))
+        file = surface["runbook"]["core_file"]
+        # The real dispatcher writes the real file, in a repository of its own.
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        printed = subprocess.run(
+            [sys.executable, str(SKILL_ROOT / "multi_llm.py"), "util", "instructions",
+             "implement", "--host", "opencode", file["option"]],
+            capture_output=True, encoding="utf-8", timeout=180, cwd=repo,
+            check=True).stdout.splitlines()
+        pointer = next(line for line in printed if line.startswith(file["marker"] + " "))
+        core = Path(pointer.split()[1])
+        lines = re.search(r"\blines=([0-9]+)\b", pointer).group(1)
+        result, argv = self._owing_run(
+            built_package, uv_stub, {"exit": 0, "stdout": printed})
+        assert argv == ["util", "instructions", "implement", "--host", "opencode",
+                        file["option"]]
+        assert result["instructions"] == pointer + "\n" + file["read"].replace(
+            "{mode}", "implement").replace("{lines}", lines)
+        assert len(json.dumps(result).encode("utf-8")) < 51_200
+        text = core.read_text(encoding="utf-8")
+        assert str(text.count("\n")) == lines
+        assert (surface["runbook"]["core_end_marker"] + " implement") in text
+        for sentence in caps.verb_sentences("opencode"):
+            assert sentence in text
+
+    @pytest.mark.parametrize("child, reason", [
+        # The file could not be written, so the dispatcher printed the core, and
+        # it arrived without `MULTI_LLM_CORE_END: <mode>`: a partial payload.
+        ({"exit": 0, "stdout": ["# Core", "WORKFLOW-STEP: the first half of a core."]},
+         "without their closing line (`MULTI_LLM_CORE_END: implement`)"),
+        # Over the 64 KiB tail the child's stdout keeps, the head is gone while
+        # the closing line arrived: refused on the cut, not on the line.
+        ({"exit": 0, "stdout": ["# Core"]
+          + ["WORKFLOW-PADDING: a step the model owes."] * 2000
+          + ["MULTI_LLM_CORE_END: implement"]},
+         "what arrived is the end of the core without its head"),
+        ({"exit": 1, "stdout": [],
+          "stderr": ["ERROR: core instruction file missing; reinstall the skill."]},
+         "`util instructions` exited 1: ERROR: core instruction file missing"),
+    ], ids=["partial", "cut", "fetch-failed"])
+    def test_a_core_that_cannot_be_attached_says_why(
+        self, built_package, uv_stub, child, reason
+    ):
+        """No core is handed over as whole when it is not, and its absence is
+        said: ``instructions_error`` names the reason and what to do, while the
+        run's own fields stand (the codex route's ``runbook_error``)."""
+        result, _argv = self._owing_run(built_package, uv_stub, child)
+        assert "instructions" not in result
+        assert result["ok"] is True and result["state"] == "done"
+        assert result["next"]["args"]["mode"] == "review-code"
+        error = result["instructions_error"]
+        assert error.startswith("The implement core instructions are not attached: ")
+        assert reason in error
+        assert "tell the user this, and stop" in error
+
+    def test_a_printed_core_too_big_for_the_result_says_why_and_keeps_the_run(
+        self, built_package, uv_stub, tmp_path
+    ):
+        """``.multi-llm/tmp/cores`` is a file, so ``--to-file`` prints the core
+        instead: implement's, 58 KB, made a single-line result over opencode's
+        51,200-byte cap, which the host shows none of, ``next`` included. The
+        core gives way to an ``instructions_error`` that names the dispatcher's
+        reason and the fix; the result stays within the cap."""
+        repo = tmp_path / "unwritable-cores"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / ".multi-llm" / "tmp").mkdir(parents=True)
+        (repo / ".multi-llm" / "tmp" / "cores").write_text("not a folder", encoding="utf-8")
+        printed = subprocess.run(
+            [sys.executable, str(SKILL_ROOT / "multi_llm.py"), "util", "instructions",
+             "implement", "--host", "opencode", "--to-file"],
+            capture_output=True, encoding="utf-8", timeout=180, cwd=repo, check=True)
+        assert "printing the core instead" in printed.stderr
+        assert len(printed.stdout.encode("utf-8")) > 51_200
+        result, _argv = self._owing_run(built_package, uv_stub, {
+            "exit": 0, "stdout": printed.stdout.splitlines(),
+            "stderr": printed.stderr.splitlines()})
+        wire = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+        assert len(wire.encode("utf-8")) <= 51_200
+        assert "instructions" not in result
+        assert result["ok"] is True and result["artifacts"] == ["a"]
+        assert result["next"]["args"]["mode"] == "review-code"
+        error = result["instructions_error"]
+        assert "could not write the core file" in error
+        assert "writable `.multi-llm/tmp/cores` folder" in error
+
+    def test_a_long_output_is_cut_in_the_middle_to_keep_the_result_whole(
+        self, built_package, uv_stub
+    ):
+        """The child's 64 KiB stdout tail alone puts a result over the cap: its
+        middle gives way, head and tail kept, and the way forward stays."""
+        follow = "uv run -- python multi_llm.py review-code p.md"
+        noisy = {"exit": 0, "stdout": [
+            "progress line {:05d} ".format(n) + "x" * 60 for n in range(1500)] + [
+            'MULTI_LLM_RESULT: {"state":"done","exit":0,"artifacts":["a"],'
+            '"next":' + json.dumps(follow) + '}']}
+        launch = {
+            "exit": 0,
+            "stdout": ["run_id: R", "log: /l",
+                       'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}'],
+        }
+        core = ["# Core", "WORKFLOW-STEP: a short core.", "MULTI_LLM_CORE_END: implement"]
+        result, _calls = uv_stub.run(
+            built_package,
+            {"mode": "implement", "plan": "p.md", "question": "", "extra_flags": []},
+            [launch, noisy, {"exit": 0, "stdout": core}],
+        )
+        wire = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+        assert len(wire.encode("utf-8")) <= 51_200
+        assert result["ok"] is True and result["next"]["args"]["mode"] == "review-code"
+        assert result["instructions"] == "\n".join(core)  # the core, kept whole
+        output = result["output"]
+        assert "characters of output left out" in output
+        assert output.rstrip().endswith("x" * 60)  # the tail survives the cut
+
+    def test_the_bound_keeps_the_core_and_cuts_the_rest_first(self, built_package):
+        bounded = node_json(
+            """
+            const outcome = {
+              ok: true, state: "done", next: { tool: "multi_llm" },
+              message: "m", output: "o".repeat(60000), instructions: "i".repeat(30000),
+            }
+            const small = { ok: true, state: "done", message: "m" }
+            const crowded = { ok: true, state: "done", next: { tool: "x" },
+              message: "m", artifacts: Array.from({ length: 9000 }, (_, n) => `a${n}`) }
+            emit({
+              big: T.boundResult(outcome),
+              small: T.boundResult(small) === small,
+              crowded: T.boundResult(crowded),
+              limit: T.RESULT_MAX_BYTES,
+            })
+            """,
+            built_package,
+        )
+        big = bounded["big"]
+        assert big["instructions"] == "i" * 30000
+        assert "characters of output left out" in big["output"]
+        assert len(json.dumps(big, ensure_ascii=False, separators=(",", ":")).encode()) <= bounded["limit"]
+        assert bounded["small"] is True
+        crowded = bounded["crowded"]
+        assert crowded["next"] == {"tool": "x"} and "artifacts" not in crowded
+        assert "too large for the host to show whole" in crowded["result_error"]
+        assert bounded["limit"] < 51_200
+
     def test_a_finished_run_is_not_sent_the_manual_run_instructions(
         self, built_package, uv_stub
     ):
@@ -5362,7 +5544,9 @@ class TestPlanSpelling:
         assert all(argv[1] == absolute for argv in polls)
 
 
-from tests.test_write_executor_orchestrators import repo  # noqa: E402,F401
+from tests.support.write_orchestrators import (  # noqa: E402
+    orchestrator_repo,  # noqa: F401 - the repo fixture
+)
 
 
 @pytest.fixture
@@ -5699,9 +5883,9 @@ class TestResumeCommand:
         --human-task T001=done" beside a `resume_markdown` giving the same
         command. Driven on the real path: the executor's stop and the real
         `util next-command --blocked` lookup, handed over as it answered."""
-        from tests.test_manual_task_gate import (
-            IMPLEMENT_WRITE_IDS, _clean_env, _manual, _run, _seed_generate_tasks,
-        )
+        from tests.support.write_orchestrators import IMPLEMENT_WRITE_IDS, _seed_generate_tasks
+        from tests.support.main_runs import _clean_env, _run
+        from tests.support.manual_gate import _manual
 
         _clean_env(repo.monkeypatch)
         _seed_generate_tasks(repo)
@@ -6811,7 +6995,7 @@ class TestStaging:
         assert staged == expected
 
         # The regressions the old denylist caught, kept as regressions.
-        for forbidden in ("tests/", "legacy/", ".venv/", "__pycache__/",
+        for forbidden in ("tests/", ".venv/", "__pycache__/",
                           ".pytest_cache/", "plans/"):
             assert not any(path.startswith(forbidden) for path in staged), (
                 f"{forbidden} reached the payload"
@@ -7113,7 +7297,7 @@ class TestPack:
                 f"{required} is not in the tarball"
             )
         assert any("skills/multi-llm/instructions/" in n for n in listing)
-        for forbidden in ("/tests/", "/legacy/", "/.venv/", "__pycache__",
+        for forbidden in ("/tests/", "/.venv/", "__pycache__",
                           ".pytest_cache"):
             assert not any(forbidden in name for name in listing), (
                 f"{forbidden} reached the tarball"
@@ -7658,7 +7842,7 @@ def pin_render(tmp_path, monkeypatch):
     monkeypatch.syspath_prepend(str(SKILL_ROOT / "hosts"))
     import render_capabilities as renderer
 
-    monkeypatch.setattr(caps, "_CACHE", {})
+    caps.clear_cache()
     original = (SKILL_ROOT / caps.CAPABILITIES_FILE).read_text(encoding="utf-8")
     calls = []
 
@@ -8478,10 +8662,8 @@ class TestRouteStaging:
 
         Read as text, never imported: the module's POSIX-only imports would
         skip this row on a runner that can perfectly well parse it."""
-        source = (Path(__file__).parent / "container" / "entrypoint.py").read_text(
-            encoding="utf-8"
-        )
-        main = next(node for node in ast.walk(ast.parse(source))
+        entrypoint = Path(__file__).parent / "container" / "entrypoint.py"
+        main = next(node for node in ast.walk(source_tree(entrypoint))
                     if isinstance(node, ast.FunctionDef) and node.name == "main")
         calls = [node for node in ast.walk(main)
                  if isinstance(node, ast.Call)
@@ -8628,21 +8810,31 @@ class TestPublishGate:
             messages.add(pkg_build.check_stamp(staged, allow_dirty=True))
         assert len(messages) == 5, "two refusals share a message"
 
-    def test_the_publish_recipe_checks_the_stamp_before_npm(self):
-        """The refusal happens **before** npm is invoked at all.
-
-        ``opencode-publish`` no longer reaches npm: it refuses and names the two
-        guarded paths. The laptop one, ``opencode-publish-first``, checks the
-        stamp among its preflights, all of which run before the upload
-        (``test_opencode_first_release.py`` grades the order and each refusal).
-        """
+    def test_the_publish_recipe_never_reaches_npm(self):
+        """``opencode-publish`` no longer uploads: it refuses, names the workflow
+        dispatch (the one guarded path, with provenance) and exits non-zero."""
         recipes = _makefile_recipes(REPO_ROOT / "Makefile")
-        assert not any(
-            re.search(r"\bnpm\s+publish\b", line) for line in recipes["opencode-publish"]
-        )
-        assert any("first_release.py" in line for line in recipes["opencode-publish-first"])
-        source = (PACKAGE_DIR / "first_release.py").read_text(encoding="utf-8")
-        assert source.index('"--check-stamp"') < source.index('"npm", "publish"')
+        body = " ".join(recipes["opencode-publish"])
+        assert body, "opencode-publish has no recipe"
+        assert not re.search(r"\bnpm\s+publish\b", body) and "--provenance" not in body
+        assert "workflow" in body
+        assert body.rstrip().endswith("exit 1")
+
+    @pytest.mark.skipif(shutil.which("make") is None or os.name == "nt",
+                        reason="needs make and a POSIX shell for the recipe")
+    def test_the_publish_recipe_refuses_and_names_the_workflow(self):
+        done = subprocess.run(["make", "-s", "opencode-publish"], cwd=REPO_ROOT,
+                              capture_output=True, text=True, timeout=60)
+        assert done.returncode != 0
+        assert "workflow dispatch" in done.stderr
+        assert "opencode-publish-first" not in done.stderr, "a removed target is still named"
+
+    def test_the_first_release_target_is_gone(self):
+        """The first npm release (0.1.1) is done, and its laptop path with it:
+        npm only refuses a second "first" publish, so the target could only
+        ever refuse. packaging/opencode/README.md keeps the record's pointer."""
+        assert "opencode-publish-first" not in _makefile_recipes(REPO_ROOT / "Makefile")
+        assert not (PACKAGE_DIR / "first_release.py").exists()
 
     def test_the_publish_recipe_never_allows_a_dirty_tree(self):
         """``ALLOW_DIRTY`` is a development convenience and must not reach here.
@@ -8849,6 +9041,11 @@ class TestTheToolResultCarriesTheValidationCounts:
         status_file.write_status(str(phase), {
             "phase": "review-plan", "state": "complete",
         })
+        # The worker claims the dir first, then its report records the counts.
+        status_file.claim_run(str(phase), {
+            "run_id": "run-counts-js-01", "state": "done", "exit_code": 0,
+            "detached": True, "mode": "review-plan",
+        })
         groups = (
             [{"validation_status": "valid"}] * 53
             + [{"validation_status": "invalid"}]
@@ -8860,10 +9057,6 @@ class TestTheToolResultCarriesTheValidationCounts:
             "valid": 53, "invalid": 1,
             "needs_human_decision": 3, "validation_failed": 0,
         }
-        status_file.claim_run(str(phase), {
-            "run_id": "run-counts-js-01", "state": "done", "exit_code": 0,
-            "detached": True, "mode": "review-plan",
-        })
 
         ctx = cli_common.activate_result(cli_common.ResultContext())
         try:
@@ -9486,8 +9679,8 @@ class TestTheOutputLeavesTheBlockToTheStep:
     def test_a_real_complete_poll_says_the_manual_note_once(
         self, built_package, tmp_path, monkeypatch, capsys,
     ):
-        from tests.test_manual_tasks_on_completion import _complete_plan
-        from tests.test_next_command_emitters import _terminal_record
+        from tests.support.manual_tasks import _complete_plan
+        from tests.support.next_command_world import _terminal_record
 
         plan = _complete_plan(tmp_path / "project")
         _terminal_record(plan, "apply-fixes", mode="apply-code-fixes",
@@ -9505,8 +9698,8 @@ class TestTheOutputLeavesTheBlockToTheStep:
     def test_a_real_poll_says_the_optional_why_once(
         self, built_package, tmp_path, monkeypatch, capsys,
     ):
-        from tests.test_next_command_emitters import _terminal_record, build
-        from tests.test_next_phase import P, UP_TO_TASKS, WHY_REVIEW_TASKS, S
+        from tests.support.next_command_world import _terminal_record, build
+        from tests.support.next_phase_world import P, S, UP_TO_TASKS, WHY_REVIEW_TASKS
 
         root = tmp_path / "project"
         root.mkdir()

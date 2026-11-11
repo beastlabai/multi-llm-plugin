@@ -36,7 +36,9 @@ from tests.scope_apply_fixtures import (  # noqa: E402
     write_code_review, write_review,
 )
 from tests.test_write_executor import FakeState, env  # noqa: E402,F401
-from tests.test_write_executor_orchestrators import repo  # noqa: E402,F401
+from tests.support.write_orchestrators import (  # noqa: E402
+    orchestrator_repo,  # noqa: F401 - the repo fixture
+)
 
 PHASE = "apply-suggestions"
 

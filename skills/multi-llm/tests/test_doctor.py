@@ -27,6 +27,8 @@ import multi_llm  # noqa: E402
 from utils import doctor  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from utils import dispatch_spawn  # noqa: E402
+from utils import sandbox_walk  # noqa: E402
 
 MOCK_LLM = Path(__file__).parent / "mocks" / "mock_llm.py"
 BWRAP_BROKEN_LINE = "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted"
@@ -65,7 +67,6 @@ def clinic(tmp_path, monkeypatch):
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
     monkeypatch.chdir(tmp_path)
     registry._config = None
-    registry._config_key = None
     executor.reset_version_cache()
     for name in ("codex", "grok", "muse"):
         resolved = shutil.which(name)
@@ -74,13 +75,12 @@ def clinic(tmp_path, monkeypatch):
     def no_model_calls(*args, **kwargs):
         raise AssertionError("doctor dispatched a model call")
 
-    monkeypatch.setattr(executor, "_spawn", no_model_calls)
+    monkeypatch.setattr(dispatch_spawn, "_spawn", no_model_calls)
     from utils import llm_client
 
     monkeypatch.setattr(llm_client, "invoke_with_provider", no_model_calls)
     yield bin_dir
     registry._config = None
-    registry._config_key = None
 
 
 def _broken_bwrap(monkeypatch):
@@ -159,14 +159,32 @@ class TestDoctorOnABrokenSandbox:
         assert "not recommended" in out
         assert "kernel.apparmor_restrict_unprivileged_userns=0" in out
 
-    def test_warn_only_reports_the_same_and_exits_0(self, clinic, monkeypatch, capsys):
+    def test_warn_only_prints_one_line_per_problem_and_exits_0(
+        self, clinic, monkeypatch, capsys
+    ):
+        """PERF-5: the SessionStart hook's view is a summary line plus one
+        line per problem. The table and the repair text stay on a plain
+        `doctor`, which the problem line names; `--json` stays complete."""
         monkeypatch.setenv("MOCK_LLM_SANDBOX_BROKEN", "1")
         _broken_bwrap(monkeypatch)
         assert doctor.main(["--warn-only", "--budget", "10"]) == 0
-        out = capsys.readouterr().out
-        assert "WARN: codex: sandbox" in out
+        lines = capsys.readouterr().out.splitlines()
+        assert lines[0].startswith("multi-llm doctor: 3 of ")
+        assert "1 problem(s)" in lines[0] and "`multi_llm.py doctor`" in lines[0]
+        assert lines[1:] == [
+            "WARN: codex: sandbox — " + doctor.SANDBOX_FIX_SENTENCE
+            + " [sandbox_fallback: auto, read-only phases run unsandboxed, writes refused]"
+        ]
+        out = "\n".join(lines)
         assert "FAIL:" not in out
-        assert "profile bwrap /usr/bin/bwrap flags=(unconfined)" in out
+        assert "profile bwrap" not in out and "grok" not in out
+
+        assert doctor.main(["--warn-only", "--json", "--budget", "10"]) == 0
+        report = json.loads(capsys.readouterr().out)
+        assert report["repair"] == doctor._repair_block()
+        assert {r["provider"] for r in report["providers"] if r["present"]} == {
+            "codex", "grok", "muse",
+        }
 
     def test_the_default_fallback_is_named_beside_broken_and_changes_nothing_else(
         self, clinic, monkeypatch, capsys
@@ -261,7 +279,7 @@ class TestDoctorOnABrokenSandbox:
             profiles.append(profile)
             return real(provider, profile, **kwargs)
 
-        monkeypatch.setattr(executor, "sandbox_verdict", spy)
+        monkeypatch.setattr(sandbox_walk, "sandbox_verdict", spy)
         assert doctor.main(["--budget", "10"]) == 3
         out = capsys.readouterr().out
         assert (
@@ -331,7 +349,7 @@ class TestDoctorOnAHealthyMachine:
             pytest.fail("an exhausted report budget started a subprocess")
 
         monkeypatch.setattr(doctor.subprocess, "run", forbidden)
-        monkeypatch.setattr(executor, "sandbox_verdict", forbidden)
+        monkeypatch.setattr(sandbox_walk, "sandbox_verdict", forbidden)
         assert doctor._run(["unused"], timeout=0) is None
         from types import SimpleNamespace
 
@@ -428,12 +446,17 @@ class TestDoctorIsAMode:
         assert "multi-llm doctor" in out
         assert '"mode": "doctor"' in out and '"phase": null' in out
 
-    def test_doctor_takes_no_lock_and_writes_nothing(self, clinic, monkeypatch, capsys):
+    def test_doctor_takes_no_lock_and_writes_nothing_but_its_version_cache(
+        self, clinic, monkeypatch, capsys
+    ):
+        from utils import cli_version_cache
+
         monkeypatch.setattr(doctor, "_bwrap_self_test", lambda timeout: ("ok", ""))
         before = sorted(p.name for p in Path.cwd().iterdir())
         assert doctor.main(["--budget", "10"]) == 0
         capsys.readouterr()
         assert sorted(p.name for p in Path.cwd().iterdir()) == before
+        assert os.listdir(cli_version_cache.cache_dir()) == [cli_version_cache.FILE_NAME]
 
 
 # ---------------------------------------------------------------------------
@@ -455,7 +478,7 @@ def _fake_verdicts(monkeypatch, generate_verdict, calls=None):
             return generate_verdict
         return executor.SandboxProbeResult("unavailable", BWRAP_BROKEN_LINE)
 
-    monkeypatch.setattr(executor, "sandbox_verdict", fake)
+    monkeypatch.setattr(sandbox_walk, "sandbox_verdict", fake)
 
 
 def _codex_line(out):
@@ -644,6 +667,21 @@ class TestDoctorReportsTheLadder:
 
         from utils.provider_registry import get_provider
 
+        class Clock:
+            """The report's clock, moved only by the probes below: the budget
+            is a number of seconds a probe "takes", not a race with the
+            machine. Everything but ``monotonic`` is the real ``time``."""
+
+            now = 1000.0
+
+            def monotonic(self):
+                return self.now
+
+            def __getattr__(self, name):
+                return getattr(time, name)
+
+        clock = Clock()
+        monkeypatch.setattr(doctor, "time", clock)
         provider = get_provider("codex")
         monkeypatch.setattr(
             codex_module, "sandbox_fallback_policy", lambda anchor=None: "auto"
@@ -654,13 +692,13 @@ class TestDoctorReportsTheLadder:
             calls.append((profile, kwargs.get("timeout")))
             if profile == PROFILE_GENERATE:
                 pytest.fail("the read-only probe started on an exhausted budget")
-            time.sleep(0.25)
+            clock.now += 0.25
             return executor.SandboxProbeResult("unavailable", BWRAP_BROKEN_LINE)
 
-        monkeypatch.setattr(executor, "sandbox_verdict", slow)
-        started = time.monotonic()
+        monkeypatch.setattr(sandbox_walk, "sandbox_verdict", slow)
+        started = clock.monotonic()
         row = doctor._probe_sandbox(provider, 0.2, None)
-        assert time.monotonic() - started < 1.0
+        assert clock.monotonic() - started == pytest.approx(0.25)
         assert row["state"] == "unavailable" and row["ok"] is False
         assert row["fallback_probe"] == "unprobed"
         assert doctor._fallback_note("codex", row) == (
@@ -669,12 +707,21 @@ class TestDoctorReportsTheLadder:
 
         # With budget left, the second probe is handed the remainder, not the whole.
         calls.clear()
-        _fake_verdicts(monkeypatch, executor.SandboxProbeResult(
+        walk_verdict = executor.SandboxProbeResult(
             "unavailable", BWRAP_BROKEN_LINE, "landlock", (("landlock", "taken"),),
-        ), calls=calls)
+        )
+
+        def fake(provider, profile, **kwargs):
+            calls.append((profile, kwargs.get("timeout")))
+            if profile == PROFILE_GENERATE:
+                return walk_verdict
+            clock.now += 0.25
+            return executor.SandboxProbeResult("unavailable", BWRAP_BROKEN_LINE)
+
+        monkeypatch.setattr(sandbox_walk, "sandbox_verdict", fake)
         doctor._probe_sandbox(provider, 5.0, None)
         assert [profile for profile, _ in calls][-1] == PROFILE_GENERATE
-        assert calls[-1][1] <= calls[0][1]
+        assert calls[-1][1] == pytest.approx(calls[0][1] - 0.25)
 
 
 class TestDoctorNamesTheRetiredRung:
@@ -829,7 +876,7 @@ class TestDoctorNamesTheRetiredRung:
             seen.append(kwargs)
             return executor.SandboxProbeResult("unavailable", BWRAP_BROKEN_LINE)
 
-        monkeypatch.setattr(executor, "sandbox_verdict", spy)
+        monkeypatch.setattr(sandbox_walk, "sandbox_verdict", spy)
         from utils.provider_registry import get_provider
         from utils.providers import codex as codex_module
 
@@ -1022,7 +1069,6 @@ class TestDoctorConfigOnly:
         )
         monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(path))
         registry._config = None
-        registry._config_key = None
         self.oc.reset_hermetic_state()
         row = doctor._probe_auth(self.provider, 5.0, str(tmp_path), None)
         assert row["state"] == "config-only" and row["ok"] is False

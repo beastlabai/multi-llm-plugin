@@ -23,7 +23,7 @@ import json
 import re
 from pathlib import Path
 
-from tests.test_check_findings_hold_dependents import repo  # noqa: F401 - fixture
+from tests.support.implement_world import implement_repo  # noqa: F401 - the repo fixture
 
 import implement_orchestrator  # noqa: E402
 import multi_llm  # noqa: E402
@@ -136,7 +136,6 @@ class TestAnApplyCodeFixesBatch:
         config.write_text("driver:\n  subagent_runner: codex:gpt-5.5\n", encoding="utf-8")
         monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(config))
         monkeypatch.setattr(registry, "_config", None)
-        monkeypatch.setattr(registry, "_config_key", None)
         plan = root / "plans" / "racing.md"
         plan.parent.mkdir(parents=True)
         plan.write_text("# Racing\n", encoding="utf-8")

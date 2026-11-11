@@ -591,8 +591,8 @@ class TestNpmStub:
          "printed no manifest"),
         (manifest("0.1.1"), "printed no manifest"),
         (manifest(name="another-package"), "printed no manifest"),
-        # A runner that turns its timeout into exit 124 says so only on stderr
-        # (first_release.Runner): the refusal must still name it.
+        # A runner that turns its timeout into exit 124 says so only on stderr:
+        # the refusal must still name it.
         ({"exit": 124, "stdout": "", "stderr": "npm: no answer within 90 s\n"},
          "code <none> (npm: no answer within 90 s)"),
     ], ids=["E500", "E503", "E403", "E429", "ECONNREFUSED", "stderr-only", "E404-no-match",
@@ -1052,24 +1052,18 @@ class TestTheClaudeFamily:
         _refused(cli(entry, h.root, absent()),
                  "has no codex-v0.1.0 tag (release tags found: claude-v0.1.1)")
 
-    def test_legacy_and_hooks_do_not_move_the_digest(self, history):
+    def test_claude_only_files_do_not_move_the_digest(self, history):
         """The digest is allowlist-based, so a Claude-only difference is not a
         shared one: Claude's moved-tree rule answers for those files instead."""
         history.commit("0.1.1", "b", tag="claude-v0.1.1")
         before = history.digest("claude-v0.1.1")
-        for relative in ("skills/multi-llm/legacy/README.md",
-                         "skills/multi-llm/legacy/instructions/ask.md",
-                         "hooks/doctor.sh", "hooks/hooks.json", ".claude-plugin/plugin.json",
-                         f"{CLAUDE_TREE}/hooks/doctor.sh",
-                         f"{CLAUDE_TREE}/skills/multi-llm/legacy/README.md"):
+        for relative in ("hooks/doctor.sh", "hooks/hooks.json", ".claude-plugin/plugin.json",
+                         f"{CLAUDE_TREE}/hooks/doctor.sh"):
             history.write(relative, "edited after the release\n")
         history.commit("0.1.1", "b")
         assert history.digest() == before
 
     @pytest.mark.parametrize("path", [
-        "skills/multi-llm/legacy/README.md",
-        "skills/multi-llm/legacy/instructions/ask.md",
-        "skills/multi-llm/legacy/references/uv-check.md",
         "hooks/hooks.json",
         "hooks/doctor.sh",
         ".claude-plugin/plugin.json",
@@ -1090,7 +1084,6 @@ class TestTheClaudeFamily:
         a hook edit under this version, and it does not run on these two paths."""
         history.commit("0.1.1", "b", tag="claude-v0.1.1")
         history.write(f"{CLAUDE_TREE}/hooks/doctor.sh", "edited after the release\n")
-        history.write("skills/multi-llm/legacy/README.md", "edited after the release\n")
         history.commit("0.1.1", "b", tag=f"{other}-v0.1.1")
         _passed(cli(entry, history.root, absent()))
 
@@ -1169,7 +1162,7 @@ class TestPlacement:
         joined = self.MAKEFILE.replace("\\\n", " ")
         phony = " ".join(re.findall(r"^\.PHONY:(.*)$", joined, re.M))
         assert re.search(r"(?<![\w-])claude-check-bump(?![\w-])", phony)
-        assert "make claude-check-bump" in self.MAKEFILE
+        assert "claude-check-bump: ## " in self.MAKEFILE
 
     @EVERY_ENTRY
     def test_every_entry_point_s_help_names_every_family(self, entry):
@@ -1189,14 +1182,14 @@ class TestPlacement:
 
     def test_the_makefile_help_names_every_family(self):
         line = next(text for text in self.MAKEFILE.splitlines()
-                    if "make opencode-check-bump " in text and "@echo" in text)
+                    if text.startswith("opencode-check-bump:") and "## " in text)
         assert "claude-v*/codex-v*/opencode-v*" in line
 
     def test_it_is_phony_documented_and_follows_the_registry_target(self):
         joined = self.MAKEFILE.replace("\\\n", " ")
         phony = " ".join(re.findall(r"^\.PHONY:(.*)$", joined, re.M))
         assert re.search(r"(?<![\w-])opencode-check-bump(?![\w-])", phony)
-        assert "make opencode-check-bump" in self.MAKEFILE
+        assert "opencode-check-bump: ## " in self.MAKEFILE
         assert (self.MAKEFILE.index("\nopencode-print-registry:")
                 < self.MAKEFILE.index("\nopencode-check-bump:"))
 

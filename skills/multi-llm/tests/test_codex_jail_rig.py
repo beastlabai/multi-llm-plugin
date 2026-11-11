@@ -104,7 +104,7 @@ from utils.providers.codex import (  # noqa: E402
     CodexProvider,
     jail_developer_instructions,
 )
-from tests.test_landlock_exec import require_landlock  # noqa: E402
+from tests.support.landlock_kernel import require_landlock  # noqa: E402
 
 pytestmark = [pytest.mark.codex_jail, pytest.mark.landlock]
 

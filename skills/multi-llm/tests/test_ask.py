@@ -1240,7 +1240,7 @@ class TestOutputChannelVariants:
         assert len(stdout_out.encode("utf-8")) <= len(file_out.encode("utf-8"))
 
     def test_unknown_or_absent_provider_renders_the_file_variant(self):
-        # The posture llm_client.render_output_location already takes: a config
+        # The posture prompt_channels.render_output_location already takes: a config
         # naming an adapter this build no longer ships gets what every caller
         # got before the field existed.
         assert self._render(None) == self._render("claude-code")
@@ -1369,23 +1369,60 @@ class TestRunModelsConcurrent:
         asyncio.run(run_models_concurrent(specs, cb, None, 10))
         assert state["max"] <= 2
 
-    def test_applies_staggered_starts(self, monkeypatch):
+    # The launch spacing, asserted on the dispatch timeline the fan-out really
+    # produces (a virtual clock), not on the sleeps it asks for; the
+    # contention and retry schedules are in tests/test_launch_limiter.py.
+
+    @staticmethod
+    def _dispatch_times(monkeypatch, specs, max_parallel=5):
         import utils.review_orchestrator_base as base
-        recorded = []
+        from tests.launch_timeline import now, run_on_virtual_clock
 
-        async def fake_sleep(delay):
-            recorded.append(delay)
-
-        monkeypatch.setattr(base.asyncio, "sleep", fake_sleep)
-        monkeypatch.setattr(base, "get_backoff_delay", lambda x: x)
+        monkeypatch.delenv("MULTI_LLM_TEST_FAST_BACKOFF", raising=False)
+        dispatched = []
 
         async def cb(spec, idx):
+            dispatched.append((spec, now()))
             return spec
 
-        specs = ["gemini:gemini-3-flash", "gemini:gemini-3-pro", "gemini:gemini-2.5-flash"]
-        asyncio.run(run_models_concurrent(specs, cb, None, 5))
-        # index 0 has no stagger; indices 1,2 -> index * PROVIDER_STAGGER_DELAY (2.0).
-        assert recorded == [base.PROVIDER_STAGGER_DELAY, 2 * base.PROVIDER_STAGGER_DELAY]
+        run_on_virtual_clock(base.run_models_concurrent(specs, cb, None, max_parallel))
+        return dict(dispatched)
+
+    def test_applies_staggered_starts(self, monkeypatch):
+        # cursor-agent declares a launch stagger; its first slot starts at once.
+        from utils.providers.cursor_agent import CursorAgentProvider
+        step = CursorAgentProvider.LAUNCH_STAGGER_S
+        assert step > 0
+        specs = ["cursor-agent:auto", "cursor-agent:gpt-5", "cursor-agent:sonnet"]
+        times = self._dispatch_times(monkeypatch, specs)
+        assert [times[s] for s in specs] == [0.0, step, 2 * step]
+
+    def test_slots_of_different_providers_start_together(self, monkeypatch):
+        specs = ["gemini:gemini-3-flash", "claude-code:sonnet", "codex:gpt-5.5",
+                 "cursor-agent:auto"]
+        # Only a repeated provider can wait, and only if its adapter declares one.
+        assert set(self._dispatch_times(monkeypatch, specs).values()) == {0.0}
+
+    def test_a_provider_is_staggered_among_its_own_slots_only(self, monkeypatch):
+        # cursor-agent's second slot sits at global index 3, behind two other
+        # providers: it waits one stagger step, not three.
+        from utils.providers.cursor_agent import CursorAgentProvider
+        step = CursorAgentProvider.LAUNCH_STAGGER_S
+        specs = ["cursor-agent:auto", "gemini:gemini-3-flash", "codex:gpt-5.5",
+                 "cursor-agent:sonnet"]
+        times = self._dispatch_times(monkeypatch, specs)
+        assert [times[s] for s in specs] == [0.0, 0.0, 0.0, step]
+
+    def test_total_timeout_accounts_for_the_largest_stagger(self):
+        import utils.review_orchestrator_base as base
+        from utils.providers.cursor_agent import CursorAgentProvider
+        step = CursorAgentProvider.LAUNCH_STAGGER_S
+        limiter, overhead = base.plan_launch_limiter(["gemini", "codex", "gemini"])
+        assert overhead == 0.0 and not limiter.spaces("gemini")
+        # Three cursor-agent slots, one other: the cursor bucket sets the margin.
+        _, overhead = base.plan_launch_limiter(
+            ["cursor-agent", "gemini", "cursor-agent", "cursor-agent"])
+        assert overhead == 3 * step
 
 
 # ---------------------------------------------------------------------------
@@ -1518,6 +1555,7 @@ class TestRoutingAndDocs:
 # D6 step 3 — ask's lane asks the same pre-dispatch sandbox question
 # ---------------------------------------------------------------------------
 
+@pytest.mark.shell_probe
 class TestTheAskFanoutGatesOnTheSandboxProbe:
     """`ask_one` is the third lane that reaches `generate`, so it asks too.
 
@@ -1546,7 +1584,8 @@ class TestTheAskFanoutGatesOnTheSandboxProbe:
         from utils.providers import codex as codex_module
         from utils.providers.base import PROFILE_GENERATE
 
-        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+        from utils import subagent_executor
+        subagent_executor._SANDBOX_PROBE_CACHE.clear()
         broken = ["sh", "-c", f"echo '{self.BWRAP_LINE}' >&2; exit 1"]
         provider = registry.get_provider("codex")
         monkeypatch.setattr(
@@ -1816,7 +1855,8 @@ def break_the_codex_sandbox(monkeypatch, policy="off"):
     from utils.providers import codex as codex_module
     from utils.providers.base import PROFILE_GENERATE
 
-    monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+    from utils import subagent_executor
+    subagent_executor._SANDBOX_PROBE_CACHE.clear()
     line = "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted"
     broken = ["sh", "-c", f"echo '{line}' >&2; exit 1"]
     provider = registry.get_provider("codex")
@@ -2033,7 +2073,7 @@ class TestTheAskLaneQueueWaitIsNotBudgetSpent:
 
         # No stagger, so only the parked wait can make the tail's `queued_s`
         # positive. (The autouse fast-backoff floor is 10 ms, which rounds to 0.)
-        with patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+        with patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             rc = run_ask(["--plan-file", str(plan), "--question", "Q",
                           "--models", self.HEAD, self.TAIL,
                           "--max-parallel", "1"], SlowHead())
@@ -2107,6 +2147,7 @@ class TestEveryAskSourceLandsOnTheMap:
         assert models["claude-code:haiku"]["source"] == "file"
         assert {e["state"] for e in models.values()} == {"done"}
 
+    @pytest.mark.shell_probe
     def test_the_pre_dispatch_refusal_lands_as_not_dispatched(
         self, plan, monkeypatch, progress_lines
     ):
@@ -2134,9 +2175,8 @@ class TestEveryEndingRetiresItsSlot:
         self, plan, progress_lines
     ):
         """Four different endings in one run: an answer, a refusal the lane
-        produced, a slot that *raised* (retired by the helper as ``exception``,
-        the only place the spec behind a dropped task is still known), and a
-        model that came off disk."""
+        produced, a slot whose provider call *raised* (``source: exception``),
+        and a model that came off disk."""
         from utils import progress_tracker
         from utils.progress_tracker import LIVE_STATES
 
@@ -2173,28 +2213,15 @@ class TestEveryEndingRetiresItsSlot:
         assert (models["claude-code:fable"]["state"],
                 models["claude-code:fable"]["source"]) == ("failed", "failed")
         assert models["claude-code:fable"]["error"] == "no usable answer"
-        # The slot that raised keeps its own exception text, while the report's
-        # failed map — built from `results`, which a raised task never reaches —
-        # falls to F11's backfill. The map is the finer-grained of the two.
-        #
-        # Updated for F4 (2026-09-20): this used to assert the sentence "No
-        # answer produced (model did not complete)", which was ask's own third
-        # wording for the one cause the other two lanes name once. A slot in
-        # neither `results` nor the failure map is `DEADLINE_ERROR` here exactly
-        # as it is in `run_models_concurrent`'s sibling test
-        # (`test_a_slot_that_raises_retires_itself_and_leaves_its_sibling_alone`,
-        # tests/test_review_plan_orchestrator.py), which pins the same
-        # asymmetry: the map keeps the exception, the report's list — which has
-        # no exception in hand — names the deadline wording. That the sentence
-        # was *right* about this particular slot is a coincidence of a generic
-        # phrasing; it was equally applied to a genuine deadline loss, whose
-        # swept map entry said `DEADLINE_ERROR` in the same file.
+        # A raising provider call is that slot's own ending, recorded as the
+        # redacted exception in the map and the report alike, never as a
+        # deadline loss (docs/development/workflows.md#ask-mode).
+        exception = "Exception: RuntimeError: boom"
         assert (models["claude-code:haiku"]["state"],
                 models["claude-code:haiku"]["source"]) == ("failed", "exception")
-        assert models["claude-code:haiku"]["error"] == "boom"
-        assert read_status(d)["models_failed"]["claude-code:haiku"] == (
-            progress_tracker.DEADLINE_ERROR
-        )
+        assert models["claude-code:haiku"]["error"] == exception
+        assert read_status(d)["models_failed"]["claude-code:haiku"] == exception
+        assert progress_tracker.DEADLINE_ERROR not in read_answers(d)
 
         # Both counters, and the right way round: four finished slots, two of
         # which produced a usable answer.
@@ -2227,7 +2254,7 @@ class TestTheDeadlineIsNamedOnceOnThisLane:
         # `--timeout 0` with the stagger patched out makes the fan-out's own
         # `total_timeout` 0, so `asyncio.wait_for` fires its deadline before any
         # slot can run: the real deadline path, not a simulated one.
-        with patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+        with patch("utils.concurrency.PROVIDER_STAGGER_DELAY", 0.0):
             rc = run_ask(["--plan-file", str(plan), "--question", "Q",
                           "--timeout", "0", "--models", *specs], FakeInvoker())
         assert rc == 3  # zero answers: nothing to aggregate
@@ -3166,7 +3193,7 @@ class TestAFailedRunIsNeverAnAnswer:
                 return await asyncio.wait_for(aw, timeout)
 
         monkeypatch.setattr(base, "asyncio", HoldsTheDeadlineUntilWritten())
-        monkeypatch.setattr(base, "PROVIDER_STAGGER_DELAY", 1.0)
+        monkeypatch.setattr("utils.concurrency.PROVIDER_STAGGER_DELAY", 1.0)
         rc = run_ask(ask_argv(plan, spec, extra=("--timeout", "0")), WritesThenHangs())
         assert written.is_set()
         assert rc == 3
@@ -3210,7 +3237,7 @@ class TestAFailedRunIsNeverAnAnswer:
                 return {"success": True, "data": "late",
                         "details": {"answer_text": "late"}}
 
-        monkeypatch.setattr(base, "PROVIDER_STAGGER_DELAY", 1.0)
+        monkeypatch.setattr("utils.concurrency.PROVIDER_STAGGER_DELAY", 1.0)
         rc = run_ask(ask_argv(plan, spec, extra=("--timeout", "0")), HangsThenWrites())
         assert rc == 3
         status = read_status(d)
@@ -3240,7 +3267,7 @@ class TestAFailedRunIsNeverAnAnswer:
                     "Written as the CLI was stopped.", encoding="utf-8")
                 return {"success": False, "error": "stopped", "details": {}}
 
-        monkeypatch.setattr(base, "PROVIDER_STAGGER_DELAY", 1.0)
+        monkeypatch.setattr("utils.concurrency.PROVIDER_STAGGER_DELAY", 1.0)
         started = time.monotonic()
         rc = run_ask(ask_argv(plan, spec, extra=("--timeout", "0")), RunsALongCli())
         assert time.monotonic() - started < 30
@@ -3339,6 +3366,7 @@ class _AnySpec(dict):
         return dict(self._behavior)
 
 
+@pytest.mark.shell_probe
 class TestPartialsAroundTheTwoEarlyReturns:
     """D3.2: the porcelain-violation return keeps stdout text too; the sandbox
     refusal keeps an earlier run's partial untouched and says whose it is."""
@@ -3767,6 +3795,7 @@ class TestProvenance:
         assert provenance_of(d, spec) is None
         assert failed_line(d, spec) == "claude-code exited with code 1"
 
+    @pytest.mark.shell_probe
     def test_a_refused_slot_keeps_the_earlier_answer_s_line(self, plan, monkeypatch):
         break_the_codex_sandbox(monkeypatch, policy="off")
         d = qdir(plan, "Q")
@@ -3776,11 +3805,27 @@ class TestProvenance:
         origin_of(d, CODEX_SPEC).write_text("fallback", encoding="utf-8")
         inv = FakeInvoker()
         # `--rerun-all`, or resume would skip the answer before the gate is asked.
-        assert run_ask(ask_argv(plan, CODEX_SPEC, extra=("--rerun-all",)), inv) == 0
+        # It asked for a new answer, so the earlier one is not this run's: the
+        # model fails with the refusal, and its answer and record stay.
+        assert run_ask(ask_argv(plan, CODEX_SPEC, extra=("--rerun-all",)), inv) == 3
         assert inv.calls == []
-        assert read_status(d)["progress"]["models"][CODEX_SPEC]["source"] == "not-dispatched"
-        assert provenance_of(d, CODEX_SPEC) == self.LINES["fallback"]
+        status = read_status(d)
+        assert status["progress"]["models"][CODEX_SPEC]["source"] == "not-dispatched"
+        assert status["models_completed"] == []
+        assert status["models_failed"][CODEX_SPEC].startswith("[SANDBOX_UNAVAILABLE]")
+        assert status["answer_origins"]["kept"] == 0
+        assert provenance_of(d, CODEX_SPEC) is None
+        assert failed_line(d, CODEX_SPEC).endswith(
+            f"answer_{stem_of(CODEX_SPEC)}.md, an earlier run's answer, was kept as "
+            "it was (not counted: --rerun-all asks every model again)")
+        assert answer_of(d, CODEX_SPEC).read_text(encoding="utf-8") == "An earlier answer."
         assert origin_of(d, CODEX_SPEC).read_text(encoding="utf-8") == "fallback"
+
+        # A resume keeps it, with the line of the run that produced it.
+        assert run_ask(ask_argv(plan, CODEX_SPEC), inv) == 0
+        assert inv.calls == []
+        assert provenance_of(d, CODEX_SPEC) == self.LINES["fallback"]
+        assert read_status(d)["answer_origins"]["kept"] == 1
 
     def test_a_failed_record_write_warns_and_the_answer_still_counts(
         self, plan, monkeypatch, capsys

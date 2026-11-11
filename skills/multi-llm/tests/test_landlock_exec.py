@@ -25,7 +25,6 @@ everywhere:
 
 import ast
 import errno
-import functools
 import io
 import os
 import re
@@ -39,11 +38,11 @@ SKILL_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(SKILL_ROOT))
 
 from utils import landlock_exec as lx  # noqa: E402
+from tests.source_cache import source_tree  # noqa: E402
+from tests.support.landlock_kernel import REQUIRE_ENV, _landlock_unusable_reason, require_landlock  # noqa: E402
 
 WRAPPER = SKILL_ROOT / "utils" / "landlock_exec.py"
 
-#: Set on a host that must run tier 2: a skip there fails instead.
-REQUIRE_ENV = "MULTI_LLM_REQUIRE_LANDLOCK"
 
 #: The entry rows open real paths with ``O_PATH``, which only Linux has.
 linux_only = pytest.mark.skipif(
@@ -490,7 +489,7 @@ class TestEntries:
 
 class TestTheScriptStandsAlone:
     def test_it_imports_nothing_but_the_stdlib(self):
-        tree = ast.parse(WRAPPER.read_text(encoding="utf-8"))
+        tree = source_tree(WRAPPER)
         imported = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
@@ -514,33 +513,6 @@ class TestTheScriptStandsAlone:
 # ===========================================================================
 # Tier 2: the real kernel
 # ===========================================================================
-
-@functools.lru_cache(maxsize=None)
-def _landlock_unusable_reason():
-    """``None`` when this kernel can run the jail, else why not."""
-    kernel = lx.Kernel()
-    machine = kernel.machine()
-    if machine not in lx.SYSCALLS:
-        return f"machine {machine!r} is not in the wrapper's syscall table"
-    try:
-        abi = kernel.abi()
-    except OSError as exc:
-        name = errno.errorcode.get(exc.errno, str(exc.errno))
-        return f"Landlock unavailable: {name} ({exc.strerror})"
-    if abi < lx.ABI_FLOOR:
-        return f"Landlock ABI {abi} found; the floor is {lx.ABI_FLOOR}"
-    return None
-
-
-def require_landlock():
-    """Skip unless the ABI query returns >= 3; with ``MULTI_LLM_REQUIRE_LANDLOCK=1``
-    the same condition fails instead, so a skip cannot hide a regression."""
-    reason = _landlock_unusable_reason()
-    if reason is None:
-        return
-    if os.environ.get(REQUIRE_ENV, "") not in ("", "0"):
-        pytest.fail(f"{REQUIRE_ENV} is set but the tier-2 Landlock rows cannot run: {reason}")
-    pytest.skip(reason)
 
 
 class TestTheSkipHelper:

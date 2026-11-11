@@ -33,21 +33,13 @@ from harness import SkillRunner  # noqa: E402
 from utils import cli_common, detach  # noqa: E402
 from utils.cli_common import parse_result_line  # noqa: E402
 
-from tests.test_generate_tasks_orchestrator import (  # noqa: E402
-    PLAN_BODY,
-    _valid_document,
-)
+from tests.support.generate_tasks_world import PLAN_BODY, _valid_document  # noqa: E402
+from tests.source_cache import source_tree
+from tests.support.gitrepo import git as _git  # noqa: E402
 
 SKILL_ROOT = Path(__file__).parent.parent
 PLAN = "plans/x.md"
 NOTICE = "multi-llm: running from the repository root"
-
-
-def _git(repo, *args):
-    subprocess.run(
-        ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
-        cwd=repo, check=True, capture_output=True,
-    )
 
 
 @pytest.fixture
@@ -167,7 +159,7 @@ BRIEF = "plans/commit-reviews/root-e4f5a6b7c8d9.md"
 
 @pytest.fixture
 def brief_rule(repo, monkeypatch):
-    """The repo's commit brief, and ``utils.commit_review.is_commit_brief``
+    """The repo's commit brief, and ``utils.commit_paths.is_commit_brief``
     (another task's module, the brief rule's one owner) as a stand-in that
     accepts exactly that file; records each question it was asked."""
     import types
@@ -185,10 +177,10 @@ def brief_rule(repo, monkeypatch):
         asked.append((str(candidate), cwd))
         return os.path.realpath(str(candidate)) == str(path)
 
-    stand_in = types.ModuleType("utils.commit_review")
+    stand_in = types.ModuleType("utils.commit_paths")
     stand_in.is_commit_brief = is_commit_brief
-    monkeypatch.setitem(sys.modules, "utils.commit_review", stand_in)
-    monkeypatch.setattr(utils, "commit_review", stand_in, raising=False)
+    monkeypatch.setitem(sys.modules, "utils.commit_paths", stand_in)
+    monkeypatch.setattr(utils, "commit_paths", stand_in, raising=False)
     return asked
 
 
@@ -271,6 +263,7 @@ UTIL_CALLS = {
     "batch-done": ["--phase-dir", "plans/x/implement", "--task-id", "T001",
                    "--status", "completed"],
     "commit-brief": ["last", "2", "commits", "--context-plan", PLAN],
+    "resume-state": ["review-plan", PLAN],
 }
 
 
@@ -621,7 +614,7 @@ def _parser_options(module_name: str):
     import importlib.util
 
     spec = importlib.util.find_spec(module_name)
-    tree = ast.parse(Path(spec.origin).read_text(encoding="utf-8"))
+    tree = source_tree(spec.origin)
     found = set()
     for node in ast.walk(tree):
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)

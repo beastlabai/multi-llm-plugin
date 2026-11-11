@@ -54,6 +54,11 @@ jobs:
           # two-commit repository is the better fix and is recorded as owed.
           fetch-depth: 0
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+      # The lint gate (`make lint`). Linux only: ruff reads source text, so one
+      # runner decides it for all three, and ruff is in the project's dev group.
+      - name: Lint
+        if: runner.os == 'Linux'
+        run: uv run --project skills/multi-llm -- ruff check --config skills/multi-llm/pyproject.toml skills/multi-llm packaging
       # The committed-secret guard is the one that actually holds the line for a
       # PUBLIC repo, so it has to run on a PR rather than only where a developer
       # happens to have the binary. Linux only: the guard is OS-independent, and
@@ -86,6 +91,40 @@ jobs:
         # on runners with no codex binary to put in the jail.
         run: uv run --project skills/multi-llm -- pytest skills/multi-llm/tests -m "not live and not container and not package and not codex_jail"
 
+  # A one-week trial of the same suite spread over the runner's cores, kept apart
+  # from the gating `test` job above (its checks keep their names and still
+  # decide the merge). `--dist loadfile` keeps every test file on one worker, so
+  # the module-level state some files share stays on one process. This leg is
+  # non-blocking: `continue-on-error` stops a failure here from failing the run,
+  # and its check names (`test-parallel (<os>)`) are not in any required list.
+  # Hosted runners are slower than the 4-worker local run (6 min), and the tests
+  # that time a 2 to 3 s child can flake on a busy one. How to read the trial,
+  # promote the leg or fall back to file shards: docs/development.md, "CI trial:
+  # parallel suite".
+  test-parallel:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    continue-on-error: true
+    # The serial job's caps: a parallel leg is faster, never slower, so a leg
+    # past them is hung.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 240 || 120 }}
+    steps:
+      # Pins as in the `test` job; bump both together.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # Full history, for the reason the `test` job gives.
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+      # No gitleaks install: the serial job runs the committed-secret guard, and
+      # the module skips with a named reason where the binary is absent.
+      # pytest-xdist comes from the project's `dev` dependency group (pyproject + uv.lock),
+      # like every other test dependency. The -m expression is the serial job's.
+      - name: Run tests in parallel
+        run: uv run --project skills/multi-llm -- pytest skills/multi-llm/tests -n auto --dist loadfile -m "not live and not container and not package and not codex_jail"
+
   # The npm package. Linux-only by decision, exactly as the gitleaks guard above
   # is: nothing downstream of the uv probe has been measured on Windows or macOS
   # on this route, so a green leg there would claim coverage that does not exist.
@@ -96,6 +135,12 @@ jobs:
   # point, because a gate that skips silently everywhere is indistinguishable
   # from a gate that passes. `MLLM_REQUIRE_PACKAGE_ROWS` is what turns a skip
   # into a failure, and `make opencode-package-check-ci` sets it.
+  #
+  # `PLAIN_ROWS=graded` on each tier: the Ubuntu `test` leg above already runs
+  # every plain (unmarked) row of these suites on the same commit, so this job
+  # runs only the plain rows a grader reads (opencode's rows 1-6 and 5b) beside
+  # the `package` rows, the clean rebuilds and the moved-tree rule. The publish
+  # workflows run the tiers with every plain row, as they must.
   package:
     runs-on: ubuntu-latest
     steps:
@@ -118,16 +163,16 @@ jobs:
       # the difference between the two targets is the whole reason a publish
       # demands the full one rather than trusting a green PR.
       - name: Package gate (A4 rows 1-6)
-        run: make opencode-package-check-ci
+        run: make opencode-package-check-ci PLAIN_ROWS=graded
       # The codex plugin's CI tier, beside the npm one: the clean rebuild must
       # equal the committed `packaging/codex/multi-llm/` (the Git route serves
-      # those bytes with no build), then the codex suite's plain and
-      # `package`-marked rows. No Docker, no codex binary, no stamp.
+      # those bytes with no build), then the codex suite's `package`-marked
+      # rows. No Docker, no codex binary, no stamp.
       - name: Codex plugin gate (CI tier)
-        run: make codex-package-check-ci
+        run: make codex-package-check-ci PLAIN_ROWS=graded
       # The Claude Code plugin's CI tier: the clean rebuild must equal the committed
-      # `packaging/claude/multi-llm/`, the moved-tree rule must hold, then the plain
-      # and `package`-marked rows. No Docker, no claude binary, no registry.
+      # `packaging/claude/multi-llm/`, the moved-tree rule must hold, then the
+      # `package`-marked rows. No Docker, no claude binary, no registry.
       #
       # The moved-tree rule is on a pull request where the shared-version check is
       # not, because Claude Code installs follow `master` and cache by version: a
@@ -140,4 +185,4 @@ jobs:
       - name: Claude Code plugin gate (CI tier)
         env:
           CLAUDE_RELEASE_BASE: ${{ github.event_name == 'pull_request' && format('origin/{0}', github.base_ref) || github.event.before }}
-        run: make claude-package-check-ci
+        run: make claude-package-check-ci PLAIN_ROWS=graded

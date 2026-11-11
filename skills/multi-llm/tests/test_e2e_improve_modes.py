@@ -426,8 +426,7 @@ class World:
         env = self.runner._build_env()
         # The route and host pick only the spelling of a printed command; a
         # developer shell exporting either would move every `command` asserted here.
-        for name in ("MULTI_LLM_ROUTE", "MULTI_LLM_HOST", "MULTI_LLM_HOST_SESSION_MODEL",
-                     "MULTI_LLM_LEGACY_INSTRUCTIONS"):
+        for name in ("MULTI_LLM_ROUTE", "MULTI_LLM_HOST", "MULTI_LLM_HOST_SESSION_MODEL"):
             env.pop(name, None)
         env.update(extra)
         return env
@@ -1007,7 +1006,9 @@ class TestAReviewThatFails:
         assert world.state()["improve_plan"]["failed_phase"] == "review-plan"
         assert not (world.out / "apply-suggestions").exists()
         assert world.plan_bytes == world.original_plan
-        assert [classify(call) for call in world.calls()] == ["review"]
+        # The mock's bare `ERROR: Simulated failure`, exit 1, is a failure no
+        # adapter recognises: one transport retry of the review, nothing else.
+        assert [classify(call) for call in world.calls()] == ["review", "review"]
 
         again = world.composite("improve-plan")
 

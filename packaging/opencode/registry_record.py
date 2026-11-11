@@ -266,13 +266,13 @@ def tag_facts(repo: Path, tag: str) -> Dict[str, Any]:
     try:
         manifest = json.loads(manifest_text)
     except ValueError as exc:
-        raise RecordError(f"{tag}:{TAG_MANIFEST} is not JSON ({exc})")
+        raise RecordError(f"{tag}:{TAG_MANIFEST} is not JSON ({exc})") from exc
     import yaml
 
     try:
         capabilities = yaml.safe_load(capabilities_text) or {}
     except yaml.YAMLError as exc:
-        raise RecordError(f"{tag}:{CAPABILITIES} is not YAML ({exc})")
+        raise RecordError(f"{tag}:{CAPABILITIES} is not YAML ({exc})") from exc
     package = (((capabilities.get("hosts") or {}).get("opencode") or {}).get("package") or {}) \
         if isinstance(capabilities, dict) else {}
     public = package.get("public_version") if isinstance(package, dict) else None

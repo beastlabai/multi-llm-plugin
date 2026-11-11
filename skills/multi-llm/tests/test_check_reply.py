@@ -6,6 +6,8 @@ one. The check is what lets the instructions say "re-ask once, never repair".
 """
 
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -117,6 +119,51 @@ class TestCheckTaskReply:
         assert check_task_reply(_task(tmp_path, kind="consolidation"), str(tmp_path))
 
 
+
+class TestOneCheckForBothLanes:
+    """The native lane's check and the executor lane's are one function
+    (`schema_validator.validation_reply_problems`). They differ only in what
+    the merge recovers from by leaving a group `validation_failed`: the native
+    lane re-asks over it, the executor lane leaves it to the merge, since a
+    schema failure is terminal for a validation batch."""
+
+    @staticmethod
+    def _executor(document):
+        from utils import subagent_executor
+        return subagent_executor.validate_result("validation", document)
+
+    def test_an_unknown_status_is_re_asked_natively_and_left_to_the_merge(self, tmp_path):
+        from utils.schema_validator import VALIDATION_VERDICTS
+
+        reply = _reply(HASH_A, HASH_B)
+        reply["groups"][0]["status"] = "approved"
+        _write(tmp_path, reply)
+        assert check_task_reply(_task(tmp_path), str(tmp_path)) == [
+            "groups[0] status 'approved' is not one of " + ", ".join(VALIDATION_VERDICTS)]
+        assert self._executor(reply) == []
+
+    @pytest.mark.parametrize("document, problem", [
+        ({"groups": None}, 'reply has no "groups" list'),
+        (42, 'reply has no "groups" list'),
+        ({"groups": ["x"]}, "groups[0] is not an object"),
+        ({"groups": [{"group_hash": HASH_A, "status": ""}]}, "groups[0] has no status"),
+        ({"groups": [{"status": "valid"}]}, "groups[0] has no group_hash (or group_id)"),
+    ])
+    def test_what_the_merge_cannot_use_fails_on_both(self, tmp_path, document, problem):
+        _write(tmp_path, document)
+        assert problem in check_task_reply(_task(tmp_path), str(tmp_path))
+        assert problem in self._executor(document)
+
+    def test_coverage_is_checked_natively_only(self):
+        from utils.schema_validator import validation_reply_problems
+
+        reply = _reply(HASH_A)
+        assert validation_reply_problems(reply, group_ids=[HASH_A, HASH_B]) == [
+            f"missing group_hash: {HASH_B}"]
+        assert validation_reply_problems(
+            reply, group_ids=[HASH_A, HASH_B], recoverable=False) == []
+
+
 class TestMain:
     def _tasks_file(self, tmp_path):
         document = {"batches": [_task(tmp_path)]}
@@ -142,6 +189,18 @@ class TestMain:
         from multi_llm import UTIL_COMMANDS
         assert UTIL_COMMANDS["check-reply"][0] == "utils.check_reply"
 
+    def test_it_runs_as_a_direct_script(self, tmp_path):
+        """`python utils/check_reply.py` is a supported entry point: its guard
+        puts the skill root on sys.path and calls the package module's `main`
+        before any package import runs."""
+        env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+        done = subprocess.run(
+            [sys.executable, str(SKILL_ROOT / "utils" / "check_reply.py"), "--help"],
+            cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60,
+        )
+        assert done.returncode == 0, done.stderr
+        assert "--tasks-file" in done.stdout
+
 
 class TestRevalidationRunsTheCheckToo:
     """Adversarial review, 2026-10-02: only the three review cores told the host
@@ -155,19 +214,33 @@ class TestRevalidationRunsTheCheckToo:
         end = text.index("leave its file as it is and say so.", start)
         return " ".join(text[start:end].split())
 
-    def test_each_revalidating_core_carries_the_review_paragraph(self):
+    def test_the_revalidation_runbook_carries_the_review_paragraph(self):
+        """Both apply cores send revalidation to one runbook,
+        ``references/revalidation.md``, which a host reads as it is: the same
+        paragraph, its command behind the ``<prefix>`` that file defines and its
+        path under the ``{review}`` dir the core names."""
         instructions = SKILL_ROOT / "instructions"
         review = self._paragraph(
             (instructions / "review-plan.md").read_text(encoding="utf-8"))
+        text = (SKILL_ROOT / "references" / "revalidation.md").read_text(
+            encoding="utf-8")
+        assert self._paragraph(text) == review.replace(
+            'uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python '
+            '"{SKILL_DIR}/multi_llm.py" util check-reply',
+            "<prefix> util check-reply",
+        ).replace(
+            '"{plan}/review-plan/validation_tasks.json"',
+            '"{plan}/{review}/revalidation_tasks.json"')
+        # Above both the single- and the multi-batch path.
+        assert text.index("util check-reply") < text.index(
+            "### Single batch: `[REVALIDATION_PENDING]`")
         for name, phase in (("apply-suggestions.md", "review-plan"),
                             ("apply-code-fixes.md", "code-review")):
-            text = (instructions / name).read_text(encoding="utf-8")
-            assert self._paragraph(text) == review.replace(
-                '"{plan}/review-plan/validation_tasks.json"',
-                f'"{{plan}}/{phase}/revalidation_tasks.json"'), name
-            # Above both the single- and the multi-batch path.
-            assert text.index("util check-reply") < text.index(
-                "#### Single Batch: `[REVALIDATION_PENDING]`"), name
+            core = (instructions / name).read_text(encoding="utf-8")
+            trigger = next(line for line in core.splitlines()
+                           if "references/revalidation.md" in line)
+            assert "[REVALIDATION_PENDING]" in trigger, name
+            assert f"`{phase}` as its `{{review}}`" in trigger, name
 
     def test_a_revalidation_task_is_checked_like_a_validation_one(self, tmp_path):
         _write(tmp_path, _reply(HASH_A))
@@ -231,12 +304,13 @@ class TestARepliesNotWrittenYet:
         assert "[REPLY_INVALID] validation-batch-0: no reply file" in capsys.readouterr().out
 
     @pytest.mark.parametrize("name", [
-        "review-plan", "review-code", "review-tasks", "apply-suggestions",
-        "apply-code-fixes",
+        "instructions/review-plan.md", "instructions/review-code.md",
+        "instructions/review-tasks.md",
+        # The apply cores' revalidation runbook, which both name by a trigger.
+        "references/revalidation.md",
     ])
     def test_every_runbook_checks_the_whole_file_after_the_subagents_return(self, name):
-        text = " ".join((SKILL_ROOT / "instructions" / f"{name}.md").read_text(
-            encoding="utf-8").split())
+        text = " ".join((SKILL_ROOT / name).read_text(encoding="utf-8").split())
         assert ("(omit `--task-id` to check every batch, and only once every "
                 "batch's subagent has returned: a reply not written yet prints "
                 "`[REPLY_MISSING]`, which is no bad reply and no re-ask)") in text

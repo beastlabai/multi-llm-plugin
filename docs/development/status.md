@@ -11,6 +11,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [ETA outcomes and denominators](#eta-outcomes-and-denominators)
 - [Status parity across execution paths](#status-parity-across-execution-paths)
 - [Clipping model text](#clipping-model-text)
+- [How `status` is built](#how-status-is-built)
 
 ## Status views and run selection
 
@@ -62,6 +63,19 @@ unreadable. A host prints any non-zero exit as an error, so the two read steps t
 `|| …` is chained onto the call, which would cost Claude Code's permission allow
 rule.
 
+**A foreground run's head line takes its tense from the checkpoint.** A phase dir with a
+checkpoint and no `run` record is a foreground run (verdict `no_run`, exit `2`): `running in
+foreground (…)` while `state` or `progress.step` reads in flight (`_checkpoint_in_flight`),
+`finished in foreground (…)` once they read terminal, `stopped in foreground (needs you; …)` on
+the write scheduler's stop. A review fan-out or ask whose checkpoint still reads in flight while
+nobody holds its phase lock heads `ended in foreground without a final state (…)`
+(`status_views._foreground_run_gone`): those foreground runs hold the lock from before their first
+checkpoint write to their exit (`status_views.FOREGROUND_LOCKED_PHASES`), so a free lock (the
+view's probed `lock_held`) says the run ended without writing a terminal state, as a fan-out whose
+every model failed does (exit 3 over `state: models_running`). Text only: the verdict, the exit
+code and `--wait` are unchanged. generate-tasks, implement and the apply phases hold no lock in the
+foreground, so a free lock tells nothing there and their head line keeps `running`.
+
 `--exit-zero` (fix round 7) is the opt-in for a call whose loop never reads the code — each
 core's roster read, and the poll a background-mechanism host composes (Claude Code's *run detached*
 sentence): a view that was read exits `0` and the verdict's word stays on the
@@ -102,9 +116,17 @@ the workflow at all, so the real follow-up for a finished `review-tasks` lived o
 polled, said "nothing further to run" and then invented `--apply-task-suggestions` from general
 knowledge (F7, 2026-09-16). A still-running poll carries neither.
 
+**Only a workflow step's run carries them.** The lines, the `notice` and `user_next_step` are
+read for a listed run whose record's `mode` (else its phase dir) is a workflow phase or a
+composite (`run_status._is_workflow_step_run`). An `ask` is neither: a poll that lists only ask
+runs (`--phase ask`, `--question`, `--run-id` of an ask) reads no workflow and prints no next
+phase, whatever `state.json` holds. A commit front door's run is recorded under the phase it fronts
+and answers as that phase. `--view all` and `--view workflow` still print the workflow section the
+poll asked for.
+
 **A terminal poll pinned to one run that exits `0` also carries
 `user_next_step`** beside F7's `notice` (plans/next-phase-command.md): built for
-the run record's `mode`, its `plan_arg` when `next_phase.recorded_plan_spelling`
+the run record's `mode`, its `plan_arg` when `routes.recorded_plan_spelling`
 passes it (else the poll's own absolute plan, never the record's `plan_file`), the poll's
 own `--host` and route, from a fresh workflow read taken after any
 `--wait`.
@@ -153,16 +175,22 @@ builder and the completed-phase guard all agree, and `code_review_orchestrator` 
 `--force` path on a stale review instead of auto-healing it back from the artifacts it
 left.
 
-**The next-step walk never skips a started phase** (`next_phase_commands`): a required phase before
-the finished one that is `in_progress` or has a seeded `tasks_total` (an implement
-that ended `needs-human`) is the answer, so `user_next_step` and the result's
+**The next-step walk never skips a started phase** (`next_phase_commands`, through
+`utils/phase_walk.next_step`, the one owner of the rule): a required phase before
+the finished one that is `in_progress`, has a seeded `tasks_total` (an implement
+that ended `needs-human`) or a `stale` completion is the answer, so `user_next_step` and the result's
 `suggested next` notice cannot disagree and a workflow with an unfinished implement is never
-`complete`; a phase never begun still stays skipped over by a standalone start.
+`complete`; a phase never begun still stays skipped over by a standalone start. Measured
+2026-10-02 on the OpenCode and Codex racing runs: implement had ended `needs-human` after a
+write-gate refusal, and apply-code-fixes then answered `complete` while the notice said
+`suggested next: implement`. A stale start is its own answer once nothing earlier is open
+(`util next-command --after review-code` had walked past a stale review to apply-code-fixes),
+and only with the gate off: a finished phase not on record answers nothing.
 
 **An early warning for the refusal that waits at phase 6** (`check_workflow_prerequisites.repo_wide_sandbox_warning`): whenever
 `implement` / `apply-code-fixes` would be refused for the runner
 `driver.subagent_runner` resolves to on this host — computed from the dispatch's own decision
-(`subagent_executor.repo_wide_write_refusal`: `_detect_sandbox` with the `agent-write` profile and a
+(`sandbox_walk.repo_wide_write_refusal`: `_detect_sandbox` with the `agent-write` profile and a
 repo-wide `JailRequest`, the adapter's model-free probes once per process through the
 shared probe cache; since 2026-10-02 never a guess from an earlier phase's recorded rung, which
 after step 3b would say the opposite) — `implement` and `apply-code-fixes` carry a
@@ -179,7 +207,7 @@ the servers declare the host nowhere else, so the codex session rung is only rea
 `--reaggregate` makes older batches look stale, so the next command is bare rather than
 `--resume`.
 
-`suggested_next` is picked **once, after** those marks (`_suggested_next`: a started,
+`suggested_next` is picked **once, after** those marks (`phase_walk.next_step` with no start: a started,
 unfinished required phase first — `in_progress`, a seeded `tasks_total` or
 `stale` — else the first open required phase after the furthest completed phase,
 never one before it, so a plan whose review-plan never ran is not sent back to it; fix round 14), so
@@ -252,11 +280,44 @@ When the jail probes ok under `auto`, the AppArmor/sysctl block is still printed
 full but headed `System-level alternative (needs /etc and sudo; …)` instead of `Repair (…)` (`REPAIR_HEADING_SYSTEM_ALTERNATIVE`);
 the verdict and the exit code do not move. It also WARNs when codex's own config has
 `[features] use_legacy_landlock` enabled globally, which makes every `workspace-write` dispatch panic. It
-takes no lock and writes nothing.
+takes no lock and writes nothing but its version cache.
+
+**doctor's version cache** (`utils/cli_version_cache.py`, PERF-5/PROV-12, 2026-11-08): the parsed
+`--version` string per provider, in `$XDG_CACHE_HOME/multi-llm/cli-versions.json` (default
+`~/.cache/multi-llm/`), so a second doctor skips those spawns (most of its CPU). The key is the
+probe's argv plus the resolved launcher's real path, `st_size`, `st_mtime_ns`, `st_ctime_ns` and
+`st_ino`, and the same identity of the file that defines the adapter's `parse_version`. Resolved
+executables are often launchers (a uv shim, `codex.js`) whose bytes can be identical across
+versions, so the times carry the key; installers rewrite the launcher. A hand-made wrapper whose
+target changes beneath it is what the key cannot see, so an entry also expires after 7 days and
+`doctor --fresh` re-probes every CLI (and still writes the cache). The floor verdict is taken live
+from the cached string. Only parsed strings are stored, never a probe's output, and never a failed
+or timed-out read; auth and sandbox probes always run. The file is written once per run to a temp
+file in the same directory, merged over what is on disk and moved into place with `os.replace`, so
+concurrent sessions never see a torn file (a race costs one more probe); a missing, unreadable or
+corrupt file is an empty cache. Only what doctor could have written is read: the file and the
+`multi-llm` directory must be this user's, not symlinks and not group- or world-writable (the file
+is opened without following a link or blocking on a FIFO), else the cache is empty and a refused
+directory is never written to; `--json`'s `version_cache.refused` says why, and the text views say
+nothing. An entry needs a finite `probed_at` inside the 7-day window and a version the adapter's own
+`parse_version` reads back unchanged, so a planted `unknown` (which skips the floor) is a miss. A
+same-user forgery stays possible: that user can edit the CLI itself. **Doctor only:** the executor's `min_version` refusal
+(`runner_preflight._detect_version`) and every other runner check read the CLI live, and
+`tests/test_cli_version_cache.py` holds that no other module imports the cache. `--json` rows say
+`version.source` (`probe` or `cache`) and the report carries `version_cache` (path, hits, written).
 
 The Claude Code plugin's `hooks/hooks.json` runs it `--warn-only` from a
 `SessionStart` hook through `hooks/doctor.sh` (silent exit 0 when uv is missing) —
-advisory, never blocking; beside it, a `Stop` hook runs `hooks/report-check.sh`
+advisory, never blocking. Its stdout reaches the model every session, so `--warn-only` prints a
+one-line summary and then one line per problem (`doctor.problem_lines`: a configured name with no
+adapter, each failure with a `[sandbox_fallback: …]` clause on a BROKEN runner sandbox saying what
+the next run does — and, wherever plugin-landlock serves a phase, that it stops stray writes, not
+the model, and leaves the network unconfined — each warning, a bad `MULTI_LLM_CODEX_SKIP_RUNG`, one
+`NOTE` per check that ran but settled nothing (an unread version, an auth answer no verdict matched,
+a sandbox probe with no result; an undeclared probe is not one), and one `NOTE` naming every probe
+that ran out of budget). Any `NOTE` makes the summary say checking was incomplete instead of "no
+problems"; the full table and the repair text are a plain `doctor`'s, and
+`--json` is complete either way (about 450 characters here against 4,350 before, 2026-11-08); beside it, a `Stop` hook runs `hooks/report-check.sh`
 (plans/next-phase-command.md T11), which exits 0 at once when `stop_hook_active` is set or when
 the transcript holds no `[NEXT_COMMAND`/`[WORKFLOW_COMPLETE]` text and no Bash call that ran
 `multi_llm.py` (a `grep` before uv is even looked up; the call is enough
@@ -295,13 +356,13 @@ lands with it), so the check reads it once the reply `last_assistant_message` na
 (`settled_turn`); `install-host --check` never reaches any of these probes, and
 `status` reaches only the model-free probes behind the early warning above — codex's
 standard `workspace-write` probe and then the write rung's — once per process and under
-`subagent_executor.ADVISORY_PROBE_BUDGET_S` (1 s: a hung or slow probe draws no warning, never a slow
+`sandbox_walk.ADVISORY_PROBE_BUDGET_S` (1 s: a hung or slow probe draws no warning, never a slow
 `status`, and a measurement the budget cut short is cached nowhere, so the dispatch's
 own 10 s probe and verdict do not move), and `provider_registry.py` stays subprocess-free.
 
 `sandbox_unavailable` is the same machine condition as a dispatch-time refusal:
 `preflight_runner`'s D6 leg runs the adapter's probe once per host/spec/profile (decision in
-`_SANDBOX_DECISIONS`; the measurement in `subagent_executor._SANDBOX_PROBE_CACHE`, the one probe cache the fan-out
+`_SANDBOX_DECISIONS`; the measurement in `probe_state._SANDBOX_PROBE_CACHE`, the one probe cache the fan-out
 shares, keyed by codex version and policy, one rung probe per version across both lanes —
 2026-09-24) before the first dispatch of that profile — **the read-only one included** (F2,
 2026-09-17): `codex exec --sandbox read-only` is the same bubblewrap, so codex answers a probe for
@@ -368,7 +429,7 @@ A needs-human exit 3 on a tool route also carries `resume_command`, the same-pha
 (`dispatcher.resume` in the surface, additive within v5; since fix round 14 its
 `user_resume` also carries the resume's `flags` and the
 `--human-task` answers the implement stop recorded (`stop.answers`,
-`write_batch_scheduler._stop_answers`), which the servers make the first options — the resume first, so it and
+`write_stop.StopAccount.stop_answers`), which the servers make the first options — the resume first, so it and
 `resume_command` are one command — `resume_answers` and the surface's
 `needs_human_message.answers` clause), which answers only for a phase the workflow view shows
 `in_progress` — a prerequisite refusal, a stop before the first dispatch or a missing plan
@@ -412,7 +473,7 @@ round 24, live run 10 #5/#7, Claude Code racing #6).
 
 A task that failed reads `task 2/11 failed (timeout) after 20m 5s` (plus `· half-applied: its edits are kept` when it changed files
 first), never `done` and with no estimate, on both legs: the executor passes the
-outcome (`_eta_failure`), the native `util metrics record` reads the record
+outcome (`EtaLines.failure`), the native `util metrics record` reads the record
 `util batch-done` just wrote (`metrics.native_failure`: `metrics_progress.{phase}.failed` and the recorded
 reason, for `--task-id`, which the four runbooks pass, or the id the implement label
 starts with; with neither, the one failed task of this run that has no record yet, and among two or
@@ -422,14 +483,14 @@ more none — `[METRICS_NO_TASK_ID]` asks for `--task-id` and the entry, marked
 (`_compute_eta`).
 
 The line whose total is lower than the last line's adds `total now 4 (T007 not run: check T002 reported problems)` in
-`left_out_tail`'s words (executor `_eta_dropped` against `_eta_line_ids`;
+`left_out_tail`'s words (executor `EtaLines.dropped` against `EtaLines.line_ids`;
 native `metrics_progress.{phase}.named_out` over `withdrawn`).
 
 A complete implement run whose human-task plan set tasks aside ends `ALL DISPATCHED TASKS COMPLETE · T011 left for you (manual); T012 skipped with a manual task`
 (`set_aside_by_plan`; the native emit records it as `state.json`'s
 `metrics_set_aside`, dropped by `finish` or an executor start), and
 `phase complete` is unchanged. summary.md counts the tasks a runner was started for and the
-batches they ran in, naming a task refused before dispatch apart (`_dispatched_sentence`; it read "5
+batches they ran in, naming a task refused before dispatch apart (`WriteReports.dispatched_sentence`; it read "5
 batch task(s) dispatched across 4 batch(es)" for 4 tasks in 3 batches), and `status`'s
 implement line counts tasks alone, with no `items applied`.
 
@@ -465,6 +526,29 @@ loop (no `metrics_left_out`), the block naming them `T003 can still run: the res
 exit code stays the no-run-record 2, fix round 24), and the native implement block prints the
 executor routes' `all tasks:` tally.
 
+**Both legs name a task's outcome through `utils/task_ledger.py`**: the reason words a record
+carries, the rule that reads a skip as the user's decline or a deferral (`is_declined_reason`,
+`chain_declined`), the walk to the manual task a skipped dependent waits on (`skip_chain_root`), the
+bucket of a skip (`skip_bucket`) and of every implement task (`classify`, behind
+`run_status._implement_buckets`), and the words of each bucket (`TALLY_LABELS`, `bucket_clauses`,
+`kept_named`). The executor's write mirror (`human_task_plan._declined_split`,
+`_deferred_split`, from `HumanTaskPlan.chain`), `StateManager`'s deferral readers and `status`'s
+native view (from the reasons in `state.json`) all go through it, so one skip reads the same on
+every surface (`tests/test_task_ledger.py`). It imports nothing from the package.
+
+The executor's write mirror words its accepted and skipped tasks through the same
+`bucket_clauses` (`MIRROR_ACCEPTED_LABELS`, `MIRROR_SKIP_LABELS`: the mirror's own order and
+separators), and it writes no id list its own `tasks` rows already carry: the tasks not `ok`, the
+checks with findings and the code batches whose own check failed are read from the rows
+(`task_ledger.mirror_ids`, `MIRROR_ROW_LISTS`), and a mirror written before that keeps its
+recorded `failed_task_ids`, `check_findings_task_ids` and `batch_check_task_ids`, read as they are.
+The mirror carries no `completed`, `finalized` or `pending_human_task_ids` either: no reader used
+them (the finished tasks are the rows; a finalized phase is the file's `state: complete`). The
+lists `state.json` cannot answer for one run stay in it: the skips, the accepted and kept tasks,
+the tasks not run and the checks that held them, `runner_failed_task_ids`. The change is one way:
+an older reader shows less of a new mirror ([write-scheduler.md](write-scheduler.md#a-batchs-records)).
+Whether both legs leave the same record is `tests/test_write_legs_parity.py`.
+
 The unapplied-task-groups notice, which is the optional `--apply-task-suggestions` entry's
 `why`, names the valid groups waiting and what skipping them means, worded as the
 `--resume` its command is once a run of the phase started (`check_workflow_prerequisites.unapplied_task_groups_notice`, fix
@@ -480,3 +564,134 @@ boundary, ends in "…", drops a dangling separator and closes any bracket or qu
 opened; the budgets stay each surface's own, the OpenCode stop title mirrors it in
 `capTitleLine` (a parity test holds them together), and `plain_line` lives beside
 it.
+
+## How `status` is built
+
+**Five modules, one job each, importing down only.** `utils/run_status.py` is the command: its
+parser, the plan value, `main` and its stages, `--wait`, `--abort` and `--sweep`. Below it,
+lowest first:
+
+- `utils/status_views.py`: what a run view is. Discovery and selection of the phase dirs, the
+  predicates over one `detach.classify_run` view (terminal, stopped for the user, died, live),
+  `exit_code_for`, and the workflow read `_workflow_payload`.
+- `utils/status_commands.py`: the commands `status` prints, in the reader's spelling
+  (`user_speller`), the `resume with:` block (`_resume_lines`) and the runner section
+  (`render_runner_text`).
+- `utils/status_native.py`: the phases a native host ran, read back from `state.json`, the
+  executor runs a native leg superseded, and implement's task tally.
+- `utils/status_text.py`: the run view and the workflow section as text, the per-model table, the
+  progress lines a pinned poll's result carries, the executor mirrors, the notices, and the
+  `just finished:` difference a `--wait` takes.
+
+`tests/test_run_status_moved_names.py` holds the layering, and `tests/test_import_layers.py` puts
+all five at L6.
+
+**`run_status` re-exports every moved name for reading only** (`run_status._MOVED`, the same
+contract as `git_utils`'): `run_status.X` returns the owner's current object, and a patch of
+`run_status.X` reaches no code. Patch the owner; the moved-names test fails a test that patches a
+moved name on `run_status`. The names tests patch to reach `main` stay defined in `run_status`:
+`_collect` (which the wait loop re-reads), `_wait_for_terminal`, `_resolve_wait_timeout`, the wait's
+`time`, `_emit_user_next_step`, `_run_abort` and `note_swallowed`. **The workflow read is one seam**:
+every reader in the five modules calls `status_views._workflow_payload` on its owner at each call,
+never a copy, so one patch there reaches them all (an ask poll reads no workflow, and a test counts
+those reads). The advisory guards of all five modules are recorded by `lenient_advisory`.
+
+**`main` runs in stages, and their order is the contract.** Before the stages: a refused commit
+spelling (exit 3), a plan that is not there (exit 1, one JSON error object), `--abort`, `--sweep`,
+and `--view workflow`, which is the workflow read printed as is (byte-identical to
+`check_workflow_prerequisites.py --status`, exit 0 included). Then:
+
+1. `_gather` reads the views, then what discovery skipped (before any wait, so it describes the
+   views the poll started from), then waits (`--wait`), then sets aside the executor runs a
+   native leg went on from (fix round 26, the commit review of 2026-10-08: such a run is not
+   this phase's run any more) and tallies implement's tasks beside an executor implement run
+   (fix round 16, run 6: the run's own counts are that run's; the phase's are `state.json`'s).
+   `--timeout` is a sentinel until here and is resolved only under `--wait`, where it can see both
+   the flag and the config, so a plain poll pays no config read. A `--wait` with no honest
+   deadline is exit 3 with the fix on stderr and nothing on stdout (F4/F7, 2026-09-20): rule 2
+   stops on 3 and relays the message, while exit 1 would read as "the run is unreadable".
+2. `_decide` builds the answer from those facts, in this order: the pinned run's own fields
+   (below), the exit code, a pinned exit-0 run's result word, the `[COMMIT_FIXES]` block, a
+   terminal `--view run` poll's workflow trailer, the native phases' blocks, and the next step. It
+   reads `state.json` again for the last four and prints nothing but a failed next-step lookup's
+   one stderr line.
+3. `_render` prints the `--json` document (`_render_json`) or the text (`_render_text`), then
+   the next step's block.
+4. `_record_result` records the rest of the result line: the notice; the artifacts;
+   `consolidation_recommended`, `validation_context`, then the pinned run's `validation_counts`,
+   `high_priority_groups` and `answer_origins`; and on exit 2, `next` and `state`.
+
+**Each result field is recorded as soon as the poll knows it, never saved up for the end.** The
+dispatcher prints the result line on a crash or an interrupt too (exit 1), holding what was
+recorded before it, and a host that reads only that line keeps what the poll had learned. So
+`_decide` records the pinned run's `mode` and `phase`, then its `progress`, then its
+`progress_lines`, then its stop line as `error`, each before the next read; its result word
+before the `[COMMIT_FIXES]` read; `commit_fixes` before the trailer's workflow read; and
+`user_next_step` as the next step is built. Everything else waits for its value, after the
+render. A later record of the same key wins, so this order is fixed too.
+`tests/test_status_result_line_on_a_fault.py` raises an `OSError` and a `KeyboardInterrupt` at
+each boundary and pins which fields the line keeps.
+
+`--exit-zero` then moves the code alone (fix round 7): the word stays on the result line, and
+everything above was decided on the real verdict.
+
+**A pinned poll answers for one run** (`run_status._pinned_view`): one listed view under
+`--phase`, `--question` or `--run-id`. A listing (no selector, or several views) has no single
+run to answer for. Beyond N5's `mode`/`phase` (above), a pinned poll carries:
+
+- the run's progress map whole, and beside it the same run rendered (`progress_lines`), because
+  the supervised poll reads only its own `MULTI_LLM_RESULT` and the OpenCode plugin may not
+  compose a sentence about the run. An executor implement's lines end with the whole phase's
+  tally (fix round 16). `--question` counts as a selector (F8a, 2026-09-20): the ask core forbids
+  `--phase` (`--phase ask` selects every question ever asked), so an ask always polls by
+  `--question`.
+- a failed run's own stop line as `error` (`run.error`, which the worker writes from its result
+  context; racing re-run 3, 2026-10-05). The hosts read a terminal poll's `error` as "the last
+  line it left". The close-out's generic `needs_human (exit 3)` is not a reason and is left off.
+- on exit 0, the run's own result word (`run.result_state`, plan §5). A `partial` run exits 0,
+  and `cli_common.emit` would turn exit 0 into `done`. `--json`'s `runs[].run.state` stays the
+  process word `done`.
+- `user_next_step` (above). It is built before the text and printed after it (fix round 26), so
+  a tool route's trailer can leave out what the step's markdown says (fix round 26, live run 11,
+  Codex 08).
+- the verdict counts (§6 T6.1; a composite's last review's, D2), the distinct-HIGH-group count of
+  a finished run whose phase is `complete` (F4: a detached `--fail-on-high` review the gate held
+  at exit 3 is "completed" to a host only with a positive count, `modes.REVIEW_GATE`), and an
+  ask's answer origins (plans/ask-answer-recovery-and-false-success.md D7.2). An unselected
+  `--view run` lists every phase alphabetically while `mode`/`phase` stay `status`/null, so the
+  first view's counts would read as whichever run the host was watching. Freshness is
+  `claim_run`'s: it drops a predecessor's (`status_file.RUN_SCOPED_KEYS`), so a run that stopped
+  short of its own report relays none.
+
+**A terminal `--view run` poll of a workflow step's run carries the workflow trailer** (F7,
+above). `suggested next:` is left out of a non-zero poll's text and notice (fix round 26, live
+run 11, Codex stop 01b): a stopped or failed run has no next phase, and the hosts relayed the
+line beside the stop's own ways forward. When the stop's section leads with the resume that
+records implement's manual tasks done, that command is given once, there (fix round 28): the
+notice, and the text a tool route reads, name the tasks and leave it out. A shell's text keeps
+every line.
+
+**The `[COMMIT_FIXES]` block** (plans/review-commits.md §2.3/§2.8): a detached apply prints it
+into the worker's log, which no host reads, so a poll renders it from the apply guard saved in
+`state.json` and carries `commit_fixes` on its result line. It is shown once every listed run is
+settled: terminal, or with no run record. On Claude Code the review core runs detached and the
+apply core in the foreground, so a hand-typed `status <pinned>` always sees that mixed shape.
+
+**The notice is one join, in this order** (fix round 28, live run 12 #7: one join, so a part gives
+up its closing stop to the separator): a `mode: truncated` validation source on any terminal poll
+(plan §2.4: it qualifies the verdicts the next step acts on); a terminal write run's own
+not-clean parts, then each finished run's notes, a consistency warning or the items left
+unapplied (fix round 14: the log was the only place that carried them); a composite's steps'
+notices in step order, each as its phase recorded and bounded it (D2, live test 2026-10-26: one
+clip over the lot would cut the last step's), each clause said once (Fable review of D2); and the
+workflow trailer. A part the run's stop line carries word for word is left out (fix round 26,
+live run 11, Codex stop 01b). With a next step, the trailer part leaves out what the step's
+markdown says: the manual tasks' command (fix round 22, live run 9), the `suggested next` line
+(fix round 24, live run 10) and the optional entry's why (fix round 26, live run 11). The hosts
+relayed each beside the step. The text a person reads keeps them.
+
+**Exit 2's `next` polls a run that can change its answer.** It names the first live view
+(non-terminal and holding a run record, F1/F3 above), else the first view with a run record (F2,
+2026-09-21: the old bare `views[0]` fallback handed back a poll of a `no_run` view, which now
+carries `--wait` and loops forever), else nothing: a plan with no run recorded has nothing to
+poll. It carries the run's own host (F6, 2026-09-16).

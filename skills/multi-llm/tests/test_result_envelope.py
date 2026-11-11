@@ -7,19 +7,17 @@ over the envelope shapes below. Both now delegate to
 table that made the extraction safe and keeps the two adapters from diverging
 again.
 
-The legacy third copy — ``llm_client.parse_subagent_response``, which uses a
-weaker extractor and a different return shape — is deliberately **left alone**:
-it is live behind the shipped ``--internal-validation`` flag
-(``review_orchestrator_base`` → ``validation.validate_groups`` →
-``llm_client.invoke_for_json`` → ``invoke_subagent`` +
-``parse_subagent_response``). ``check_cursor_agent_available`` had no caller at
-all and is gone; the last test here pins both facts.
+The legacy third copy, ``llm_client.parse_subagent_response``, served only the
+in-process validation lane and was retired with it, as was
+``check_cursor_agent_available``; the last class here pins that both stay gone.
 """
 import json
 
 import pytest
 
+from utils.json_extractor import extract_json_from_text
 from utils.providers.result_envelope import parse_result_envelope
+from tests.source_cache import source_tree
 
 # --- The nine envelope shapes ---------------------------------------------
 #
@@ -93,16 +91,6 @@ ENVELOPE_SHAPES = [
 # text extractor rather than raising.
 FALLTHROUGH_SHAPES = [
     (
-        "truncated-object",
-        '{"type": "result", ',
-        {
-            "success": False,
-            "error": "No valid JSON found in text",
-            "raw": '{"type": "result",',
-            "data": None,
-        },
-    ),
-    (
         "prose-stdout",
         "plain prose, no json",
         {
@@ -118,6 +106,62 @@ FALLTHROUGH_SHAPES = [
         {"success": True, "data": {"id": 3}},
     ),
 ]
+
+
+_CUT = (
+    "the runner's JSON envelope is incomplete: stdout ends inside it, so it "
+    "holds no finished answer"
+)
+_USAGE = '"usage": {"input_tokens": 1, "output_tokens": 1}'
+_WHOLE = json.dumps({"type": "result", "result": '[{"id": 1}]'})
+
+#: Stdout whose envelope (recognised by ``RESULT_ENVELOPE_SIGNATURE`` where
+#: the CLI writes it, ``base.read_stdout``) never closes: refused as
+#: incomplete, never handed to the text extractor, which returns the
+#: envelope's own bookkeeping.
+CUT_SHAPES = [
+    ("truncated-object", '{"type": "result", '),
+    # Cut inside its answer, after the bookkeeping that extraction would serve.
+    ("cut-after-bookkeeping", '{"type": "result", ' + _USAGE + ', "result": "[{\\"id\\": 1}'),
+    # claude-code 2.1.319's key order (tests/fixtures/claude-code/).
+    ("captured-order", '{"duration_api_ms": 1, ' + _USAGE + ', "result": "x'),
+    ("ansi-then-cut", '\x1b[32m{"type": "result", ' + _USAGE + ', "result": "x'),
+    ("json-log-then-cut", '{"level": "info"}\n{"type": "result", ' + _USAGE + ', "result": "x'),
+]
+
+#: The envelope's opening behind plain text, cut or whole: ambiguous, refused.
+AMBIGUOUS_SHAPES = [
+    ("leading-line-then-cut", 'notice\n{"type": "result", ' + _USAGE + ', "result": "x'),
+    ("log-line-then-cut", '[INFO] starting\n{"type": "result", ' + _USAGE + ', "result": "x'),
+    ("inline-then-cut", 'notice: {"type": "result", ' + _USAGE + ', "result": "x'),
+    ("leading-line", "notice\n" + _WHOLE),
+    ("log-lines", "[INFO] starting\n" + _WHOLE + "\n[INFO] done"),
+]
+
+#: A whole envelope where the CLI writes it, with text around it: read from
+#: its ``result`` field.
+SURROUNDED_SHAPES = [
+    ("trailing-line", _WHOLE + "\nwarning: x"),
+    ("trailing-log", _WHOLE + "\n[INFO] done"),
+    ("ansi", "\x1b[32m" + _WHOLE + "\x1b[0m"),
+    ("json-logs", '{"level": "info"}\n' + _WHOLE + '\n{"level": "done"}'),
+]
+
+#: No envelope signature: the shared text extractor, unchanged. An object
+#: that opens on another key is an answer, even one holding ``usage``.
+ORDINARY_SHAPES = [
+    ("fenced-object", '```json\n{"findings": []}\n```'),
+    ("prose-then-object", 'Here is the result:\n{"findings": []}'),
+    ("object-then-prose", '{"findings": []}\nDone.'),
+    ("unsigned-object-then-prose", '{"usage": {"input_tokens": 1}}\nDone.'),
+]
+
+
+def _cut(stdout: str) -> dict:
+    return {
+        "success": False, "error": _CUT, "raw": stdout.strip(), "data": None,
+        "incomplete": True,
+    }
 
 
 def _adapters():
@@ -147,6 +191,42 @@ class TestSharedEnvelopeParser:
     def test_non_envelope_stdout_falls_through(self, shape, stdout, expected):
         assert parse_result_envelope(stdout) == expected
 
+    @pytest.mark.parametrize("shape,stdout", CUT_SHAPES, ids=[s for s, _ in CUT_SHAPES])
+    def test_a_cut_envelope_is_refused_as_incomplete(self, shape, stdout):
+        assert parse_result_envelope(stdout) == _cut(stdout)
+
+    @pytest.mark.parametrize(
+        "shape,stdout", AMBIGUOUS_SHAPES, ids=[s for s, _ in AMBIGUOUS_SHAPES]
+    )
+    def test_an_envelope_behind_plain_text_is_refused(self, shape, stdout):
+        parsed = parse_result_envelope(stdout)
+        assert parsed["success"] is False and parsed["data"] is None
+        assert "incomplete" not in parsed
+
+    @pytest.mark.parametrize(
+        "shape,stdout", SURROUNDED_SHAPES, ids=[s for s, _ in SURROUNDED_SHAPES]
+    )
+    def test_a_whole_envelope_amid_other_text_is_unwrapped(self, shape, stdout):
+        assert parse_result_envelope(stdout) == {"success": True, "data": [{"id": 1}]}
+
+    @pytest.mark.parametrize(
+        "shape,stdout", ORDINARY_SHAPES, ids=[s for s, _ in ORDINARY_SHAPES]
+    )
+    def test_an_answer_without_the_signature_goes_to_text_extraction(self, shape, stdout):
+        assert parse_result_envelope(stdout) == extract_json_from_text(
+            stdout.strip(), prefer_arrays=True
+        )
+        assert parse_result_envelope(stdout)["success"] is True
+
+    def test_an_envelope_without_its_result_field_is_no_answer(self):
+        stdout = json.dumps({"type": "result", "subtype": "success", "usage": {"a": 1}})
+        assert parse_result_envelope(stdout) == {
+            "success": False,
+            "error": "the result envelope carries no result field",
+            "raw": stdout,
+            "data": None,
+        }
+
     def test_leading_and_trailing_whitespace_is_stripped(self):
         payload = json.dumps({"type": "result", "result": '[{"id": 1}]'})
         assert parse_result_envelope(f"\n  {payload}  \n") == {
@@ -170,6 +250,15 @@ class TestBothAdaptersDelegate:
         }
         assert results["cursor-agent"] == expected
         assert results["claude-code"] == expected
+
+    @pytest.mark.parametrize(
+        "shape,stdout",
+        CUT_SHAPES + AMBIGUOUS_SHAPES + SURROUNDED_SHAPES + ORDINARY_SHAPES,
+        ids=[s for s, _ in CUT_SHAPES + AMBIGUOUS_SHAPES + SURROUNDED_SHAPES + ORDINARY_SHAPES],
+    )
+    def test_both_read_a_non_whole_stdout_as_the_shared_parser(self, shape, stdout):
+        for provider in _adapters().values():
+            assert provider.parse_output(stdout, "") == parse_result_envelope(stdout)
 
     def test_neither_adapter_keeps_its_own_copy(self):
         """Both `parse_output` bodies are the shared call, not 34 lines each.
@@ -203,8 +292,7 @@ class TestBothAdaptersDelegate:
         from utils.providers.cursor_agent import CursorAgentProvider
 
         for cls in (CursorAgentProvider, ClaudeCodeProvider):
-            with open(inspect.getfile(cls), encoding="utf-8") as handle:
-                module = ast.parse(handle.read())
+            module = source_tree(inspect.getfile(cls))
             functions = [
                 node for node in ast.walk(module)
                 if isinstance(node, ast.FunctionDef) and node.name == "parse_output"
@@ -232,43 +320,35 @@ class TestBothAdaptersDelegate:
             ), f"{cls.__name__}.parse_output does not delegate to the shared parser"
 
 
-class TestLegacyChainSurvivesTheCleanup:
-    """§9.5's split verdict: delete the dead references, keep the live chain."""
+class TestTheLegacyLaneIsGone:
+    """The in-process validation lane and its helpers are retired (PROV-10)."""
 
-    def test_dead_availability_helper_is_gone(self):
-        import utils
-        import utils.llm_client as llm_client
+    #: Every name that lane owned, and the module that used to bind it.
+    RETIRED = {
+        "utils.llm_client": (
+            "check_cursor_agent_available", "invoke_subagent",
+            "parse_subagent_response", "_extract_json_from_text",
+            "invoke_for_json", "LLMClientError", "SubagentTimeoutError",
+        ),
+        "utils.validation": (
+            "validate_groups", "revalidate_failed_items",
+            "_classify_validation_error", "VALIDATION_PROMPT_TEMPLATE",
+        ),
+        "utils.review_orchestrator_base": (
+            "internal_validation_with_scope", "validate_groups",
+        ),
+    }
 
-        assert not hasattr(llm_client, "check_cursor_agent_available")
-        assert not hasattr(utils, "check_cursor_agent_available")
-        assert "check_cursor_agent_available" not in utils.__all__
+    @pytest.mark.parametrize("module_name", sorted(RETIRED))
+    def test_no_module_binds_a_retired_name(self, module_name):
+        import importlib
 
-    def test_internal_validation_chain_is_intact(self):
-        """`--internal-validation` still resolves end to end."""
-        import utils
-        import utils.validation as validation
-        from utils.llm_client import (
-            invoke_for_json,
-            invoke_subagent,
-            parse_subagent_response,
-        )
+        module = importlib.import_module(module_name)
+        bound = [n for n in self.RETIRED[module_name] if hasattr(module, n)]
+        assert not bound, f"{module_name} still binds {bound}"
 
-        assert callable(invoke_for_json)
-        assert callable(invoke_subagent)
-        assert callable(parse_subagent_response)
-        for name in ("invoke_subagent", "parse_subagent_response", "invoke_for_json"):
-            assert name in utils.__all__
-        # The flag's own leg: validation dispatches through invoke_for_json.
-        assert "invoke_for_json" in validation.__dict__
-
-    def test_legacy_parser_still_reads_the_wrapper(self):
-        """Weaker extractor, different return shape — unchanged on purpose."""
-        from utils.llm_client import parse_subagent_response
-
-        payload = json.dumps({"type": "result", "result": '[{"id": 1}]'})
-        assert parse_subagent_response(payload) == [{"id": 1}]
-
-    def test_code_review_orchestrator_dropped_its_dead_import(self):
+    def test_code_review_orchestrator_dropped_its_dead_imports(self):
         import code_review_orchestrator
 
         assert not hasattr(code_review_orchestrator, "parse_subagent_response")
+        assert not hasattr(code_review_orchestrator, "validate_groups")

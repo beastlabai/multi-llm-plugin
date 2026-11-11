@@ -67,7 +67,6 @@ def _args(**over):
         skip_validation=False,
         validation_model="auto",
         timeout=None,
-        internal_validation=False,
         force=False,
     )
     base.update(over)

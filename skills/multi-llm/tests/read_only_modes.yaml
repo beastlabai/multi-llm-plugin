@@ -1,0 +1,242 @@
+# tests/read_only_modes.yaml — each CLI's OWN read-only mechanism, as data (M15 / §3.5)
+#
+# THIS FILE EXECUTES NOTHING. It is a record, not a knob: no adapter, no
+# orchestrator and no spawn site reads it, and argv stays in the provider
+# classes under utils/providers/. Its only readers are
+# tests/test_read_only_modes.py (and test_provider_omp.py through it) and a
+# human. The contract it records is written up in
+# docs/development/providers.md#read-only-provider-contracts.
+#
+# WHY IT LIVES UNDER tests/ AND NOT IN providers.yaml. The guard must read a
+# table no config layer can reach: a per-project `.multi-llm/providers.yaml` or
+# a MULTI_LLM_PROVIDERS_CONFIG deep-merges over the base, so a table read from
+# the merged config could gain a `bypass_exception:` from a cloned repository
+# and silence the scan. Until 2026-11-08 the table sat in the base
+# providers.yaml and the guard read the base layer alone; a file under tests/
+# keeps that guarantee (no layer is ever looked up here), ships in no plugin
+# payload, and is outside `code_review.collapse_paths`' `fixtures` globs, so a
+# change to a row reaches multi-llm's own reviewers as a whole diff.
+#
+# ONE ROW PER REGISTERED ADAPTER, and the row set is checked against
+# utils/provider_registry._PROVIDERS rather than against a list of names written
+# here: a new adapter is missing its row on the day it is registered, not on the
+# day somebody remembers this file. Nothing in the test names an adapter or a
+# count.
+#
+# `mechanism:` is the runner's own read-only mechanism — an ask/plan mode, a
+# read-only sandbox, a deny-all tool list — as the exact argv tokens it renders,
+# or `null`. A row is non-null ONLY where it was measured, `probed:` carries
+# that measurement's provenance, and the two move together in both directions.
+#
+# AN UNPROBED ROW IS `null`, NEVER A GUESS. Not from the adapter's flags, not
+# from its help text, not from its name. Three rows are measured; every other
+# row is `null` and the `null` rows ARE the probe queue. Two of them have an
+# obvious-looking candidate — opencode and vibe both already pass `--agent plan`
+# — and that is exactly the inference this rule refuses: a candidate is not a
+# measurement, and §3.5's three positives are the three that were exercised. A
+# row moves to non-null only with its own probe transcript, on §13.1's method.
+#
+# `bypass_exception:` is §3.5's named-exception disposition, and it is the only
+# thing that keeps the negative-set guard green over an adapter still emitting a
+# `--yolo`-class token from `build_command`/`get_env`. It is deliberately
+# uncomfortable to write: it names the token, the profile it is emitted on, why
+# it is still there, and what retires it. "It was already there" is not a
+# disposition. The guard is red for any such token NOT declared here, and
+# equally red for a declaration whose token is no longer emitted, so an
+# exception cannot outlive the flag it excuses.
+read_only_modes:
+  agy:
+    mechanism: null
+    probed: null
+    bypass_exception:
+      token: --dangerously-skip-permissions
+      profile: generate
+      reason: >-
+        agy 1.1.15's only known unattended mode, emitted by this adapter's
+        build_command since it was written. §3.5 names it a defect of the same
+        class as cursor's `-f` and gives it exactly two dispositions: replace it
+        with agy's own read-only mechanism, PROBED FIRST, or record an explicit
+        `null` row plus this named exception. The first needs a probe that does
+        not exist — `agy --help` was captured 2026-08-19 into
+        tests/container/cli-surface.yaml for the flags we already emit, and
+        nothing has ever measured what a headless `agy -p` does without this
+        one. Dropping it on the assumption that a read/analyze prompt needs no
+        tool approval is the guess this table exists to refuse, and it would
+        turn every agy slot into an unexplained timeout if the assumption were
+        wrong. So it is written down instead of waved through.
+      retires_when: >-
+        agy's read-only mode is probed and lands in `mechanism:` above, or a
+        probe shows the flag is unnecessary for a `/generate` read/analyze
+        prompt. Either way the token leaves build_command and this entry is
+        deleted with it — the guard fails on a stale exception, so the two
+        cannot drift apart.
+  aider:
+    # `/ask `, the start of `--message`'s value (aider's read-only chat mode),
+    # plus the decline supply the argv transport writes to stdin. Neither is a
+    # whole argv token, so tests/test_read_only_modes.py checks a `message:`
+    # entry against the rendered `--message` value and a `stdin:` entry against
+    # the `stdin_text` `build_command_for_transport` returns on "argv".
+    mechanism: ["message:/ask ", "stdin:s"]
+    probed: >-
+      Measured offline against aider 0.86.2 and a localhost stub
+      (plans/ask-answer-recovery-and-false-success/investigation/
+      aider-mention-autoadd-2026-09-29.md, and the T4.2 `s` re-run
+      e5_noyes_s_abs_pathsbig beside it). `/ask ` keeps aider in chat mode, where
+      it writes no file (tests/test_provider_housekeeping.py's
+      STOPS_FILE_WRITES). What `/ask ` does not stop is aider adding every
+      repo-relative path the prompt or a reply names to its context, asking
+      "Add file to the chat?" for each: answered yes — which `--yes-always` did
+      until 2026-09-29, and which EOF on stdin does — a reply naming a 2.9 MB
+      uv.lock re-sent 3.05 MB, and the 2026-09-26 incident sent 1.08M tokens.
+      With no `--yes-always` and `"s\n" * 64` on stdin (utils/providers/aider.py
+      AIDER_DECLINE_LINES), the same run read 2 lines for 10 prompts, added
+      nothing and sent one 3,207-byte request. The `--yes-always`
+      `bypass_exception` this row held was deleted with the flag (its own
+      `retires_when`); an `.aider.conf.yml` or `.env` that turns yes-always back
+      on is refused before spawn, and `AIDER_YES_ALWAYS` is stripped from the
+      child's environment.
+  claude-code:
+    # `--allowed-tools` / `--disallowed-tools`, the deny-all tool list.
+    mechanism: ["--allowed-tools", "--disallowed-tools"]
+    probed: >-
+      In-repo and enforced, which is why §3.5 counts it among the three
+      positives: build_agent_command's agent-readonly leg renders both flags,
+      AGENTS.md names it as this adapter's own denial mechanism, and
+      tests/test_provider_*.py cross-check the declaration against the
+      implementation in both directions.
+  cline:
+    mechanism: null
+    probed: null
+  codex:
+    # `--sandbox read-only`, the sandbox value rewritten in place for the
+    # agent-readonly profile.
+    mechanism: ["--sandbox", "read-only"]
+    probed: >-
+      2026-08-16, harness-invocation-improvements.md §3.3. Live at
+      utils/providers/codex.py's agent-readonly leg.
+  copilot:
+    mechanism: null
+    probed: null
+  cursor-agent:
+    # `--mode ask`. `--trust` rides beside it in build_command and is NOT part
+    # of the mechanism: it satisfies a workspace-trust launch gate and grants
+    # nothing (CURSOR_REQUIRED_FLAGS explains why the pair is one change).
+    mechanism: ["--mode", "ask"]
+    probed: >-
+      2026-08-16, harness-invocation-improvements.md §3.1 — measured REFUSING
+      writes ("I'm in Ask mode, so I can't create or edit files"), re-confirmed
+      2026-08-18 over three identical runs. Q12 separately confirmed it keeps
+      its read tools (Grep/Read tool_use entries in the same transcript): a
+      positive row means read-ONLY, not read-LESS. What ask mode does about a
+      shell is not restated here: it is recorded once, with its measurement,
+      as CursorAgentProvider.runs_shell_in_generate in
+      utils/providers/cursor_agent.py, which the review-code prompt renders
+      from — so that attribute is the one value to change if a probe moves it.
+  gemini:
+    # Not a `null`-by-oversight: gemini ships no write_file tool at all under
+    # this adapter's argv (MEASURED 2026-08-19, tests/test_provider_housekeeping
+    # NO_WRITE_TOOL_AT_ALL). That is an absent capability, not a read-only MODE
+    # the adapter selects, and it fails OPEN — gemini exits 0 reporting a write
+    # that never happened. It is therefore not a mechanism this table may claim.
+    mechanism: null
+    probed: null
+  goose:
+    mechanism: null
+    probed: null
+  grok:
+    mechanism: null
+    probed: null
+  fx:
+    # fx 0.0.14 has no measured general read-only mode for this dispatch.
+    # `--auto` still invokes its shell reviewer and does not block web fetch;
+    # no OS sandbox is supplied by the adapter.
+    mechanism: null
+    probed: null
+  kilocode:
+    mechanism: null
+    probed: null
+  kimi:
+    mechanism: null
+    probed: null
+  muse:
+    mechanism: null
+    probed: null
+  omp:
+    # `generate` renders NO read-only mode, so this stays null. Two read-only
+    # mechanisms ARE measured at 18.2.2 and are recorded here for the
+    # agent-readonly follow-up rather than guessed at then:
+    #   * `--tools read,grep,glob` — the write-class tools are ABSENT, and
+    #     asked to create a file the model answered "file-writing tools are
+    #     unavailable" and none appeared. PREFERRED: an honest refusal, and the
+    #     only candidate compatible with the parser's denial policy. The
+    #     measurement was taken as `read,grep,glob,find`, where `find` was an
+    #     ALIAS of `glob`; at 18.2.9 the name is a separate default-off tool
+    #     `--tools` rejects, so it is gone from both lists and the read-class
+    #     set is unchanged (see utils/providers/omp.py OMP_TOOLS).
+    #   * `--approval-mode always-ask` — read/grep run unapproved, every
+    #     write-class tool is denied with "requires approval but no interactive
+    #     UI available". Under that mode every denied write is a FAILED run by
+    #     construction (utils/providers/omp.py parse_output step 3).
+    # Either moves into `mechanism:` on the day a profile renders it, with its
+    # own probe transcript in `probed:`.
+    mechanism: null
+    probed: null
+    bypass_exception:
+      token: "yolo"
+      profile: generate
+      reason: >-
+        `--approval-mode yolo` is what this adapter renders on `generate`, and
+        `yolo` is the one token negative_tokens_in_argv reports for that pair
+        (the flag element is in neither NEGATIVE_FLAG_TOKENS nor
+        NEGATIVE_TOKEN_PREFIXES). It is not inherited and not a default this
+        adapter fell back to: omp's FACTORY default is already `yolo` over every
+        tool, so there is no safe default to inherit and the explicit flag is
+        what makes both the factory value and the user's config.yml irrelevant.
+        Measured at 18.2.2: every narrower mode denies `bash` headless, and
+        prompts/code_review.txt tells the model to run `git diff`. Under
+        `--approval-mode write` the model answered `git version 2.43.0` after
+        three denials without ever running the command — a fabricated tool
+        output inside a review that looks right. The actual bound is the
+        allow-list `--tools read,grep,glob,bash,edit,write`, under which
+        every other tool is absent rather than denied. ACCEPTED BY THE
+        REPOSITORY OWNER, 2026-09-17, for the `generate` profile only: an
+        agent-write executor profile is a separate decision on its own
+        measurement.
+      retires_when: >-
+        omp grants a per-tool allow ON ARGV — `tools.approval.bash: allow`
+        exists today only as a config key (the denial text advertises it), and
+        putting it in the overlay would be the same bypass moved out of the
+        guard's sight, so that is rejected rather than deferred — or the
+        code-review prompt stops shelling out.
+  opencode:
+    # CANDIDATE, DELIBERATELY NOT WRITTEN AS A VALUE: `--agent plan` is already
+    # this adapter's agent-readonly leg and AGENTS.md names it. No probe on
+    # §13.1's method has ever exercised it as a read-only MODE, and §3.5's three
+    # positives are the three that were. Probe it and this row moves.
+    mechanism: null
+    probed: null
+  pi:
+    # NOT a read-only mode, and deliberately still `null`. Every `generate`
+    # dispatch pins `--tools read,grep,find,bash,write` (utils/providers/pi.py
+    # PI_TOOLS, decision 11.6) plus `--no-mcp` (pi 1.1.0's `--tools` keeps MCP
+    # tools, so pi's MCP client is switched off): the allow-list keeps `edit`
+    # out and stops the user's settings or a trusted project's
+    # `.pi/settings.json` from choosing which tool NAMES are active, but `bash` stays (the code-review prompt runs
+    # `git diff`), so the model can still run any command and write through it.
+    # It also pins names, not implementations: an extension that registers one
+    # of those names replaces the built-in (extension isolation is deferred,
+    # decision 11.8). This row moves only if `bash` leaves the list once the
+    # diff reaches reviewers by file, with its own probe transcript.
+    mechanism: null
+    probed: null
+  qwen-code:
+    # CANDIDATE, same treatment: `--max-tool-calls 0` is a zero tool budget
+    # adjudicated in STOPS_FILE_WRITES for the file-output question. Whether a
+    # zero budget is a read-only mode or an abort is exactly what a probe would
+    # settle (it exits 55 with zero stdout), so the row stays null.
+    mechanism: null
+    probed: null
+  vibe:
+    # CANDIDATE, same treatment: `--agent plan` plus VIBE_DEFAULT_AGENT=plan.
+    mechanism: null
+    probed: null

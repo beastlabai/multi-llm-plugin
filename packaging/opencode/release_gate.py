@@ -39,8 +39,7 @@ is the one executable contract that replaced both. It owns five things:
   evidence reaches CI, whose runners have no Docker daemon. The maintainer
   copies it into ``tests/container/records/`` and commits it in the default
   branch's own commit after the fast-forward (plan step 2), never in the tag's
-  tree, then checks the tag's commit out again before ``make
-  opencode-publish-first``. :func:`validate_records` is the one validator the
+  tree. :func:`validate_records` is the one validator the
   publishing workflow's ``verify`` job and the suite both run.
 
 **Stdlib only**, and that is a requirement rather than a preference: the
@@ -66,14 +65,9 @@ import importlib.util
 import json
 import os
 import re
-import shutil
-import signal
 import subprocess
 import sys
 import tempfile
-import threading
-import time
-import uuid
 import xml.etree.ElementTree as ElementTree
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
@@ -91,6 +85,12 @@ CANDIDATE_DIGEST = PACKAGE_DIR / "dist" / "tree.sha256"
 RECORD_SCHEMA = PACKAGE_DIR / "release-gate-record.schema.json"
 STAMP_NAME = ".package-check.stamp"
 
+# ``packaging/common`` holds the helper layer this gate shares with the codex
+# one (``common/gate.py``). Stdlib only, like this module.
+if str(REPO_ROOT / "packaging") not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT / "packaging"))
+from common import gate as common_gate  # noqa: E402
+
 #: Where the session's evidence lands. Gitignored beside the stamp: it attests
 #: to the machine that ran it, exactly like the stamp it feeds. Other work
 #: packages never write here; their CLIs write to the ``--out`` path the
@@ -99,15 +99,14 @@ EVIDENCE_DIR = PACKAGE_DIR / ".gate"
 #: Where ``export-record`` writes by default: inside the gitignored evidence
 #: directory, NOT ``RECORDS_DIR``. ``records/`` lies under the payload prefix
 #: ``skills/multi-llm/``, so an untracked record there makes the tree dirty and
-#: ``build.py --check-stamp`` — and with it ``opencode-publish-first`` — refuse
+#: ``build.py --check-stamp`` refuse
 #: the very candidate the gate just stamped. :func:`dirty_paths` exempts nothing
 #: under ``records/`` either. The record is copied there and committed in the
-#: default branch's own commit after the fast-forward (plan step 2); the tag's
-#: commit is then checked out again before ``make opencode-publish-first``. The
-#: export prints the copy-and-commit lines for that step.
+#: default branch's own commit after the fast-forward (plan step 2). The export
+#: prints the copy-and-commit lines for that step.
 EXPORT_SUBDIR = "export"
 EXPORT_DIR = EVIDENCE_DIR / EXPORT_SUBDIR
-SESSION_NAME = "session.json"
+SESSION_NAME = common_gate.SESSION_NAME
 IMAGE_NAME = "image.json"
 #: Sub-directories :func:`begin_session` empties too: raw CLI output, step
 #: logs, junit files and the scratch host install all belong to one session.
@@ -122,14 +121,13 @@ INSTALLED_ROOT = "/opt/mllm/opencode-plugin"
 IMAGE_PAYLOAD_DIGEST = f"{INSTALLED_ROOT}/dist/tree.sha256"
 IMAGE_INSTALLED_REPORT = "/opt/mllm/lock/cli-versions.installed.json"
 
-_STAMP = re.compile(r"\d{8}T\d{6}Z")
+_STAMP = common_gate.STAMP_RE
 _IMAGE_ID = re.compile(r"sha256:[0-9a-f]{64}")
 _SHA = re.compile(r"[0-9a-f]{40}")
 _DIGEST = re.compile(r"[0-9a-f]{64}")
 
 
-class GateError(Exception):
-    """A refusal, worded for the maintainer reading the make output."""
+GateError = common_gate.GateError
 
 
 # ---------------------------------------------------------------------------
@@ -270,23 +268,10 @@ def _builder():
     return _sibling("build", "opencode_build")
 
 
-def _read_json(path: Path) -> Any:
-    try:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-
-
-def _now() -> datetime.datetime:
-    return datetime.datetime.now(datetime.timezone.utc)
-
-
-def _iso(moment: datetime.datetime) -> str:
-    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _compact(moment: datetime.datetime) -> str:
-    return moment.strftime("%Y%m%dT%H%M%SZ")
+_read_json = common_gate.read_json
+_now = common_gate.now
+_iso = common_gate.iso
+_compact = common_gate.compact
 
 
 def manifest(path: Optional[Path] = None) -> Dict[str, Any]:
@@ -402,34 +387,23 @@ def begin_session(directory: Path = EVIDENCE_DIR, *, allow_dirty: bool = False,
     dirty — a dirty tree, or ``ALLOW_DIRTY=1`` (``allow_dirty``), makes this a
     rehearsal that may run every row and authorizes nothing.
     """
-    directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True)
-    for old in directory.glob("*.json"):
-        old.unlink()
-    for name in SESSION_SUBDIRS:
-        shutil.rmtree(directory / name, ignore_errors=True)
-    for name in ("raw", "logs", "junit"):
-        (directory / name).mkdir()
-    dirty = dirty_paths(root)
-    moment = _now()
-    session = {
-        "id": uuid.uuid4().hex,
-        "started_at": _iso(moment),
-        "started_stamp": _compact(moment),
-        "candidate_sha": head_sha(root),
-        "version": package_version(),
-        "dirty": bool(dirty),
-        "dirty_paths": dirty[:40],
-        "allow_dirty": bool(allow_dirty),
-    }
-    (directory / SESSION_NAME).write_text(json.dumps(session, indent=2) + "\n",
-                                          encoding="utf-8")
-    return session
+    def candidate(moment) -> Dict[str, Any]:
+        dirty = dirty_paths(root)
+        return {
+            "started_stamp": _compact(moment),
+            "candidate_sha": head_sha(root),
+            "version": package_version(),
+            "dirty": bool(dirty),
+            "dirty_paths": dirty[:40],
+            "allow_dirty": bool(allow_dirty),
+        }
+
+    return common_gate.begin_session(directory, fields=candidate, clear=SESSION_SUBDIRS,
+                                     create=("raw", "logs", "junit"))
 
 
 def current_session(directory: Path = EVIDENCE_DIR) -> Optional[Dict[str, Any]]:
-    session = _read_json(Path(directory) / SESSION_NAME)
-    return session if isinstance(session, dict) and session.get("id") else None
+    return common_gate.current_session(directory)
 
 
 def is_rehearsal(session: Mapping[str, Any]) -> bool:
@@ -461,9 +435,7 @@ def write_row(row_id: str, evidence: Mapping[str, Any],
     session = _require_session(directory)
     stamped = {**evidence, "row": row_id, "session": session["id"],
                "candidate_sha": head_sha(root), "recorded_at": _iso(_now())}
-    path = _row_path(directory, row_id)
-    path.write_text(json.dumps(stamped, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return path
+    return common_gate.write_json(_row_path(directory, row_id), stamped, sort_keys=True)
 
 
 def load_evidence(directory: Path = EVIDENCE_DIR) -> Dict[str, Any]:
@@ -478,6 +450,20 @@ def load_evidence(directory: Path = EVIDENCE_DIR) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Rows 1-6 and 5b: graded node by node out of junit XML
 # ---------------------------------------------------------------------------
+
+def ci_node_ids(root: Path = REPO_ROOT) -> List[str]:
+    """Every node id the CI rows name, once each, in row order, as a pytest run
+    from ``root`` spells it. ``PLAIN_ROWS=graded`` runs exactly these for the
+    plain selection: they are what :func:`grade_ci` reads, and the rest of the
+    plain suite is the ``test`` job's."""
+    prefix = SKILL_DIR.relative_to(root).as_posix()
+    nodes: List[str] = []
+    for row in ROWS:
+        for node in row.nodes:
+            if f"{prefix}/{node}" not in nodes:
+                nodes.append(f"{prefix}/{node}")
+    return nodes
+
 
 def _junit_key(node: str) -> Tuple[str, str]:
     """``tests/x.py::Class::test`` → (``tests.x.Class``, ``test``): the two
@@ -888,21 +874,11 @@ def bind_image(tag: str, *, runner: Runner = subprocess.run,
 # Row 8: the five scenario records, graded against the session's image
 # ---------------------------------------------------------------------------
 
-def _records_for(row_id: str, since: str, records_dir: Path) -> List[Path]:
-    """Every record of ``row_id`` started at or after ``since``, oldest first."""
-    found = []
-    for path in sorted(Path(records_dir).glob(f"*-{row_id}.json")):
-        stamp = path.name[: -len(f"-{row_id}.json")]
-        if _STAMP.fullmatch(stamp) and stamp >= since:
-            found.append(path)
-    return found
+_records_for = common_gate.records_for
 
 
 def _harness_markers() -> Tuple[str, ...]:
-    if str(SKILL_DIR) not in sys.path:
-        sys.path.insert(0, str(SKILL_DIR))
-    from tests.container import harness  # noqa: WPS433 — the record vocabulary
-
+    harness = common_gate.harness(SKILL_DIR)
     return (harness.PROVISIONAL_REASON, harness.UNGRADED_REASON)
 
 
@@ -1612,69 +1588,11 @@ def step_grace_s() -> float:
     return float(_sibling("probe", "opencode_probe").SWEEP_BOUND_S) + STEP_GRACE_MARGIN_S
 
 
-def _kill(child: "subprocess.Popen[bytes]", grace: float) -> None:
-    """The child's whole process group, TERM then KILL. It leads its own
-    session (``start_new_session``), so every descendant that did not leave it
-    goes too."""
-    def signal_group(sig: int) -> None:
-        try:
-            if os.name == "posix":
-                os.killpg(child.pid, sig)
-            elif sig == signal.SIGTERM:
-                child.terminate()
-            else:
-                child.kill()
-        except (ProcessLookupError, PermissionError, OSError):
-            pass
-
-    signal_group(signal.SIGTERM)
-    if os.name == "posix":
-        # The leader may exit immediately while a descendant is still
-        # unwinding (or ignoring TERM). Give the whole group its grace before
-        # KILL, including time for a probe to sweep its detached children.
-        deadline = time.monotonic() + grace
-        while True:
-            child.poll()  # Reap the leader so it cannot alone keep the group alive.
-            try:
-                os.killpg(child.pid, 0)
-            except ProcessLookupError:
-                return
-            except PermissionError:
-                # macOS answers EPERM, not ESRCH, while the group's last
-                # members have exited but their new parent (launchd) has not
-                # reaped them yet. Keep polling: they are gone in moments, and
-                # a member that really refuses the signal meets the KILL below.
-                pass
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            time.sleep(min(0.05, remaining))
-        signal_group(signal.SIGKILL)
-    try:
-        child.wait(timeout=grace)
-    except subprocess.TimeoutExpired:
-        child.kill()
-        try:
-            child.wait(timeout=grace)
-        except subprocess.TimeoutExpired:
-            pass
-
-
 def run_step(name: str, argv: Sequence[str], *, timeout: float,
              capture: Optional[Path] = None, directory: Path = EVIDENCE_DIR,
-             grace: Optional[float] = None) -> int:
-    """Run one gate step under a wall-clock bound, its output tee'd to
-    ``.gate/logs/<name>.log``.
-
-    **Its own session, with no terminal.** The child's stdin is ``/dev/null``
-    and it leads a new session, so a timeout kills every descendant in one
-    ``killpg``. That is also what makes the bound safe for ``opencode run``,
-    which a plain ``timeout N`` wrapper wedges before it creates a session
-    (measured: ``timeout`` moves the child into a background process group of
-    the same terminal; with no controlling terminal there is nothing to be
-    stopped by). ``capture`` keeps the last non-empty stdout line — the
-    host-install path, the image id — for the recipe's next line, since each
-    recipe line is its own shell.
+             grace: Optional[float] = None, stdin: Optional[Path] = None) -> int:
+    """One gate step under a wall-clock bound, its output tee'd to
+    ``.gate/logs/<name>.log`` (:func:`common.gate.run_step` has the contract).
 
     **A grace the probes' sweep fits in.** On the bound the group gets SIGTERM,
     then :func:`step_grace_s` (unless ``grace`` is given) before SIGKILL, so a
@@ -1682,69 +1600,8 @@ def run_step(name: str, argv: Sequence[str], *, timeout: float,
     sessions of their own instead of dying half-way through.
     """
     grace = step_grace_s() if grace is None else grace
-    logs = Path(directory) / "logs"
-    logs.mkdir(parents=True, exist_ok=True)
-    log_path = logs / f"{name}.log"
-    started = time.monotonic()
-    last_stdout: List[str] = []
-    lock = threading.Lock()
-    with log_path.open("w", encoding="utf-8", errors="replace") as log:
-        log.write(f"$ {' '.join(argv)}\n")
-        try:
-            child = subprocess.Popen(
-                list(argv), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, start_new_session=(os.name == "posix"),
-                close_fds=False)
-        except OSError as exc:
-            print(f"release gate: step {name} could not start {argv[0]!r}: {exc}",
-                  file=sys.stderr)
-            return 127
-
-        def pump(stream, sink, is_stdout: bool) -> None:
-            for raw in iter(stream.readline, b""):
-                text = raw.decode("utf-8", errors="replace")
-                with lock:
-                    log.write(text)
-                    log.flush()
-                    sink.write(text)
-                    sink.flush()
-                    if is_stdout and text.strip():
-                        last_stdout[:] = [text.strip()]
-
-        threads = [threading.Thread(target=pump, args=(child.stdout, sys.stdout, True),
-                                    daemon=True),
-                   threading.Thread(target=pump, args=(child.stderr, sys.stderr, False),
-                                    daemon=True)]
-        for thread in threads:
-            thread.start()
-        code: Optional[int]
-        try:
-            code = child.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            _kill(child, grace)
-            code = None
-        except KeyboardInterrupt:
-            _kill(child, grace)
-            raise
-        for thread in threads:
-            thread.join(timeout=grace)
-    elapsed = time.monotonic() - started
-    if code is None:
-        print(f"release gate: step {name} exceeded its {timeout:g} s bound and was killed "
-              f"with its process group; its output is in {log_path}", file=sys.stderr)
-        return 124
-    if code != 0:
-        print(f"release gate: step {name} failed (exit {code}) after {elapsed:.0f} s; its "
-              f"output is in {log_path}", file=sys.stderr)
-        return code
-    if capture is not None:
-        if not last_stdout:
-            print(f"release gate: step {name} printed nothing on stdout to capture into "
-                  f"{capture}; its output is in {log_path}", file=sys.stderr)
-            return 1
-        Path(capture).parent.mkdir(parents=True, exist_ok=True)
-        Path(capture).write_text(last_stdout[0] + "\n", encoding="utf-8")
-    return 0
+    return common_gate.run_step(name, argv, timeout=timeout, grace=grace,
+                                directory=directory, capture=capture, stdin=stdin)
 
 
 # ---------------------------------------------------------------------------
@@ -1776,6 +1633,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     begin.add_argument("--allow-dirty", action="store_true",
                        help="a development rehearsal: rows run, nothing is authorized")
     sub.add_parser("rows", help="print the declared rows")
+    sub.add_parser("ci-nodes", help="print the pytest node ids rows 1-6 and 5b name, "
+                                    "relative to the repository root")
     grade = sub.add_parser("grade-ci", help="grade rows 1-6 and 5b from pytest junit XML")
     grade.add_argument("--junit", action="append", required=True, type=Path)
     record = sub.add_parser("record", help="check a row-7 or row-9 CLI's file; keep it")
@@ -1794,18 +1653,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     for flag in ("--tag", "--sha", "--version", "--digest", "--host-version", "--registry"):
         validate.add_argument(flag, required=True)
     validate.add_argument("--records-dir", type=Path, default=RECORDS_DIR)
-    step = sub.add_parser("step", help="run one bounded gate step, keeping its log",
-                          usage="release_gate.py step NAME --timeout S [--capture F] -- CMD...")
-    step.add_argument("name")
-    step.add_argument("--timeout", type=float, required=True)
-    step.add_argument("--capture", type=Path, default=None)
-    words = list(argv) if argv is not None else sys.argv[1:]
-    # The step's command is everything after the first `--`, split off before
-    # argparse sees it: a REMAINDER positional would swallow `--timeout` too.
-    command: List[str] = []
-    if "step" in words and "--" in words[words.index("step"):]:
-        cut = words.index("--", words.index("step"))
-        words, command = words[:cut], words[cut + 1:]
+    common_gate.add_step_parser(sub)
+    words, command = common_gate.split_step_command(
+        list(argv) if argv is not None else sys.argv[1:])
     args = parser.parse_args(words)
     directory = args.evidence_dir
     try:
@@ -1819,6 +1669,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             for row in ROWS:
                 print(f"row {row.id}: {row.proves}\n  grader: {row.grader}\n  evidence: "
                       f"{row.evidence}" + "".join(f"\n    {node}" for node in row.nodes))
+        elif args.command == "ci-nodes":
+            print("\n".join(ci_node_ids()))
         elif args.command == "grade-ci":
             verdicts = grade_ci(args.junit)
             session = session_for_grading(directory)
@@ -1872,8 +1724,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                   f"    cp {path} {target}/\n"
                   f"    git add {target}/{path.name}\n"
                   f"    git commit -m \"Record the opencode release gate for "
-                  f"<tag>\" && git push origin HEAD\n"
-                  "Then check the tag's commit out again before `make opencode-publish-first`.")
+                  f"<tag>\" && git push origin HEAD")
         elif args.command == "validate-record":
             path, record = validate_records(
                 tag=args.tag, sha=args.sha, version=args.version, digest=args.digest,
@@ -1886,7 +1737,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             if not command:
                 parser.error("step needs a command after --")
             return run_step(args.name, command, timeout=args.timeout, capture=args.capture,
-                            directory=directory)
+                            directory=directory, stdin=args.stdin)
     except GateError as exc:
         print(f"REFUSING: {exc}", file=sys.stderr)
         return 1

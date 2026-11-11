@@ -28,12 +28,14 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import signal
+import stat
 import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 import pytest
 
@@ -44,31 +46,25 @@ WAKEUP_CHECK_SH = REPO_ROOT / "hooks" / "wakeup-check.sh"
 
 sys.path.insert(0, str(SKILL_ROOT))
 
-from tests.test_report_check import (  # noqa: E402
-    COMMAND,
-    OPTIONAL,
-    Transcript,
-    _fake_uv,
-    block_output,
-    decision_of,
-    report,
-    run_check,
+from tests.support.transcripts import (  # noqa: E402
+    COMMAND, OPTIONAL, Transcript, _fake_uv, block_output, decision_of, report, run_check,
 )
 from tests.test_report_check_session import notification  # noqa: E402
-from tests.test_wakeup_check import DISPATCH, PLAN, OWN_CALL, own_call_entry  # noqa: E402
+from tests.support.wakeup_world import DISPATCH, PLAN, own_call_entry  # noqa: E402
 from utils import report_check, wakeup_check  # noqa: E402
-
-#: How long after the hook starts the background thread writes.
-LATE_S = 0.3
-
-#: The `util next-command` call a stopped implement's report step runs.
-LOOKUP = f'{DISPATCH} util next-command "{PLAN}" --after implement --host claude-code'
-#: A phase launched in the background with its log redirected, as SKILL.md says.
-BACKGROUND_PHASE = (f'{DISPATCH} review-tasks "{PLAN}" --host claude-code --yes '
-                    "> plans/racing-game/review-tasks/orchestrator-run.log 2>&1")
-LAUNCHED = ("Command running in background with ID: b1. Output is being written "
-            "to: /tmp/claude-1000/tasks/b1.output. You will be notified when it "
-            "completes.")
+from tests.support.hook_settle_world import (  # noqa: E402
+    BACKGROUND_PHASE,
+    LAUNCHED,
+    LOOKUP,
+    denied,
+    line,
+    reply,
+    stop_input,
+    tool_result,
+    tool_use,
+    wakeup_input,
+    write_later,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -78,53 +74,7 @@ def _the_hooks_budget(monkeypatch):
     monkeypatch.setattr(report_check, "SETTLE_STEP_S", 0.05, raising=False)
 
 
-def line(entry: Dict[str, Any]) -> str:
-    return json.dumps(entry) + "\n"
-
-
-def write_later(path: Path, text: str, delay: float = LATE_S) -> threading.Thread:
-    """Append *text* to *path* after *delay* seconds, from a thread: Claude
-    Code writing the transcript while the hook reads it."""
-
-    def append() -> None:
-        time.sleep(delay)
-        with path.open("a", encoding="utf-8") as stream:
-            stream.write(text)
-
-    thread = threading.Thread(target=append, daemon=True)
-    thread.start()
-    return thread
-
-
-def tool_use(tool_id: str, command: str, message: str, name: str = "Bash",
-             **tool_input: Any) -> Dict[str, Any]:
-    tool_input.setdefault("command", command)
-    return {"type": "assistant", "message": {"id": message, "role": "assistant", "content": [
-        {"type": "tool_use", "id": tool_id, "name": name, "input": tool_input}]}}
-
-
-def tool_result(tool_id: str, text: str) -> Dict[str, Any]:
-    return {"type": "user", "message": {"role": "user", "content": [
-        {"type": "tool_result", "tool_use_id": tool_id, "content": text}]}}
-
-
-def reply(text: str) -> Dict[str, Any]:
-    return {"type": "assistant", "message": {"role": "assistant", "content": [
-        {"type": "text", "text": text}]}}
-
-
 STOP_SUMMARY = {"type": "system", "subtype": "stop_hook_summary", "hookCount": 1}
-
-
-def stop_input(path: Path, last_message: Optional[str], **extra: Any) -> Dict[str, Any]:
-    payload: Dict[str, Any] = {
-        "session_id": "s1", "transcript_path": str(path), "cwd": str(path.parent),
-        "hook_event_name": "Stop", "stop_hook_active": False,
-    }
-    if last_message is not None:
-        payload["last_assistant_message"] = last_message
-    payload.update(extra)
-    return payload
 
 
 def run_report_check(capsys, tmp_path: Path, payload: Dict[str, Any]) -> str:
@@ -136,14 +86,6 @@ def run_report_check(capsys, tmp_path: Path, payload: Dict[str, Any]) -> str:
     return captured.out
 
 
-def wakeup_input(path: Path, tool: str = "ScheduleWakeup") -> Dict[str, Any]:
-    return {"session_id": "s1", "transcript_path": str(path), "cwd": str(path.parent),
-            "hook_event_name": "PreToolUse", "tool_name": tool,
-            "tool_input": {"delaySeconds": 60, "prompt": "check the phase",
-                           "reason": "waiting"},
-            "tool_use_id": OWN_CALL}
-
-
 def run_wakeup_check(capsys, tmp_path: Path, payload: Dict[str, Any]) -> str:
     hook_file = tmp_path / "hook-input.json"
     hook_file.write_text(json.dumps(payload), encoding="utf-8")
@@ -153,21 +95,65 @@ def run_wakeup_check(capsys, tmp_path: Path, payload: Dict[str, Any]) -> str:
     return captured.out
 
 
-def denied(out: str) -> str:
-    decision = json.loads(out)
-    specific = decision["hookSpecificOutput"]
-    assert specific["permissionDecision"] == "deny"
-    return specific["permissionDecisionReason"]
-
-
-def run_script(script: Path, tmp_path: Path, payload: Dict[str, Any]):
-    env = {
+def script_env(tmp_path: Path) -> Dict[str, str]:
+    return {
         "PATH": "/usr/bin:/bin", "HOME": str(tmp_path),
         "CLAUDE_PLUGIN_ROOT": str(REPO_ROOT), "ARGV_LOG": str(tmp_path / "argv.txt"),
         "REAL_PYTHON": sys.executable, "MULTI_LLM_UV": str(_fake_uv(tmp_path)),
     }
-    return subprocess.run(["/bin/sh", str(script)], input=json.dumps(payload), env=env,
-                          capture_output=True, text=True, timeout=60)
+
+
+def run_script(script: Path, tmp_path: Path, payload: Dict[str, Any]):
+    return subprocess.run(["/bin/sh", str(script)], input=json.dumps(payload),
+                          env=script_env(tmp_path), capture_output=True, text=True, timeout=60)
+
+
+def run_script_publishing_once_it_waits(script: Path, tmp_path: Path, payload: Dict[str, Any],
+                                        path: Path, text: str):
+    """Run *script* on a transcript that does not exist, and publish *text* at *path*
+    only once the script is sleeping in its wait for the file: a `sleep` stand-in
+    leaves a marker, so the file is provably missing when the script first looks
+    and no timer decides which side of the check the write lands on. The file
+    arrives whole (written aside, renamed into place). Returns (completed, waited)."""
+    assert not path.exists()
+    real_sleep = shutil.which("sleep", path="/usr/bin:/bin")
+    assert real_sleep, "no sleep on the hook's PATH"
+    waiting = tmp_path / "script-is-waiting"
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    stub = stubs / "sleep"
+    stub.write_text(f'#!/bin/sh\n: > "{waiting}"\nexec {real_sleep} "$@"\n', encoding="utf-8")
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    env = script_env(tmp_path)
+    env["PATH"] = f"{stubs}:{env['PATH']}"
+    proc = subprocess.Popen(["/bin/sh", str(script)], stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+                            text=True, start_new_session=True)
+    try:
+        assert proc.stdin is not None
+        proc.stdin.write(json.dumps(payload))
+        proc.stdin.close()
+        # 30 s only bounds a script that never sleeps nor exits; the normal wait is
+        # the script's own start-up. A script that exits instead skips the publish.
+        give_up = time.monotonic() + 30.0
+        while not waiting.exists() and proc.poll() is None and time.monotonic() < give_up:
+            time.sleep(0.005)
+        waited = waiting.exists()
+        if waited:
+            aside = path.with_name(path.name + ".part")
+            aside.write_text(text, encoding="utf-8")
+            os.replace(aside, path)
+        out, err = proc.communicate(timeout=60)
+        return subprocess.CompletedProcess(proc.args, proc.returncode, out, err), waited
+    finally:
+        # Unconditional: also after a failed assertion or a timeout, and for the
+        # script's own children (sleep, the util), which share its process group.
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        proc.kill()
+        proc.communicate()
 
 
 # ---------------------------------------------------------------------------
@@ -282,9 +268,10 @@ class TestTheStopScriptDoesNotExitBeforeTheBlockIsWritten:
         path = tmp_path / "t.jsonl"
         transcript = (Transcript().prompt("go").bash(block_output())
                       .say("Implement stopped. Done."))
-        write_later(path, "".join(line(entry) for entry in transcript.entries))
-        completed = run_script(REPORT_CHECK_SH, tmp_path,
-                               stop_input(path, "Implement stopped. Done."))
+        completed, waited = run_script_publishing_once_it_waits(
+            REPORT_CHECK_SH, tmp_path, stop_input(path, "Implement stopped. Done."), path,
+            "".join(line(entry) for entry in transcript.entries))
+        assert waited, f"the script left before waiting for the file: {completed.stdout!r}"
         assert completed.returncode == 0, completed.stderr
         assert json.loads(completed.stdout)["decision"] == "block"
 

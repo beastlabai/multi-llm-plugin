@@ -23,16 +23,16 @@ back only the tasks that depend on it** (racing re-run 4, 2026-10-05: Codex T007
 task read VERIFIED; in run 3 the same kind of check, worded "must exit 0", claimed
 `failed` and stopped implement for good).
 
-A check task's result contract (`write_batch_scheduler.CHECK_RESULT_CONTRACT`, appended by `with_result_contract` on both
+A check task's result contract (`batch_prompt.CHECK_RESULT_CONTRACT`, appended by `with_result_contract` on both
 legs when `is_check_task`) asks for a structured `check: {passed, findings}` (optional and untyped
 in `write_batch_result.schema.json`: an older reply stays valid and a near-miss shape is read, never a schema
 failure — fix round 11, when implement had no report re-ask; it has one since fix round 14, and the
-lenient reading stays so a near-miss costs no re-ask); `subagent_executor.check_findings_from` reads it leniently,
+lenient reading stays so a near-miss costs no re-ask); `batch_reply.check_findings_from` reads it leniently,
 never `notes` (only a clear pass with nothing listed is a pass;
 `{}`, `check: null` or an unreadable `passed` is a
 `CHECK_RESULT_UNKNOWN` finding, and a bare
 `"none"`/`"n/a"`/`"no problems found"`/`0` beside a
-pass is no finding — fix round 12), and `_verification_verdict` records `passed: false` or any
+pass is no finding — fix round 12), and `write_verdict.decide`'s verification-only rows record `passed: false` or any
 finding as `no-op`/`ok` labelled `check-findings`; a crash,
 or a `check` saying `could_not_run: true` (`read_check_reply`; the contract's
 word for a check that could not run, on the native leg `util batch-done --status failed --check could-not-run`), is a failed task
@@ -45,7 +45,8 @@ whatever its `check` lists, and so is `failed` listing no finding;
 The findings reach the rows' `check`, the verdict stamp, summary.md's
 `## Check Findings` and accounting line, the batch log line, `[CHECK_FINDINGS]` lines (on a
 stop as at the end of a run, since fix round 14; on the native leg from `util batch-done --check findings`,
-`check_findings_line`, fix round 26), the mirror's `check_findings`/`check_findings_task_ids`,
+`check_findings_line`, fix round 26), the mirror rows' `check_findings` (the check ids `status`
+names are read from them, `task_ledger.mirror_ids`),
 implement's result `notice`, the prior-changes line and `state.json`'s
 `task_check_findings` (`state_manager.set_task_check_findings_in_state`; on the native leg `util batch-done --check passed|findings --finding …`), which
 `status`'s trailer (while implement is unfinished, then until code-review is completed
@@ -54,11 +55,11 @@ through `StateManager.implementation_check_findings`.
 
 Fix round 11: its transitive dependents are not run (`SchedulerResult.blocked_by_check`, each
 `pending` with `blocked_by_check_reason`), and once every other task ran implement ends
-needs-human with a `check-findings` stop record (`_record_check_block`, summary.md's
+needs-human with a `check-findings` stop record (`StopAccount.record_check_block`, summary.md's
 `## Not Run: Upstream Check Reported Problems`, `blocked_by_check` in the report and mirror); a check with findings on
 record, completed and not accepted (`rerunnable_checks`), is materialized again on
 `--resume`, answered with `--human-task <id>=done|skip|retry`, and re-dispatched on retry or when the
-tree changed since the run ended (`_check_findings_rerun`; `_restamp_check_trees` stamps the tree the
+tree changed since the run ended (`CheckHolds.check_findings_rerun`; `CheckHolds.restamp_check_trees` stamps the tree the
 run left); on the native leg `util batch-done --check findings` records the held dependents and prints
 `[CHECK_BLOCKED]`, `util write-prompt` refuses them (`[WRITE_PROMPT_BLOCKED]`) and
 `util finalize-tracking --mark-completed` refuses while one is left.
@@ -77,7 +78,7 @@ cleared the hold).
 round 13, the rerun-5 check-gate fixture). A check whose reply said `failed` while
 listing findings counts as done on `--resume` when its verdict stamp reads
 ok/`check-findings` (`_findings_from_a_failed_claim`; the runner's `failed` stays in the
-file), so `_check_findings_rerun` decides its re-run as for any check.
+file), so `CheckHolds.check_findings_rerun` decides its re-run as for any check.
 
 A task refused before any runner started (the write policy, the grant, the snapshot, the census, the
 result contract) is recorded `failed` with its reason through `_record_batch_effects`
@@ -94,7 +95,7 @@ and "allow it" resumed into the same refusal, an allow miss says to add the file
 `allow`, and a file outside the repository, named as the task declared it, gets the
 skip alone, `policy_outside_note`), and every stop that leaves tasks held by a check with findings
 appends that check's `done|skip|retry` answers and one combined resume command
-(`_held_by_checks_lines`, `user_commands["answers"]`; `stop.blocked`/`check_task_ids` and
+(`StopAccount.held_by_checks_lines`, `user_commands["answers"]`; `stop.blocked`/`check_task_ids` and
 the headline).
 
 On the native leg `util write-prompt` refuses a task the policy denies (`[WRITE_PROMPT_REFUSED]`,
@@ -132,7 +133,7 @@ round 28, live run 12, Codex racing 06: T010 gated nine code tasks, `--yes`'s
 into 0 execution batches", review-code next on an empty tree).
 
 One pure rule, `state_manager.manual_task_gates` (over `implement_task_depends_on`; `StateManager.manual_task_gates` from
-`state.json`, `write_batch_scheduler.plan_manual_gates` from a resolved plan): `closable`, the
+`state.json`, `human_task_plan.plan_manual_gates` from a resolved plan): `closable`, the
 owed manual tasks whose own dependencies are done (a later manual task that comes after code not run
 yet, `after`, is never in a close command: `manual_close_ids` is
 `manual_tasks_to_close` over it), `waiting`, the code tasks a resume runs once those are
@@ -172,7 +173,7 @@ Under a skip strategy an explicit `--human-task <manual>=skip` is the user's dec
 and `StateManager._deferred_to_user` read it as not owed; under `skip-dependents` its walk runs first and
 takes over a later manual task a deferral reached, while a failed code task's `skip`
 keeps fix round 8's rule; under `skip-continue` the code after it still runs); the gate's
-stop records it as its `answers` (`next_phase.manual_gate_decline_answers`, the combined one first over
+stop records it as its `answers` (`manual_tasks.manual_gate_decline_answers`, the combined one first over
 several gating tasks), `manual_gate_way_on` names it after the resume, `util next-command --blocked` and
 `--after implement` (`gate_decline_steps`) and the native `status` give it on
 both legs, and a run that then dispatches nothing completes, its `phase complete` line naming
@@ -213,7 +214,7 @@ same check over the same scope, never a narrower one such as one test file or `-
 `ran` naming each command and how it ended or an empty `ran` and a
 `not_run` reason, which is no check and never a pass — `ran_no_check`, natively
 `--own-check none` — after live run 11's replies that ran `npm test` sent no
-`check`), read by `subagent_executor.batch_check_findings` (no usable report is `None`,
+`check`), read by `batch_reply.batch_check_findings` (no usable report is `None`,
 never a finding; never `notes`; unlike a check task's reading, a clear
 `passed: true` is a pass whatever it lists beside it, and `could_not_run` is one
 `BATCH_CHECK_COULD_NOT_RUN` finding every surface words "its check could not run", fix round 15; fix
@@ -229,7 +230,7 @@ nothing (a `not_run` reason with no `ran` included) is no check; a
 both legs; since fix round 16 every one-line surface says it is the batch's own report and quotes
 it, `quoted_findings`), summary.md's `## Check Findings` (`batch_check_section`, both
 summaries; the outcome cell/heading reads "applied, its check fails"), the mirror
-(`batch_check_task_ids`, per-task `batch_check_findings`), `status`'s progress line
+(per-task `batch_check_findings`, which `status` reads its ids from), `status`'s progress line
 (`own check fails …`) and the result `notice` (`write_result_notice`; a terminal
 poll rebuilds it from the run's mirror, `run_status._write_result_notice`); on the native leg
 `util batch-done --own-check passed|findings|none` records a code batch's and prints `[BATCH_CHECK_FAILED]` (fix round 18:
@@ -245,9 +246,9 @@ an implement task's failing own check is also on record in `state.json`'s
 review-code's implementation record read it through `StateManager.implementation_batch_check_findings`, fix round 15).
 
 A code phase that finished with no `driver.verify_command` — or, since fix round 16, stopped after
-one of its tasks applied an edit (`_note_unverified_on_stop`, every stop path; run 6's stop 01 said
+one of its tasks applied an edit (`VerifyStep.note_unverified_on_stop`, every stop path; run 6's stop 01 said
 nothing; fix round 17: an edit, so a check or a task answered `=done` alone does not
-count, and `_run_verification` asks the same `_phase_has_applied_batches` question) — carries
+count, and `VerifyStep.run` asks the same `phase_has_applied_batches` question) — carries
 `SchedulerResult.unverified` (`unverified_line`: nothing ran the tests, add `verify_command`
 under `driver:`, naming `verify_command_candidate`'s command — package.json
 `scripts.test` by lockfile, a Makefile `test:` target, Cargo, Go, pytest
@@ -259,7 +260,7 @@ under `reported problems` (fix round 25), apply-code-fixes' tally when a batch r
 `checks_report`) in its messages, `write_batch_report.json`, the mirror, the Verification line
 and the notice — and, on a stop, at the end of the stop's headline, the result line's
 `error`, which the hosts relay where they never relayed `notice` (fix
-round 18; fitted to `cli_common.ERROR_MAX_CHARS` by `write_batch_scheduler.fit_stop_headline`: the model's quoted words give
+round 18; fitted to `cli_common.ERROR_MAX_CHARS` by `stop_answers.fit_stop_headline`: the model's quoted words give
 way first, then the not-run list and the task titles, never the remedy, the answers or this line —
 fix round 19), as an apply phase's stop now records its headline as `error` too.
 
@@ -279,7 +280,7 @@ batch can edit `tasks.md`), and only a plain check command, `is_check_command`'s
 strict allowlist: no shell operator, substitution or redirection, a known runner form, no
 deploy/migrate/seed/release/watch/serve/`--fix`-style word; `go test ./...` is
 kept) and both legs bind `known_checks_section` after the code batch's `## Checks you ran` at
-dispatch (`with_result_contract(checks_section=…)`: the scheduler's `_known_checks_section`, `util write-prompt`),
+dispatch (`with_result_contract(checks_section=…)`: the scheduler's `BatchPromptBuilder.known_checks_section`, `util write-prompt`),
 apply-code-fixes only, nothing when none is known: run each after the edits in its own sandbox,
 never as root, skipping one it judges unsafe as `not run`, report each in
 `check.listed` as `passed`/`failed`/`not run` (with
@@ -310,7 +311,7 @@ reported the accepted failure in its own `check`, and the phase read
 are known, not its to fix and not a failure of its own check, that it may cite them and need not run
 the check again.
 
-`write_batch_scheduler.split_accepted_findings` takes out of an implement task's own-check findings each one that names the
+`check_records.split_accepted_findings` takes out of an implement task's own-check findings each one that names the
 same command as an accepted finding (since fix round 23 `accepted_findings_for`: only the accepted
 checks upstream of the task, which its prompt's section named, and none whose command the task's own
 title, `## Task` section or criteria name or whose findings they ask it to fix or make
@@ -340,7 +341,7 @@ unchanged.
 `accepted_checks_section` asks for the accepted finding copied exactly, nothing added, and any comment
 in the `check`'s `note`; `WRITE_CHECK_CONTRACT` asks every code batch
 for findings that are the command and what it reported, nothing else, and a `note`
-for its own words (`subagent_executor.batch_check_note`: the row, the verdict stamp, `state.json`'s
+for its own words (`batch_reply.batch_check_note`: the row, the verdict stamp, `state.json`'s
 `task_own_check_note` or an `apply_fix_batch_checks` entry's `note`, the
 `[BATCH_CHECK_*]` lines and summary.md; natively `util batch-done --note`, refused without
 `--own-check`; never read as a finding).

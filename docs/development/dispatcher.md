@@ -7,11 +7,13 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 ## Contents
 
 - [Entrypoint and result protocol](#entrypoint-and-result-protocol)
+- [Result schemas](#result-schemas)
 - [Mode registry](#mode-registry)
 - [Shared CLI parser](#shared-cli-parser)
 - [Repository-root path resolution](#repository-root-path-resolution)
 - [Utility commands](#utility-commands)
 - [Import safety](#import-safety)
+- [Import layers](#import-layers)
 - [uv project selection](#uv-project-selection)
 - [Shared flags](#shared-flags)
 - [Mode and help updates](#mode-and-help-updates)
@@ -45,7 +47,25 @@ prints `[HIGH_PRIORITY_ISSUES] <n>` and returns `0`; `--fail-on-high` is the
 opt-in for a standalone CI gate and is exit `3`, never `1`.
 Every invocation ends with exactly one machine-readable stdout line, `MULTI_LLM_RESULT: {"mode","phase","state","exit","artifacts":[…],"next":…}`, emitted
 even on a crash (`next` is `null` when no follow-up is owed).
-**Optional** keys join them.
+**Optional** keys join them. `schemas/result_line.schema.json` declares every key
+([Result schemas](#result-schemas)).
+
+**JSON output** (`--output-format json` on the three apply phases, `status --json`): the mode's
+own stdout is one JSON document, and through `multi_llm.py` the result line still follows it as
+the last stdout line, so a consumer takes the text before the last `MULTI_LLM_RESULT:` marker
+(`out.rsplit(marker, 1)[0]`); run the orchestrator script directly for a stdout that is the
+document alone. The result line stays on stdout because every host reads it there and nowhere
+else (`cli_common.parse_result_line`; the opencode plugin never searches stderr for it). What
+moves is everything else: the dispatcher's `[NEXT_COMMAND]` block, and in an apply phase
+(`ApplyOrchestratorBase._run_json`) its markers, `[AUTO_RESOLVED]` lines, judging and executor
+progress, all to stderr. An apply run that ends with no payload of its own (a `--dry-run`, an
+error, a stop, a detach handshake, a host-driven revalidation) prints a fresh
+`{"status", "phase", "exit_code", "plan_file", "message"?}` object instead, never an earlier
+run's output file, and the exit code is unchanged. `status` is `error`, `needs_human`,
+`nothing_to_do`, `detached`, `revalidation_pending` or `stopped`, or `dry_run`, which also carries
+the selection under the output file's own keys (`to_apply`, `needs_human_review`,
+`skipped_items`, `summary`) and the batches without prompts; a dry run applies no bulk approval,
+so `to_apply` is what the review selected, before `--approve-*`.
 
 `consolidation_recommended` (`{valid_groups, threshold, command}`), present only on a review phase that crossed
 `CONSOLIDATION_RECOMMENDED_THRESHOLD` — written to `{phase}/.status.json` at the same site, carried through
@@ -92,6 +112,17 @@ predicate (every file-capable answer was recovered from stdout), so a host that 
 result line sees the condition; it never moves `state` or the exit
 (plans/ask-answer-recovery-and-false-success.md D7.2).
 
+`high_priority_groups` (`{count}`) takes that route as well, for a terminal run whose
+checkpoint `state` is `complete`, the one point the count is written: a detached
+`review-code --fail-on-high` held at exit 3 reads as completed to a host only with a positive
+count on the poll's line (`modes.REVIEW_GATE`). The `state` outlives the run that wrote it, so
+`claim_run` drops the count when the next run starts: a retry refused before it completes
+(an edited plan, exit 3) never relays the earlier review's count as its own. It drops
+`validation_counts` with it (`status_file.RUN_SCOPED_KEYS`), whose relay has no `state`
+condition at all: a run's counts are its own report's, so a refused retry or a validation
+hand-off relays none. `answer_origins` needs no entry there, since a detached ask's first
+write after the claim replaces the whole checkpoint.
+
 **`user_next_step`** is the workflow's next phase as the command the *user* types
 (plans/next-phase-command.md): `{"phase", "command", "optional_before": [{"phase", "command", "why"}], "complete": false}` (`optional_before` omitted when empty,
 and every rendering puts the primary first; since fix round 16 it also carries
@@ -115,7 +146,7 @@ a resume that dispatches nothing keeps implement's completion date on both legs 
 records, never from tasks.md, scoped to the decomposition implement ran last
 (`implement_task_ids`) and to deferrals — a pause-and-ask "Skip" and its dependents are not owed;
 additive, 2026-10-05; the native leg's emit writes those statuses itself through the executor's own
-`write_batch_scheduler.persist_human_task_plan`, and a manual task of a completed implement with no answer on record at all
+`human_task_plan.persist_human_task_plan`, and a manual task of a completed implement with no answer on record at all
 is owed too, via `implement_human_task_ids` — fix round 7) — a complete workflow is an answer, so the
 key is present then and **absent always means "no answer"** (not a workflow phase, the gate found
 the phase unfinished, a failed run, or an excluded invocation), never "complete".
@@ -131,8 +162,8 @@ exactly as its source supplied it and, only when that phase is recorded `in_prog
 (completed, skipped, or `in_progress`: exit 0 at a `[…_PENDING]` marker or the
 native first call of an apply phase is not a finished phase), never beside a non-null
 `next` (which is what excludes a real `--detach` launch or
-`--if-not-running` re-attach: `detach.launch` records the run's poll command as
-`next`), never on `1`/`3`, never for a
+`--if-not-running` re-attach: `detach.launch`, or a review launcher's entry gate
+(`detach.take_for_launch`), records the run's poll command as `next`), never on `1`/`3`, never for a
 write-phase invocation without `--exec-subagents` (it hands its batch loop to the invoker and
 records the phase `in_progress` at emit time — `StateManager.mark_phase_started`, since 2026-10-05;
 the builder would answer `--resume` for the phase being run), except the apply phases'
@@ -150,6 +181,54 @@ route auto-follows `next`, and following this would start a paid phase nobody as
 for. Beside the key, the emitter prints the `[NEXT_COMMAND]` block (see
 [runtime](runtime.md#detach-boundary-and-worker-lifecycle)) above the result line — on stderr when the invocation asked for JSON output
 (`--output-format json`, `status --json`).
+
+## Result schemas
+
+The three machine-readable outputs have draft-07 JSON Schemas under `skills/multi-llm/schemas/`:
+
+- `schemas/result_line.schema.json`: the `MULTI_LLM_RESULT` payload (`cli_common.ResultContext.payload`).
+- `schemas/status_file.schema.json`: `{phase}/.status.json` (`utils/status_file.py`). Its `definitions`
+  are shared: `run`, `progress`, one fan-out slot, and the objects that ride both the checkpoint and the
+  line (`consolidation_recommended`, `high_priority_groups`, `validation_counts`, `validation_context`,
+  `answer_origins`, `step_results`). The other two schemas `$ref` them by file name.
+- `schemas/status_json.schema.json`: the document `status --json` prints before its result line: an
+  `{error}` object, the workflow view alone (`--view workflow`), or `{workflow?, runs, …}` with one run
+  view per phase dir (`detach.classify_run`).
+
+**Strictness follows lifetime.** The result line and `status --json` are written and read by one
+plugin version within one invocation, so their top level is closed (`additionalProperties: false`)
+and an unknown key there is drift. `.status.json` outlives the version that wrote it: a plan dir keeps
+its checkpoints across plugin updates, and a legacy checkpoint can hold a `null` the current writer
+would remove instead. So every object in that file stays open. Nested objects are open everywhere,
+because their writers add keys over time; a reader ignores keys it does not know.
+
+**Nothing validates at run time.** A schema check in the dispatcher could only turn the line every host
+depends on into a crash, or into a warning no host reads. The tests hold the schemas to the code:
+
+- `tests/test_result_contract.py` produces each output from real code paths (a dispatcher refusal, a
+  crash, a missing plan, a range refusal, a detached launch, a live fan-out poll, partial, failed and
+  runner-refused runs, a finished review relaying its counts, `doctor`) and validates what comes out.
+  It also reads the emitters' source through `tests/contract_inventory.py`, an AST walk that follows
+  dict literals and `**` spreads, `dict(...)` (nested ones too), local dicts filled in place
+  (`d[k] = v`, `.update()`, `.setdefault()`, `|=`, also inside a skill function the dict is handed
+  to), module constants used as keys, helper functions' returns, and a parameter to what every call
+  of its function passes. Every key a writer can produce must be declared, and every declared key
+  must have a writer. Whatever the walk cannot follow is reported with its line, never skipped, and
+  the function it sits in (`status_file.update_status`, which merges into the document it read from
+  disk) must be on that test's `PASS_THROUGH` list, naming the enforced check that covers its keys.
+  `doctor --json`'s report is not one of the three outputs and has no schema; its result line does.
+- `tests/contract_audit.py` is an opt-in pytest plugin. It validates every result line, checkpoint write
+  and run view a test selection produces, and reports without failing, because several suites write
+  hostile checkpoints on purpose:
+  `PYTHONPATH=skills/multi-llm MULTI_LLM_CONTRACT_AUDIT=<file.jsonl> uv run --project skills/multi-llm -- pytest <tests> -p tests.contract_audit`.
+
+To add a key, declare it (type and meaning) in the schema in the same change as its writer; the
+inventory test names the file and line of an undeclared one. A new result `state` word, run state,
+fan-out slot state or run-view verdict also goes into the matching `enum`, which the tests compare
+with the code's constants. The prose contracts stay where they are: this page for the result line,
+and `utils/status_file.py`'s docstring with [runtime](runtime.md#status-file-schema) for the
+checkpoint. A host program (the opencode plugin's `src/index.mjs`, the Codex MCP server) may validate
+against these schemas; like any reader, it must ignore keys it does not know.
 
 ## Mode registry
 
@@ -226,13 +305,25 @@ launch's result line says the command ran there (`ran_from_root`, set only when 
 
 ## Utility commands
 
-**`util` namespace, not a user-facing surface**: `multi_llm.py util metrics|prior-changes|report|decisions|update-tasks|prereq|finalize-tracking|backup|restore-batch|runs|report-check|next-command|check-reply|check-tasks|write-prompt|batch-done|improve-steps|instructions …` routes the
+**`util` namespace, not a user-facing surface**: `multi_llm.py util metrics|prior-changes|report|decisions|update-tasks|prereq|finalize-tracking|backup|restore-batch|runs|report-check|next-command|check-reply|check-tasks|write-prompt|batch-done|improve-steps|resume-state|instructions …` routes the
 utility scripts the same in-process `main(argv)` way, flags forwarded verbatim. Excluded
 from `argument-hint` and from `--help`'s mode list, documented only under
 `multi_llm.py util --help`, and — like the reserved hidden `--internal-*` prefix — never
 rendered into a `MULTI_LLM_RESULT.next` value. `util instructions <mode>` prints a mode's core
 instruction file with every skill-dir placeholder replaced by the running skill dir, so the text a
-host agent reads carries no unexpanded token.
+host agent reads carries no unexpanded token; `--to-file` writes that text to a file and prints its
+`[CORE_FILE]` line instead, and `--page <i>` prints one bounded page of it between a `[CORE_PAGE]`
+header and a `[CORE_PAGE_END]` line ([host integration](hosts.md#host-neutral-instruction-core) says
+which shim uses which form, and the paged completeness rule). `util resume-state <mode> <plan>` is a review core's resume step: read-only,
+it prints one `[RESUME_STATE]` line (case, action, models, batches, flags, ownership) from the files
+the orchestrators' own guards read, and `references/resume-detection.md`'s case list is rendered from
+its table (`tests/tools/render_resume_cases.py`). Only `state.json`'s completion (the primary guard)
+answers `report`; no file date is read. A task file is this round's when it records the `round_id`
+`.status.json` records ([round identity](review-results.md#round-identity)), or, for a file from
+before round ids, when `.status.json` reads `validation_pending`. Validation files of another round
+answer a `--force` re-run marked `ownership=stale`, and files nothing ties to that run the same
+re-run marked `ownership=uncertain`: it may re-run work but never reports an earlier round's
+verdicts as this one's.
 
 `util finalize-tracking` also inserts the implementation summary's back-reference into the plan when
 `--plan-file`/`--summary-file-relative` are passed (it replaced an inline
@@ -254,7 +345,7 @@ When it answers implement `--resume`, this lookup alone also prints
 `[NEXT_COMMAND_ANSWERS_WHY]`/`[NEXT_COMMAND_ANSWERS]` (`user_next_step.answers`, `next_phase.implement_answers`): one
 resume carrying `=done` for each check that holds tasks and `=skip`
 for each failed task, the native stop's combined answer (fix round 14), then each answer alone, the
-same list and whys the tool routes' `resume_answers` give (`write_batch_scheduler.native_stop_answers` over
+same list and whys the tool routes' `resume_answers` give (`stop_answers.native_stop_answers` over
 `compose_stop_answers`, the executor stop's own composer, fix round 20; fix round 21: a failed task
 `util batch-done --partial` recorded half-applied, `HALF_APPLIED_PREFIX`, gets none, and one recorded
 `said applied, no file changed` gets `skip` before `done`, as the executor
@@ -262,7 +353,7 @@ answers a partial application and an unlanded reply); `util report-check` holds 
 each like the other commands.
 
 Above them it prints `[TESTS_NOT_RUN]` when no `driver.verify_command` is set and a code task is
-recorded completed (`write_batch_scheduler.native_stop_unverified_line`, the executor stop's line, which the native leg never
+recorded completed (`verification_lines.native_stop_unverified_line`, the executor stop's line, which the native leg never
 printed — fix round 18); the report gives its text, and the Stop hook does not check it.
 
 Fix round 24: below the block it prints the answer's `markdown` between
@@ -274,14 +365,14 @@ reads no marker line; `--blocked` carries the same section as `user_resume.markd
 character could open a block is escaped (`markdown_text`).
 
 Since fix round 22 it also prints `[NEXT_COMMAND_WHY]` above that resume (`user_next_step.why`,
-`write_batch_scheduler.native_resume_why`): what the plain resume does on an unchanged tree, from the stop's facts
+`stop_answers.native_resume_why`): what the plain resume does on an unchanged tree, from the stop's facts
 (`compose_resume_why`), which the executor stop records as `resume_why`,
 `--blocked` hands the tool routes (`user_resume.why` → `resume_why` and
 the `needs_human_message.resume_why` clause) and `status` prints under `resume with:`.
 
 Fix round 23: it ends with what the resume keeps (`keeps the N tasks already done` since fix round 24, a kept
 check task having applied nothing, and the half-applied clause status used to append), so status and
-the tool routes say it word for word; it is cut at a word to `next_phase.MAX_RECORDED_WHY_CHARS`, as each
+the tool routes say it word for word; it is cut at a word to `manual_tasks.MAX_RECORDED_WHY_CHARS`, as each
 answer's why is; a check is said to stay unrun only when the resume keeps it (a verdict
 `tree_fingerprint` equal to the tree the stop leaves, a `task_check_trees` stamp or
 `executor_check_stamp`, or `not_rerun`), else it runs again; every task id
@@ -322,7 +413,7 @@ the ids before the first `(`, `—`, `;` or
 is the range, an empty label reads the id-only bullets under it, and a bare number is an id only in
 a Step-numbered document (adversarial review, 2026-10-02); the executor leg prints the same findings
 as `[CONSISTENCY_WARNING]` and in `summary.md`, and (fix round 14) hands them, with every
-item it left unapplied and why, to the result as `progress.notes` (`ApplyOrchestratorBase.run_notes`):
+item it left unapplied and why, to the result as `progress.notes` (`ApplyPhaseReport.run_notes`):
 the run's own `notice`, `status`'s `note:` lines and
 `progress_lines`, and a terminal poll's `notice`, so a host relays them beside
 the counts.
@@ -330,14 +421,19 @@ the counts.
 `util write-prompt --phase-dir <phase> --task-id <id>` (2026-10-05) is the native write leg's per-batch prompt: the four write
 phases' emit path now materializes the executor's own `{phase}/write_tasks.json`
 (`[WRITE_TASKS_FILE]`), and this binds one task's prompt through the scheduler's two module-level
-seams — `write_batch_scheduler.bind_prior_changes` (late, from the **plan dir's** `prior_changes.jsonl` as it is at
+seams — `batch_prompt.bind_prior_changes` (late, from the **plan dir's** `prior_changes.jsonl` as it is at
 that moment, phase-scoped) and `with_result_contract` — writes it to `{phase}/prompts/<id>.prompt.txt` and
 prints `[WRITE_PROMPT] <path>` / `[WRITE_PROMPT_LINES] <n>` / `[WRITE_PROMPT_CONTEXT] …`
 (`--stdout` prints the text alone); `tests/test_write_prompt.py` pins it byte-identical to
-`WriteBatchScheduler`'s dispatch text for the same state.
+`WriteBatchScheduler`'s dispatch text for the same state. For apply-suggestions and
+apply-task-suggestions it also takes the batch's pre-batch snapshot, bound to the batch and kept
+when the same batch is bound again (`prepare_batch_snapshot`, 2026-11-08), and prints
+`[WRITE_SNAPSHOT] <path>` / `[WRITE_ARTIFACT] <path>` after the three markers (on stderr under
+`--stdout`), which the host's diff step reads (no command restores from it); the rules are in
+[write safety](write-safety.md#write-safety-controls).
 
 The executor leg keeps the same file (fix round 16, run 6 #10b: T007's prompt with the accepted
-findings was in no artifact on either tool route): `WriteBatchScheduler._keep_dispatched_prompt` writes each dispatch's
+findings was in no artifact on either tool route): `BatchPromptBuilder.keep_dispatched_prompt` writes each dispatch's
 prompt to `{phase}/prompts/<id>.prompt.txt` (`dispatched_prompt_path`) just before the child starts, overwritten
 by a later dispatch as a `--resume` rebinds the native one, and an attempt that sends
 something else (a report re-ask, rule 9's re-send) to `<id>.attempt-<n>.prompt.txt`, which the task's next
@@ -369,8 +465,8 @@ right after the host verified a batch and before its prior-changes append, it wr
 every `expected_ids` member (the scheduler writes that too since fix round 22) (a raw
 read-modify-write of `state.json` through `state_manager`'s module-level helpers,
 never a `StateManager` over the plan the batch just edited, held under
-`metrics.state_file_lock` — `<state dir>/.state.lock`, which `util metrics record|start|finish` and
-`util finalize-tracking` hold too, so parallel same-batch records no longer drop each other's
+`metrics.state_file_lock` — `<state dir>/.state.lock`, which `util metrics record|start|finish`,
+`util finalize-tracking` and every `StateManager.save()` hold too, so parallel same-batch records no longer drop each other's
 `task_status`; a lock not free in 120 s is exit 1 with nothing written, fix round 8); the
 apply base's `--resume` (step 23) drops a group recorded there unless
 `failed`, implement's drops a `completed` task, and both native emit paths
@@ -395,6 +491,111 @@ plan's first phase it failed "state file not found" and the host shrugged it off
 `*_orchestrator.py` stays **supported but unadvertised** (the test suite and
 `--internal-*` re-entry rely on it); the instruction core and shims name only
 `multi_llm.py`.
+
+**Every `utils/` module imports as part of the package.** A module imports its siblings relatively
+(`from .x import y`), with no `try`/`except ImportError` second spelling, and names the module
+that defines a name: `utils/__init__.py` re-exports nothing, so importing a leaf loads only what
+that leaf needs. `tests/test_utils_imports.py` imports every `utils` module first in its own fresh
+interpreter and keeps `utils.text_clip` and `utils.report_check` free of the provider stack and
+YAML. Run a utility as `multi_llm.py util <name>`; a module with an entry point also runs as
+`python -m utils.<name>` from the skill directory. The nine modules that developers run by path
+(`python utils/check_reply.py`, `env_vars`, `metrics` and a few more) open with a guard that, before
+any package import, puts the skill root on `sys.path`, found from the file's real location as Python
+finds `sys.path[0]` (so a symlink to the file or to the skill directory works), and calls the package
+module's `main` with `sys.argv` untouched, so help and errors keep the program name typed.
+`tests/test_utils_entry_points.py` runs each spelling. `utils/landlock_exec.py` is the exception: the
+jail wrapper runs by path in a stdlib-only `-I -S` interpreter and imports nothing from the
+package, so `landlock_dispatch` loads it under either spelling
+([process primitives](runtime.md#process-primitives)).
+
+**A function-level import needs a reason, stated beside it.** Import at module top unless the
+import closes a load-time cycle (an adapter importing `llm_client`, which loads the adapters), is
+an optional dependency (`tomllib` on 3.10, `_winapi`), points up a layer through an edge
+`tests/test_import_layers.py` lists in `KNOWN_UPWARD`, or keeps a light module light: the modules
+`tests/test_utils_imports.py` lists in `LIGHT_LEAVES` and `LIGHT_SCRIPTS` (the hook commands,
+`doctor`, the `status` and `next-command` paths, the light `util` commands and front doors) load
+neither the provider stack nor YAML. What a short-lived command loads when it *runs* counts too:
+a stopped composite's `status --view run` (which imports `improve_workflow` to spell the
+continuation) and each commit front door's `--help` load no project module beyond their set in
+`READER_PATHS`, so the review engine, the write path's reporting and the range and brief modules
+stay inside the functions that use them. The reason is a comment on the import's line or directly
+above it (adjacent imports share one; an import opening a `try` body or an `except` handler may
+use that header's comment), and `test_every_function_level_import_says_why` fails on an import
+inside a function that has none. A module every load imports at the top (not under a
+run-time `if`, a `try` that handles exceptions, or `if TYPE_CHECKING:`) is not imported again
+inside a function, anywhere in the skill (`test_no_skill_module_imports_a_module_twice`). When a test
+patches a name on its owner (`monkeypatch.setattr(subagent_tasks, "prompt_budget_utf16", ...)`), a
+module-top `from x import name` copy would not see the patch: import the module and read
+`x.name` at the call instead. A name a module only forwards through its `__getattr__` (`git_utils`,
+`write_batch_scheduler`, `providers.base`) is imported from its owner.
+
+**Module-level caches live in one registry.** Because one interpreter runs several targets, a cache
+at module scope is shared by every phase of a run on purpose (the sandbox probe's once-per-process
+budget, [status.md](status.md)). Declare one with `utils/process_state.process_cache("<module>.<name>")`
+(pass `set` or `list` for those kinds), never as a bare `{}`. A cache the module guards with a lock
+passes it as `lock=`; one whose workers fill it under per-key locks also passes `busy=`, read under
+that lock and True while one of them is held. Nothing on a run path resets it; `tests/conftest.py`
+calls `process_state.reset_all()` around every test, which empties each registered container in
+place, under its lock. A cache whose lock stays held, or whose `busy` stays True, for `LOCK_WAIT_S`
+is left as it was, and the reset raises `CacheBusyError` naming the cache and the thread in its
+module's code: a test left a worker running. So a registered cache is cleared, never rebound, by its
+module and by tests alike (`.clear()`, `lines[:] = [...]` or `patch.dict`). `tests/test_process_state.py` covers module level, module-level `if`/`try`/`with`
+blocks and class bodies (`<module>.<Class>.<attr>`), not instance attributes or `lru_cache`. It fails
+on an unregistered cache-named container (`CACHE_WORDS`), on any other empty container in `utils/` that
+is not in `NOT_REGISTERED` with its reason, on a rebinding, and on a cache used under a module lock it
+was not registered with. Two checks over the modules loaded in a fresh interpreter catch what syntax
+cannot see, such as a factory's return value.
+
+## Import layers
+
+`tests/test_import_layers.py` assigns every skill module to one of seven layers (`LAYERS`: L0 core,
+L1 state, L2 providers, L3 execution, L4 domain, L5 orchestrators, L6 CLI) and fails on an import
+that points to a higher layer. An edge counts wherever the import sits, inside a function too, and
+the spellings of one module are one module: `from .x`, `from utils.x`, `import utils.x` and a
+dual-import shim's bare `from x`. `from package import name` follows Python's lookup: a name the
+package's `__init__` binds wins and resolves through every re-export and alias to the module that
+defines it, and only an unbound name means the submodule, so `from utils import name` points past
+the barrel. Dynamic imports count too: calls of `importlib.import_module`, `__import__` and
+`routes._skill_module` (or an alias of one) are read from the syntax tree, so comments and
+strings never make an edge. A call with literal arguments is an edge, relative ones such as
+`import_module(".x", package="utils")` and `__import__("x", globals(), None, [...], 1)` included.
+`if TYPE_CHECKING:` blocks and the package `__init__` that Python runs implicitly do not count. The
+whole graph is parsed with `ast` in under a second.
+
+`KNOWN_UPWARD` in the same file lists the upward edges that existed when the map was drawn (29),
+each with the names that cross it and where they belong; none remain, so it is empty. It only
+shrinks:
+
+- **A new upward edge** fails with the importer, the target, every import site and the names that
+  cross. Move those names down to the importer's layer or lower and let the old module re-import
+  them, or pass the value in as an argument. A moved name that tests patch with
+  `monkeypatch.setattr(<old module>, ...)` stops reaching its callers, so grep `tests/` and update
+  those patches with the move. Add the edge to `KNOWN_UPWARD`, with a reason, only when it is
+  deliberate.
+- **A moved name keeps a read-only alias** in the module it left when a reader still spells it
+  there; the old module's own code reads the owner. `tests/test_layer_moves.py` lists every alias
+  (`MOVED`, and `MOVED_WHOLE` for `finalize_tracking.py`, whose body is `utils/tracking.py`),
+  checks that each reads as the owner's object, and fails any test that writes one: patch the owner.
+  A name that moved with no alias is in `RETIRED` (a slot the run rebinds, such as
+  `run_record._ACTIVE`, of which an alias would be a stale copy, or a name that moved up a layer);
+  the same guard fails a test that writes its old spelling.
+- **Passing a value in** replaces an upward import when the code that needs it sits above the
+  importer: `run_registry.sweep` takes `detach`'s close-out and kill from `utils/run_sweep.py`, and
+  `detach` applies a commit front door's stage through the applier a worker's entry hands it
+  (`commit_front_door.hand_worker_the_stage_applier`, called by `multi_llm.main` and by the
+  orchestrators the front doors run, which a worker can also be started through directly).
+- **A stale entry**, whose import is gone or no longer points upward, fails until it is deleted.
+- **A new module** fails until it has a layer; the message gives the range its imports and importers
+  allow. Choose by role: moving an existing module to another layer is a design change, reviewed
+  like one.
+- **A computed dynamic import**, whose module name is a variable (the dispatch tables), or a loader
+  used as a value (`load = importlib.import_module`), fails until `COMPUTED_IMPORTS` lists it. The
+  key is the importer and the call as `ast.unparse` prints it; the entry names every module the call
+  can load (names or `*` patterns) and why the name is computed, and those modules then count as
+  the importer's edges. Prefer a literal name when the set is fixed. An entry whose call is gone,
+  or that names no module, fails until it is fixed.
+- **A wildcard import** of a skill module (`from utils import *`) fails: name the imports, so each
+  edge points at the module that defines the name.
 
 ## uv project selection
 

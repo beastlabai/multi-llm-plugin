@@ -4,63 +4,69 @@ This directory contains unit tests and integration tests for the multi-llm skill
 
 ## Quick Start
 
+Run from the **repository root**, with `uv run --project` (not `--directory`):
+
 ```bash
-# Run all tests
-uv run -- pytest
+# Which tests cover a module, then run only those (advisory, -n 4)
+make test-for MODULE=utils/status_file.py
 
-# Run with verbose output
-uv run -- pytest -v
+# One file, one class, one test
+uv run --project skills/multi-llm -- pytest skills/multi-llm/tests/test_filtering.py -v
+uv run --project skills/multi-llm -- pytest skills/multi-llm/tests/test_filtering.py::TestFilterItems -v
 
-# Run a specific test file
-uv run -- pytest tests/test_filtering.py -v
-
-# Run a specific test class
-uv run -- pytest tests/test_filtering.py::TestFilterItems -v
-
-# Run a specific test
-uv run -- pytest tests/test_filtering.py::TestFilterItems::test_filter_valid_items -v
+# The ordinary CI selection (the gate; `make test-for` never replaces it)
+uv run --project skills/multi-llm -- pytest skills/multi-llm/tests -m "not live and not container and not package and not codex_jail"
 ```
 
-## Test Categories
+A bare `pytest` applies the `addopts` default in `pyproject.toml`
+(`-m 'not container and not package and not codex_jail'`).
 
-### Unit Tests
+## Which tests cover a module
 
-These test individual functions and classes in isolation:
+File names do not follow the module layout, so use the generated map rather than
+guessing:
 
-| File | Module Tested | Description |
-|------|---------------|-------------|
-| `test_importance.py` | `utils/importance.py` | Importance level calculations and comparisons |
-| `test_filtering.py` | `utils/filtering.py` | Bulk approval conflict resolution, item filtering |
-| `test_validation_recovery.py` | `utils/validation.py` | Error classification, validation result loading/saving |
-| `test_state_manager_decisions.py` | `utils/state_manager.py` | Group ID generation, human decision tracking, resume state |
-| `test_schema_validator.py` | `utils/schema_validator.py` | JSON schema validation |
-| `test_json_extractor.py` | `utils/json_extractor.py` | JSON extraction from LLM responses |
-| `test_output_handler.py` | `utils/output_handler.py` | Output file path handling |
-| `test_provider_registry.py` | `utils/provider_registry.py` | LLM provider configuration |
-
-### Integration Tests
-
-These test the orchestrators end-to-end using subprocess calls:
-
-| File | Description |
-|------|-------------|
-| `test_apply_suggestions_integration.py` | Tests `apply_suggestions_orchestrator.py` with various CLI options |
+- [`MODULE_TESTS.md`](MODULE_TESTS.md) lists, for every source module, how many
+  test files cover it and the best matches. It is generated; do not edit it.
+- `make test-for MODULE=utils/foo.py [TOP=n]` (backed by
+  [`tools/tests_for.py`](tools/tests_for.py)) prints the ranked files, best name
+  match first, and runs only those. It marks a **hub** (more than 40 covering
+  files, for example `utils.state_manager`), which the map cannot narrow.
+- The map is a static AST scan. It counts `import x`, `from x import y`, and a
+  literal `importlib.import_module("x")` / `__import__("x")` under any alias,
+  plus two declared tables in `tools/tests_for.py`, each row with a reason:
+  `SWEEPS` (a test that loads modules by a computed name, such as every
+  `utils.providers.*` adapter) and `HARNESS_SUITES` (every `test_e2e_*.py`,
+  which drive the skill as a subprocess; the orchestrators a suite runs are
+  derived from the mode words and orchestrator names it passes). A new
+  `test_e2e_*.py` needs a `HARNESS_SUITES` row or `test_module_tests_map.py` fails.
+- A `tests/support` module a test imports counts its own imports as the test's
+  (followed through the support modules it imports in turn).
+- Still not covered: `runpy`, any other helper module that re-exports a source
+  module, a suite-wide fixture a test names without importing it, a computed
+  import nobody declared, and coverage through another source module.
+  The map picks a focused first run; it is never a reason to skip the CI command.
+- After a test's imports or a declared route change, run `make tests-map` and
+  commit `MODULE_TESTS.md`; `test_module_tests_map.py` fails until you do. Adding
+  a test that maps to no module leaves the file unchanged.
 
 ## Running Integration Tests
 
 Integration tests use mock data in `plans/test-plan/` to avoid calling real LLMs.
+Each test builds its own copy under pytest's `tmp_path`, so the tests never
+touch the skill's `plans/` directory and are safe to split across xdist workers.
 
 ```bash
 # Run integration tests
-uv run -- pytest tests/test_apply_suggestions_integration.py -v
+uv run --project skills/multi-llm -- pytest skills/multi-llm/tests/test_apply_suggestions_integration.py -v
 
-# Regenerate test fixtures if they become stale
-uv run -- python tests/test_apply_suggestions_integration.py --setup-fixtures
+# Write the same fixture tree into the skill's plans/ to inspect it
+uv run --project skills/multi-llm -- python skills/multi-llm/tests/test_apply_suggestions_integration.py --setup-fixtures
 ```
 
 ### Integration Test Fixtures
 
-The integration tests use a self-contained test plan at `plans/test-plan/`:
+The integration tests use a self-contained test plan at `plans/test-plan/` (per test, under `tmp_path`):
 
 ```
 plans/
@@ -99,9 +105,37 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils.filtering import filter_items
 ```
 
+### Shared fixtures and helpers: `tests/support/`
+
+A helper or fixture that more than one test file uses lives in
+[`support/`](support/), never in a `test_*.py` file another test imports: a
+test module changes with its own tests, and one used as a library broke its
+importers silently. Each module there is one "world" (the check-gate repository,
+the implement world, transcripts for the report-check hook, ...), described in
+its docstring. [`support/__init__.py`](support/__init__.py) has the rules, and
+`test_support_package.py` checks them:
+
+- A module listed in `conftest.py`'s `pytest_plugins` registers its fixtures for
+  every test: name them as parameters and import nothing (`repo` is the
+  check-gate world's, `workdir`, `plan_dir`, `runner_env`, `stub_phases`). A
+  file that defines a fixture of the same name overrides it.
+- A module that is not registered defines each fixture as
+  `@pytest.fixture(name="repo") def implement_repo(...)`; import the function
+  name (`from tests.support.implement_world import implement_repo  # noqa:
+  F401 - the repo fixture`) to get the fixture in that file. To reuse one under
+  another name, go through the module (`write_orchestrators.orchestrator_repo.__wrapped__`),
+  since importing the function binds its fixture name.
+- [`support/gitrepo.py`](support/gitrepo.py) runs git hermetically (`git`,
+  `init_repo`, `commit_file`, `make_repo_fixture`): the developer's
+  `~/.gitconfig` never reaches a test repository.
+- Some older test modules still re-export a moved name (a `__getattr__` at the
+  top, or a `# noqa: F401` import) because a file another change is editing
+  imports it from there; import it from `tests.support` instead.
+
 ### Fixture Pattern
 
-Common fixtures are defined in `conftest.py`:
+Fixtures every test may need, and the isolation that runs for every test, are
+defined in `conftest.py`:
 
 ```python
 @pytest.fixture
@@ -137,7 +171,7 @@ To generate a coverage report:
 
 ```bash
 # Run with coverage
-uv run -- pytest --cov=. --cov-report=html
+uv run --project skills/multi-llm -- pytest skills/multi-llm/tests --cov=skills/multi-llm --cov-report=html
 
 # Open the report
 open htmlcov/index.html
@@ -147,19 +181,15 @@ open htmlcov/index.html
 
 ### Import Errors
 
-If you see `ModuleNotFoundError`, ensure you're running from the skill directory:
-
-```bash
-cd skills/multi-llm
-uv run -- pytest
-```
+If you see `ModuleNotFoundError`, run from the repository root with the `--project` form
+shown under Quick Start; `tests/conftest.py` puts the skill directory on `sys.path`.
 
 ### Stale Fixtures
 
 If integration tests fail unexpectedly, regenerate the fixtures:
 
 ```bash
-uv run -- python tests/test_apply_suggestions_integration.py --setup-fixtures
+uv run --project skills/multi-llm -- python skills/multi-llm/tests/test_apply_suggestions_integration.py --setup-fixtures
 ```
 
 ### Plan Hash Mismatch
@@ -170,7 +200,8 @@ The state file includes a `plan_hash` that must match the actual plan content. I
 
 1. **Unit tests**: Add to the appropriate `test_*.py` file or create a new one
 2. **Integration tests**: Add to `test_apply_suggestions_integration.py` or create a new integration test file
-3. **Fixtures**: Add common fixtures to `conftest.py`
+3. **Fixtures**: Add a fixture or helper that several files share to a
+   `support/` module (see above); `conftest.py` holds the suite-wide isolation
 
 ### Example: Adding a Unit Test
 

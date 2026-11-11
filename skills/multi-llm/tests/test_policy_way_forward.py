@@ -23,21 +23,11 @@ import json
 
 import pytest
 
-from tests.test_check_gate_fixture import (  # noqa: E402
-    CHECK_GATE,
-    DENY,
-    DENY_CLAUSE,
-    PLAN,
-    PRINT,
-    STAMP,
-    _check,
-    _policy,
+from tests.support.gate_fixture import (  # noqa: E402
+    CHECK_GATE, DENY, DENY_CLAUSE, PLAN, PRINT, STAMP, _check, _policy,
 )
-from tests.test_implement_stop_account import (  # noqa: E402
-    _dispatched_titles,
-    _implement,
-    _statuses,
-    make_repo,
+from tests.support.implement_world import (  # noqa: E402
+    _dispatched_titles, _implement, _statuses, make_repo,
 )
 
 import multi_llm  # noqa: E402
@@ -99,7 +89,6 @@ def _repo(tmp_path, monkeypatch, plan: str, policy: str):
 def _fresh_config():
     yield
     registry._config = None
-    registry._config_key = None
 
 
 def _stop(repo, capsys, *flags) -> tuple:

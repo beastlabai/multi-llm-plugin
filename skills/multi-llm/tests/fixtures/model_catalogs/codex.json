@@ -1,0 +1,19 @@
+{
+  "captured": "2026-11-08",
+  "cli_version": "codex-cli 0.167.0",
+  "command": "codex debug models --bundled",
+  "ids": [
+    "codex-auto-review",
+    "gpt-5.5",
+    "gpt-5.6-luna",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-6-astra",
+    "gpt-6-luna",
+    "gpt-6-sol",
+    "gpt-6.1-sol",
+    "gpt-6.1-terra",
+    "gpt-daybreak-blue-latest",
+    "gpt-daybreak-red-latest"
+  ]
+}

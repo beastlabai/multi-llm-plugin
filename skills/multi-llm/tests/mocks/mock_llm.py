@@ -77,6 +77,9 @@ Environment Variables (New - for scenario-based testing):
     MOCK_LLM_TOUCH: Path the mock writes to before answering, so the D3e
         read-only sentinel test can prove a runner that ignores its profile is
         detectable (a genuinely read-only runner never sets this).
+    MOCK_LLM_HOLD: A path. A dispatch writes ``<path>.waiting`` (its pid) and
+        answers only once ``<path>`` exists, or after 60 s. A test overlaps two
+        runs with it: the first run's model call waits while the second runs.
     MOCK_LLM_PRINT_TIMEOUT_BEHAVIOUR: "honour" or "ignore" — agy only. Selects
         one of the two §9.6.e stubs behind `--print-timeout`: the child that
         reaches its own derived cutoff and shuts down cleanly before the outer
@@ -832,7 +835,7 @@ FILE_INSTRUCTION_RE = re.compile(
 #: literal rather than imported from `utils.providers`: this file is a stand-in
 #: for a third-party binary and must not depend on the product it fakes — the
 #: pin that keeps the two in step is
-#: `test_providers.TestDeclaredOutputChannel.CANNOT_WRITE_FILES`, and
+#: `test_provider_contract.TestDeclaredOutputChannel.CANNOT_WRITE_FILES`, and
 #: `test_fake_lane_output_channel.py` asserts this set against it.
 #:
 #: The other three declared read-only adapters (`aider` `/ask`, `qwen-code`
@@ -885,7 +888,7 @@ def shipped_file_instruction(prompt: str) -> Optional[Path]:
     """The file the SHIPPED review prompt orders the model to write, if any.
 
     This is the one spelling the product really renders
-    (``llm_client.FILE_OUTPUT_LOCATION``), and therefore the only one that means
+    (``prompt_channels.FILE_OUTPUT_LOCATION``), and therefore the only one that means
     "an adapter was asked for the file channel". The refusal gate keys on it
     alone — `MOCK_OUTPUT_PATH` and the legacy `OUTPUT_FILE:` directive are both
     a *test author* saying "put a file here", which is a property of the harness
@@ -1259,7 +1262,7 @@ def format_agy_output(content: str) -> str:
     no credential-free route to a successful run at any price.
 
     The shape below is therefore the repo's existing record of real runs —
-    `AgyProvider`'s docstring and `tests/test_providers.TestAgyProvider._envelope`
+    `AgyProvider`'s docstring and `tests/test_provider_agy.TestAgyProvider._envelope`
     — with every key corroborated **offline** against the installed binary itself
     (agy 1.1.13, `agy --version`), whose Go JSON struct tags carry `ConversationID
     json:"conversation_id"`, `Status json:"status"`, `Response json:"response"`,
@@ -2012,6 +2015,17 @@ def run_print_timeout_stub(provider: str, args: Any) -> Optional[int]:
     return 0
 
 
+def hold_until(path: Optional[str], timeout_s: float = 60.0) -> None:
+    """``MOCK_LLM_HOLD``: announce the held dispatch, then wait for the release
+    file (bounded, so a broken test never hangs the suite)."""
+    if not path:
+        return
+    Path(path + ".waiting").write_text(str(os.getpid()), encoding="utf-8")
+    deadline = time.monotonic() + timeout_s
+    while not os.path.exists(path) and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
 def main() -> int:
     """Main entry point for the unified mock LLM binary.
 
@@ -2066,6 +2080,9 @@ def main() -> int:
     args, prompt = parse_provider_args(provider)
     if not prompt:
         prompt = read_stdin_prompt()
+
+    # A dispatch held at a known point, so a test can overlap two runs.
+    hold_until(os.environ.get("MOCK_LLM_HOLD"))
 
     # A genuinely read-only runner can never do this; the D3e sentinel test uses
     # it to prove the check has teeth rather than passing vacuously.

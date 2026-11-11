@@ -29,6 +29,8 @@ Usage:
 """
 
 import json
+import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -43,20 +45,22 @@ import multi_llm  # noqa: E402
 from harness import SkillRunner  # noqa: E402
 from mocks.mock_llm import echo_subagent_answer  # noqa: E402
 from utils import task_decomposer  # noqa: E402
+from utils import write_safety  # noqa: E402
 from utils.cli_common import parse_result_line  # noqa: E402
-from utils.subagent_executor import simulate_native_invoker  # noqa: E402
+from tests.harness.native_invoker import simulate_native_invoker  # noqa: E402
+from tests.support.generate_tasks_world import (
+    PLAN_BODY,
+    RESULT_NAME,
+    TASK_FILE_NAME,
+    _materialize,
+    _phase_dir,
+    _plan,
+    _tasks_md,
+    _valid_document,
+)
+from utils import task_result  # noqa: E402
+from utils import dispatch_spawn, runner_preflight, task_dispatch  # noqa: E402
 
-PLAN_BODY = """# Task Generation Plan
-
-## Overview
-Add a foundation module and wire it into the entry point.
-
-## Step 1
-Create `src/foundation.py`.
-
-## Step 2
-Call it from `src/main.py`.
-"""
 
 #: The reserved ``progress`` keys, as ``utils/status_file.py``'s module docstring
 #: enumerates them. A foreground run writes this object now (``report_progress``
@@ -73,67 +77,10 @@ _RESERVED_PROGRESS_KEYS = {
     "subagents", "write_subagents", "sandbox_bypassed",
 }
 
-RESULT_NAME = gto.RESULT_NAME
-TASK_FILE_NAME = gto.TASK_FILE_NAME
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _plan(tmp_path: Path, name: str = "tg-plan") -> Path:
-    plan = tmp_path / f"{name}.md"
-    plan.write_text(PLAN_BODY, encoding="utf-8")
-    return plan
-
-
-def _phase_dir(plan: Path) -> Path:
-    return plan.parent / plan.stem / "generate-tasks"
-
-
-def _tasks_md(plan: Path) -> Path:
-    return plan.parent / plan.stem / "tasks" / "tasks.md"
-
-
-def _valid_document() -> dict:
-    """The document every leg of the loop is expected to accept."""
-    return {
-        "schema_version": "1.0",
-        "plan_preamble": "Foundation first, then the wiring that consumes it.",
-        "tasks": [
-            {
-                "id": "T001",
-                "title": "Create the foundation module",
-                "description": "Add src/foundation.py exporting the interface.",
-                "depends_on": [],
-                "files_to_create": ["src/foundation.py"],
-                "files_to_modify": [],
-                "acceptance_criteria": ["src/foundation.py exports the interface"],
-                "estimated_complexity": "low",
-                "executor_role": "agent",
-                "subagent_type": None,
-            },
-            {
-                "id": "T002",
-                "title": "Wire it into the entry point",
-                "description": "Call T001's interface from src/main.py.",
-                "depends_on": ["T001"],
-                "files_to_create": [],
-                "files_to_modify": ["src/main.py"],
-                "acceptance_criteria": ["src/main.py calls the interface"],
-                "estimated_complexity": "medium",
-                "executor_role": "agent",
-                "subagent_type": None,
-            },
-        ],
-    }
-
-
-def _materialize(plan: Path) -> dict:
-    """Run the phase up to (and including) the pending marker; return the task."""
-    assert multi_llm.main(["generate-tasks", str(plan)]) == 0
-    document = json.loads((_phase_dir(plan) / TASK_FILE_NAME).read_text(encoding="utf-8"))
-    return document["tasks"][0]
 
 
 def _persist(plan: Path, document) -> Path:
@@ -183,11 +130,9 @@ def exec_env(tmp_path, mock_provider, monkeypatch):
         for key, value in env.items():
             monkeypatch.setenv(key, value)
         registry._config = None
-        registry._config_key = None
 
     yield configure
     registry._config = None
-    registry._config_key = None
 
 
 # ---------------------------------------------------------------------------
@@ -429,6 +374,44 @@ class TestDocumentValidation:
         assert "parses to 1 task(s)" in err and "declared 2" in err
         assert plan.read_bytes() == before
 
+    def test_the_consumer_is_called_with_the_document_not_through_argv(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """`apply_tasks_document` gets the validated document; the CLI wrapper
+        (and its second read of the file) is never involved."""
+        plan = _plan(tmp_path)
+        _materialize(plan)
+        _persist(plan, _valid_document())
+
+        import update_plan_tasks
+
+        def no_cli(argv=None):
+            raise AssertionError("consume_document must not call main()")
+
+        monkeypatch.setattr(update_plan_tasks, "main", no_cli)
+        code = multi_llm.main(["generate-tasks", str(plan), "--yes", "--reaggregate"])
+        assert code == 0, capsys.readouterr().err
+        assert _tasks_md(plan).exists()
+
+    def test_a_refused_document_restores_the_plan(self, tmp_path, monkeypatch, capsys):
+        plan = _plan(tmp_path)
+        _materialize(plan)
+        _persist(plan, _valid_document())
+        before = plan.read_bytes()
+
+        import update_plan_tasks
+
+        def refuse(plan_path, data, *, dry_run=False):
+            update_plan_tasks.replace_file(Path(plan_path), "half-done\n")
+            raise update_plan_tasks.TasksDocumentError("SOURCE_DATE_EPOCH is bad")
+
+        monkeypatch.setattr(update_plan_tasks, "apply_tasks_document", refuse)
+        code = multi_llm.main(["generate-tasks", str(plan), "--yes", "--reaggregate"])
+        err = capsys.readouterr().err
+        assert code == 3
+        assert "refused the document (SOURCE_DATE_EPOCH is bad)" in err
+        assert plan.read_bytes() == before
+
     def test_an_unreadable_result_is_exit_three(self, tmp_path, capsys):
         plan = _plan(tmp_path)
         _materialize(plan)
@@ -437,6 +420,99 @@ class TestDocumentValidation:
             ["generate-tasks", str(plan), "--yes", "--reaggregate"]
         ) == 3
         assert "could not be read as JSON" in capsys.readouterr().err
+
+
+class TestTheMarkerIsCheckedTheWayImplementFollowsIt:
+    """Generation succeeds only on a plan implement can read its task list
+    from: the writer rewrites every marker that counts (not one quoted as
+    code), and `verify_outcome` resolves the marker with implement's own
+    resolver (`tasks_file.resolve_tasks_marker`)."""
+
+    def _generate(self, plan: Path) -> int:
+        _materialize(plan)
+        _persist(plan, _valid_document())
+        return multi_llm.main(["generate-tasks", str(plan), "--yes", "--reaggregate"])
+
+    @pytest.mark.parametrize("stray", [
+        "<!-- TASKS_FILE: tg-plan/../tg-plan/tasks/tasks.md -->",
+        "<!--TASKS_FILE: stale/tasks.md-->",
+        "<!--TASKS_FILE:-->",
+        "<!-- TASKS_FILE:-->",
+        "<!--TASKS_FILE:\n-->",
+    ])
+    def test_a_marker_under_the_title_is_rewritten_for_implement(
+        self, tmp_path, capsys, stray
+    ):
+        """The `..` marker used to be left in place: generation reported
+        success, and implement then refused the plan."""
+        from utils.tasks_file import read_task_list, tasks_marker_spans
+
+        plan = tmp_path / "tg-plan.md"
+        plan.write_text(PLAN_BODY.replace("\n", f"\n{stray}\n", 1), encoding="utf-8")
+
+        assert self._generate(plan) == 0, capsys.readouterr().err
+
+        text = plan.read_text(encoding="utf-8")
+        assert text.startswith(
+            "# Task Generation Plan\n<!-- TASKS_FILE: tg-plan/tasks/tasks.md -->\n"
+        )
+        assert {raw for _, _, raw in tasks_marker_spans(text)} == {"tg-plan/tasks/tasks.md"}
+        assert read_task_list(plan).path == _tasks_md(plan).resolve()
+
+    def test_a_quoted_example_marker_is_left_alone(self, tmp_path, capsys):
+        from utils.tasks_file import read_task_list
+
+        example = "```\n<!-- TASKS_FILE: example.md -->\n```\n"
+        plan = tmp_path / "tg-plan.md"
+        plan.write_text(PLAN_BODY + "\n" + example, encoding="utf-8")
+
+        assert self._generate(plan) == 0, capsys.readouterr().err
+
+        assert example in plan.read_text(encoding="utf-8")
+        assert read_task_list(plan).path == _tasks_md(plan).resolve()
+
+    def test_a_marker_implement_refuses_fails_generation(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Even one that leads to the rendered file: `(plan.parent /
+        marker).resolve()` accepted `tg-plan/../tg-plan/tasks/tasks.md`."""
+        import update_plan_tasks
+
+        plan = tmp_path / "tg-plan.md"
+        plan.write_text(
+            PLAN_BODY + "\n<!-- TASKS_FILE: tg-plan/../tg-plan/tasks/tasks.md -->\n",
+            encoding="utf-8",
+        )
+        _materialize(plan)
+        _persist(plan, _valid_document())
+        before = plan.read_bytes()
+        monkeypatch.setattr(
+            update_plan_tasks, "insert_tasks_file_reference",
+            lambda content, tasks_file: content,
+        )
+
+        code = multi_llm.main(["generate-tasks", str(plan), "--yes", "--reaggregate"])
+
+        err = capsys.readouterr().err
+        assert code == 3
+        assert "implement would refuse the plan's TASKS_FILE marker" in err
+        assert "climbs out with .." in err
+        assert plan.read_bytes() == before
+
+    def test_verify_outcome_refuses_disagreeing_markers(self, tmp_path):
+        plan = tmp_path / "tg-plan.md"
+        _tasks_md(plan).parent.mkdir(parents=True)
+        _tasks_md(plan).write_text("### T001: One\nBody.\n", encoding="utf-8")
+        plan.write_text(
+            PLAN_BODY + "\n<!-- TASKS_FILE: tg-plan/tasks/tasks.md -->\n"
+            "<!-- TASKS_FILE: other.md -->\n",
+            encoding="utf-8",
+        )
+
+        problems = gto.verify_outcome(plan, 1)
+
+        assert len(problems) == 1
+        assert "different task lists" in problems[0]
 
 
 class TestSemanticRules:
@@ -489,6 +565,7 @@ class TestRunnerRefusal:
     def test_an_unavailable_session_model_uses_the_executor_fallback(
         self, tmp_path, exec_env, monkeypatch, capsys
     ):
+        from utils import runner_selection
         from utils import subagent_executor as executor
         from utils.provider_registry import HOST_DEFAULT_LAYER, SESSION_LAYER
 
@@ -496,7 +573,7 @@ class TestRunnerRefusal:
         session_spec = "codex:unavailable-session-model"
         fallback_spec = "codex:gpt-5.5"
         monkeypatch.setattr(
-            executor, "resolve_subagent_runner",
+            runner_selection, "resolve_subagent_runner",
             lambda *args, skip_session=False, **kwargs: (
                 (fallback_spec, HOST_DEFAULT_LAYER) if skip_session
                 else (session_spec, SESSION_LAYER)
@@ -512,7 +589,7 @@ class TestRunnerRefusal:
                 )
             return real_preflight(spec, **kwargs)
 
-        monkeypatch.setattr(executor, "preflight_runner", preflight)
+        monkeypatch.setattr(runner_preflight, "preflight_runner", preflight)
         plan = _plan(tmp_path)
         code = multi_llm.main(
             ["generate-tasks", str(plan), "--yes", "--exec-subagents"]
@@ -799,12 +876,12 @@ class TestTheHostIsToldWhatWasProduced:
     `tasks.md`, the plan edit, or how many tasks had been generated."""
 
     def _consume_detached(self, tmp_path, monkeypatch, capsys):
-        from utils import detach, status_file
+        from utils import run_record, status_file
 
         plan = _plan(tmp_path)
         _materialize(plan)
         _persist(plan, _valid_document())
-        monkeypatch.setattr(detach, "_ACTIVE", _FakeRunHandle(_phase_dir(plan)))
+        monkeypatch.setattr(run_record, "_ACTIVE", _FakeRunHandle(_phase_dir(plan)))
         assert multi_llm.main(["generate-tasks", str(plan), "--yes", "--reaggregate"]) == 0
         capsys.readouterr()
         return plan, status_file.read_status(str(_phase_dir(plan)))
@@ -944,7 +1021,7 @@ def scripted_runner(monkeypatch):
             duration=0.01, argv=["codex", "exec", "--json"],
         )
 
-    monkeypatch.setattr(executor, "_spawn", fake_spawn)
+    monkeypatch.setattr(dispatch_spawn, "_spawn", fake_spawn)
 
     def play(*replies):
         script[:] = list(replies)
@@ -1110,7 +1187,7 @@ class TestSchemaRepairReAsk:
         runner its reply "does not match the result shape" would be false."""
         from utils import subagent_executor as executor
 
-        monkeypatch.setattr(executor, "MAX_RESULT_BYTES", 512)
+        monkeypatch.setattr(task_result, "MAX_RESULT_BYTES", 512)
         exec_env("codex:gpt-5.5")
         big = _valid_document()
         big["tasks"][0]["description"] = "x" * 2000
@@ -1162,7 +1239,7 @@ class TestSchemaRepairReAsk:
                     )
                 box["ladder"] = self
 
-        monkeypatch.setattr(executor, "RetryLadder", Ladder)
+        monkeypatch.setattr(task_dispatch, "RetryLadder", Ladder)
         scripted = executor._spawn
 
         def ticking_spawn(**kwargs):
@@ -1171,7 +1248,7 @@ class TestSchemaRepairReAsk:
                 clock["t"] += clock["tick"](box["ladder"].timeout)
             return capture
 
-        monkeypatch.setattr(executor, "_spawn", ticking_spawn)
+        monkeypatch.setattr(dispatch_spawn, "_spawn", ticking_spawn)
         return clock, box
 
     def test_a_re_ask_the_envelope_cannot_hold_keeps_the_attempts_own_status(
@@ -1432,3 +1509,402 @@ class TestSemanticRulesOnTheExecutorLane:
         assert "NOT retried" not in err
         assert "--exec-subagents" in err and "re-asks" in err
         assert "without --reaggregate" in err
+
+
+# ---------------------------------------------------------------------------
+# Every file this phase writes beside the plan stays in the plan's directory
+# ---------------------------------------------------------------------------
+
+def _tree(root: Path) -> dict:
+    """Every path under *root*: a file's bytes, inode and mtime, a link's
+    target text, ``None`` for a folder. Equal trees mean nothing was written
+    in there, not even bytes put back afterwards."""
+    found = {}
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            found[str(path)] = ("link", os.readlink(path))
+        elif path.is_dir():
+            found[str(path)] = None
+        else:
+            info = path.stat()
+            found[str(path)] = (path.read_bytes(), info.st_ino, info.st_mtime_ns)
+    return found
+
+
+def _bytes_or_none(path: Path):
+    return path.read_bytes() if path.exists() else None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="creating symlinks needs privileges on Windows")
+class TestTheOutputsStayInThePlansDirectory:
+    """A repository symlink named like one of this phase's outputs never
+    carries a write out of the plan's directory: the task list, the
+    phase folder, the task file, the rewritten result document and the
+    archived result are each contained before their first byte
+    (docs/development/write-safety.md#plan-output-containment). The plan
+    itself may still be linked in from anywhere."""
+
+    @pytest.fixture
+    def world(self, tmp_path):
+        repo = tmp_path / "repo"
+        (repo / ".git").mkdir(parents=True)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "victim.md").write_text("precious\n", encoding="utf-8")
+        return repo, outside
+
+    @staticmethod
+    def _link_the_task_list(plan: Path, target: Path) -> None:
+        _tasks_md(plan).parent.mkdir(parents=True, exist_ok=True)
+        _tasks_md(plan).symlink_to(target)
+
+    def test_a_task_list_linked_out_is_refused_before_anything_is_produced(
+            self, world, capsys):
+        repo, outside = world
+        plan = _plan(repo)
+        self._link_the_task_list(plan, outside / "victim.md")
+        outside_before = _tree(outside)
+
+        assert multi_llm.main(["generate-tasks", str(plan)]) == 3
+
+        err = capsys.readouterr().err
+        assert "Refusing the task list" in err and "Nothing was dispatched" in err
+        assert not _phase_dir(plan).exists(), "no phase folder, no task file"
+        assert _tree(outside) == outside_before
+        assert plan.read_text(encoding="utf-8") == PLAN_BODY
+
+    @pytest.mark.parametrize("entry", ["the phase", "the consumer"])
+    def test_a_task_list_linked_out_after_dispatch_is_refused_and_nothing_changes(
+            self, world, capsys, entry):
+        """The link planted between dispatch and consume: the plan, its state
+        and the file outside are byte for byte what they were, whether the
+        phase's preflight or the consumer's own check meets it."""
+        repo, outside = world
+        plan = _plan(repo)
+        _materialize(plan)
+        result = _persist(plan, _valid_document())
+        self._link_the_task_list(plan, outside / "victim.md")
+        state = plan.parent / plan.stem / "state.json"
+        plan_before, state_before = plan.read_bytes(), _bytes_or_none(state)
+        outside_before = _tree(outside)
+        capsys.readouterr()
+
+        if entry == "the phase":
+            code = multi_llm.main(["generate-tasks", str(plan), "--reaggregate"])
+        else:
+            code = gto.consume_document(plan, str(result))
+
+        assert code == 3
+        assert "Refusing the task list" in capsys.readouterr().err
+        assert _tree(outside) == outside_before, "the task list landed outside"
+        assert plan.read_bytes() == plan_before
+        assert _bytes_or_none(state) == state_before
+
+    def test_a_task_file_linked_out_is_refused(self, world, capsys):
+        repo, outside = world
+        plan = _plan(repo)
+        _phase_dir(plan).mkdir(parents=True)
+        (_phase_dir(plan) / TASK_FILE_NAME).symlink_to(outside / "victim.md")
+        outside_before = _tree(outside)
+
+        assert multi_llm.main(["generate-tasks", str(plan)]) == 3
+
+        assert "Refusing the task file" in capsys.readouterr().err
+        assert _tree(outside) == outside_before
+
+    def test_a_result_document_linked_out_is_not_rewritten(self, world, capsys):
+        """The consumer writes a supplied ``schema_version`` back into the
+        result before validating: never through a link that leads out."""
+        repo, outside = world
+        plan = _plan(repo)
+        _materialize(plan)
+        document = _valid_document()
+        document.pop("schema_version")
+        (outside / "result.json").write_text(json.dumps(document), encoding="utf-8")
+        (_phase_dir(plan) / RESULT_NAME).symlink_to(outside / "result.json")
+        outside_before = _tree(outside)
+        capsys.readouterr()
+
+        assert multi_llm.main(["generate-tasks", str(plan), "--reaggregate"]) == 3
+
+        assert "Refusing the result document" in capsys.readouterr().err
+        assert _tree(outside) == outside_before
+        assert plan.read_text(encoding="utf-8") == PLAN_BODY
+
+    def test_the_move_aside_is_contained(self, world, capsys):
+        """``--force`` archives the old result by renaming it in its folder:
+        a folder that leads out is refused, and nothing moves there."""
+        repo, outside = world
+        plan = _plan(repo)
+        _materialize(plan)
+        _persist(plan, _valid_document())
+        moved = outside / "generate-tasks"
+        shutil.move(str(_phase_dir(plan)), str(moved))
+        _phase_dir(plan).symlink_to(moved, target_is_directory=True)
+        outside_before = _tree(outside)
+        capsys.readouterr()
+
+        assert multi_llm.main(["generate-tasks", str(plan), "--force"]) == 3
+        assert "Refusing the generate-tasks folder" in capsys.readouterr().err
+        assert _tree(outside) == outside_before
+
+        # The archive's own check, met without the phase's preflight.
+        code = gto._move_result_aside(
+            plan, str(_phase_dir(plan) / RESULT_NAME), False,
+            kept="", failed=lambda exc: f"ERROR: {exc}", done=lambda path: "",
+        )
+        assert code == 3
+        assert "Refusing the archived result" in capsys.readouterr().err
+        assert _tree(outside) == outside_before, "nothing was renamed"
+
+    def test_a_task_list_linked_inside_the_plans_directory_is_written_through(
+            self, world, capsys):
+        repo, _outside = world
+        plan = _plan(repo)
+        shared = repo / "shared" / "tasks.md"
+        shared.parent.mkdir()
+        self._link_the_task_list(plan, Path("..") / ".." / "shared" / "tasks.md")
+        _materialize(plan)
+        _persist(plan, _valid_document())
+
+        assert multi_llm.main(["generate-tasks", str(plan), "--reaggregate"]) == 0
+
+        capsys.readouterr()
+        assert _tasks_md(plan).is_symlink()
+        assert "### Task T001" in shared.read_text(encoding="utf-8")
+
+    def test_a_plan_linked_in_from_outside_the_repository_still_completes(
+            self, world, capsys):
+        repo, outside = world
+        (outside / "kept").mkdir()
+        real = _plan(outside / "kept")
+        link = repo / real.name
+        link.symlink_to(real)
+        _materialize(link)
+        _persist(link, _valid_document())
+
+        assert multi_llm.main(["generate-tasks", str(link), "--reaggregate"]) == 0
+
+        capsys.readouterr()
+        assert link.is_symlink() and link.resolve() == real.resolve()
+        assert "<!-- TASKS_FILE: tg-plan/tasks/tasks.md -->" in real.read_text(
+            encoding="utf-8")
+        assert _tasks_md(link).is_file()
+
+    def test_a_failed_consume_restores_a_linked_plans_own_state(
+            self, world, capsys, monkeypatch):
+        """``StateManager`` keeps a linked plan's state beside the file the
+        link leads to, so that is the ``state.json`` the restore puts back."""
+        repo, outside = world
+        (outside / "kept").mkdir()
+        real = _plan(outside / "kept")
+        link = repo / real.name
+        link.symlink_to(real)
+        _materialize(link)
+        result = _persist(link, _valid_document())
+        state = real.parent / real.stem / "state.json"
+        plan_before, state_before = real.read_bytes(), _bytes_or_none(state)
+        monkeypatch.setattr(gto, "verify_outcome", lambda *_a, **_k: ["forced"])
+        capsys.readouterr()
+
+        assert gto.consume_document(link, str(result)) == 3
+
+        capsys.readouterr()
+        assert real.read_bytes() == plan_before
+        assert _bytes_or_none(state) == state_before, (
+            "generate-tasks must not stay recorded as completed")
+        assert not _tasks_md(link).exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="creating symlinks needs privileges on Windows")
+class TestEveryWriteGoesThroughItsHeldFolder:
+    """What a static check cannot see: a link swapped in after it, for one of
+    the phase's files or a folder above one, and the folder the executor's
+    failure captures go in (Codex's review of U86a, 2026-11-09). Every write
+    of the flow goes through its folder held below the plan's directory, so a
+    link met there is refused, never followed; every destination is checked
+    before the first write, so a refusal changes nothing in the tree
+    (docs/development/write-safety.md#plan-output-containment)."""
+
+    @pytest.fixture
+    def world(self, tmp_path):
+        repo = tmp_path / "repo"
+        (repo / ".git").mkdir(parents=True)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "victim.json").write_text('{"precious": true}\n', encoding="utf-8")
+        return tmp_path, repo, outside
+
+    @staticmethod
+    def _swap_after_check(monkeypatch, what, swap):
+        """Run *swap* once ``contain_plan_output`` has checked *what*: the
+        seam just before that file is written."""
+        import update_plan_tasks
+
+        real_check = update_plan_tasks.contain_plan_output
+        wanted, swapped = what, []
+
+        def check_then_swap(plan_path, path, *, what: str, **kwargs):
+            checked = real_check(plan_path, path, what=what, **kwargs)
+            if what == wanted and not swapped:
+                swap()
+                swapped.append(what)
+            return checked
+
+        monkeypatch.setattr(update_plan_tasks, "contain_plan_output", check_then_swap)
+        return swapped
+
+    @pytest.mark.skipif(not write_safety._PUBLISHES_BY_DESCRIPTOR,
+                        reason="the held-folder write is Linux and macOS")
+    def test_a_task_file_swapped_for_a_link_after_its_check_is_refused(
+            self, world, monkeypatch):
+        tmp_path, repo, outside = world
+        plan = _plan(repo)
+        phase = _phase_dir(plan)
+        phase.mkdir(parents=True)
+        (phase / TASK_FILE_NAME).write_text("{}", encoding="utf-8")
+
+        def swap():
+            (phase / TASK_FILE_NAME).unlink()
+            (phase / TASK_FILE_NAME).symlink_to(outside / "victim.json")
+
+        swapped = self._swap_after_check(monkeypatch, "task file", swap)
+        before = _tree(outside)
+
+        with pytest.raises(gto.TaskFileError, match="Refusing the task file"):
+            gto.materialize_task_file(plan, str(phase))
+
+        assert swapped
+        assert _tree(outside) == before, "the task file landed outside"
+
+    @pytest.mark.skipif(not write_safety._PUBLISHES_BY_DESCRIPTOR,
+                        reason="the held-folder write is Linux and macOS")
+    def test_a_result_swapped_for_a_link_after_its_check_is_not_rewritten(
+            self, world, monkeypatch, capsys):
+        """The consumer writes a supplied ``schema_version`` back into the
+        result: never through a link swapped in for it after its check."""
+        tmp_path, repo, outside = world
+        plan = _plan(repo)
+        _materialize(plan)
+        result = _persist(plan, _valid_document())
+        document = _valid_document()
+        document.pop("schema_version")
+        (outside / "victim.json").write_text(json.dumps(document), encoding="utf-8")
+
+        def swap():
+            result.unlink()
+            result.symlink_to(outside / "victim.json")
+
+        swapped = self._swap_after_check(monkeypatch, "result document", swap)
+        before, plan_before = _tree(outside), plan.read_bytes()
+        capsys.readouterr()
+
+        assert gto.consume_document(plan, str(result)) == 3
+
+        assert swapped
+        assert "could not be rewritten" in capsys.readouterr().err
+        assert _tree(outside) == before, "the result was rewritten outside"
+        assert plan.read_bytes() == plan_before
+
+    @pytest.mark.skipif(not write_safety._PUBLISHES_BY_DESCRIPTOR,
+                        reason="the held-folder write is Linux and macOS")
+    def test_a_phase_folder_swapped_for_a_link_after_its_check_moves_nothing(
+            self, world, monkeypatch, capsys):
+        """``--force`` moves the old result aside by a rename in its folder:
+        never in a folder a link swapped in after the check leads to."""
+        tmp_path, repo, outside = world
+        plan = _plan(repo)
+        _materialize(plan)
+        _persist(plan, _valid_document())
+        phase = _phase_dir(plan)
+        copy = outside / "generate-tasks"
+        shutil.copytree(phase, copy)
+
+        def swap():
+            phase.rename(phase.with_name("saved"))
+            phase.symlink_to(copy, target_is_directory=True)
+
+        swapped = self._swap_after_check(monkeypatch, "archived result", swap)
+        before = _tree(outside)
+        capsys.readouterr()
+
+        code = gto._move_result_aside(
+            plan, str(phase / RESULT_NAME), False,
+            kept="", failed=lambda exc: f"ERROR: {exc}", done=lambda path: "",
+        )
+
+        assert swapped
+        assert code == 3
+        assert "without following a link" in capsys.readouterr().err
+        assert _tree(outside) == before, "the result was moved aside outside"
+
+    def test_a_failure_capture_folder_linked_out_is_never_written(self, world):
+        """The executor's own write: a capture whose folder leads out is not
+        written, and an earlier capture there is not retired either."""
+        from utils import subagent_executor as executor
+
+        tmp_path, repo, outside = world
+        plan = _plan(repo)
+        phase = _phase_dir(plan)
+        phase.mkdir(parents=True)
+        (phase / executor.FAILED_CAPTURE_DIRNAME).symlink_to(
+            outside, target_is_directory=True)
+        (outside / f"{gto.TASK_ID}.attempt1.json").write_text("{}", encoding="utf-8")
+        before = _tree(outside)
+
+        written = executor._write_failure_capture(
+            phase_dir=str(phase), task={"task_id": gto.TASK_ID, "kind": gto.TASK_KIND},
+            attempt_index=1, argv=["runner"], prompt="the prompt", stdout="",
+            stderr="failed", exit_code=1, duration=0.01, status="execution_failed",
+            error="failed",
+        )
+
+        assert written is None
+        assert _tree(outside) == before, "a capture was written or retired outside"
+
+    def test_a_failure_capture_folder_linked_out_is_refused_before_dispatch(
+            self, world, exec_env, scripted_runner, capsys):
+        """The same folder met by the phase's own check: nothing is dispatched,
+        so no attempt can leave its capture outside."""
+        tmp_path, repo, outside = world
+        plan = _plan(repo)
+        phase = _phase_dir(plan)
+        phase.mkdir(parents=True)
+        (phase / "failed").symlink_to(outside, target_is_directory=True)
+        exec_env("codex:gpt-5.5")
+        prompts = scripted_runner(WRONG_SHAPE, _valid_document())
+        before = _tree(outside)
+
+        code = multi_llm.main(["generate-tasks", str(plan), "--yes", "--exec-subagents"])
+
+        err = capsys.readouterr().err
+        assert code == 3
+        assert "Refusing the failure-capture folder" in err
+        assert "Nothing was dispatched" in err
+        assert prompts == []
+        assert _tree(outside) == before
+
+    def test_a_task_file_linked_out_changes_nothing_in_the_tree(self, world, capsys):
+        """Refused before the scope policy is recorded, before the prompt
+        sidecar is cleaned up or written, before the task file: the whole
+        tree, the existing ``state.json`` and prompt included, is byte for
+        byte and inode for inode what it was."""
+        from utils.state_manager import StateManager
+
+        tmp_path, repo, outside = world
+        plan = _plan(repo)
+        StateManager(plan).save()
+        phase = _phase_dir(plan)
+        phase.mkdir(parents=True)
+        (phase / gto.PROMPT_FILE_NAME).write_text("an earlier prompt\n", encoding="utf-8")
+        (phase / TASK_FILE_NAME).symlink_to(outside / "victim.json")
+        state = plan.parent / plan.stem / "state.json"
+        assert state.is_file()
+        before = _tree(tmp_path)
+        capsys.readouterr()
+
+        code = multi_llm.main(["generate-tasks", str(plan), "--scope-policy", "preserve"])
+
+        assert code == 3
+        assert "Refusing the task file" in capsys.readouterr().err
+        assert _tree(tmp_path) == before, "something was written before the refusal"

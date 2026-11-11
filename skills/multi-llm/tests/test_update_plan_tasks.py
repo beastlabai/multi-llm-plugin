@@ -1,6 +1,8 @@
 """Tests for update_plan_tasks script."""
 
 import json
+import os
+import stat
 import subprocess
 import sys
 import time
@@ -13,65 +15,116 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import update_plan_tasks  # noqa: E402
-from update_plan_tasks import (
+from update_plan_tasks import (  # noqa: E402
+    apply_tasks_document,
     generate_dependency_diagram,
     generate_tasks_markdown,
     generated_stamp,
-    validate_tasks_json,
+    replace_file,
 )
+from utils import write_safety  # noqa: E402
 
 
-class TestValidateTasksJson:
-    """Tests for validate_tasks_json function."""
+def _document(tasks, preamble="Shared context for every task."):
+    """A task-generation document the executor's validator accepts.
 
-    def test_valid_tasks(self, sample_tasks_json):
-        """Test validation with valid tasks."""
-        data = {"tasks": sample_tasks_json}
-        is_valid, error = validate_tasks_json(data)
-        assert is_valid is True
-        assert error == ""
+    The shared ``sample_tasks_json`` fixture predates the schema and leaves out
+    keys it requires; they are filled here, never overwritten.
+    """
+    completed = []
+    for task in tasks:
+        full = {"acceptance_criteria": ["It works."], "executor_role": "agent"}
+        full.update(task)
+        completed.append(full)
+    return {"plan_preamble": preamble, "tasks": completed}
 
-    def test_missing_tasks_field(self):
-        """Test validation when tasks field is missing."""
-        data = {"items": []}
-        is_valid, error = validate_tasks_json(data)
-        assert is_valid is False
-        assert "Missing 'tasks' field" in error
 
-    def test_tasks_not_array(self):
-        """Test validation when tasks is not an array."""
-        data = {"tasks": "not an array"}
-        is_valid, error = validate_tasks_json(data)
-        assert is_valid is False
-        assert "'tasks' must be an array" in error
+def _write_inputs(temp_dir, document, plan_text="# My Plan\n\nSome content here.\n"):
+    plan_path = temp_dir / "my-plan.md"
+    plan_path.write_text(plan_text, encoding="utf-8")
+    tasks_json_path = temp_dir / "tasks.json"
+    tasks_json_path.write_text(json.dumps(document), encoding="utf-8")
+    return plan_path, tasks_json_path
 
-    def test_empty_tasks(self):
-        """Test validation when tasks array is empty."""
-        data = {"tasks": []}
-        is_valid, error = validate_tasks_json(data)
-        assert is_valid is False
-        assert "empty" in error
 
-    def test_task_missing_id(self):
-        """Test validation when a task is missing id."""
-        data = {"tasks": [{"title": "Test"}]}
-        is_valid, error = validate_tasks_json(data)
-        assert is_valid is False
-        assert "missing 'id'" in error
+def _main(plan_path, tasks_json_path, *extra):
+    return update_plan_tasks.main(
+        ["--plan-file", str(plan_path), "--tasks-file", str(tasks_json_path), *extra]
+    )
 
-    def test_task_missing_title(self):
-        """Test validation when a task is missing title."""
-        data = {"tasks": [{"id": "T001"}]}
-        is_valid, error = validate_tasks_json(data)
-        assert is_valid is False
-        assert "missing 'title'" in error
 
-    def test_root_not_object(self):
-        """Test validation when root is not an object."""
-        data = [{"id": "T001", "title": "Test"}]
-        is_valid, error = validate_tasks_json(data)
-        assert is_valid is False
-        assert "Root must be an object" in error
+class TestTheCliValidatesLikeTheExecutor:
+    """``util update-tasks`` applies the executor's verdict for the kind
+    (``validate_result("task_generation", ...)``): the schema, then the graph
+    rules. Each refusal names the rule and writes nothing."""
+
+    @pytest.mark.parametrize("document,needle", [
+        ({"items": []}, "missing required field 'tasks'"),
+        ({"plan_preamble": "P.", "tasks": "not an array"}, "expected type array"),
+        ({"plan_preamble": "P.", "tasks": []}, "fewer than minItems 1"),
+        ([{"id": "T001", "title": "Test"}], "expected type object"),
+    ])
+    def test_a_malformed_document_is_refused_by_name(
+            self, temp_dir, capsys, document, needle):
+        plan_path, tasks_json_path = _write_inputs(temp_dir, document)
+
+        assert _main(plan_path, tasks_json_path) == 1
+
+        err = capsys.readouterr().err
+        assert "Invalid tasks JSON" in err and needle in err, err
+        assert plan_path.read_text(encoding="utf-8") == "# My Plan\n\nSome content here.\n"
+        assert not (temp_dir / "my-plan").exists()
+
+    @pytest.mark.parametrize("drop", ["id", "title", "executor_role"])
+    def test_a_task_missing_a_required_key_is_refused(
+            self, temp_dir, sample_tasks_json, capsys, drop):
+        document = _document(sample_tasks_json)
+        document["tasks"][0].pop(drop)
+        plan_path, tasks_json_path = _write_inputs(temp_dir, document)
+
+        assert _main(plan_path, tasks_json_path) == 1
+
+        assert f"missing required field '{drop}'" in capsys.readouterr().err
+        assert not (temp_dir / "my-plan").exists()
+
+    def test_a_cyclic_list_never_reaches_the_plan(
+            self, temp_dir, sample_tasks_json, capsys):
+        """The weak id/title check let a cycle through to implement."""
+        document = _document(sample_tasks_json)
+        document["tasks"][0]["depends_on"] = ["T003"]
+        plan_path, tasks_json_path = _write_inputs(temp_dir, document)
+
+        assert _main(plan_path, tasks_json_path) == 1
+
+        assert "cycle" in capsys.readouterr().err
+        assert "TASKS_FILE" not in plan_path.read_text(encoding="utf-8")
+        assert not (temp_dir / "my-plan").exists()
+
+    def test_omitted_empty_values_are_read_as_empty_like_every_lane(
+            self, temp_dir, sample_tasks_json):
+        """Absent lists, ``subagent_type`` and ``schema_version`` mean the
+        empty value (``normalize_result``/``supply_result_version``); the
+        input file itself is not rewritten."""
+        document = _document(sample_tasks_json)
+        assert "schema_version" not in document
+        assert "files_to_modify" not in document["tasks"][0]
+        plan_path, tasks_json_path = _write_inputs(temp_dir, document)
+        before = tasks_json_path.read_bytes()
+
+        assert _main(plan_path, tasks_json_path) == 0
+
+        assert tasks_json_path.read_bytes() == before
+        assert (temp_dir / "my-plan" / "tasks" / "tasks.md").exists()
+
+    def test_the_function_raises_where_main_returns_one(self, temp_dir):
+        plan_path = temp_dir / "my-plan.md"
+        plan_path.write_text("# My Plan\n", encoding="utf-8")
+
+        with pytest.raises(update_plan_tasks.TasksDocumentInvalid) as raised:
+            apply_tasks_document(plan_path, {"tasks": []})
+        assert raised.value.errors
+        with pytest.raises(update_plan_tasks.TasksDocumentError, match="not found"):
+            apply_tasks_document(temp_dir / "missing.md", {"tasks": []})
 
 
 class TestGenerateTasksMarkdown:
@@ -279,7 +332,7 @@ class TestGeneratedStamp:
         plan_path.write_text("# My Plan\n", encoding="utf-8")
         tasks_json_path = temp_dir / "tasks.json"
         tasks_json_path.write_text(
-            json.dumps({"tasks": sample_tasks_json}), encoding="utf-8")
+            json.dumps(_document(sample_tasks_json)), encoding="utf-8")
         monkeypatch.setenv("SOURCE_DATE_EPOCH", "yesterday")
 
         code = update_plan_tasks.main(["--plan-file", str(plan_path),
@@ -303,7 +356,7 @@ class TestThePlanUpdateSaysWhatItWrote:
         plan_path.write_text("# My Plan\n\nBody.\n", encoding="utf-8")
         tasks_json_path = temp_dir / "tasks.json"
         tasks_json_path.write_text(
-            json.dumps({"tasks": sample_tasks_json}), encoding="utf-8")
+            json.dumps(_document(sample_tasks_json)), encoding="utf-8")
 
         code = update_plan_tasks.main(["--plan-file", str(plan_path),
                                        "--tasks-file", str(tasks_json_path)])
@@ -435,7 +488,7 @@ class TestUpdatePlanTasksScript:
 
         # Create tasks JSON
         tasks_json_path = temp_dir / "tasks.json"
-        tasks_json_path.write_text(json.dumps({"tasks": sample_tasks_json}), encoding="utf-8")
+        tasks_json_path.write_text(json.dumps(_document(sample_tasks_json)), encoding="utf-8")
 
         # Run script
         script_path = Path(__file__).parent.parent / "update_plan_tasks.py"
@@ -467,7 +520,7 @@ class TestUpdatePlanTasksScript:
 
         # Create tasks JSON
         tasks_json_path = temp_dir / "tasks.json"
-        tasks_json_path.write_text(json.dumps({"tasks": sample_tasks_json}), encoding="utf-8")
+        tasks_json_path.write_text(json.dumps(_document(sample_tasks_json)), encoding="utf-8")
 
         # Run script
         script_path = Path(__file__).parent.parent / "update_plan_tasks.py"
@@ -496,7 +549,7 @@ class TestUpdatePlanTasksScript:
 
         # Create tasks JSON
         tasks_json_path = temp_dir / "tasks.json"
-        tasks_json_path.write_text(json.dumps({"tasks": sample_tasks_json}), encoding="utf-8")
+        tasks_json_path.write_text(json.dumps(_document(sample_tasks_json)), encoding="utf-8")
 
         # Run script with --dry-run
         script_path = Path(__file__).parent.parent / "update_plan_tasks.py"
@@ -522,7 +575,7 @@ class TestUpdatePlanTasksScript:
         """Test error handling when plan file doesn't exist."""
         plan_path = temp_dir / "nonexistent.md"
         tasks_json_path = temp_dir / "tasks.json"
-        tasks_json_path.write_text(json.dumps({"tasks": sample_tasks_json}), encoding="utf-8")
+        tasks_json_path.write_text(json.dumps(_document(sample_tasks_json)), encoding="utf-8")
 
         script_path = Path(__file__).parent.parent / "update_plan_tasks.py"
         result = subprocess.run(
@@ -620,7 +673,7 @@ class TestThePluginsOwnPlanEdit:
         StateManager(plan_path).save()
         tasks_json_path = temp_dir / "tasks.json"
         tasks_json_path.write_text(
-            json.dumps({"plan_preamble": "P.", "tasks": sample_tasks_json}),
+            json.dumps(_document(sample_tasks_json, preamble="P.")),
             encoding="utf-8",
         )
         script_path = Path(__file__).parent.parent / "update_plan_tasks.py"
@@ -669,10 +722,10 @@ class TestPreambleStorage:
         plan_path.write_text("# My Plan\n\nSome content here.\n", encoding="utf-8")
 
         # Create tasks JSON with preamble
-        tasks_data = {
-            "plan_preamble": "This is a test preamble describing the plan goals and architecture.",
-            "tasks": sample_tasks_json
-        }
+        tasks_data = _document(
+            sample_tasks_json,
+            preamble="This is a test preamble describing the plan goals and architecture.",
+        )
         tasks_json_path = temp_dir / "tasks.json"
         tasks_json_path.write_text(json.dumps(tasks_data), encoding="utf-8")
 
@@ -698,60 +751,160 @@ class TestPreambleStorage:
         assert "plan_preamble" in state_data
         assert state_data["plan_preamble"] == "This is a test preamble describing the plan goals and architecture."
 
-    def test_script_handles_missing_preamble_gracefully(self, temp_dir, sample_tasks_json):
-        """Test that the script works when plan_preamble is missing from JSON."""
-        # Create plan file
-        plan_path = temp_dir / "my-plan.md"
-        plan_path.write_text("# My Plan\n\nSome content here.\n", encoding="utf-8")
+    @pytest.mark.parametrize("preamble", [None, ""])
+    def test_a_missing_or_empty_preamble_is_refused(
+            self, temp_dir, sample_tasks_json, capsys, preamble):
+        """The schema requires a non-empty preamble: without it every implement
+        prompt silently loses its shared context. Generate-tasks never wrote
+        one without it; ``util update-tasks`` now refuses it the same way."""
+        document = _document(sample_tasks_json, preamble=preamble)
+        if preamble is None:
+            document.pop("plan_preamble")
+        plan_path, tasks_json_path = _write_inputs(temp_dir, document)
 
-        # Create tasks JSON without preamble (legacy format)
-        tasks_data = {"tasks": sample_tasks_json}
-        tasks_json_path = temp_dir / "tasks.json"
-        tasks_json_path.write_text(json.dumps(tasks_data), encoding="utf-8")
+        assert _main(plan_path, tasks_json_path) == 1
 
-        # Run script
-        script_path = Path(__file__).parent.parent / "update_plan_tasks.py"
-        result = subprocess.run(
-            [sys.executable, str(script_path),
-             "--plan-file", str(plan_path),
-             "--tasks-file", str(tasks_json_path)],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-        )
+        assert "plan_preamble" in capsys.readouterr().err
+        assert not (temp_dir / "my-plan").exists()
 
-        assert result.returncode == 0, f"Script failed: {result.stderr}"
-        # Should not mention storing preamble since there was none
-        assert "Stored plan preamble" not in result.stdout
 
-    def test_script_handles_empty_preamble(self, temp_dir, sample_tasks_json):
-        """Test that the script handles empty preamble string."""
-        # Create plan file
-        plan_path = temp_dir / "my-plan.md"
-        plan_path.write_text("# My Plan\n\nSome content here.\n", encoding="utf-8")
+class TestThePlanWriteIsAtomic:
+    """Both writes go through a sibling temp file and ``os.replace``: a write
+    that fails part-way leaves the old bytes, never a truncated plan."""
 
-        # Create tasks JSON with empty preamble
-        tasks_data = {
-            "plan_preamble": "",
-            "tasks": sample_tasks_json
-        }
-        tasks_json_path = temp_dir / "tasks.json"
-        tasks_json_path.write_text(json.dumps(tasks_data), encoding="utf-8")
+    class _Torn:
+        """A stream that writes half its data, then fails like a full disk."""
 
-        # Run script
-        script_path = Path(__file__).parent.parent / "update_plan_tasks.py"
-        result = subprocess.run(
-            [sys.executable, str(script_path),
-             "--plan-file", str(plan_path),
-             "--tasks-file", str(tasks_json_path)],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-        )
+        def __init__(self, stream):
+            self._stream = stream
 
-        assert result.returncode == 0, f"Script failed: {result.stderr}"
-        # Should not store empty preamble
-        assert "Stored plan preamble" not in result.stdout
+        def write(self, data):
+            self._stream.write(data[: len(data) // 2])
+            self._stream.flush()
+            raise OSError(28, "No space left on device")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._stream.close()
+
+        def __getattr__(self, name):
+            return getattr(self._stream, name)
+
+    def _tear_write(self, monkeypatch, which):
+        """Tear the *which*-th (1-based) file write; earlier ones succeed."""
+        real_fdopen = os.fdopen
+        calls = []
+
+        def fdopen(fd, *args, **kwargs):
+            stream = real_fdopen(fd, *args, **kwargs)
+            calls.append(fd)
+            return self._Torn(stream) if len(calls) == which else stream
+
+        monkeypatch.setattr(update_plan_tasks.os, "fdopen", fdopen)
+
+    def test_a_failure_mid_write_leaves_the_plan_intact(
+            self, temp_dir, sample_tasks_json, monkeypatch):
+        plan_path, _ = _write_inputs(temp_dir, {})
+        before = plan_path.read_bytes()
+        # tasks.md first, then the plan: the plan's is the first stream where
+        # tasks.md goes in by descriptor through its held folder.
+        self._tear_write(
+            monkeypatch, which=1 if write_safety._PUBLISHES_BY_DESCRIPTOR else 2)
+
+        with pytest.raises(OSError, match="No space left"):
+            apply_tasks_document(plan_path, _document(sample_tasks_json))
+        monkeypatch.undo()
+
+        assert plan_path.read_bytes() == before
+        assert sorted(p.name for p in temp_dir.iterdir()) == [
+            "my-plan", "my-plan.md", "tasks.json",
+        ], "no temp file is left beside the plan"
+
+    def test_replace_file_keeps_the_old_bytes_on_a_torn_write(
+            self, temp_dir, monkeypatch):
+        target = temp_dir / "plan.md"
+        target.write_bytes(b"old bytes\n")
+        self._tear_write(monkeypatch, which=1)
+
+        with pytest.raises(OSError):
+            replace_file(target, "new text that is never fully written\n")
+        monkeypatch.undo()
+
+        assert target.read_bytes() == b"old bytes\n"
+        assert [p.name for p in temp_dir.iterdir()] == ["plan.md"]
+
+    def test_text_is_written_like_write_text_and_bytes_exactly(self, temp_dir):
+        target = temp_dir / "plan.md"
+        replace_file(target, "a\nb\n")
+        expected = temp_dir / "expected.md"
+        expected.write_text("a\nb\n", encoding="utf-8")
+        assert target.read_bytes() == expected.read_bytes()
+        replace_file(target, b"a\r\nb")
+        assert target.read_bytes() == b"a\r\nb"
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits and symlinks")
+    def test_mode_bits_and_a_symlinked_plan_survive(
+            self, temp_dir, sample_tasks_json):
+        real = temp_dir / "real" / "my-plan.md"
+        real.parent.mkdir()
+        real.write_text("# My Plan\n", encoding="utf-8")
+        real.chmod(0o640)
+        link = temp_dir / "my-plan.md"
+        link.symlink_to(real)
+
+        replace_file(link, "# My Plan\n\nEdited.\n")
+
+        assert link.is_symlink() and os.readlink(link) == str(real)
+        assert real.read_text(encoding="utf-8") == "# My Plan\n\nEdited.\n"
+        assert stat.S_IMODE(real.stat().st_mode) == 0o640
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX mode bits")
+    def test_a_private_file_is_never_readable_more_widely_while_replaced(
+            self, temp_dir, monkeypatch):
+        target = temp_dir / "plan.md"
+        target.write_text("old\n", encoding="utf-8")
+        target.chmod(0o600)
+        seen = []
+        real_fsync = os.fsync
+
+        def watching_fsync(descriptor):
+            info = os.fstat(descriptor)
+            if stat.S_ISREG(info.st_mode):
+                seen.append(stat.S_IMODE(info.st_mode))
+            return real_fsync(descriptor)
+
+        previous = os.umask(0o022)
+        try:
+            monkeypatch.setattr(os, "fsync", watching_fsync)
+            replace_file(target, "private\n")
+        finally:
+            os.umask(previous)
+        assert seen == [0o600]
+        assert stat.S_IMODE(target.stat().st_mode) == 0o600
+        assert target.read_text(encoding="utf-8") == "private\n"
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX directory fsync")
+    def test_the_directory_is_flushed_after_the_rename(self, temp_dir, monkeypatch):
+        target = temp_dir / "plan.md"
+        target.write_text("old\n", encoding="utf-8")
+        events = []
+        real_fsync, real_replace = os.fsync, os.replace
+
+        def recording_fsync(descriptor):
+            kind = "dir" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file"
+            events.append(kind)
+            return real_fsync(descriptor)
+
+        def recording_replace(source, destination):
+            events.append("replace")
+            return real_replace(source, destination)
+
+        monkeypatch.setattr(os, "fsync", recording_fsync)
+        monkeypatch.setattr(os, "replace", recording_replace)
+        replace_file(target, "new\n")
+        assert events == ["file", "replace", "dir"]
 
 
 class TestHumanTaskRendering:
@@ -853,3 +1006,285 @@ class TestInPlanTaskSections:
 
         plan = "# Plan\n\n## Subtasks of the design\n\n### Task 3: API\n\n## Testing\n"
         assert find_in_plan_task_sections(plan) == []
+
+
+def _tree(root):
+    """Every path under *root*: a file's bytes, inode and mtime, a link's
+    target text, ``None`` for a folder. Equal trees mean nothing was written
+    in there, not even bytes put back afterwards."""
+    found = {}
+    for path in sorted(Path(root).rglob("*")):
+        if path.is_symlink():
+            found[str(path)] = ("link", os.readlink(path))
+        elif path.is_dir():
+            found[str(path)] = None
+        else:
+            info = path.stat()
+            found[str(path)] = (path.read_bytes(), info.st_ino, info.st_mtime_ns)
+    return found
+
+
+@pytest.mark.skipif(os.name == "nt", reason="creating symlinks needs privileges on Windows")
+class TestTheTaskListStaysInThePlansDirectory:
+    """The task list is written through a symlink only while the link leads
+    somewhere inside the plan's directory: a repository link named like the
+    output (the list, its folder, the plan's output folder) that leads out is
+    refused before anything is written, and the plan and its state stay as
+    they were (docs/development/write-safety.md#plan-output-containment). The
+    plan itself may still be linked in from anywhere."""
+
+    @pytest.fixture
+    def world(self, temp_dir):
+        repo = temp_dir / "repo"
+        (repo / ".git").mkdir(parents=True)
+        outside = temp_dir / "outside"
+        outside.mkdir()
+        (outside / "victim.md").write_text("precious\n", encoding="utf-8")
+        plan = repo / "my-plan.md"
+        plan.write_text("# My Plan\n\nSome content here.\n", encoding="utf-8")
+        return repo, outside, plan
+
+    @staticmethod
+    def _plant(repo, outside, where):
+        output = repo / "my-plan"
+        if where == "the list":
+            (output / "tasks").mkdir(parents=True)
+            (output / "tasks" / "tasks.md").symlink_to(outside / "victim.md")
+        elif where == "a dangling list":
+            (output / "tasks").mkdir(parents=True)
+            (output / "tasks" / "tasks.md").symlink_to(outside / "new.md")
+        elif where == "its folder":
+            output.mkdir()
+            (output / "tasks").symlink_to(outside, target_is_directory=True)
+        else:  # the plan's output folder
+            output.symlink_to(outside, target_is_directory=True)
+
+    @pytest.mark.parametrize("where", [
+        "the list", "a dangling list", "its folder", "the output folder",
+    ])
+    def test_a_link_out_of_the_repository_is_refused_and_nothing_is_written(
+            self, world, sample_tasks_json, where, capsys):
+        repo, outside, plan = world
+        self._plant(repo, outside, where)
+        tasks_json = repo.parent / "tasks.json"
+        tasks_json.write_text(json.dumps(_document(sample_tasks_json)), encoding="utf-8")
+        plan_before = plan.read_bytes()
+        outside_before = _tree(outside)
+        repo_before = _tree(repo)
+
+        assert _main(plan, tasks_json) == 1
+
+        err = capsys.readouterr().err
+        assert "Refusing the task list" in err
+        assert "nothing was written" in err
+        assert _tree(outside) == outside_before, "a write landed outside the repository"
+        assert plan.read_bytes() == plan_before
+        assert _tree(repo) == repo_before, "no state.json, no folder, no marker"
+
+    def test_a_dry_run_reports_the_same_refusal_and_creates_no_folder(
+            self, world, sample_tasks_json):
+        repo, outside, plan = world
+        self._plant(repo, outside, "the output folder")
+        outside_before = _tree(outside)
+
+        for dry_run in (True, False):
+            with pytest.raises(update_plan_tasks.TasksOutputEscape) as refused:
+                apply_tasks_document(
+                    plan, _document(sample_tasks_json), dry_run=dry_run)
+            assert isinstance(refused.value, update_plan_tasks.TasksDocumentError)
+        assert _tree(outside) == outside_before, "not even the tasks/ folder"
+
+    def test_a_link_inside_the_plans_directory_is_written_through(
+            self, world, sample_tasks_json):
+        repo, _outside, plan = world
+        shared = repo / "shared" / "my-tasks.md"
+        shared.parent.mkdir()
+        (repo / "my-plan" / "tasks").mkdir(parents=True)
+        link = repo / "my-plan" / "tasks" / "tasks.md"
+        link.symlink_to(Path("..") / ".." / "shared" / "my-tasks.md")
+        tasks_json = repo.parent / "tasks.json"
+        tasks_json.write_text(json.dumps(_document(sample_tasks_json)), encoding="utf-8")
+
+        assert _main(plan, tasks_json) == 0
+
+        assert link.is_symlink(), "the link survives"
+        assert "### Task T001" in shared.read_text(encoding="utf-8")
+        assert "<!-- TASKS_FILE: my-plan/tasks/tasks.md -->" in plan.read_text(
+            encoding="utf-8")
+        from utils.tasks_file import resolve_tasks_marker
+        assert resolve_tasks_marker(plan) == shared.resolve(), (
+            "implement reads the list the link leads to")
+
+    def test_a_link_elsewhere_in_the_repository_is_refused_where_implement_would_refuse_it(
+            self, temp_dir, sample_tasks_json):
+        """The boundary is the plan's directory, the one implement reads the
+        list from (``tasks_file.resolve_tasks_marker``): a list written
+        elsewhere in the repository is one implement then refuses, and the
+        link could name any tracked file."""
+        repo = temp_dir / "repo"
+        (repo / ".git").mkdir(parents=True)
+        source = repo / "src" / "main.py"
+        source.parent.mkdir()
+        source.write_text("print('keep me')\n", encoding="utf-8")
+        plan = repo / "plans" / "my-plan.md"
+        plan.parent.mkdir()
+        plan.write_text("# My Plan\n", encoding="utf-8")
+        (plan.parent / "my-plan" / "tasks").mkdir(parents=True)
+        (plan.parent / "my-plan" / "tasks" / "tasks.md").symlink_to(source)
+
+        with pytest.raises(update_plan_tasks.TasksOutputEscape):
+            apply_tasks_document(plan, _document(sample_tasks_json))
+
+        assert source.read_text(encoding="utf-8") == "print('keep me')\n"
+        from utils.tasks_file import TasksFileRefused, _resolve_one
+        with pytest.raises(TasksFileRefused):
+            _resolve_one(str(plan.parent), "my-plan/tasks/tasks.md")
+
+    def test_a_plan_linked_in_from_outside_the_repository_still_works(
+            self, world, sample_tasks_json):
+        """The plan is the user's own file, written through its link wherever
+        that leads; its outputs stay beside the name it is reached by."""
+        repo, outside, _plan = world
+        real = outside / "plans" / "linked-plan.md"
+        real.parent.mkdir()
+        real.write_text("# Linked\n\nBody.\n", encoding="utf-8")
+        link = repo / "linked-plan.md"
+        link.symlink_to(real)
+
+        # In-process, as generate-tasks calls it: the link's own path.
+        apply_tasks_document(link, _document(sample_tasks_json))
+        assert link.is_symlink() and link.resolve() == real.resolve()
+        assert "<!-- TASKS_FILE: linked-plan/tasks/tasks.md -->" in real.read_text(
+            encoding="utf-8")
+        assert (repo / "linked-plan" / "tasks" / "tasks.md").is_file()
+
+        # `util update-tasks` resolves the plan first: the outputs go beside it.
+        real.write_text("# Linked\n\nBody.\n", encoding="utf-8")
+        tasks_json = repo.parent / "tasks.json"
+        tasks_json.write_text(json.dumps(_document(sample_tasks_json)), encoding="utf-8")
+        assert _main(link, tasks_json) == 0
+        assert link.is_symlink()
+        assert (real.parent / "linked-plan" / "tasks" / "tasks.md").is_file()
+        assert "<!-- TASKS_FILE:" in real.read_text(encoding="utf-8")
+
+    def test_a_looping_link_fails_the_write_alike_on_every_python(
+            self, world, sample_tasks_json):
+        """The check resolves the way the write does (``os.path.realpath``),
+        so a link that leads nowhere is the write's own ``OSError`` on every
+        Python, the plan untouched, never a ``RuntimeError`` from the check
+        (``Path.resolve`` raised one on a loop before 3.13)."""
+        repo, _outside, plan = world
+        (repo / "my-plan" / "tasks").mkdir(parents=True)
+        link = repo / "my-plan" / "tasks" / "tasks.md"
+        link.symlink_to("tasks.md")
+        plan_before = plan.read_bytes()
+
+        with pytest.raises(OSError):
+            apply_tasks_document(plan, _document(sample_tasks_json))
+
+        assert link.is_symlink() and os.readlink(link) == "tasks.md"
+        assert plan.read_bytes() == plan_before
+
+    def test_a_colon_in_the_plans_directory_is_not_an_escape(
+            self, temp_dir, sample_tasks_json):
+        """The check is for paths the plugin computed, not ones a model
+        supplied: a POSIX directory name may hold a colon, which the
+        task-path check (``contain_under_root``) reads as an NTFS stream."""
+        repo = temp_dir / "proj:2"
+        (repo / ".git").mkdir(parents=True)
+        plan = repo / "my-plan.md"
+        plan.write_text("# My Plan\n", encoding="utf-8")
+
+        apply_tasks_document(plan, _document(sample_tasks_json))
+
+        assert (repo / "my-plan" / "tasks" / "tasks.md").is_file()
+
+
+@pytest.mark.skipif(not write_safety._PUBLISHES_BY_DESCRIPTOR,
+                    reason="the held-folder write is Linux and macOS; Windows writes by path")
+class TestALinkSwappedInAfterTheCheckIsNeverWrittenThrough:
+    """A check of the task list's path followed by a write by that path can be
+    redirected in between: a link swapped in for the list, or for its folder,
+    after the containment check and before the write (Codex's review of U86a,
+    2026-11-09). The list is written through its folder, held below the
+    plan's directory and reached without following a link, so the link is
+    refused or replaced, never followed: the file outside, the plan and its
+    state stay as they were
+    (docs/development/write-safety.md#plan-output-containment)."""
+
+    @pytest.fixture
+    def world(self, temp_dir):
+        repo = temp_dir / "repo"
+        (repo / ".git").mkdir(parents=True)
+        outside = temp_dir / "outside"
+        outside.mkdir()
+        (outside / "tasks.md").write_text("precious\n", encoding="utf-8")
+        plan = repo / "my-plan.md"
+        plan.write_text("# My Plan\n\nSome content here.\n", encoding="utf-8")
+        folder = repo / "my-plan" / "tasks"
+        folder.mkdir(parents=True)
+        (folder / "tasks.md").write_text("the old list\n", encoding="utf-8")
+        return repo, outside, plan, folder
+
+    @staticmethod
+    def _swap(folder, outside, swap):
+        if swap == "the list":
+            (folder / "tasks.md").unlink()
+            (folder / "tasks.md").symlink_to(outside / "tasks.md")
+        else:
+            folder.rename(folder.with_name("saved"))
+            folder.symlink_to(outside, target_is_directory=True)
+
+    @pytest.mark.parametrize("swap", ["the list", "its folder"])
+    def test_a_link_swapped_in_just_before_the_write_is_refused(
+            self, world, sample_tasks_json, monkeypatch, swap):
+        """The seam: the containment check returns, then the swap."""
+        repo, outside, plan, folder = world
+        real_check = update_plan_tasks.contain_plan_output
+
+        def check_then_swap(*args, **kwargs):
+            checked = real_check(*args, **kwargs)
+            self._swap(folder, outside, swap)
+            return checked
+
+        monkeypatch.setattr(update_plan_tasks, "contain_plan_output", check_then_swap)
+        outside_before, plan_before = _tree(outside), plan.read_bytes()
+
+        with pytest.raises(OSError, match="nothing was written"):
+            apply_tasks_document(plan, _document(sample_tasks_json))
+
+        assert _tree(outside) == outside_before, "the list landed outside"
+        assert plan.read_bytes() == plan_before
+        assert not (repo / "my-plan" / "state.json").exists()
+
+    @pytest.mark.parametrize("swap", ["the list", "its folder"])
+    def test_a_link_swapped_in_while_the_list_is_staged_is_never_followed(
+            self, world, sample_tasks_json, monkeypatch, swap):
+        """The seam: the folder held and the list staged in it, just before
+        the rename. A link at the list's name is replaced by the list, its
+        target untouched; a folder replaced by a link is no longer the one
+        held, so nothing is renamed into it."""
+        repo, outside, plan, folder = world
+        real_check = write_safety._check_staged
+        swapped = []
+
+        def swap_then_check(*args, **kwargs):
+            if not swapped:
+                self._swap(folder, outside, swap)
+                swapped.append(swap)
+            return real_check(*args, **kwargs)
+
+        monkeypatch.setattr(write_safety, "_check_staged", swap_then_check)
+        outside_before, plan_before = _tree(outside), plan.read_bytes()
+
+        if swap == "the list":
+            apply_tasks_document(plan, _document(sample_tasks_json))
+            assert not (folder / "tasks.md").is_symlink()
+            assert "### Task T001" in (folder / "tasks.md").read_text(encoding="utf-8")
+        else:
+            with pytest.raises(OSError, match="moved or replaced"):
+                apply_tasks_document(plan, _document(sample_tasks_json))
+            assert plan.read_bytes() == plan_before
+
+        assert swapped, "the list went in through its held folder"
+        assert _tree(outside) == outside_before, "the list landed outside"

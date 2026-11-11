@@ -1,6 +1,6 @@
 """The commit-review path layer (plans/review-commits.md §2.2, §2.4, §2.8).
 
-``utils/commit_review.py``'s helpers that decide where a commit brief lives,
+``utils/commit_paths.py``'s helpers that decide where a commit brief lives,
 whether a file is one, which brief a pinned range names, and which paths are a
 commit review's own files. Plus the class drop those feed:
 ``code_review_orchestrator._drop_workflow_paths`` and finalize_tracking's
@@ -26,8 +26,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import code_review_orchestrator as cro
 import finalize_tracking
-from utils import commit_review
-from utils.commit_review import (
+from utils import commit_paths
+from utils.commit_paths import (
     BRIEF_END_MARKER,
     BRIEF_MARKER,
     CommitReviewError,
@@ -145,7 +145,7 @@ class TestBriefPaths:
         def refuse(anchor=None):
             raise ConfigError("multi-llm config error: code_review.commit_reviews_dir …")
 
-        monkeypatch.setattr(commit_review, "get_commit_reviews_dir", refuse)
+        monkeypatch.setattr(commit_paths, "get_commit_reviews_dir", refuse)
         assert commit_reviews_folder_rel(repo) is None
 
 
@@ -154,8 +154,8 @@ class TestPatternsMatchTheRangeGrammar:
         """Kept here so this module never imports the range grammar; the two
         copies must stay one text."""
         commit_range = pytest.importorskip("utils.commit_range")
-        assert commit_review.SLUG_PATTERN == commit_range.SLUG_PATTERN
-        assert commit_review.PINNED_PATTERN == commit_range.PINNED_PATTERN
+        assert commit_paths.SLUG_PATTERN == commit_range.SLUG_PATTERN
+        assert commit_paths.PINNED_PATTERN == commit_range.PINNED_PATTERN
 
     def test_the_markers(self):
         assert BRIEF_MARKER == "<!-- multi-llm:commit-brief v1 -->"
@@ -231,7 +231,7 @@ class TestIsCommitBrief:
         def refuse(anchor=None):
             raise ConfigError("multi-llm config error: code_review.commit_reviews_dir …")
 
-        monkeypatch.setattr(commit_review, "get_commit_reviews_dir", refuse)
+        monkeypatch.setattr(commit_paths, "get_commit_reviews_dir", refuse)
         assert not is_commit_brief(cut)
         assert is_commit_brief(marked)
 
@@ -242,7 +242,6 @@ class TestIsCommitBrief:
         _write(repo / ".multi-llm" / "providers.yaml",
                "code_review:\n  commit_reviews_dir: reviews/commits\n")
         registry._config = None
-        registry._config_key = None
         assert is_commit_brief(_write(repo / "reviews" / "commits" / f"{SLUG}.md", "# x\n"))
         assert not is_commit_brief(_write(repo / FOLDER / f"{SLUG}.md", "# x\n"))
 
@@ -544,7 +543,7 @@ class TestTheClassDropInTheReviewScope:
         def refuse(anchor=None):
             raise ConfigError("multi-llm config error: code_review.commit_reviews_dir …")
 
-        monkeypatch.setattr(commit_review, "get_commit_reviews_dir", refuse)
+        monkeypatch.setattr(commit_paths, "get_commit_reviews_dir", refuse)
         paths = REVIEW_FILES + [NOTES]
         assert cro._drop_workflow_paths(paths, [], repo_root=str(repo)) == paths
         assert "Left out" not in capsys.readouterr().out
@@ -600,6 +599,6 @@ class TestTheClassDropInTrackedFiles:
         def refuse(anchor=None):
             raise ConfigError("multi-llm config error: code_review.commit_reviews_dir …")
 
-        monkeypatch.setattr(commit_review, "get_commit_reviews_dir", refuse)
+        monkeypatch.setattr(commit_paths, "get_commit_reviews_dir", refuse)
         paths = REVIEW_FILES + [NOTES]
         assert finalize_tracking._drop_workflow_files(paths, [], lambda _line: None) == paths

@@ -1,9 +1,11 @@
 """Integration tests for validation subagent support in orchestrators.
 
 Tests the CLI flags and output markers:
-- review_plan_orchestrator.py: --internal-validation flag and [VALIDATION_PENDING] marker
-- apply_suggestions_orchestrator.py: --internal-revalidation flag and [REVALIDATION_PENDING] marker
-- apply_code_fixes_orchestrator.py: --internal-revalidation flag and [REVALIDATION_PENDING] marker
+- review_plan_orchestrator.py: [VALIDATION_PENDING] marker
+- apply_suggestions_orchestrator.py: [REVALIDATION_PENDING] marker
+- apply_code_fixes_orchestrator.py: [REVALIDATION_PENDING] marker
+- the retired --internal-validation / --internal-revalidation flags, which still
+  parse, warn once and change nothing (the in-process lane is gone)
 """
 import json
 import os
@@ -14,6 +16,10 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from utils import cli_common  # noqa: E402
 
 
 # Get the skill directory for running orchestrators
@@ -148,41 +154,93 @@ def temp_plan_with_code_review_results(temp_plan_dir):
 # Review Plan Orchestrator Tests
 # ============================================================================
 
-class TestReviewPlanOrchestratorCLI:
-    """Tests for review_plan_orchestrator.py CLI argument parsing."""
+def _parse(script: str, argv):
+    """*script*'s own ``parse_args`` on *argv*, in-process."""
+    if script == "review_plan":
+        import review_plan_orchestrator as module
 
-    def test_internal_validation_flag_recognized(self, temp_plan_dir):
-        """--internal-validation flag is recognized."""
-        # This test just verifies the flag is parsed without error
-        # We mock the actual execution since we can't run full orchestration
+        return module.parse_args(argv)
+    if script == "review_tasks":
+        import review_tasks_orchestrator as module
+
+        return module.parse_args(argv)
+    if script == "apply_suggestions":
+        from apply_suggestions_orchestrator import ApplySuggestionsOrchestrator
+
+        return ApplySuggestionsOrchestrator.parse_args(argv)
+    from apply_code_fixes_orchestrator import ApplyCodeFixesOrchestrator
+
+    return ApplyCodeFixesOrchestrator.parse_args(argv)
+
+
+RETIRED_FLAG_CASES = [
+    ("review_plan", "--internal-validation"),
+    ("review_tasks", "--internal-validation"),
+    ("apply_suggestions", "--internal-revalidation"),
+    ("apply_code_fixes", "--internal-revalidation"),
+]
+
+
+class TestRetiredInProcessFlags:
+    """The in-process validation lane is retired; its flags warn, never fail.
+
+    Each still parses (an old command line completes), prints one stderr line
+    naming the delegated route, and leaves the namespace exactly as a run
+    without it — so nothing downstream can branch on it.
+    """
+
+    @pytest.mark.parametrize("script,flag", RETIRED_FLAG_CASES)
+    def test_parses_warns_once_and_changes_nothing(self, script, flag, capsys):
+        base_argv = ["--plan-file", "p.md"]
+        default = _parse(script, base_argv)
+        capsys.readouterr()
+
+        # Typed twice, still one line: the notice is per parse, not per token.
+        args = _parse(script, base_argv + [flag, flag])
+        err = capsys.readouterr().err
+
+        assert vars(args) == vars(default)
+        notices = [line for line in err.splitlines() if "is retired" in line]
+        assert notices == [cli_common.RETIRED_FLAGS[flag]]
+        assert "delegated subagent route" in notices[0]
+
+    @pytest.mark.parametrize("script,flag", RETIRED_FLAG_CASES)
+    def test_hidden_from_help(self, script, flag, capsys):
+        with pytest.raises(SystemExit) as exit_info:
+            _parse(script, ["--help"])
+        assert exit_info.value.code == 0
+        assert flag not in capsys.readouterr().out
+
+    @pytest.mark.parametrize("flag", sorted(cli_common.RETIRED_FLAGS))
+    def test_never_replayed_into_a_follow_up(self, flag):
+        """A replayed retired flag would make `set_next` drop the whole command."""
+        replay = cli_common.replay_flags(
+            "review-plan", ["--plan-file", "p.md", flag, "--quick"]
+        )
+        assert replay == ["--quick"]
+
+    def test_apply_revalidation_takes_the_delegated_route(
+        self, temp_plan_with_review_results
+    ):
+        """--internal-revalidation used to revalidate in-process and continue;
+        now it materializes the task file and stops at the marker, as without it."""
         result = subprocess.run(
             [
-                sys.executable, str(SKILL_DIR / "review_plan_orchestrator.py"),
-                "--plan-file", str(temp_plan_dir),
-                "--internal-validation",
-                "--skip-validation",  # Skip actual validation to avoid needing LLM
-                "--help"  # Just test help to verify flag is recognized
+                sys.executable, str(SKILL_DIR / "apply_suggestions_orchestrator.py"),
+                "--plan-file", str(temp_plan_with_review_results),
+                "--revalidate", "--internal-revalidation", "--no-confirm",
             ],
             capture_output=True,
             text=True,
             cwd=str(SKILL_DIR),
             encoding="utf-8",
         )
-        # --help should show the flag
-        assert "--internal-validation" in result.stdout
-
-    def test_help_shows_internal_validation_option(self, temp_plan_dir):
-        """Help output includes --internal-validation option."""
-        result = subprocess.run(
-            [sys.executable, str(SKILL_DIR / "review_plan_orchestrator.py"), "--help"],
-            capture_output=True,
-            text=True,
-            cwd=str(SKILL_DIR),
-            encoding="utf-8",
-        )
-        assert result.returncode == 0
-        assert "--internal-validation" in result.stdout
-        assert "legacy" in result.stdout.lower() or "orchestrator" in result.stdout.lower()
+        assert result.returncode == 0, result.stderr
+        assert result.stderr.count("--internal-revalidation is retired") == 1
+        assert "Running internal revalidation" not in result.stderr
+        assert "[REVALIDATION_PENDING]" in result.stdout
+        review_dir = temp_plan_with_review_results.parent / "test-plan" / "review-plan"
+        assert (review_dir / "revalidation_tasks.json").is_file()
 
 
 class TestReviewPlanOrchestratorValidationPending:
@@ -218,66 +276,8 @@ class TestReviewPlanOrchestratorValidationPending:
 # Apply Suggestions Orchestrator Tests
 # ============================================================================
 
-class TestApplySuggestionsOrchestratorCLI:
-    """Tests for apply_suggestions_orchestrator.py CLI argument parsing."""
-
-    def test_internal_revalidation_flag_recognized(self):
-        """--internal-revalidation flag is recognized."""
-        result = subprocess.run(
-            [sys.executable, str(SKILL_DIR / "apply_suggestions_orchestrator.py"), "--help"],
-            capture_output=True,
-            text=True,
-            cwd=str(SKILL_DIR),
-            encoding="utf-8",
-        )
-        assert result.returncode == 0
-        assert "--internal-revalidation" in result.stdout
-
-    def test_help_shows_internal_revalidation_option(self):
-        """Help output includes --internal-revalidation option."""
-        result = subprocess.run(
-            [sys.executable, str(SKILL_DIR / "apply_suggestions_orchestrator.py"), "--help"],
-            capture_output=True,
-            text=True,
-            cwd=str(SKILL_DIR),
-            encoding="utf-8",
-        )
-        assert result.returncode == 0
-        assert "--internal-revalidation" in result.stdout
-        assert "legacy" in result.stdout.lower() or "orchestrator" in result.stdout.lower()
-
-
 class TestApplySuggestionsOrchestratorRevalidation:
     """Tests for revalidation subagent support in apply_suggestions_orchestrator."""
-
-    def test_revalidation_task_json_structure(self):
-        """Test the structure of revalidation_task.json output."""
-        from utils.validation import prepare_revalidation_task
-
-        groups = [
-            {"theme": "Test", "category": "test", "models": [], "suggestions": []},
-        ]
-        validation_results = [
-            {"group_index": 0, "status": "validation_failed", "reason": "Error", "confidence": 0.0, "error_type": "timeout", "recoverable": True},
-        ]
-        context = "Test context"
-        output_path = "/tmp/revalidation.json"
-
-        result = prepare_revalidation_task(groups, validation_results, context, output_path)
-
-        # Verify structure
-        assert "prompt" in result
-        assert "output_path" in result
-        assert "items_to_revalidate" in result
-        assert "item_indices" in result
-        assert "original_validation" in result
-        assert "model_hint" in result
-
-        # Verify values
-        assert result["output_path"] == output_path
-        assert result["items_to_revalidate"] == 1
-        assert 0 in result["item_indices"]
-        assert result["original_validation"] == validation_results
 
     def test_dry_run_with_revalidation(self, temp_plan_with_review_results):
         """--dry-run with --revalidate shows what would be revalidated."""
@@ -300,35 +300,6 @@ class TestApplySuggestionsOrchestratorRevalidation:
 # ============================================================================
 # Apply Code Fixes Orchestrator Tests
 # ============================================================================
-
-class TestApplyCodeFixesOrchestratorCLI:
-    """Tests for apply_code_fixes_orchestrator.py CLI argument parsing."""
-
-    def test_internal_revalidation_flag_recognized(self):
-        """--internal-revalidation flag is recognized."""
-        result = subprocess.run(
-            [sys.executable, str(SKILL_DIR / "apply_code_fixes_orchestrator.py"), "--help"],
-            capture_output=True,
-            text=True,
-            cwd=str(SKILL_DIR),
-            encoding="utf-8",
-        )
-        assert result.returncode == 0
-        assert "--internal-revalidation" in result.stdout
-
-    def test_help_shows_internal_revalidation_option(self):
-        """Help output includes --internal-revalidation option."""
-        result = subprocess.run(
-            [sys.executable, str(SKILL_DIR / "apply_code_fixes_orchestrator.py"), "--help"],
-            capture_output=True,
-            text=True,
-            cwd=str(SKILL_DIR),
-            encoding="utf-8",
-        )
-        assert result.returncode == 0
-        assert "--internal-revalidation" in result.stdout
-        assert "legacy" in result.stdout.lower() or "orchestrator" in result.stdout.lower()
-
 
 class TestApplyCodeFixesOrchestratorRevalidation:
     """Tests for revalidation subagent support in apply_code_fixes_orchestrator."""
@@ -393,18 +364,6 @@ class TestImports:
         from utils.validation import prepare_validation_task
         assert callable(prepare_validation_task)
 
-    def test_import_prepare_revalidation_task(self):
-        """Can import prepare_revalidation_task."""
-        from utils.validation import prepare_revalidation_task
-        assert callable(prepare_revalidation_task)
-
-    def test_review_plan_orchestrator_imports_prepare_validation_task(self):
-        """review_plan_orchestrator imports prepare_validation_task."""
-        # Read the file and check for import
-        orchestrator_path = SKILL_DIR / "review_plan_orchestrator.py"
-        content = orchestrator_path.read_text(encoding="utf-8")
-        assert "prepare_validation_task" in content
-
     def test_base_class_handles_revalidation_for_apply_suggestions(self):
         """apply_suggestions_orchestrator supports revalidation via base class."""
         from apply_suggestions_orchestrator import ApplySuggestionsOrchestrator
@@ -443,22 +402,6 @@ class TestValidationTaskJsonFormat:
         parsed = json.loads(json_str)
         assert parsed == result
 
-    def test_revalidation_task_is_json_serializable(self):
-        """revalidation_task output is JSON serializable."""
-        from utils.validation import prepare_revalidation_task
-
-        groups = [{"theme": "Test", "category": "test", "models": [], "suggestions": []}]
-        validation = [{"group_index": 0, "status": "validation_failed", "reason": "Error", "confidence": 0.0, "error_type": "timeout"}]
-        result = prepare_revalidation_task(groups, validation, "context", "/tmp/out.json")
-
-        # Should be JSON serializable
-        json_str = json.dumps(result)
-        assert json_str is not None
-
-        # Should be deserializable
-        parsed = json.loads(json_str)
-        assert parsed == result
-
     def test_validation_task_prompt_is_string(self):
         """validation_task prompt is a non-empty string."""
         from utils.validation import prepare_validation_task
@@ -468,18 +411,3 @@ class TestValidationTaskJsonFormat:
 
         assert isinstance(result["prompt"], str)
         assert len(result["prompt"]) > 0
-
-    def test_revalidation_task_prompt_is_string_or_none(self):
-        """revalidation_task prompt is a string or None."""
-        from utils.validation import prepare_revalidation_task
-
-        # Case 1: Has items to revalidate - prompt should be string
-        groups = [{"theme": "Test", "category": "test", "models": [], "suggestions": []}]
-        validation = [{"group_index": 0, "status": "validation_failed", "reason": "Error", "confidence": 0.0, "error_type": "timeout"}]
-        result = prepare_revalidation_task(groups, validation, "context", "/tmp/out.json")
-        assert isinstance(result["prompt"], str)
-
-        # Case 2: No items to revalidate - prompt should be None
-        validation = [{"group_index": 0, "status": "valid", "reason": "OK", "confidence": 0.9, "error_type": "unknown"}]
-        result = prepare_revalidation_task(groups, validation, "context", "/tmp/out.json")
-        assert result["prompt"] is None

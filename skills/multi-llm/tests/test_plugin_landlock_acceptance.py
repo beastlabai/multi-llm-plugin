@@ -50,6 +50,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import multi_llm  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from utils import sandbox_walk  # noqa: E402
 from utils.providers import codex as codex_module  # noqa: E402
 from utils.providers.base import (  # noqa: E402
     HOST_SANDBOX_POSTURE_ENV,
@@ -60,12 +61,8 @@ from utils.providers.base import (  # noqa: E402
 from utils.state_manager import StateManager  # noqa: E402
 from utils.write_safety import AuditLog, safety_dir  # noqa: E402
 from tests.mock_launchers import is_this_interpreter  # noqa: E402
-from tests.test_plugin_landlock_executor import (  # noqa: E402
-    BWRAP_LINE,
-    F6_LEAD,
-    FakeWrapper,
-    _slot_dirs,
-    use_own_temp_base,
+from tests.support.landlock_world import (  # noqa: E402
+    BWRAP_LINE, F6_LEAD, FakeWrapper, _slot_dirs, use_own_temp_base,
 )
 
 # Windows runs no plugin jail (codex has its own sandbox there), and this suite
@@ -490,7 +487,6 @@ class Scratch:
         else:
             self.monkeypatch.delenv("MULTI_LLM_PROVIDERS_CONFIG", raising=False)
         registry._config = None
-        registry._config_key = None
 
     def target(self, mode: str) -> Path:
         return {
@@ -529,7 +525,6 @@ class Scratch:
         if mode == "implement":
             self.complete("apply-suggestions")
         registry._config = None
-        registry._config_key = None
         if hasattr(registry, "_RUN_ANCHOR"):
             registry._RUN_ANCHOR = None
         return multi_llm.main([mode, str(self.plan), "--yes", "--exec-subagents", *extra])
@@ -602,14 +597,12 @@ def own_temp_base(tmp_path, monkeypatch):
 def scratch(tmp_path, monkeypatch):
     yield Scratch(tmp_path, monkeypatch)
     registry._config = None
-    registry._config_key = None
 
 
 @pytest.fixture
 def judged(tmp_path, monkeypatch):
     yield Scratch(tmp_path, monkeypatch, judge=True)
     registry._config = None
-    registry._config_key = None
 
 
 def _in_flight(status: Dict[str, Any]) -> list:
@@ -904,7 +897,7 @@ class TestNoRouteReachesUnsandboxed:
         if probe == "hang":
             # Room for the wrapper to start and record the probe before it hangs:
             # 0.8 s was not always enough on the macOS runner (2026-10-23).
-            monkeypatch.setattr(executor, "SANDBOX_PROBE_TIMEOUT_S", 2.5)
+            monkeypatch.setattr(sandbox_walk, "SANDBOX_PROBE_TIMEOUT_S", 2.5)
         before = _bytes(scratch.target(mode))
         code = scratch.run(mode)
         cap = capsys.readouterr()
@@ -1471,11 +1464,10 @@ class TestTheRealJailThroughTheScheduler:
 
     @pytest.fixture
     def jailed(self, tmp_path, monkeypatch):
-        from tests.test_landlock_exec import require_landlock
+        from tests.support.landlock_kernel import require_landlock
         require_landlock()
         yield Scratch(tmp_path, monkeypatch, real_jail=True)
         registry._config = None
-        registry._config_key = None
 
     @pytest.mark.parametrize("mode", REPO_WIDE)
     def test_outside_writes_are_denied_inside_ones_land_and_the_metadata_line_fires(
@@ -1678,11 +1670,10 @@ class TestARootLevelFileLandsOnTheRealJail:
 
     @pytest.fixture
     def jailed(self, tmp_path, monkeypatch):
-        from tests.test_landlock_exec import require_landlock
+        from tests.support.landlock_kernel import require_landlock
         require_landlock()
         yield Scratch(tmp_path, monkeypatch, real_jail=True)
         registry._config = None
-        registry._config_key = None
 
     def test_a_new_root_file_and_a_subdirectory_edit_both_land(self, jailed, capsys):
         root = jailed.root

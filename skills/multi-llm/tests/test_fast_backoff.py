@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for fast backoff support in review_plan_orchestrator."""
+"""Tests for fast backoff support in the review fan-out (get_backoff_delay)."""
 
 import os
 import sys
@@ -10,7 +10,7 @@ import pytest
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from review_plan_orchestrator import get_backoff_delay
+from utils.review_orchestrator_base import get_backoff_delay
 
 
 class TestGetBackoffDelay:

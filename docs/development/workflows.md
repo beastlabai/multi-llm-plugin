@@ -18,8 +18,11 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 **`generate-tasks` is Python (`generate_tasks_orchestrator.py`), and it is the one phase whose subagent
 sees the repository.** The sequence is: `ensure_prerequisites` (row 5, called — never reimplemented)
 → materialize **one** `task_generation` task into `{plan}/generate-tasks/task_generation_tasks.json` (the standard
-envelope, so the executor needs no special case) → dispatch → validate → `update_plan_tasks.main(...)`
-**in-process** → verify the outcome.
+envelope, so the executor needs no special case) → dispatch → validate → `update_plan_tasks.apply_tasks_document(...)`
+**in-process** → verify the outcome. `util update-tasks` reaches the same function through
+`update_plan_tasks.main`, so a hand-written list gets the same schema and graph rules
+(`validate_result("task_generation", …)`), and both plan writes go through a temp file and
+`os.replace` (`update_plan_tasks.replace_file`), so a crash mid-write leaves the old plan.
 
 The task is `context_mode: workspace-read` with the pinned repo root as the only path its prompt names, and
 it requires **both** `supports_workspace_reads` and the `agent-readonly` profile: a runner with
@@ -122,11 +125,11 @@ counts (`run_status.implement_task_tally`: every task of the decomposition, ever
 check accepted with its findings apart (`accepted_with_findings_task_ids`) — fix round 16, run 6's resumes read
 "1/1 batches ok" against seven tasks.
 
-The mirror's dispatch counter — renamed `completed`, it used to count FINISHED tasks as
+The mirror's finished tasks are its `tasks` rows; its dispatch counter used to count them as
 `dispatched`, so a single-task batch running minutes read `dispatched: 0` the whole
-time, indistinguishable from a stall — is joined by `in_flight` (`{task_id, dispatched_at}`,
+time, indistinguishable from a stall. The tasks still running are `in_flight` (`{task_id, dispatched_at}`,
 patched by `_begin_sweep` at dispatch time so it is visible before the task finishes),
-rendered as `in flight: <task_id> (since <duration>)` (F10, 2026-09-16). And `write_batch_scheduler._mirror_status` writes the
+rendered as `in flight: <task_id> (since <duration>)` (F10, 2026-09-16). And `write_reports.WriteReports.mirror_status` writes the
 phase-level `state` (`complete` / `subagents_failed` /
 `running`) beside the run record, as the read phases do, instead of leaving
 `phase state: (none)`.
@@ -137,11 +140,11 @@ first dispatch, `stopped`, `complete`), because the step is set before a
 all 288 s of batch application and in the terminal payload, next to `run.state: done` (measured
 2026-09-16).
 
-Before validation, `subagent_executor.normalize_result` supplies `[]` for any of
+Before validation, `task_result.normalize_result` supplies `[]` for any of
 `depends_on`/`files_to_create`/`files_to_modify` (`TASK_GENERATION_LIST_KEYS`) a task
 left *out* — on both executor parse lanes and, for the native host's file, in
 `consume_document`, which writes the completed document back before validating because
-`update_plan_tasks` reads the file. Absent and empty mean the same thing to every consumer, and a
+`task_is_complete` re-reads the file. Absent and empty mean the same thing to every consumer, and a
 small model spells "none" by omission (measured 2026-09-14: `opencode/nemotron-3-ultra-free` returned ten
 well-formed single-file tasks with no `files_to_create` on any and failed rung 6 twice); a key
 present with the wrong type is left for the schema to name, and no other kind is completed.
@@ -181,7 +184,37 @@ binds the *other* end: when a plan carries a `TASKS_FILE` marker whose target is
 `implement` is exit **3** naming the path and `--generate-tasks`, never the old
 WARNING-and-parse-the-plan fallback, which fabricated 18 tasks titled ". Overview" with
 `camera.update` declared as a file to create (measured 2026-09-16); only a plan with **no**
-marker at all (the legacy embedded-task format) still parses its own content.
+marker at all and no default task list beside it (`tasks_file.default_tasks_path`,
+`{plan}/tasks/tasks.md`; the legacy embedded-task format) still parses its own content.
+
+The marker has one reader, `utils/tasks_marker.py` (text only; `utils/tasks_file.py` re-exports it
+and does the rest): `TASKS_FILE_MARKER_PATTERN` (whitespace
+inside the comment tolerated and the value may be empty, since a reader that misses a marker
+parses the plan's prose), `tasks_marker_spans` (the markers that count: none inside a fenced
+code block or inline code, which are examples of the syntax), `tasks_marker` (the first one's
+path as written; `""` for a marker naming nothing, `<!--TASKS_FILE:-->` included, which is
+still a marker), `resolve_tasks_marker` (each relative, no `..`, real path inside the plan's
+directory, else `TasksFileRefused`; markers leading to different files are
+`TasksFileAmbiguous`, since following the first would implement a stale or pasted list) and
+`read_task_list` (the named file's text; without a marker the default task list's when that is
+a file, as `find_tasks_file` reads it, so no two phases read two task lists, and the plan's only
+when it is not; `TasksFileMissing` when a named file is not there). Code detection errs on the marker's side: a
+fence never closed is not code, and a stray backtick never reaches a marker on its own line.
+The writer, `plan_updater.insert_tasks_file_reference`, rewrites every marker that counts
+(its `## Implementation Tasks` section whole, any other in place) and leaves quoted examples
+alone, and `generate_tasks_orchestrator.verify_outcome` checks the result with
+`resolve_tasks_marker`, so generation never reports success on a marker implement refuses.
+Every phase that parses
+the task list goes through `read_task_list`: implement (a refusal is the same exit-3
+`TASKS_FILE_MISSING` block), `decompose_plan_file`, the scheduler's check-task ids and the
+known-checks task list. `find_tasks_file` (review-tasks, apply-task-suggestions,
+code-review) keeps its exit 1 for a refusal. Readers that only *name* the file — the
+workflow-file exclusions in `output_handler`, the code-fix batcher's do-not-edit list —
+use `tasks_marker` (directly, or through `plan_updater.get_tasks_file_path`) without the containment, since naming one file too many is the
+conservative side there. Until 2026-11-08 implement read the marker with a second pattern
+that wanted exactly one space after `<!--`, so `<!--TASKS_FILE: …-->` turned the plan's
+`## 1. Overview` headings into tasks, and it opened `../` paths review-tasks refused; every
+reader took the first match, so a marker quoted in a code block above the real one won.
 
 `{PROJECT_ROOT}/.multi-llm/tmp/generated_tasks_*.json` is **not** part of any contract any more — the temp file, its
 `.gitignore` bootstrap and the second git-root resolution are deleted, not ported.
@@ -315,8 +348,7 @@ A live run owning a dir the composite writes (its `sequence` dirs,
 with its status and abort commands, never joined, `--force` included, and
 `ImproveWorkflow.run_mode` holds each step's phase-dir `.lock` while it runs
 (`full` gets neither). `--interactive` is exit 3 before
-`--yes` is implied. Legacy: no frozen copy; with `MULTI_LLM_LEGACY_INSTRUCTIONS=1` both serve
-the current core with no notice, and `test_every_served_mode_has_a_frozen_copy` exempts exactly these two.
+`--yes` is implied.
 
 ## Commit reviews
 
@@ -330,11 +362,12 @@ rejected: apply's `review_subdir`, all-of `PHASE_PREREQUISITES`, `REVIEW_PHASE_B
 all have had to learn it, where sharing the phase costs one rendering hook (`utils/commit_spelling.py`,
 keyed on `Mode.commit_view_of`). None of the three rows is `is_workflow_phase`, so `full` never runs
 them. `utils/commit_range.py` owns the grammar and every rendered line (block, fix block, drift line,
-result payload, read rule); `utils/commit_review.py` the path layer and the front-door core the three
-doors and `util commit-brief` share; `utils/commit_brief.py` the header bytes, identity, snapshot and
+result payload, read rule); `utils/commit_paths.py` the path layer (where a brief lives and what is
+one); `utils/commit_front_door.py` the front-door core the three doors and `util commit-brief` share
+(`utils/commit_review.py` is its old name, kept as an alias); `utils/commit_brief.py` the header bytes, identity, snapshot and
 restart archive; `utils/commit_apply.py` the apply guard.
 
-The core (`commit_review.prepare` for steps 1 to 6, `front_door` adds 7):
+The core (`commit_front_door.prepare` for steps 1 to 6, `front_door` adds 7):
 
 1. resolve the range to two full SHAs (`resolve_range`; a brief path reads `commit_range` back through
    `resolve_recorded`; a no-argument apply picks the review on record, `commit_apply.select_review`);
@@ -361,11 +394,15 @@ the review step under it instead of taking it again, so the round stays owned th
 `brief and state left unchanged`. **Under `--detach` the launcher publishes nothing:** it writes the
 header, `commit_range` and any new context-plan snapshot to `<phase dir>/.commit-stage-<hex>.json`,
 names it with the hidden `--commit-stage` (dropped from replay like `--revs`), and the worker applies
-it right after `_acquire_lock` (`commit_review.apply_stage`), before the phase reads the brief. A refused or re-attached
+it right after `_acquire_lock` (`commit_front_door.apply_stage`), before the phase reads the brief.
+`detach` sits below the front door, so the worker's entry hands it that applier
+(`commit_front_door.hand_worker_the_stage_applier`): the dispatcher and, for a worker started directly, the
+three orchestrators the doors run (`code_review_orchestrator`, `apply_code_fixes_orchestrator`,
+`improve_commits_orchestrator`). A refused or re-attached
 launch deletes its stage and a worker that loses the lock applies nothing; a brief that does not exist yet
 is the exception, created by the launcher with an exclusive create. The restart's synthesised
 `--force --rerun-all` never takes over a live run: in `detach.launch` only a typed `--force` does, which
-the stage records as `typed_force`.
+the stage records as `typed_force` (`commit_paths.stage_takes_over`).
 
 **What step 7 records.** Three readers take the invocation record as it stands: `maybe_detach`'s mode
 check, the detached child's argv (`detach.build_worker_argv`) and `_emit_user_next_step`, which answers
@@ -420,7 +457,7 @@ prints what was cut. The fencing and the caps are presentation only: neither ent
 - **A restart archives the replaced round.** A changed identity rewrites the header only after step 4 and
   passes `--force --rerun-all` with `[COMMIT_REVIEW_RESTARTED]`. First, `commit_brief.archive_round`
   renames every entry of `<slug>/code-review/` except `RESTART_KEEP` (`.lock`, `.status.lock`,
-  `.status.json`, `orchestrator-run.log`), the stage file and earlier archives into
+  `.status.json`, `orchestrator-run.log`, `.views.lock`), the stage file and earlier archives into
   `restarted-<YYYYmmdd-HHMMSS>[.<µs>]/`, which the phase's non-recursive globs never read. `--rerun-all`
   alone would leave an old-set-only model's `<model>.json`, which `retire_result_from_another_scope`
   misses because a changed focus keeps the scope id, and apply would read the old `user_selections.json`
@@ -433,7 +470,7 @@ prints what was cut. The fencing and the caps are presentation only: neither ent
   answers, so it is archived and restarted, and step 6 still prints `[STATE_REPLACED]`. Under
   `--detach`, `[COMMIT_REVIEW_RESTARTED]` and `[COMMIT_DECISIONS_DROPPED]` print only after the launch,
   once a worker has consumed the stage; a refused launch restarted nothing and says nothing.
-- **Briefs are never under review.** `commit_review.commit_review_artifact(path, folder)` matches
+- **Briefs are never under review.** `commit_paths.commit_review_artifact(path, folder)` matches
   `<folder>/<slug>.md` and anything under `<folder>/<slug>/` by string, and `_drop_workflow_paths` and
   `finalize_tracking._drop_workflow_files` drop those on every mode, whatever the run's plan.
 
@@ -528,7 +565,145 @@ line's `commit_fixes` read too. A new review round removes `guard`, so the next 
 `ask` mode (`ask_orchestrator.py`) is a read-only free-text Q&A side-channel:
 markdown output, no JSON schema / grouping / validation, output under `{plan}/ask/<question-slug>-<hash8>/`. It
 shares concurrency mechanics with the review modes via `run_models_concurrent` in
-`review_orchestrator_base.py`.
+`review_orchestrator_base.py`, and its model-selection preamble with them through
+`interactive.select_models`.
+
+`_main` is a sequence of stages, each with its inputs and outputs explicit: `_resolve_inputs`
+(question, plan, hash) → `_accept_partial_entry` or `_prepare_fanout` (models, question dir,
+prompt parts, all in the foreground) → `_cross_detach_boundary` → `_hold_question_dir` (the
+foreground lock, held until `main` returns) → `_record_launch` → `AskRun`. `AskRun` holds what
+the slots share: `skip_existing_answer` and `ask_one` are its methods, `close` sets the deadline's
+answers aside and writes `answers.md`, and `report` prints the closing report.
+`tests/test_ask_run.py` drives `ask_one` directly.
+
+Each ask slot is single-shot: one `invoke_with_provider` call, no retry ladder. A call that
+raises is a failed slot carrying `Exception: <type>: <message>`, redacted
+(`slot_exception_error`), with `source: exception`, never a deadline loss. It first gets the
+checks a returned call gets: the porcelain check on the uncontained rung, and the mode and home
+checks on the plugin's jail, with the raising call counted as unaudited and its home compared by
+the lane (see [providers](providers.md)). A violation found there is recorded instead, still with
+`source: exception`. Any answer file the call left is set aside as a partial, never counted.
+Cancellation (`CancelledError`, `KeyboardInterrupt`) is not caught: the fan-out's teardown retires
+the slot. `run_models_concurrent` names a slot that raised `CancelledError` itself and keeps its
+siblings' results; the slot is missing from the results like one that raised.
+
+A slot any of these checks fails has its answer file moved to `answer_<model>.md.violated`, a
+name the closing scan never reads. When that move fails the file stays where it is, as
+evidence, and the scan withholds it (`answers_left_in_place`): the slot stays failed, and its
+failure line says the file was left in place.
+
+**Earlier and unfinished answers.** Only text a slot wrote itself can count as its answer.
+Past the sandbox gate, before its dispatch, the slot removes what an earlier run left: the
+`partial_<model>.md` (`remove_earlier_partial`), the `origin_<model>.txt` (`remove_earlier_origin`),
+then, under `--rerun-all`, the `answer_<model>.md` (`remove_earlier_answer`). Each removal is
+attempted directly: only its own `FileNotFoundError` shows the file absent, and any other error
+ends the slot `not-dispatched`, naming the file to move. A refusal keeps the earlier answer: the
+answer goes last, so a refusal over the partial or the origin record never reaches it, and a
+refusal over the answer writes the origin record back as it was read before its removal
+(`put_back_earlier_origin`; a write that fails too leaves the answer reading "origin not
+recorded"). A partial is never the last run's text when an earlier answer or its origin record is
+there, since the slot that answered removed it before it was asked. A slot that went ahead would
+leave the earlier partial named as its own, for `--accept-partial` to count; having written
+nothing, count the earlier answer as its own; or, when its own origin record failed to write,
+show its answer with the earlier one's origin. For a model nothing withheld, the record the
+slot's arm wrote is taken out again (`restore_unarmed`): the earlier answer passed its checks in
+its own run, so a resume keeps it, with its own origin record. `--rerun-all` asks every model for
+a new answer, so `close` never counts an answer it did not produce: a model it never dispatched
+(refused at the sandbox gate or over a file it could not remove, unrecorded, or still queued at
+the deadline) fails with its own reason, its earlier answer named as kept and not counted, and
+the run's state and exit code follow (`failed`, exit 3, when no model answered).
+
+The resume skip reads the answer file directly (`probe_answer`) and tells three outcomes apart:
+missing or empty asks the model again, readable skips it, and a read error, or bytes that are not
+UTF-8 text, ends the slot `not-dispatched`, the file and its origin record left for a later
+resume. A slot asked over an answer it could not read would, having written nothing, read it at
+step 1 once readable and count it, with a new origin record, as its own. No answer read raises:
+an unreadable file is never counted, and the closing scan goes on to the other models' answers.
+
+A stdout answer is written to `answer_<model>.md` atomically, and so is `answers.md`
+(`publish_atomically`, which keeps the file's mode, unlike the owner-only records): a write that
+fails, a full disk say, leaves the path as it was, never a cut prefix that the closing scan or a
+resume would count. The slot then fails with that error, its whole text kept as the partial for
+`--accept-partial`. A file the model wrote at the answer path as well, one step 1 could not read,
+never moves over that partial: it stays in place, withheld with `UNFINISHED_ANSWER_REASON`
+(below), and takes the partial's name only when the partial could not be written
+(`unpublished_answer_ending`). Because `answers.md` is replaced rather than written through, a
+symlink at `answers.md` is replaced by a regular file: a report linked to another place stops
+being updated there, and the link's target is left as it was. `tests/test_ask_answer_persistence.py`
+holds the cases.
+
+**The close uses the answers its checked slots held.** A slot that answered with its checks
+passed keeps the text it counted: the answer file as step 1 read it, or step 2's recovered answer
+as a text-mode read of the bytes `publish_atomically` wrote (`AskRun.checked_answers`). The
+closing scan counts that text and `answers.md` shows it, never the file read again, and every
+other answer file is read once for both (`collect_completed(held=...)`,
+`write_answers_md(sections=...)`), so a provider a crashed run left behind cannot replace an
+answer between its slot's checks and the report ([Consuming checked
+bytes](review-results.md#consuming-checked-bytes)).
+
+**Withheld answers.** An answer is reused only from a slot whose safety checks passed, as on
+the review lanes ([Withheld slot answers](review-results.md#withheld-slot-answers)): the
+question folder's `.status.json` keeps the same two maps, `models_rejected` and
+`models_unchecked`, through the same `result_files` helpers. `_record_launch` carries both maps
+across its opening write, every model's, read whole under the lock that write holds, then reads
+the checkpoint back; over a checkpoint it cannot read (after `CHECKPOINT_READ_ATTEMPTS` reads;
+a damaged one was recovered just before, below), or one it cannot read back, the run stops at exit
+3 before anything is dispatched, with `status_file.unreadable_checkpoint_advice`. Each slot that passes the sandbox gate is recorded
+under `models_unchecked` before anything is dispatched or removed (`review_lane.arm_slot`), in
+the question folder's checkpoint whatever its resolved answer path points into; one whose
+record cannot be written and read back, or whose launched run has no checkpoint left to record
+in, ends `not-dispatched` with `[WITHHOLD_NOT_RECORDED]` (only a direct call of `ask_one`, with
+no checkpoint at all, runs unrecorded). A model already withheld has its earlier answer file set
+aside first (`answer_<model>.md.violated` for a rejection, `.unchecked` otherwise) and its
+earlier `partial_<model>.md` removed. The rename is attempted directly: only its own
+`FileNotFoundError` shows the file absent, so a metadata error never passes for one. When
+either step fails, the slot ends `not-dispatched` and asks nothing over it; a partial left
+behind would otherwise outlive the records the slot supersedes, and `--accept-partial` would
+count it without a warning. A slot the checks fail records `models_rejected` before it sets
+its file aside (`reject_answer`). One whose checks pass leaves `models_unchecked` as it ends
+and is marked `checks_passed`: since the earlier answer was set aside before its dispatch,
+whatever it leaves is its own, so it supersedes the model's records, succeeded or not. The
+exception is a failed run whose unfinished answer can be neither moved nor copied aside: it
+stays under `models_unchecked` with `result_files.UNFINISHED_ANSWER_REASON` ("left an
+unfinished answer"), so a resume asks the model again and only `--accept-partial` counts that
+text. A dispatched slot that never returns (the deadline cut it, or it raised outside the
+provider call) keeps its record, and `close` writes one again when it is gone; a provider
+call that raises is not such an ending, because its checks still run. So does a slot
+cancelled at its launch turn, after its record and before any provider call: nothing
+supersedes it. The close writes both maps (`review_lane.withheld_record`).
+
+Every reader honours them. The resume skip asks a withheld model again rather than count its
+file; the closing scan leaves the file of every model the maps name unread, a model this run
+refused at the sandbox gate or never reached included, and its failure line says so; over a
+checkpoint that cannot be read, only this run's checked slots and resume skips are counted.
+When a refused, unchecked or unfinished answer is still at its answer path and no record of
+it can be written, the close stops at exit 3, `needs-human`, before `answers.md`. Two review-lane rules
+have no ask counterpart: there is no salvage pair to retire, and no unjoined provider call,
+since `stop_unreturned_provider_calls` waits for every call it stops (its own timeout bounds
+the wait). `--accept-partial` stays the operator's opt-in: it refuses over a checkpoint it
+cannot read, and while a withheld model's answer file is in place; a withheld model's partial is
+counted only with a `WARNING` naming why it was withheld, once both its records are cleared
+(`result_files.clear_withheld_model`). A readable checkpoint written before these maps
+withholds nothing, so an older question resumes as it did. `tests/test_ask_withheld_answers.py`
+holds the cases. Ask recovers a damaged question checkpoint as the review lanes do, with their
+function (`_recover_question_checkpoint`, `review_lane.recover_damaged_checkpoint` with this
+question's `question`, `question_slug` and `plan_hash`; [Recovering a damaged
+one](review-results.md#withheld-slot-answers)): by the process that holds the question lock, the
+foreground run after `_hold_question_dir` and before `_record_launch`, the detached worker under
+the lock its launch handed it (`detach.PhaseRun.take`) before its boundary, where `RunHandle`
+claims the run in the checkpoint. A checkpoint that cannot be read and is not proven damaged stops
+the run at exit 3 before anything is dispatched. The two reads before the lock, the question-dir
+resolver's `question` and the plan-freshness check's `plan_hash`, go through
+`status_file.read_status`: a checkpoint they cannot read (not JSON, not an object, not UTF-8, not
+a regular file) gives them no metadata, never an exception, so every run reaches the recovery. The recovery's result glob sets no answer file
+aside (they are `answer_<model>.md`); the fresh checkpoint's `checkpoint_recovered` record
+withholds them all instead, and `_record_launch` carries it over like the maps, so the resume skip
+and `--accept-partial` keep withholding every model by it: each selected model's earlier answer is
+set aside as `.unchecked` before the model is asked again (`set_withheld_answer_aside`), and the
+closing scan counts no answer file but one a slot of this run produced with its checks passed
+(`withheld_after_run`); `--accept-partial` then records the model under the record's `accepted`
+(the operator's choice, never a passed check) and reads it back before it reports `[ACCEPTED]`
+([Withheld slot answers](review-results.md#withheld-slot-answers)).
 
 ## Implementation artifacts and state
 
@@ -536,7 +711,7 @@ shares concurrency mechanics with the review modes via `run_models_concurrent` i
 phases already closed for themselves.** `run_implement_write_phase` now seeds every materialized task
 `pending` in `state.json` before the scheduler loop starts, so
 `check_workflow_prerequisites`'s task count reads the plan's total rather than however many happened to
-finish or be skipped so far (F5); records its own artifacts the way `ApplyOrchestratorBase._record_write_artifacts` does,
+finish or be skipped so far (F5); records its own artifacts the way `ApplyPhaseReport.record_write_artifacts` does,
 since `implement` never goes through that base (`write_tasks.json`,
 `write_batch_report.json`, `subagent_batch_report.json`, `summary.md`, `prior_changes.jsonl`, and
 every `files_touched` path an `ok` outcome names — F7); buffers the row-8
@@ -548,6 +723,6 @@ stamps `write_tasks.json` with `inputs.tasks_sha256` for the plan's external
 
 Its `subagent_batch_report.json`'s own `task_file` field used to read `null` on
 the write path — `run_task_file` fills it from the argument the read path is handed, and
-`WriteBatchScheduler` takes no such argument — so `_write_report` now names it directly:
+`WriteBatchScheduler` takes no such argument — so `WriteReports.write_report` now names it directly:
 `write_task_file_for_phase` always persists the same materialized list at `{phase_dir}/write_tasks.json`, which
 every write orchestrator passes as the scheduler's own `phase_dir` too (N9). 2026-09-16.

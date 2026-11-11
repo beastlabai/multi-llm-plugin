@@ -1,0 +1,9 @@
+{"type":"thread.started","thread_id":"01a1c333-34b8-70a3-9acf-e3b39b676a86"}
+{"type":"turn.started"}
+{"type":"error","message":"Reconnecting... 1/5 (stream disconnected before completion: error sending request)"}
+{"type":"error","message":"Reconnecting... 2/5 (stream disconnected before completion: error sending request)"}
+{"type":"error","message":"Reconnecting... 3/5 (stream disconnected before completion: error sending request)"}
+{"type":"error","message":"Reconnecting... 4/5 (stream disconnected before completion: error sending request)"}
+{"type":"error","message":"Reconnecting... 5/5 (stream disconnected before completion: error sending request)"}
+{"type":"error","message":"stream disconnected before completion: error sending request"}
+{"type":"turn.failed","error":{"message":"stream disconnected before completion: error sending request"}}

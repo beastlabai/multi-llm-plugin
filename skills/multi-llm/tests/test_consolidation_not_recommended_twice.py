@@ -44,7 +44,7 @@ from utils.review_orchestrator_base import (  # noqa: E402
 from utils.state_manager import (  # noqa: E402
     StateManager, save_groups_payload, stamp_stable_ids,
 )
-from utils.subagent_executor import simulate_native_invoker  # noqa: E402
+from tests.harness.native_invoker import simulate_native_invoker  # noqa: E402
 
 THRESHOLD = 2
 LINE = "consolidation recommended:"
@@ -100,7 +100,7 @@ def _consolidate_natively(plan: Path, phase_dir: Path) -> None:
         respond=lambda task: echo_subagent_answer("consolidation", task["prompt"]),
     )
     assert report.ok, report.failure_summary()
-    rpo.reaggregate_consolidation_mode(str(phase_dir), str(plan), "plan", [])
+    rpo.reaggregate_consolidation_mode(str(phase_dir), str(plan), "plan")
     assert (phase_dir / "consolidated.json").exists()
 
 

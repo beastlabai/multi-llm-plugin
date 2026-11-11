@@ -850,12 +850,12 @@ class TestPrepareBatchedValidationTasks:
 # ============================================================================
 
 class _CountingOs:
-    """``utils.validation``'s view of ``os``, with a failing ``os.replace``.
+    """``utils.atomic_io``'s view of ``os``, with a failing sidecar rename.
 
     Scoped to the one module attribute rather than to ``os.replace`` itself:
     the real function backs every other atomic write in the process, so
     patching it globally would break the test run instead of the one sidecar
-    write under test.
+    write under test. Only the renames onto a ``.prompt.txt`` sidecar count.
     """
 
     def __init__(self, fail_on_call: int):
@@ -866,6 +866,8 @@ class _CountingOs:
         return getattr(os, name)
 
     def replace(self, src, dst):
+        if not str(dst).endswith(".prompt.txt"):
+            return os.replace(src, dst)
         self.replace_calls += 1
         if self.replace_calls == self._fail_on_call:
             raise OSError(28, "No space left on device")
@@ -894,8 +896,10 @@ class TestPromptSidecars:
         line says so, and the fan-out is otherwise untouched.
         """
         groups = [make_group("MEDIUM", f"Theme {i}") for i in range(10)]
+        from utils import atomic_io
+
         counting_os = _CountingOs(fail_on_call=3)
-        monkeypatch.setattr(validation_module, "os", counting_os)
+        monkeypatch.setattr(atomic_io, "os", counting_os)
 
         result = prepare_batched_validation_tasks(
             groups=groups,
@@ -919,8 +923,12 @@ class TestPromptSidecars:
         )
         # The failing write's own temp file goes too: it is hidden, matched by
         # no glob and cleaned by nothing else, so leaving it would strand a
-        # partial prompt in the phase dir for as long as the dir lives.
-        assert [p.name for p in tmp_path.iterdir() if p.name.startswith(".")] == []
+        # partial prompt in the phase dir for as long as the dir lives. The
+        # phase dir's views mutex is a lock file, kept on purpose.
+        assert [
+            p.name for p in tmp_path.iterdir()
+            if p.name.startswith(".") and p.name != validation_module.HOST_VIEWS_LOCK_FILENAME
+        ] == []
 
         skipped = [
             line for line in capsys.readouterr().err.splitlines()
@@ -2044,6 +2052,75 @@ class TestMergeBatchedValidationResults:
             assert merged[8]["status"] == "validation_failed"
             assert merged[8].get("reason") != "Wrong group reasoning"
 
+    @pytest.mark.parametrize("hashed", [True, False])
+    def test_a_status_outside_the_verdicts_never_reaches_the_merge_output(self, tmp_path, hashed):
+        """The executor lane persists a reply whose status is not one of the
+        three verdicts (a schema failure is terminal for this kind), so the
+        merge reads that word as no verdict: the group stays
+        ``validation_failed`` under its own id, joined by hash or placed by
+        index alike, and its sibling's verdict is kept."""
+        batch_metadata = {"total_batches": 1, "batches": [{
+            "batch_index": 0, "group_indices": [0, 1], "group_ids": ["hash_0", "hash_1"],
+            "groups_count": 2,
+        }]}
+        entries = [
+            {"group_index": 0, "group_hash": "hash_0", "status": "approved",
+             "reason": "Looks fine", "confidence": 0.9},
+            {"group_index": 1, "group_hash": "hash_1", "status": "valid",
+             "reason": "Real issue", "confidence": 0.8},
+        ]
+        if not hashed:
+            for entry in entries:
+                del entry["group_hash"]
+        (tmp_path / "validation_batch_0.json").write_text(
+            json.dumps({"groups": entries, "metadata": {"model": "m"}}), encoding="utf-8")
+
+        merged = merge_batched_validation_results(str(tmp_path), batch_metadata, 2)
+
+        assert [r["status"] for r in merged] == ["validation_failed", "valid"]
+        failed = merged[0]
+        assert failed["group_id"] == "hash_0" and failed["group_index"] == 0
+        assert failed["reason"] == (
+            "the reply's status 'approved' is not one of valid, invalid, needs-human-decision")
+        assert (failed["error_type"], failed["recoverable"]) == (
+            validation_module.ERROR_TYPE_PARSING, True)
+        assert merged[1]["reason"] == "Real issue"
+
+    def test_a_later_row_outside_the_verdicts_for_the_same_hash_is_never_stamped(
+        self, tmp_path
+    ):
+        """A later row for a hash replaces the slot's verdict, and so its scope
+        authority too: a ``validation_failed`` in place of a joined verdict
+        carries no scope stamps, while the sibling's joined verdict keeps
+        them."""
+        from utils.scope_round import STAMP_KEYS
+        from utils.state_manager import generate_group_id
+
+        groups = [
+            {"theme": theme, "category": "completeness",
+             "suggestions": [{"title": theme, "desc": "d", "source_model": "m"}]}
+            for theme in ("First finding", "Second finding")
+        ]
+        hashes = [generate_group_id(group) for group in groups]
+        batch_metadata = {"total_batches": 1, "batches": [{
+            "batch_index": 0, "group_indices": [0, 1], "group_ids": hashes,
+            "groups_count": 2,
+        }]}
+        entries = [
+            {"group_hash": hashes[0], "status": "valid", "reason": "Real", "confidence": 0.9},
+            {"group_hash": hashes[0], "status": "approved", "reason": "Fine", "confidence": 0.9},
+            {"group_hash": hashes[1], "status": "valid", "reason": "Real", "confidence": 0.8},
+        ]
+        (tmp_path / "validation_batch_0.json").write_text(
+            json.dumps({"groups": entries, "metadata": {"model": "m"}}), encoding="utf-8")
+
+        merged = merge_batched_validation_results(str(tmp_path), batch_metadata, 2, groups)
+
+        assert [r["status"] for r in merged] == ["validation_failed", "valid"]
+        assert merged[0]["group_id"] == hashes[0]
+        assert not [key for key in STAMP_KEYS if key in merged[0]]
+        assert "scope_proposal_digest" in merged[1]
+
     def test_merge_partial_salvage(self):
         """Batch [2, 5, 9] where LLM returns [2, 3] — Strategy 3 saves group 2.
 
@@ -2089,6 +2166,134 @@ class TestMergeBatchedValidationResults:
             # Groups 5 and 9 should remain validation_failed (not matched)
             assert merged[5]["status"] == "validation_failed"
             assert merged[9]["status"] == "validation_failed"
+
+
+class TestMergeWrongShapedBatch:
+    """A batch file is model output a native host wrote unchecked: a document
+    of the wrong shape fails only its own groups, named, and never raises
+    (docs/development/review-results.md, "Snapshots and empty review outcomes")."""
+
+    @staticmethod
+    def _two_batches(tmpdir: str) -> Dict[str, Any]:
+        return {
+            "total_batches": 2,
+            "batches": [
+                {"batch_index": 0, "group_indices": [0, 1], "group_ids": ["h0", "h1"],
+                 "groups_count": 2,
+                 "output_path": os.path.join(tmpdir, "validation_batch_0.json")},
+                {"batch_index": 1, "group_indices": [2], "group_ids": ["h2"],
+                 "groups_count": 1,
+                 "output_path": os.path.join(tmpdir, "validation_batch_1.json")},
+            ],
+        }
+
+    @pytest.mark.parametrize("document", [
+        pytest.param({"groups": {"0": {"status": "valid"}}, "metadata": {"model": "m-x"}},
+                     id="groups-is-an-object"),
+        pytest.param("all valid", id="top-level-string"),
+        pytest.param(42, id="top-level-number"),
+        pytest.param({"groups": "valid", "metadata": "m-x"}, id="groups-a-string-metadata-a-string"),
+    ])
+    def test_a_batch_that_is_no_reply_fails_its_groups_and_the_rest_merge(
+        self, tmp_path, capsys, document,
+    ):
+        metadata = self._two_batches(str(tmp_path))
+        (tmp_path / "validation_batch_0.json").write_text(json.dumps(document))
+        (tmp_path / "validation_batch_1.json").write_text(json.dumps({
+            "groups": [{"group_index": 2, "group_hash": "h2", "status": "valid",
+                        "reason": "ok", "confidence": 0.9}],
+            "metadata": {"model": "m-y"},
+        }))
+
+        merged = merge_batched_validation_results(
+            output_dir=str(tmp_path), batch_metadata=metadata, total_groups=3,
+        )
+
+        assert [r["status"] for r in merged] == ["validation_failed", "validation_failed", "valid"]
+        assert "validation_batch_0.json holds no list of verdicts" in merged[0]["reason"]
+        out = capsys.readouterr().out
+        assert "validation_batch_0.json" in out and "is not a list of verdicts" in out
+        if isinstance(document, dict) and isinstance(document.get("metadata"), dict):
+            assert "model: m-x" in out
+
+    def test_entries_that_are_not_objects_are_dropped_and_the_rest_merge(
+        self, tmp_path, capsys,
+    ):
+        metadata = self._two_batches(str(tmp_path))
+        (tmp_path / "validation_batch_0.json").write_text(json.dumps({
+            "groups": ["oops", 7, {"group_index": 1, "group_hash": "h1",
+                                   "status": "invalid", "reason": "no", "confidence": 0.5}],
+            "metadata": {"model": "m-x"},
+        }))
+
+        merged = merge_batched_validation_results(
+            output_dir=str(tmp_path), batch_metadata=metadata, total_groups=3,
+        )
+
+        assert merged[1]["status"] == "invalid"
+        assert merged[1]["_source_model"] == "m-x"
+        assert merged[0]["status"] == "validation_failed"
+        out = capsys.readouterr().out
+        assert "model: m-x" in out and "dropped 2 entries" in out
+
+    def test_a_dropped_entry_turns_off_the_positional_match(self, tmp_path):
+        """Two records survive for two groups, but a dropped entry may have
+        been either group's slot: the verdict indexed 1 stays group 1's, the
+        extra indexed 2 places nowhere, and group 0 is left for revalidation
+        rather than handed group 1's verdict by position."""
+        metadata = self._two_batches(str(tmp_path))
+        (tmp_path / "validation_batch_0.json").write_text(json.dumps({"groups": [
+            "oops",
+            {"group_index": 1, "status": "valid", "reason": "verdict for group 1"},
+            {"group_index": 2, "status": "invalid", "reason": "extra"},
+        ]}))
+
+        merged = merge_batched_validation_results(
+            output_dir=str(tmp_path), batch_metadata=metadata, total_groups=3,
+        )
+
+        assert merged[0]["status"] == "validation_failed"
+        assert (merged[1]["status"], merged[1]["reason"]) == ("valid", "verdict for group 1")
+
+    def test_with_nothing_dropped_the_positional_match_still_places(self, tmp_path):
+        metadata = self._two_batches(str(tmp_path))
+        (tmp_path / "validation_batch_0.json").write_text(json.dumps({"groups": [
+            {"group_index": 7, "status": "valid", "reason": "first"},
+            {"group_index": 8, "status": "invalid", "reason": "second"},
+        ]}))
+
+        merged = merge_batched_validation_results(
+            output_dir=str(tmp_path), batch_metadata=metadata, total_groups=3,
+        )
+
+        assert [merged[0]["reason"], merged[1]["reason"]] == ["first", "second"]
+
+    @pytest.mark.parametrize("echo", [["h0"], {"h": "h0"}, 5])
+    def test_a_hash_that_is_not_text_is_a_foreign_hash(self, tmp_path, echo):
+        metadata = self._two_batches(str(tmp_path))
+        (tmp_path / "validation_batch_0.json").write_text(json.dumps({"groups": [
+            {"group_index": 0, "group_hash": echo, "status": "valid", "reason": "x"},
+            {"group_index": 1, "group_hash": "h1", "status": "valid", "reason": "y"},
+        ]}))
+
+        merged = merge_batched_validation_results(
+            output_dir=str(tmp_path), batch_metadata=metadata, total_groups=3,
+        )
+
+        assert merged[0]["status"] == "validation_failed"
+        assert merged[1]["status"] == "valid"
+
+    def test_a_batch_that_does_not_parse_names_its_file_in_the_reason(self, tmp_path):
+        metadata = self._two_batches(str(tmp_path))
+        (tmp_path / "validation_batch_0.json").write_text("{ not json")
+
+        merged = merge_batched_validation_results(
+            output_dir=str(tmp_path), batch_metadata=metadata, total_groups=3,
+        )
+
+        assert "validation_batch_0.json could not be read as JSON" in merged[0]["reason"]
+        # The batch whose file is missing keeps the default reason.
+        assert merged[2]["reason"] == "Batch result not found"
 
 
 # ============================================================================
@@ -2824,16 +3029,23 @@ class TestEveryFanOutCallSiteNamesItsOwnScript:
         from utils import review_orchestrator_base as base
 
         tree = ast.parse(inspect.getsource(base))
-        calls = [
-            node for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-            and getattr(node.func, "id", None) == "prepare_batched_validation_tasks"
-        ]
-        assert len(calls) >= 2, "both the fan-out and the reaggregate path prepare tasks"
-        for call in calls:
+
+        def calls_to(name):
+            return [
+                node for node in ast.walk(tree)
+                if isinstance(node, ast.Call) and getattr(node.func, "id", None) == name
+            ]
+
+        assert len(calls_to("review_validation_round")) >= 2, (
+            "both the fan-out and the reaggregate path build their round with "
+            "review_validation_round"
+        )
+        provenances = calls_to("RoundProvenance")
+        assert provenances, "review_validation_round records the round's provenance"
+        for call in provenances:
             keywords = {kw.arg for kw in call.keywords}
             assert "orchestrator" in keywords, (
-                f"line {call.lineno} prepares validation tasks without naming "
-                f"the phase's own script, so its reaggregate_mode defaults to "
+                f"line {call.lineno} records a round without naming the "
+                f"phase's own script, so its reaggregate_mode defaults to "
                 f"review-plan"
             )

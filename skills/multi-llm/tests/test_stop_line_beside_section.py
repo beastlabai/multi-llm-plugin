@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import json
 
-from tests.test_check_gate_fixture import DENY_CLAUSE, _first_run, repo  # noqa: F401
+from tests.support.gate_fixture import DENY_CLAUSE, _first_run
 from tests.test_relay_says_it_once import _detached_stop, _poll
 from tests.test_stop_section_ready_written import _blocked
 from utils.write_batch_scheduler import HEADLINE_BESIDE_SECTION_KEY, answers_cover

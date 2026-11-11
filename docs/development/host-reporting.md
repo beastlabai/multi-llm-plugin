@@ -123,7 +123,7 @@ report added the heading).
 
 A task-generation or judge reply whose only schema error is a left-out `schema_version` is
 read as the one version its schema's `const` allows, with one plain line
-(`schema_validator.supply_schema_version`, through `subagent_executor.supply_result_version` on the executor's parse lane and in
+(`schema_validator.supply_schema_version`, through `task_result.supply_result_version` on the executor's parse lane and in
 `task_is_complete`, in generate-tasks' consume, which writes the key into the file, and in the
 verdict ingest); a present key keeps its value for the schema to judge (03's host dropped it copying
 the subagent's JSON).
@@ -152,7 +152,7 @@ that is, or starts with, one of the surface's `dispatcher.next_step_markers`, `n
 `modes.NOTICE_PLACEMENT` are on every relay surface, and a stop's `resume_markdown` is the
 `options` report, in place of any list of the host's own.
 
-The manual-task note and lead read in the singular over one task (`next_phase.manual_close_lead(count)`), and a
+The manual-task note and lead read in the singular over one task (`manual_tasks.manual_close_lead(count)`), and a
 single-target apply phase names its file: the mirror's `applied_to`
 (`… items applied to <file>`), the notice's left-out line and the native `--mark-completed` message.
 
@@ -162,7 +162,7 @@ single-target apply phase names its file: the mirror's `applied_to`
 is one rule** (fix round 28, live run 12 #5/#7/#10/#11).
 
 The executor records beside a stop's `headline` the same line without its
-`--human-task` answers and bare resume (`stop.headline_beside_section`, `WriteBatchScheduler._set_stop_headline`; only
+`--human-task` answers and bare resume (`stop.headline_beside_section`, `StopAccount.set_stop_headline`; only
 when every answer it leaves out is one of the stop's `answers` or its own
 `resume_flags`, `answers_cover`; a manual-gate stop's is what stopped and why, handed
 back only while the section's resume is those flags, and the native `[MANUAL_GATE]` line says
