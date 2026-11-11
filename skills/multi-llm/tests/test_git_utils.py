@@ -2937,11 +2937,14 @@ class TestTheProbeIsSkippedOnlyWhenTheConfigCannotNameADriver:
         assert "filter.planted.clean=" in planted_driver_overrides(str(linked))
         assert probes
 
-    @pytest.mark.parametrize("damage", ["empty", "bad-head", "no-refs"])
+    @pytest.mark.parametrize("damage", ["empty", "bad-head", "no-refs", "head-refs-at-256"])
     def test_a_git_directory_git_would_walk_past_goes_to_the_probe(
             self, tmp_path, probes, damage):
         """git skips a ``.git`` that is not a repository and uses the one above,
-        so the planted driver above must still be found from below."""
+        so the planted driver above must still be found from below.
+        ``head-refs-at-256``: git reads 255 bytes of HEAD, so a ``refs/`` ending
+        at byte 256 is invalid to git (found by review: a 256-byte read here
+        accepted it, and a planted filter above ran)."""
         from utils.git_utils import planted_driver_overrides
         root = _repo_with_config(tmp_path, '[filter "above"]\n\tclean = cat\n')
         nested = root / "sub" / ".git"
@@ -2951,12 +2954,28 @@ class TestTheProbeIsSkippedOnlyWhenTheConfigCannotNameADriver:
             (nested / "objects").mkdir()
             if damage != "no-refs":
                 (nested / "refs").mkdir()
-            (nested / "HEAD").write_text(
-                "garbage\n" if damage == "bad-head" else "ref: refs/heads/master\n",
-                encoding="utf-8")
+            head = {"bad-head": "garbage\n",
+                    # "ref:" + spaces + "refs/": the "/" is byte 256.
+                    "head-refs-at-256": "ref:" + " " * 247 + "refs/heads/master\n",
+                    }.get(damage, "ref: refs/heads/master\n")
+            (nested / "HEAD").write_text(head, encoding="utf-8")
             (nested / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
         assert "filter.above.clean=" in planted_driver_overrides(str(root / "sub"))
         assert probes
+
+    @pytest.mark.parametrize("spaces, valid", [(245, True), (246, True), (247, False)])
+    def test_head_is_judged_on_the_bytes_git_reads(self, tmp_path, spaces, valid):
+        """The boundary itself, against git's own verdict: ``refs/`` ending at
+        byte 254 or 255 is a repository to git, at byte 256 it is not."""
+        from utils.git_utils import _head_is_valid
+        root = _repo_with_config(tmp_path)
+        (root / ".git" / "HEAD").write_text(
+            "ref:" + " " * spaces + "refs/heads/master\n", encoding="utf-8")
+        found = subprocess.run(["git", "rev-parse", "--absolute-git-dir"], cwd=root,
+                               capture_output=True, text=True)
+        git_accepts = found.returncode == 0 and Path(found.stdout.strip()) == root / ".git"
+        assert git_accepts is valid, "git's own HEAD check moved; re-measure the boundary"
+        assert _head_is_valid(str(root / ".git")) is valid
 
     def test_a_commondir_in_the_git_directory_goes_to_the_probe(self, tmp_path, probes):
         """git reads the config of the directory ``.git/commondir`` names as

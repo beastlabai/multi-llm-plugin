@@ -181,15 +181,25 @@ def _cwd_from_global_options(args: Sequence[str]) -> Optional[str]:
     return None
 
 
+#: How much of HEAD git's ``validate_headref`` reads: ``sizeof(buffer) - 1`` of
+#: a 256-byte buffer. A ``refs/`` that starts beyond it is invisible to git,
+#: which then treats the directory as no repository and keeps looking above
+#: it, so this check must not see further than git does.
+_HEAD_BYTES_GIT_READS = 255
+
+
 def _head_is_valid(git_dir: str) -> bool:
     """Whether ``<git_dir>/HEAD`` passes git's own check (``validate_headref``):
-    a symbolic ref into ``refs/``, or an object id. A directory whose HEAD fails
-    it is not a repository to git, which then keeps looking above it."""
+    a symbolic ref into ``refs/``, or an object id, within the first
+    :data:`_HEAD_BYTES_GIT_READS` bytes. A directory whose HEAD fails it is not
+    a repository to git, which then keeps looking above it. Where the two
+    could differ this is the stricter one (only spaces and tabs after
+    ``ref:``, nothing after an object id), so a doubt goes to the probe."""
     head = os.path.join(git_dir, "HEAD")
     if os.path.islink(head):
-        return os.readlink(head).startswith("refs/")
+        return os.readlink(head)[:_HEAD_BYTES_GIT_READS].startswith("refs/")
     with open(head, "rb") as handle:
-        data = handle.read(256)
+        data = handle.read(_HEAD_BYTES_GIT_READS)
     if data.startswith(b"ref:"):
         return data[4:].lstrip(b" \t").startswith(b"refs/")
     return re.match(rb"^([0-9a-f]{40}|[0-9a-f]{64})\s*$", data) is not None
