@@ -38,7 +38,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from tests.test_kill_tree_posix import _Host  # noqa: E402
+from tests.test_kill_tree_posix import _Host, _Sys  # noqa: E402
 from utils import detach, process_control, run_record, run_registry, run_status, run_sweep, status_file  # noqa: E402
 from utils import dispatch_spawn  # noqa: E402
 
@@ -1918,6 +1918,19 @@ on_linux_with_proc = pytest.mark.skipif(
     reason="the identity kill runs on Linux with /proc only")
 
 
+def _linux_kernel(monkeypatch):
+    """Make :mod:`process_control` see a Linux kernel, as the scripted host it
+    plays (:class:`_Host`, pidfds included) is one. A SIGCHLD reset made by
+    this process establishes zombie retention on Linux alone
+    (``process_control._children_become_zombies``): the owned kill's other
+    half, a group SIGKILL that leaves no member forking, was checked for
+    Linux's ``killpg`` only, and XNU's does not keep it. So on a macOS runner
+    the reset's scenarios would meet the kill macOS gets instead, which
+    ``test_kill_tree_posix.py`` covers for another kernel after the reset
+    (``test_another_kernel_gets_the_kill_by_number_after_the_reset_too``)."""
+    monkeypatch.setattr(process_control, "sys", _Sys("linux"))
+
+
 class TestNativePidfdsNeedNoSigactionAbi:
     """The ABI names ``struct sigaction``'s layout, which only the anchor of
     an undated owned child reads; Python's own pidfd calls do not need it."""
@@ -1977,10 +1990,12 @@ class TestNativePidfdsNeedNoSigactionAbi:
         """SP-2 (coordinator's design): the flags cannot be read without the
         ABI, but this process reset SIGCHLD itself, so its children are known
         to become zombies: the owned kill runs, its group signalled through the
-        zombie-held leader, a tool child that ignores SIGTERM included."""
+        zombie-held leader, a tool child that ignores SIGTERM included. On
+        Linux: the scripted host is a Linux one (:func:`_linux_kernel`)."""
         host = _Host({_RUNNER: (_RUNNER, "leader"), _MEMBER: (_RUNNER, "tool")},
                      owned=[_RUNNER], deaf=[_MEMBER], pidfd=True)
         host.install(monkeypatch)
+        _linux_kernel(monkeypatch)
         monkeypatch.setattr(process_control, "_SIGACTION_ABI", [None])
         monkeypatch.setattr(process_control, "_sigchld_action", lambda: None)
         monkeypatch.setattr(process_control, "_SIGCHLD_RESET", [True])
@@ -1997,6 +2012,7 @@ class TestNativePidfdsNeedNoSigactionAbi:
         host = _Host({_RUNNER: (_RUNNER, "leader"), _MEMBER: (_RUNNER, "tool")},
                      owned=[_RUNNER], deaf=[_MEMBER], pidfd=True)
         host.install(monkeypatch)
+        _linux_kernel(monkeypatch)
         monkeypatch.setattr(process_control, "_SIGACTION_ABI", [None])
         monkeypatch.setattr(process_control, "_sigchld_action", lambda: None)
         monkeypatch.setattr(process_control, "_SIGCHLD_RESET", [])
@@ -3049,6 +3065,7 @@ class TestTheExecutorUnderAnUnnamedAbi:
 
         host = _Host({_RUNNER: (_RUNNER, "provider")}, owned=[_RUNNER], pidfd=True)
         host.install(monkeypatch)
+        _linux_kernel(monkeypatch)
         monkeypatch.setattr(process_control, "_sigchld_action", lambda: None)
         monkeypatch.setattr(process_control, "_SIGCHLD_RESET", [True])
         proc = types.SimpleNamespace(pid=_RUNNER, returncode=None)
@@ -3064,6 +3081,7 @@ class TestTheExecutorUnderAnUnnamedAbi:
         host = _Host({_RUNNER: (_RUNNER, "provider")},
                      owned=[] if case == "another-parent" else [_RUNNER], pidfd=True)
         host.install(monkeypatch)
+        _linux_kernel(monkeypatch)
         monkeypatch.setattr(process_control, "_sigchld_action", lambda: None)
         monkeypatch.setattr(process_control, "_SIGCHLD_RESET",
                             [] if case == "no-reset" else [True])
@@ -3217,8 +3235,18 @@ class TestEveryUnconfirmedTimeoutKillIsReported:
         assert executor._kill_timed_out(proc, _RUNNER) == "maybe"
         self._assert_reported(executor, "maybe", capsys.readouterr().err)
 
+    @pytest.mark.parametrize("by_identity", [True, False],
+                             ids=["identity kill", "kill by number"])
     @pytest.mark.parametrize("verdict", ["survived", None])
-    def test_a_detached_run_keeps_it(self, tmp_path, monkeypatch, capsys, verdict):
+    def test_a_detached_run_keeps_it(self, tmp_path, monkeypatch, capsys, verdict,
+                                     by_identity):
+        """The run's record keeps an unconfirmed kill where the run records
+        its CLIs' identities, which only a later abort's kill can use: where
+        the identity kill runs (Linux with pidfds and ``/proc``,
+        ``process_control.record_cli_identities``). The kill by number
+        (macOS, the BSDs) records none, so no ``run.cleanup`` is written
+        there (``detach.note_left_running``). Which kill runs is scripted,
+        so every runner checks both."""
         from utils import subagent_executor as executor
 
         plan, phase, _root = _detached_run(tmp_path)
@@ -3229,6 +3257,7 @@ class TestEveryUnconfirmedTimeoutKillIsReported:
             return verdict
 
         monkeypatch.setattr(process_control, "kill_tree", kill_tree)
+        monkeypatch.setattr(process_control, "signals_by_identity", lambda: by_identity)
         monkeypatch.setattr(process_control, "_CLI_RECORD", [])
         process_control.record_cli_identities(str(phase), "run-u77")
         handle = detach.RunHandle(str(phase), run_id="run-u77", mode="review-plan",
@@ -3239,7 +3268,12 @@ class TestEveryUnconfirmedTimeoutKillIsReported:
             assert executor._kill_timed_out(proc, _RUNNER) == verdict
         finally:
             process_control.record_cli_identities(None)
-        cleanup = status_file.read_run(str(phase))["cleanup"]
+        self._assert_reported(executor, verdict, capsys.readouterr().err)
+        run = status_file.read_run(str(phase))
+        if not by_identity:
+            assert "cleanup" not in run, run
+            return
+        cleanup = run["cleanup"]
         assert (cleanup["state"], cleanup["verdict"], cleanup["pid"]) == (
             "incomplete", verdict, _RUNNER)
 

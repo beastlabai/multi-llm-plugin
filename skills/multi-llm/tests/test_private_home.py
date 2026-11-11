@@ -328,10 +328,16 @@ def test_the_sweep_removes_a_dead_owners_root_and_keeps_every_other(sweeper, tmp
     pid, start, namespace = _owner_fields()
     source = start.partition(".")[0]
     other_source = "ps" if source != "ps" else "proc"
+    # Another start time from this platform's source marks a reused pid only
+    # where that source is clock-independent (Linux's /proc ticks, Windows'
+    # FILETIME). macOS reads `ps` text, which follows the reader's time zone and
+    # locale, so there a mismatch is inconclusive and the root is kept
+    # (test_a_ps_start_time_that_reads_differently_never_sweeps).
+    reused_kept = source == process_control.START_SOURCE_PS
     dead_pid, dead_start = _dead_owner()
     cases = {
         "dead": (f"{dead_pid}-{dead_start}-{namespace}-abc1", False),
-        "reused pid": (f"{pid}-{source}.123-{namespace}-abc2", False),
+        "reused pid": (f"{pid}-{source}.123-{namespace}-abc2", reused_kept),
         "alive": (f"{pid}-{start}-{namespace}-abc3", True),
         "unknown start": (f"{pid}-unknown-{namespace}-abc4", True),
         "start without a source": (f"{pid}-123-{namespace}-abc10", True),

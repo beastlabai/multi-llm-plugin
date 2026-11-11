@@ -1259,6 +1259,27 @@ class TestOnlyACheckedPlatformTakesTheOwnedKill:
         assert _kill_owned(host) == "survived" and _by_number(host)
         assert _LEADER in host.zombies, "the kill reaped the child"
 
+    @pytest.mark.parametrize("case", sorted(
+        case for case, row in _NOT_CHECKED.items() if row[0] != "linux"))
+    def test_another_kernel_gets_the_kill_by_number_after_the_reset_too(
+            self, monkeypatch, case):
+        """This process's SIGCHLD reset establishes the C library's half of
+        the owned kill's proof, zombie retention; the kernel's half (a group
+        SIGKILL leaves no member forking) was checked for Linux's ``killpg``
+        alone, and XNU's does not keep it. So every kernel not named Linux
+        (macOS, the BSDs, glibc on another kernel) keeps the kill by number
+        after the reset: the rule the macOS runner meets wherever
+        ``test_signal_identity_posix.py`` scripts a reset on a Linux host."""
+        host = _owned_host(True).install(monkeypatch)
+        monkeypatch.setattr(process_control, "_sigchld_action", _REAL_SIGCHLD_ACTION)
+        platform, machine, glibc, loader, android = _NOT_CHECKED[case]
+        _platform(monkeypatch, platform, machine=machine, glibc=glibc,
+                  interpreter=loader, android=android)
+        monkeypatch.setattr(process_control, "_SIGCHLD_RESET", [True])
+        assert process_control._children_become_zombies() is None
+        assert _kill_owned(host) == "survived" and _by_number(host)
+        assert _LEADER in host.zombies, "the kill reaped the child"
+
     def test_a_checked_platform_gets_the_owned_kill(self, monkeypatch):
         """The control: the same host, named glibc on x86_64, and the native
         read answering SIGCHLD's default."""

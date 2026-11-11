@@ -60,6 +60,7 @@ from utils.providers.cursor_agent import CursorAgentProvider
 # `sk-ant-api03-...` here would make this file the one committed secret nobody
 # scans, and `tests/test_no_committed_secrets.py` would say so.
 from .test_no_committed_secrets import _synthesize  # noqa: E402
+from tests.support.own_session import SETSID  # noqa: E402
 
 
 # Availability is the adapter's own `CursorAgentProvider.is_available()`, which
@@ -5266,7 +5267,7 @@ class TestLaneACaptureEndsWithTheCliAndIsBounded:
         if own_session:
             script = (
                 'echo "[{\\"answer\\":1}]"; '
-                f'setsid sleep 30 & echo $! > "{marker}"; exit 0'
+                f'{SETSID} sleep 30 & echo $! > "{marker}"; exit 0'
             )
         else:
             # Alive long enough for the registry to snapshot the holder.

@@ -43,6 +43,7 @@ from utils import task_file_runner  # noqa: E402
 from utils import runner_selection, sandbox_walk, task_result  # noqa: E402
 from tests.conftest import stand_in  # noqa: E402
 from tests.harness.native_invoker import simulate_native_invoker  # noqa: E402
+from tests.support.own_session import SETSID  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
 from utils.providers.base import (  # noqa: E402
     PROFILE_AGENT_READONLY,
@@ -738,7 +739,7 @@ class TestFailureLadder:
         runner_env.echo("validation")
         holder = tmp_path / "holder.pid"
         self._wrap_codex(runner_env, f"""\
-            setsid sleep 30 &
+            {SETSID} sleep 30 &
             echo $! >> "{holder}"
             "$real" "$@"
             exit $?
@@ -786,7 +787,21 @@ class TestFailureLadder:
             provider=provider, model="gpt-5.5", prompt="p", profile=PROFILE_AGENT_WRITE,
             transport="argv", timeout=30, cwd=str(tmp_path))
         elapsed = time.monotonic() - started
-        assert elapsed < 2, f"{elapsed:.1f}s: the dispatch waited on the helper"
+        # The helper is stopped once the drain ends, never waited on. Where the
+        # owned kill runs (Linux) that stop ends once the runner's group is
+        # gone. The kill by number (macOS, the BSDs) counts the runner's own
+        # zombie as running: it sits out its grace and the SIGKILL window, then
+        # confirms the exit (docs/development/runtime.md, "An owned child's
+        # kill"). There the dispatch outlasts the helper's two seconds, so the
+        # late write not being there yet is what shows it was stopped. The two
+        # seconds added there are a loaded runner's slack (6.2-6.5 s on the
+        # macOS leg, against a 5.5 s wait).
+        pc = executor.process_control
+        bound = 2.0
+        if pc._children_become_zombies() is not True:
+            bound += dispatch_spawn.TIMEOUT_KILL_GRACE_S + pc._KILL_CONFIRM_S + 2.0
+        assert elapsed < bound, f"{elapsed:.1f}s: the dispatch waited on the helper"
+        assert not late.exists(), "the helper wrote before the dispatch returned"
         assert capture.exit_code == 0 and not capture.timed_out
         assert capture.stdout == '{"status":"done"}\n'
         assert capture.pipe_held and capture.pipe_held_verdict == "killed"

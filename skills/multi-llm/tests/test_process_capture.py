@@ -25,6 +25,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import llm_client, process_capture  # noqa: E402
+from tests.support.own_session import SETSID  # noqa: E402
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 
@@ -161,7 +162,7 @@ def test_an_exit_with_a_held_pipe_returns_after_the_grace_with_the_answer(
 def _holder_cli(marker, *, own_session=False):
     """A CLI that prints its answer and exits 0 while a ``sleep`` it started
     keeps its stdout and stderr open; the sleep's pid goes to *marker*."""
-    start = "setsid sleep 30" if own_session else "sleep 30"
+    start = f"{SETSID} sleep 30" if own_session else "sleep 30"
     return subprocess.Popen(
         ["sh", "-c", f'echo "[{{\\"answer\\":1}}]"; {start} & echo $! > "{marker}"; exit 0'],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
@@ -256,10 +257,13 @@ def test_the_lanes_stop_runs_once_and_never_on_a_clean_exit(tmp_path):
 
 
 #: A helper in a session of its own: holds the CLI's output for *hold* seconds,
-#: closes it, then writes *late* a second later (the residual: beyond reach).
+#: closes it, then writes *late* a second later (the residual: beyond reach). It
+#: leaves the CLI's group itself (``os.setsid``), on every POSIX: macOS has no
+#: ``setsid(1)``, and a second interpreter in front (``SETSID``) would eat into
+#: the window between the lane's stop and the helper closing the pipe.
 _CLOSING_HELPER = (
-    "import os, sys, time; time.sleep(float(sys.argv[2])); os.close(1); os.close(2); "
-    "time.sleep(1); open(sys.argv[1], 'w').write('late')"
+    "import os, sys, time; os.setsid(); time.sleep(float(sys.argv[2])); os.close(1); "
+    "os.close(2); time.sleep(1); open(sys.argv[1], 'w').write('late')"
 )
 
 
@@ -278,7 +282,7 @@ def test_a_helper_that_leaves_the_group_and_closes_its_pipes_is_never_signalled(
     from utils.providers.codex import CodexProvider
 
     late = tmp_path / "late"
-    script = (f"setsid {sys.executable} -c {_shell_quote(_CLOSING_HELPER)} "
+    script = (f"{_shell_quote(sys.executable)} -c {_shell_quote(_CLOSING_HELPER)} "
               f"{_shell_quote(str(late))} 0.75 & echo answer; exit 0")
     if lane == "executor":
         provider = CodexProvider()

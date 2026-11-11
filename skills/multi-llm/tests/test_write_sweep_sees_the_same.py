@@ -1129,6 +1129,23 @@ def _restore_tmp(target: Path) -> Path:
     return target.with_name(f".{target.name}.restore.{os.getpid()}.{STAGING_TOKEN}.tmp")
 
 
+def _tmpfile_here(folder: Path) -> bool:
+    """Whether a restore staging through descriptors in *folder* makes its
+    file with no name, as ``write_safety._staged`` decides: it tries
+    ``O_TMPFILE`` (Linux), *folder*'s filesystem makes such files, and
+    ``/proc/self/fd`` can name one. Elsewhere (macOS, a filesystem without
+    ``O_TMPFILE``) the staged file is made by its name."""
+    flag = write_safety._O_TMPFILE
+    if not flag or not os.path.isdir(write_safety._PROC_SELF_FD):
+        return False
+    try:
+        handle = os.open(folder, flag | os.O_RDWR, 0o600)
+    except OSError:
+        return False
+    os.close(handle)
+    return True
+
+
 #: How a restore's ``skipped`` state ends once it left a staged file of its
 #: own for the user, recorded in this process (``write_safety.restore_leftovers``).
 KEPT_FOR_THE_USER = ("until it is gone, no write check in this process counts it "
@@ -1653,7 +1670,12 @@ def test_a_payload_rewritten_after_its_check_is_never_put_back(env, monkeypatch,
     """The payload is hashed by path against the manifest, then copied. One
     rewritten in between is caught every way: the bytes read through the
     descriptor the restore holds on it must hash to the manifest's digest,
-    so nothing is put back and nothing is left beside the file."""
+    so nothing is put back. Nothing is left beside the file either, except
+    where the restore staged by descriptors and made its staged file by its
+    name (macOS, a filesystem without ``O_TMPFILE``): a name it made is never
+    removed, so that one is left there and named for the user, as every
+    other refusal after the staged file was named leaves it
+    (``tests/test_restore_staged_file.py``, ``_left_when_named``)."""
     target = env.root / "src" / "a.py"
     snapshot, payload = _snapshot_of(env)
     target.write_bytes(b"a = 2\n")
@@ -1672,10 +1694,18 @@ def test_a_payload_rewritten_after_its_check_is_never_put_back(env, monkeypatch,
     report = snapshot.restore(["src/a.py"])
 
     assert fired
-    assert report["src/a.py"].startswith("skipped:")
-    assert "no longer matches the manifest" in report["src/a.py"]
+    state = report["src/a.py"]
+    assert state.startswith("skipped:")
+    assert "no longer matches the manifest" in state
     assert target.read_bytes() == b"a = 2\n"
-    assert not os.path.lexists(_restore_tmp(target))
+    tmp = _restore_tmp(target)
+    if (restoring == STAGED and write_safety._STAGES_BY_DESCRIPTOR
+            and not _tmpfile_here(target.parent)):
+        assert os.path.lexists(tmp), state
+        assert f"was left at {tmp}" in state
+        _kept_for_the_user(state)
+    else:
+        assert not os.path.lexists(tmp), state
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows will not move a file, or a "
