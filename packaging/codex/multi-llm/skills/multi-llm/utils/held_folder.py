@@ -2,8 +2,8 @@
 descriptor, and the writes beside a plan made through one.
 
 Two things, below every writer that needs them (layer L0: the stdlib,
-``atomic_io`` and ``process_state`` only, so ``state_file`` and
-``status_file`` can use them):
+``atomic_io``, ``process_state`` and, for the platform's own calls,
+``process_control`` only, so ``state_file`` and ``status_file`` can use them):
 
 * **The walk and the hold** (:func:`_open_below_root`, :class:`_HeldFolder`):
   a folder below a root reached one component at a time, each opened
@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Optional, Sequence, Tuple, Union
 
+from . import process_control
 from .atomic_io import DIR_FD_SUPPORTED, atomic_write_bytes
 from .process_state import process_cache
 
@@ -107,9 +108,30 @@ def _open_below_root(root: str, parts: Sequence[str], *,
 
 
 #: Where a process's own descriptors are named (Linux): :meth:`_HeldFolder.where`
-#: reads a moved folder's path there; ``write_safety`` names an ``O_TMPFILE`` file
-#: through it (``linkat(2)`` with ``AT_EMPTY_PATH`` needs ``CAP_DAC_READ_SEARCH``).
+#: reads a moved folder's path there (:func:`_descriptor_path`); ``write_safety``
+#: names an ``O_TMPFILE`` file through it (``linkat(2)`` with ``AT_EMPTY_PATH``
+#: needs ``CAP_DAC_READ_SEARCH``).
 _PROC_SELF_FD = "/proc/self/fd"
+
+
+def _descriptor_path(fd: int) -> str:
+    """The path the kernel holds now for the open folder *fd*, for a message
+    alone: the link at :data:`_PROC_SELF_FD` (Linux), else ``fcntl(2)``'s
+    ``F_GETPATH`` (macOS, which has no proc filesystem:
+    ``process_control.descriptor_path``); ``""`` where neither answers. Both
+    follow the folder when it is moved, which is what
+    :meth:`_HeldFolder.where` asks of them. Never a containment check: that is
+    the walk's (docs/development/write-safety.md says why, and that
+    ``F_GETPATH`` spells the path as the kernel holds it, the link macOS
+    keeps at the top of its temp folders resolved).
+
+    Before macOS was read here, a folder moved during a write there was named
+    only as "the folder that was at <its old path>", though the kernel knew
+    where it had gone (the macOS CI leg, 2026-11-11)."""
+    try:
+        return os.readlink(f"{_PROC_SELF_FD}/{fd}")
+    except OSError:
+        return process_control.descriptor_path(fd)
 
 
 @dataclass(frozen=True)
@@ -200,14 +222,12 @@ class _HeldFolder:
     def where(self, name: str, spelled: str) -> str:
         """Where *name* in the folder held is, for a message: *spelled*, its
         path as the restore spelled it, while the folder is in place; once it
-        was moved, its path now (through :data:`_PROC_SELF_FD`, Linux), else
-        *name* in the folder that was at its path."""
+        was moved, its path now (:func:`_descriptor_path`: through
+        :data:`_PROC_SELF_FD` on Linux, ``F_GETPATH`` on macOS), else *name*
+        in the folder that was at its path."""
         if self.in_place():
             return spelled
-        try:
-            now = os.readlink(f"{_PROC_SELF_FD}/{self.fd}")
-        except OSError:
-            now = ""
+        now = _descriptor_path(self.fd)
         if os.path.isabs(now):
             return os.path.join(now, name)
         return f"{name} in the folder that was at {self.shown}"

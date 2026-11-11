@@ -431,7 +431,8 @@ payload since U82. Now (`_restored_through_descriptor`, `_stage_and_rename` and 
    another at its path; the first round then published the file in the moved folder and reported
    `restored` (Codex review 1 of U87). Once renamed, the folder must still be in place and the
    file's name the staged file; otherwise the restore says so, naming where the file went (the
-   folder's path now, through `/proc/self/fd`, on Linux), instead of `restored`.
+   folder's path now, through `/proc/self/fd` on Linux and `fcntl(F_GETPATH)` on macOS, which
+   spells it as the kernel holds it: `/private/var/…` for `/var/…`), instead of `restored`.
 5. A refusal puts nothing back and keeps the snapshot. Once the staged file has a name (made by it,
    or an unnamed one once linked) it is never removed: POSIX removes a name, not a file, and
    between any check of the name and `unlinkat` another process can swap its own file in, which the

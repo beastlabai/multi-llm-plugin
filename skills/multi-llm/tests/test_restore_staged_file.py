@@ -52,6 +52,7 @@ from tests.test_write_sweep_sees_the_same import (
     _snapshot_of,
     _staging_by_handle,
     _kept_for_the_user,
+    _tmpfile_here,
     _staging_token_pinned,  # noqa: F401 - autouse: the staging name is known
 )
 from utils import write_safety
@@ -65,20 +66,6 @@ RUNNER_CHANGE = b"runner change\n"
 #: The file's mode and times when snapshotted, which the payload keeps.
 FILE_MODE = 0o640
 FILE_TIMES = (1_600_000_000_000_000_000, 1_650_000_000_987_654_300)
-
-
-def _tmpfile_here(folder: Path) -> bool:
-    """Whether *folder*'s filesystem makes ``O_TMPFILE`` files and
-    ``/proc/self/fd`` can name one."""
-    flag = getattr(os, "O_TMPFILE", 0)
-    if not flag or not os.path.isdir("/proc/self/fd"):
-        return False
-    try:
-        handle = os.open(folder, flag | os.O_RDWR, 0o600)
-    except OSError:
-        return False
-    os.close(handle)
-    return True
 
 
 @pytest.fixture(params=["O_TMPFILE", "named"])
@@ -561,7 +548,7 @@ ANOTHER_FOLDERS_FILE = b"another folder's file\n"
 
 def _moved_name(moved: Path, name: str) -> str:
     """*name* in the folder moved to *moved*, as the restore finds its path
-    now (``/proc/self/fd``, resolved)."""
+    now (``/proc/self/fd`` on Linux, ``F_GETPATH`` on macOS: resolved)."""
     return os.path.join(os.path.realpath(moved), name)
 
 

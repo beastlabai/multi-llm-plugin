@@ -409,6 +409,34 @@ def handle_of_descriptor(fd: int) -> int:  # pragma: no cover - Windows
     return msvcrt.get_osfhandle(fd)
 
 
+#: The buffer ``fcntl(F_GETPATH)`` fills: macOS's ``MAXPATHLEN``, the
+#: terminating NUL included. Never smaller, as the kernel writes up to that.
+_MAXPATHLEN = 1024
+
+
+def descriptor_path(fd: int) -> str:
+    """The path the kernel holds now for the open descriptor *fd*, through
+    ``fcntl(2)``'s ``F_GETPATH`` (macOS, which has no ``/proc``); ``""``
+    where Python offers no such call (Linux, which names a descriptor at
+    ``/proc/self/fd`` instead; Windows) or it fails. The answer follows a
+    folder that was moved, and spells the path as the kernel holds it (the
+    link macOS keeps at the top of its temp folders resolved): fit for a
+    message saying where something went (``held_folder._descriptor_path``),
+    never for a containment check (docs/development/write-safety.md)."""
+    try:
+        import fcntl  # POSIX only; loaded on the path that calls it
+    except ImportError:  # pragma: no cover - Windows
+        return ""
+    request = getattr(fcntl, "F_GETPATH", None)
+    if request is None:
+        return ""
+    try:
+        answer = fcntl.fcntl(fd, request, bytes(_MAXPATHLEN))
+    except (OSError, ValueError):
+        return ""
+    return os.fsdecode(bytes(answer).split(b"\0", 1)[0])
+
+
 class LockUnavailable(Exception):
     """Another process holds the lock. Carries the recorded holder, if any."""
 
