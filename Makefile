@@ -25,7 +25,9 @@ LANE_GUARD := uv run --project skills/multi-llm -- python $(CONTAINER_DIR)/lane_
 # Advisory: the map is a static import scan and never replaces the CI command.
 TESTS_FOR := uv run --project skills/multi-llm -- python skills/multi-llm/tests/tools/tests_for.py
 TESTS_FOR_TOP := $(if $(TOP),--top $(TOP),)
-TESTS_FOR_MARKERS := not live and not container and not package and not codex_jail
+# The ordinary CI selection: the -m expression .github/workflows/test.yml passes.
+CI_MARKERS := not live and not container and not package and not codex_jail
+TESTS_FOR_MARKERS := $(CI_MARKERS)
 
 # --- The opencode npm package (packaging/opencode/) ----------------------------- #
 OPENCODE_PKG   := packaging/opencode
@@ -125,7 +127,7 @@ export MLLM_E2E_MATRIX_TIMEOUT_S
         claude-regen claude-package claude-check-release claude-check-bump \
         claude-package-check-ci claude-package-container \
         bump-version claude-publish claude-hook-install claude-hook-uninstall \
-        test-for tests-map lint refresh-model-catalogs
+        test test-serial test-for tests-map lint refresh-model-catalogs
 
 # `make help` lists every `target: ... ## description` line under its `##@` heading.
 # A new target needs a description and a .PHONY entry; tests/test_makefile_help.py checks both.
@@ -133,6 +135,18 @@ help: ## list the targets, grouped by section
 	@awk 'BEGIN {FS = ":.*## "} /^##@/ {printf "\n%s\n\n", substr($$0, 5); next} /^[a-zA-Z0-9_.-]+:.*## / {printf "  make %-32s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 ##@ Tests
+
+# The whole ordinary CI selection, spread over N pytest-xdist workers (default
+# `auto`, one per core xdist detects; on a machine other sessions share, a smaller
+# N leaves them room). `--dist loadfile` keeps each test file on one worker, as
+# the CI parallel leg does, because some files share module-level state. The
+# flags stay out of pyproject's addopts: a one-file run would pay worker start-up.
+test: ## run the ordinary CI selection in parallel (N workers, default auto)
+	$(PYTEST) -n $(or $(N),auto) --dist loadfile -m "$(CI_MARKERS)" -q
+
+# The same selection one test at a time, as the gating CI job runs it today.
+test-serial: ## run the ordinary CI selection serially, as the gating CI job does
+	$(PYTEST) -m "$(CI_MARKERS)" -q
 
 test-for: ## list the test files that import MODULE (a path under skills/multi-llm; optional TOP), then run only those at -n 4
 	@test -n "$(MODULE)" || { echo "usage: make test-for MODULE=utils/foo.py [TOP=n]" >&2; exit 2; }

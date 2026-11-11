@@ -23,7 +23,11 @@ uv run --project skills/multi-llm -- pytest skills/multi-llm/tests/test_filterin
 # Tests that import a module (advisory; see tests/MODULE_TESTS.md), run at -n 4
 make test-for MODULE=utils/status_file.py
 
-# Ordinary CI suite, excluding explicitly provisioned integrations
+# Ordinary CI suite, excluding explicitly provisioned integrations, in parallel
+# (pytest-xdist, --dist loadfile; N=<workers> to leave the machine room)
+make test
+
+# The same selection serially, as the gating CI job runs it
 uv run --project skills/multi-llm -- pytest skills/multi-llm/tests -m "not live and not container and not package and not codex_jail"
 
 # Error-handling tests
