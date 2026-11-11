@@ -2903,7 +2903,9 @@ class TestTheProbeIsSkippedOnlyWhenTheConfigCannotNameADriver:
         assert probes, "a config naming a driver was answered without the probe"
         assert any(item.startswith(expected) for item in overrides), overrides
 
-    @pytest.mark.parametrize("key", ["include.path", "includeIf.gitdir:/.path"])
+    # `gitdir:**` matches every git directory (git prepends `**/`); `gitdir:/`
+    # matched no Windows one (`D:/...`), so git never applied the include there.
+    @pytest.mark.parametrize("key", ["include.path", "includeIf.gitdir:**.path"])
     def test_a_driver_reached_through_an_include_goes_to_the_probe(
             self, tmp_path, probes, key):
         from utils.git_utils import planted_driver_overrides
