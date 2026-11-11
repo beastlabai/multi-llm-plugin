@@ -4461,18 +4461,25 @@ class TestWindowsSeam:
     def test_windows_abort_escalates_to_taskkill_of_the_whole_tree(self,
                                                                   monkeypatch):
         runs = []
+        breaks = []
         alive = iter([True, True, False])
         monkeypatch.setattr(process_control, "IS_WINDOWS", True)
         monkeypatch.setattr(process_control, "process_alive",
                             lambda _pid: next(alive, False))
         monkeypatch.setattr(process_control, "probe",
                             lambda *_a, **_k: process_control.ALIVE)
+        # Recorded, never sent: on a real Windows runner a CTRL_BREAK_EVENT for a
+        # pid that leads no console group reached every process on the console
+        # (pytest, its xdist workers and the step's PowerShell, which then
+        # entered its debugger and failed the job; parallel leg, 2026-11-11).
+        monkeypatch.setattr(process_control, "_send_ctrl_break", breaks.append)
         monkeypatch.setattr(
             process_control.subprocess, "run",
             lambda argv, **kwargs: runs.append(argv),
         )
         verdict = process_control.kill_tree(4242, escalate_after_s=0.0)
         assert verdict == "killed"
+        assert breaks == [4242], "the group gets its break before the escalation"
         assert runs and runs[0] == ["taskkill", "/PID", "4242", "/T", "/F"], runs
 
     def test_windows_lock_leaves_the_holder_payload_readable(self):
