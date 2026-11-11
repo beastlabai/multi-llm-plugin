@@ -244,6 +244,48 @@ def _signal_handlers_do_not_outlive_their_test():
 
 
 @pytest.fixture(autouse=True)
+def _a_console_event_names_the_test_that_sent_it(request, monkeypatch):
+    """Windows: every console Ctrl event a test sends is said on the real stderr.
+
+    A ``CTRL_BREAK_EVENT`` for a pid that leads no console group reached every
+    process on the console on the hosted Windows runner: pytest, its xdist
+    workers and the CI step's PowerShell, which entered its debugger and failed
+    the job with no summary and no JUnit file, so nothing named the test that
+    sent it (2026-11-11). Each console event this process sends is written to
+    fd 2 with the test's node id, which survives that ending. That includes
+    ``os.kill(pid, 0)``: on Windows signal 0 is ``CTRL_C_EVENT``, never a
+    liveness probe (``process_control.process_alive`` is the probe)."""
+    if os.name != "nt":
+        yield
+        return
+    from utils import process_control
+
+    real_break = process_control._send_ctrl_break
+    real_kill = os.kill
+    node = request.node.nodeid
+
+    def say(what: str) -> None:
+        try:
+            os.write(2, f"\n[CONSOLE_EVENT] {what} from {node}\n".encode("utf-8", "replace"))
+        except OSError:  # pragma: no cover - a closed stderr never fails the test
+            pass
+
+    def break_and_say(pid):
+        say(f"CTRL_BREAK_EVENT to pid {pid}")
+        return real_break(pid)
+
+    def kill(pid, sig):
+        if sig in (signal.CTRL_C_EVENT, signal.CTRL_BREAK_EVENT):
+            name = "CTRL_C_EVENT" if sig == signal.CTRL_C_EVENT else "CTRL_BREAK_EVENT"
+            say(f"os.kill {name} to pid {pid}")
+        return real_kill(pid, sig)
+
+    monkeypatch.setattr(process_control, "_send_ctrl_break", break_and_say)
+    monkeypatch.setattr(os, "kill", kill)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _lane_a_spawn_honours_a_faked_subprocess_run(monkeypatch):
     """Keep ``subprocess.run`` the suite's fake for the Lane A process boundary.
 
