@@ -420,10 +420,16 @@ def _lane_a_opencode(monkeypatch, argv):
 
     monkeypatch.setattr(llm_client, "_resolve_executable", lambda name: ([name], False))
     monkeypatch.setattr(llm_client, "provider_dispatch_context", no_dispatch_context)
-    monkeypatch.setattr(adapter, "is_available", lambda: True)
-    monkeypatch.setattr(adapter, "build_command_for_transport",
+    # The registry's adapter is process-wide, so shadow its methods through the
+    # instance ``__dict__``, whose undo deletes the key. Undoing an instance
+    # ``setattr`` would leave the original bound method on the instance, where
+    # it shadows a later test's class-level patch of the same method
+    # (``test_provider_registry``'s session rung patches ``is_available`` on the
+    # class), as ``test_lane_a_ladder._patch_adapter`` explains.
+    monkeypatch.setitem(vars(adapter), "is_available", lambda: True)
+    monkeypatch.setitem(vars(adapter), "build_command_for_transport",
                         lambda *a, **k: (list(argv), None))
-    monkeypatch.setattr(adapter, "resolve_env", lambda *a, **k: dict(os.environ))
+    monkeypatch.setitem(vars(adapter), "resolve_env", lambda *a, **k: dict(os.environ))
     yield
 
 
