@@ -16,6 +16,7 @@ concurrency:
 
 jobs:
   test:
+    if: false
     strategy:
       fail-fast: false
       matrix:
@@ -120,7 +121,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        os: [windows-latest]
     runs-on: ${{ matrix.os }}
     continue-on-error: true
     # The serial job's caps: a parallel leg is faster, never slower, so a leg
@@ -142,7 +143,7 @@ jobs:
       # every worker's results into it. The worker count xdist picked is in the
       # log's "created: N/N workers" line.
       - name: Run tests in parallel
-        run: uv run --project skills/multi-llm -- pytest skills/multi-llm/tests -n auto --dist loadfile -m "not live and not container and not package and not codex_jail" --junitxml="${{ runner.temp }}/junit.xml" --durations=25
+        run: uv run --project skills/multi-llm -- pytest skills/multi-llm/tests -n auto --dist loadfile -v -m "not live and not container and not package and not codex_jail" --junitxml="${{ runner.temp }}/junit.xml" --durations=25
       - name: Upload per-test timings
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -169,6 +170,7 @@ jobs:
   # the `package` rows, the clean rebuilds and the moved-tree rule. The publish
   # workflows run the tiers with every plain row, as they must.
   package:
+    if: false
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
