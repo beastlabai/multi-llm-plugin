@@ -2070,6 +2070,33 @@ def spawnable_stub(directory: Path, name: str, source: str) -> tuple[Path, dict]
 #: A `uv` replacement that records its argv and replays scripted exits. Every
 #: poll-loop row drives the real `execute` through this, so the loop's control
 #: flow is exercised rather than asserted about.
+def _abort_after_call(log: Path, call: int, settle_ms: int) -> str:
+    """JS defining ``controller``, aborted *settle_ms* after the uv stub's
+    *call*-th child logged its argv (the stub logs before it prints), with a
+    20 s backstop so a row whose child never starts fails instead of hanging.
+
+    Off the argv log rather than a bare timer: a timer picks its moment by how
+    fast the machine is, and on a loaded CI runner (four xdist workers on four
+    cores) a 400 ms timer fired before the launcher had printed its run id."""
+    return f"""
+            const fs = await import("node:fs")
+            const controller = new AbortController()
+            const started = () => {{
+              try {{
+                return fs.readFileSync({json.dumps(str(log))}, "utf8")
+                  .split("\\n").filter(Boolean).length
+              }} catch {{ return 0 }}
+            }}
+            const watcher = setInterval(() => {{
+              if (started() < {call}) return
+              clearInterval(watcher)
+              setTimeout(() => controller.abort(), {settle_ms}).unref?.()
+            }}, 10)
+            watcher.unref?.()
+            setTimeout(() => controller.abort(), 20000).unref?.()
+    """
+
+
 UV_SCRIPT_STUB = r'''#!/usr/bin/env python3
 """Replay a scripted sequence of dispatcher outcomes, recording every argv."""
 import json, os, sys, time
@@ -3474,10 +3501,10 @@ class TestExecuteStateMachine:
         running = {"exit": 2, "stdout": []}
         log = uv_stub.log_path
         log.write_text("", encoding="utf-8")
+        # Aborted once the first poll (the second child) has started: by then
+        # the launch record, and the run id in it, has certainly been read.
         outcome = node_json(
-            f"""
-            const controller = new AbortController()
-            setTimeout(() => controller.abort(), 400)
+            _abort_after_call(log, 2, 250) + f"""
             emit(await MultiLlmPlugin.execute(
               {{mode: "review-plan", plan: "p.md", question: "", extra_flags: []}},
               {{directory: {json.dumps(str(log.parent))}, abort: controller.signal}}, surface,
@@ -3647,10 +3674,11 @@ class TestExecuteStateMachine:
         }
         log = uv_stub.log_path
         log.write_text("", encoding="utf-8")
+        # A second after the launcher logged its argv: it has printed the banner
+        # by then (it prints right after logging) and is still in its 30 s sleep,
+        # so the abort lands inside the launch window however loaded the runner.
         outcome = node_json(
-            f"""
-            const controller = new AbortController()
-            setTimeout(() => controller.abort(), 400)
+            _abort_after_call(log, 1, 1000) + f"""
             emit(await MultiLlmPlugin.execute(
               {{mode: "review-plan", plan: "p.md", question: "", extra_flags: []}},
               {{directory: {json.dumps(str(log.parent))}, abort: controller.signal}}, surface,
