@@ -89,7 +89,22 @@ jobs:
         # macOS/Windows images), `package` on runners with no staged tarball,
         # which the package job below builds and these do not, and `codex_jail`
         # on runners with no codex binary to put in the jail.
-        run: uv run --project skills/multi-llm -- pytest skills/multi-llm/tests -m "not live and not container and not package and not codex_jail"
+        #
+        # The JUnit file is the per-test timing record the parallel trial below is
+        # judged against (docs/development.md, "CI trial: parallel suite"). It goes
+        # to the runner's temp directory, not the checkout: several tests read this
+        # checkout's git status. --durations prints the slowest tests in the log.
+        run: uv run --project skills/multi-llm -- pytest skills/multi-llm/tests -m "not live and not container and not package and not codex_jail" --junitxml="${{ runner.temp }}/junit.xml" --durations=25
+      # Kept for failed runs too: a failure is when the timings matter most. A leg
+      # that hit its cap is cancelled and pytest never wrote the file anyway.
+      - name: Upload per-test timings
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: junit-test-${{ matrix.os }}
+          path: ${{ runner.temp }}/junit.xml
+          if-no-files-found: warn
+          retention-days: 30
 
   # A one-week trial of the same suite spread over the runner's cores, kept apart
   # from the gating `test` job above (its checks keep their names and still
@@ -122,8 +137,20 @@ jobs:
       # the module skips with a named reason where the binary is absent.
       # pytest-xdist comes from the project's `dev` dependency group (pyproject + uv.lock),
       # like every other test dependency. The -m expression is the serial job's.
+      # The serial log parser cannot profile this leg (workers interleave their
+      # progress), so the JUnit file is its only per-file record; xdist merges
+      # every worker's results into it. The worker count xdist picked is in the
+      # log's "created: N/N workers" line.
       - name: Run tests in parallel
-        run: uv run --project skills/multi-llm -- pytest skills/multi-llm/tests -n auto --dist loadfile -m "not live and not container and not package and not codex_jail"
+        run: uv run --project skills/multi-llm -- pytest skills/multi-llm/tests -n auto --dist loadfile -m "not live and not container and not package and not codex_jail" --junitxml="${{ runner.temp }}/junit.xml" --durations=25
+      - name: Upload per-test timings
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: junit-test-parallel-${{ matrix.os }}
+          path: ${{ runner.temp }}/junit.xml
+          if-no-files-found: warn
+          retention-days: 30
 
   # The npm package. Linux-only by decision, exactly as the gitleaks guard above
   # is: nothing downstream of the uv probe has been measured on Windows or macOS

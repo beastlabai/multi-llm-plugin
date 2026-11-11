@@ -14,7 +14,9 @@ make test-for MODULE=utils/status_file.py
 uv run --project skills/multi-llm -- pytest skills/multi-llm/tests/test_filtering.py -v
 uv run --project skills/multi-llm -- pytest skills/multi-llm/tests/test_filtering.py::TestFilterItems -v
 
-# The ordinary CI selection (the gate; `make test-for` never replaces it)
+# The ordinary CI selection (the gate; `make test-for` never replaces it),
+# in parallel with --dist loadfile, or serially as the gating CI job runs it
+make test
 uv run --project skills/multi-llm -- pytest skills/multi-llm/tests -m "not live and not container and not package and not codex_jail"
 ```
 
