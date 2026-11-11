@@ -17,6 +17,11 @@ however many tests ask for it. Not a test module itself.
 * The latest tree of each path stays cached for the life of the process, which is
   why the import-layer check, which wants memory kept down, parses one module at a
   time and does not use this.
+* ``derived`` keeps a value computed from a tree (the nodes a scan reads) instead
+  of the tree, for a scan over so much source that keeping every tree would cost
+  more than parsing it again: each live node makes every garbage collection
+  slower, and pytest and the interpreter run several on the way out. The value is
+  kept per version of the bytes, like a tree.
 """
 
 import ast
@@ -27,7 +32,8 @@ from pathlib import Path
 #: ``skills/multi-llm``, the directory the runtime modules live under.
 SKILL_ROOT = Path(__file__).resolve().parent.parent
 
-#: path -> (sha256 of the bytes that were parsed, their tree).
+#: path -> [sha256 of the file's bytes, their tree or None until ``source_tree``
+#: asks for it, {function: its ``derived`` value}].
 _trees = {}
 
 
@@ -36,18 +42,46 @@ def source_text(path):
     return Path(path).read_text(encoding="utf-8")
 
 
-def source_tree(path):
-    """The parsed ``ast.Module`` of ``path`` (``filename`` is its path), shared: do not mutate."""
+def _entry(path):
+    """``(key, the file's bytes, its entry)``: a fresh entry when the bytes changed."""
     key = str(Path(path))
     data = Path(path).read_bytes()
     digest = hashlib.sha256(data).digest()
-    cached = _trees.get(key)
-    if cached is None or cached[0] != digest:
-        # The same decoding ``source_text`` applies (UTF-8, universal newlines).
-        text = io.TextIOWrapper(io.BytesIO(data), encoding="utf-8").read()
-        cached = (digest, ast.parse(text, filename=key))
-        _trees[key] = cached
-    return cached[1]
+    entry = _trees.get(key)
+    if entry is None or entry[0] != digest:
+        entry = _trees[key] = [digest, None, {}]
+    return key, data, entry
+
+
+def _parse(key, data):
+    # The same decoding ``source_text`` applies (UTF-8, universal newlines).
+    text = io.TextIOWrapper(io.BytesIO(data), encoding="utf-8").read()
+    return ast.parse(text, filename=key)
+
+
+def source_tree(path):
+    """The parsed ``ast.Module`` of ``path`` (``filename`` is its path), shared: do not mutate."""
+    key, data, entry = _entry(path)
+    if entry[1] is None:
+        entry[1] = _parse(key, data)
+    return entry[1]
+
+
+def derived(path, function):
+    """``function(tree)`` for ``path``'s tree, computed once per version of its bytes.
+
+    *function* is a module-level function (it is the cache key), only reads the
+    tree, and depends on nothing else, since its value is reused for as long as
+    the bytes hash the same. It gets the cached tree if ``source_tree`` already
+    parsed one; otherwise a tree parsed for it alone, which is not kept. The value
+    is shared like a tree: do not mutate it.
+    """
+    key, data, entry = _entry(path)
+    values = entry[2]
+    if function not in values:
+        tree = entry[1] if entry[1] is not None else _parse(key, data)
+        values[function] = function(tree)
+    return values[function]
 
 
 def python_files(root=SKILL_ROOT):

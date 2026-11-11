@@ -24,7 +24,13 @@ The workflow contract lives in the host-neutral instruction core under [`skills/
 ## Test suite
 
 ```bash
-# Run the test suite (from the repo root)
+# The ordinary CI selection, in parallel (about 3 min on 16 cores; N=8 to share the machine)
+make test
+
+# The same selection one test at a time, as the gating CI job runs it (about 30 min)
+make test-serial
+
+# A bare run (the addopts default below; includes `live` rows)
 uv run --project skills/multi-llm -- pytest
 
 # Run a single test file
@@ -49,6 +55,37 @@ To find the tests for the module you are editing, run
 It is an advisory import map and never replaces the CI selection; see
 [`skills/multi-llm/tests/README.md`](../skills/multi-llm/tests/README.md).
 
+### Keeping the suite cheap
+
+The suite runs on three CI operating systems, and on Windows every process start
+and every small file costs several times what it costs on Linux: a test file that
+builds its own git repository runs 12 to 25 times slower there than on Ubuntu,
+and one that drives the whole implement step against mock CLIs about 8 times.
+Thousands of millisecond tests barely register; per-test setup that starts
+processes is what fills the Windows leg. So, when adding a test:
+
+- **Prefer a row, or an assertion on a run that already exists.** A regression
+  from a live run belongs as a row in a table-driven test of the function that
+  produces the text or state, or as one more assertion on a compatible existing
+  run. Add a new end-to-end run only for another entry point or state transition.
+- **Use an in-process seam for logic.** Keep a real subprocess for what the
+  subprocess is: argv, quoting, containment, kill. The write scheduler's
+  `respond=` dispatcher and hand-built state files are the usual seams.
+- **Give a real wait a test-only knob.** A kill grace, poll budget or probe
+  timeout should be an argument the test can shorten, with margins that hold on
+  a slow Windows runner under xdist.
+- **Reuse a repository template when the shape matches.**
+  [`tests/support/git_template.py`](../skills/multi-llm/tests/support/git_template.py)
+  builds a repository shape once per worker and copies it; keep explicit
+  construction where config, mutable history or containment is the subject.
+- **Share a read-only run only among readers.**
+  [`tests/support/shared_stop.py`](../skills/multi-llm/tests/support/shared_stop.py)
+  shares one check-gate stop among tests that only read it, and checks after
+  each that nothing changed it. Anything that resumes, answers or writes builds
+  its own.
+- **Give a migration guard its exit.** Its docstring names the change that
+  deletes it, so it does not outlive the refactor.
+
 ### CI trial: parallel suite
 
 `.github/workflows/test.yml` has a second job, `test-parallel`, beside the gating
@@ -58,18 +95,39 @@ package and not codex_jail"` selection on ubuntu, macOS and Windows, run with
 `loadfile` keeps each test file on one worker. Locally, four workers finish the
 suite in about six minutes.
 
+**Why it matters most on Windows.** The serial Windows leg took about 190 min of
+pytest on 2026-11-08, and the suite has about a third more tests since, so the
+serial leg may now come close to its 240-minute cap.
+
 The leg is **non-blocking** (`continue-on-error: true`) and its checks are named
 `test-parallel (<os>)`, so no required check changes. It is a one-week trial,
 because hosted runners are slower than a developer machine and tests that time a
 2 to 3 s child can flake there. Compare it with the serial legs on the same
 commits: pass rate, flakes (a failure the serial leg does not share) and wall time.
 
+Both jobs upload a JUnit file per OS (artifacts `junit-test-<os>` and
+`junit-test-parallel-<os>`, kept 30 days, failed runs included), and both print
+their 25 slowest tests. The parallel leg's log cannot be profiled by file, since
+its workers interleave, so compare legs by file from the JUnit files:
+
+```bash
+gh run download <run-id> --repo beastlabai/multi-llm-plugin --pattern 'junit-*' --dir junit
+python skills/multi-llm/tests/tools/junit_times.py junit/junit-test-parallel-windows-latest/junit.xml
+```
+
+The sums are per-test time, not wall time; read wall time from the job, and the
+worker count from the log's `created: N/N workers` line. A fix for a
+parallel-only failure goes at its source (a widened budget, a test that no longer
+depends on wall time), never a blanket rerun or `-p no:xdist`.
+
 - **Promote it** when the week is clean: make `test-parallel` the gating job, by
   moving the `-n auto --dist loadfile` flags into `test`'s command and deleting
   the trial job, so the check names `test (<os>)` stay the required ones.
 - **Fall back to file shards** if Windows stays too slow or the flakes do not go
   away: split the file list over a matrix instead, each shard still running whole
-  files.
+  files. Bin-pack files by their Windows JUnit seconds, give a file missing from
+  the table a fixed weight so it still runs, and keep the required check name
+  with a final `test (windows-latest)` job that fails unless every shard passed.
 - **Drop it** if neither holds; the serial job is unchanged and nothing depends
   on this one.
 

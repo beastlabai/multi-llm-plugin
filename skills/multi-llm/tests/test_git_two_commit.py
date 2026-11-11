@@ -26,6 +26,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils import git_utils  # noqa: E402
 from utils import review_diff  # noqa: E402
 
+from tests.support.git_template import copy_of  # noqa: E402
+
 GOLDEN = Path(__file__).parent / "golden" / "git_two_commit_head_none.json"
 
 #: The environment every repository here is built and read under.
@@ -236,12 +238,22 @@ def hermetic(monkeypatch):
         monkeypatch.delenv(key, raising=False)
 
 
-@pytest.fixture
-def golden_repo(tmp_path, monkeypatch, hermetic):
+def _templated(tmp_path, tmp_path_factory, monkeypatch, name, build):
+    """A copy of the shape *build* makes at ``tmp_path / "repo"``, from a
+    per-session template (``tests.support.git_template``), with the cwd
+    there: ``(root, what build returned)``. Every shape here is built under
+    ``hermetic``'s fixed identity and dates, so a fresh build already had the
+    template's SHAs; the copy's index refresh runs under it too."""
     root = tmp_path / "repo"
-    shas = build_golden_repo(root)
+    _, built = copy_of(tmp_path_factory, name, build, root, env=lambda: os.environ)
     monkeypatch.chdir(root)
-    return root, shas
+    return root, built
+
+
+@pytest.fixture
+def golden_repo(tmp_path, tmp_path_factory, monkeypatch, hermetic):
+    return _templated(tmp_path, tmp_path_factory, monkeypatch, "two-commit-golden",
+                      build_golden_repo)
 
 
 def _plain_diff(root: Path, *args: str) -> bytes:
@@ -438,16 +450,21 @@ class TestTwoCommitDiff:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def root_repo(tmp_path, monkeypatch, hermetic):
-    root = _init(tmp_path / "repo")
+def _build_root_repo(path: Path):
+    root = _init(path)
     _write(root, "src/a.py", "one\ntwo\n")
     _write(root, "tests/test_a.py", "def test_a():\n    pass\n")
     _write(root, "README.md", "# R\n")
     c0 = _commit(root, "root")
     _write(root, "src/a.py", "one\ntwo\nthree\n")
     c1 = _commit(root, "second")
-    monkeypatch.chdir(root)
+    return c0, c1
+
+
+@pytest.fixture
+def root_repo(tmp_path, tmp_path_factory, monkeypatch, hermetic):
+    root, (c0, c1) = _templated(tmp_path, tmp_path_factory, monkeypatch, "two-commit-root",
+                                _build_root_repo)
     return root, c0, c1
 
 
@@ -530,17 +547,21 @@ class TestEmptyTreeBase:
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def blob_repo(tmp_path, monkeypatch, hermetic):
-    root = _init(tmp_path / "repo")
+def _build_blob_repo(path: Path):
+    root = _init(path)
     _write(root, "a.py", "a\n")
     _write(root, "pkg/mod.py", "m\n")
     newline_path = None
     if os.name != "nt":
         newline_path = "odd\nname.py"
         _write(root, newline_path, "n\n")
-    sha = _commit(root, "c")
-    monkeypatch.chdir(root)
+    return _commit(root, "c"), newline_path
+
+
+@pytest.fixture
+def blob_repo(tmp_path, tmp_path_factory, monkeypatch, hermetic):
+    root, (sha, newline_path) = _templated(tmp_path, tmp_path_factory, monkeypatch,
+                                           "two-commit-blob", _build_blob_repo)
     return root, sha, newline_path
 
 
@@ -690,17 +711,21 @@ class TestRenameMapAndDeletingCommit:
 
 
 @pytest.fixture
-def attr_repo(tmp_path, monkeypatch, hermetic):
+def attr_repo(tmp_path, tmp_path_factory, monkeypatch, hermetic):
     """``head``'s ``.gitattributes`` marks ``gen/**`` generated; the working
     tree's no longer does."""
-    root = _init(tmp_path / "repo")
+    return _templated(tmp_path, tmp_path_factory, monkeypatch, "two-commit-attr",
+                      _build_attr_repo)
+
+
+def _build_attr_repo(path: Path) -> str:
+    root = _init(path)
     _write(root, ".gitattributes", "gen/** linguist-generated\n")
     _write(root, "gen/mirror.py", "M = 1\n")
     _write(root, "src/a.py", "a\n")
     head = _commit(root, "c")
     _write(root, ".gitattributes", "")
-    monkeypatch.chdir(root)
-    return root, head
+    return head
 
 
 def _stub_check_attr(monkeypatch, returncode: int, stderr: str) -> List[List[str]]:
@@ -859,10 +884,15 @@ SCOPE = [
 
 
 @pytest.fixture
-def change_repo(tmp_path, monkeypatch, hermetic):
+def change_repo(tmp_path, tmp_path_factory, monkeypatch, hermetic):
     """``base`` → ``head``: head edits a.py, deletes gone.py, adds new.py.
     The working tree starts equal to ``head``."""
-    root = _init(tmp_path / "repo")
+    return _templated(tmp_path, tmp_path_factory, monkeypatch, "two-commit-change",
+                      _build_change_repo)
+
+
+def _build_change_repo(path: Path) -> str:
+    root = _init(path)
     _write(root, ".gitattributes", "* text=auto\n")
     for rel in ("a.py", "gone.py", "keep.py", "thing", "moved.py"):
         _write(root, rel, f"{rel}\n")
@@ -872,9 +902,7 @@ def change_repo(tmp_path, monkeypatch, hermetic):
     _write(root, "a.py", "a.py, edited in the range\n")
     (root / "gone.py").unlink()
     _write(root, "new.py", "new\n")
-    head = _commit(root, "head")
-    monkeypatch.chdir(root)
-    return root, head
+    return _commit(root, "head")
 
 
 def _changed(root: Path, head: str, paths=SCOPE) -> set:

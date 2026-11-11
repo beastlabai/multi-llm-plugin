@@ -29,15 +29,14 @@ from pathlib import Path
 import pytest
 
 from tests.support.implement_world import (  # noqa: E402
-    _dispatched_titles, _implement, _statuses, make_repo,
+    _dispatched_titles, _implement, _statuses,
 )
 
 import multi_llm  # noqa: E402
-from utils import provider_registry as registry  # noqa: E402
 from utils.state_manager import get_or_create_state  # noqa: E402
 from tests.support.gate_fixture import (
     ALLOW,
-    CHECK_GATE,
+    CHECK_GATE,  # noqa: F401 - test_resume_why.py imports it from here
     DENY,
     DENY_CLAUSE,
     FINDINGS,
@@ -48,9 +47,13 @@ from tests.support.gate_fixture import (
     _check,
     _dispatched_prompt,
     _first_run,
+    _gate_world,
     _policy,
 )
 from tests.support import gate_fixture as _gate
+from tests.support.shared_stop import (  # noqa: F401 - the fixtures
+    gate_first_stop_fixture, module_stop_cache, shared_stop,
+)
 
 
 def __getattr__(name):
@@ -65,27 +68,50 @@ def _reason(repo, task_id: str) -> str:
     return get_or_create_state(repo.plan).get_task_status_reason(task_id) or ""
 
 
-class TestThePolicyStop:
+def _front_door_run(repo, capsys) -> tuple:
+    """The first stop through ``multi_llm.main``, the door that prints the
+    ``MULTI_LLM_RESULT`` line (``_first_run`` calls the orchestrator itself)."""
+    _check(repo, passed=False)
+    assert multi_llm.main([
+        "implement", str(repo.plan), "--yes", "--exec-subagents",
+    ]) == 3
+    captured = capsys.readouterr()
+    return captured.out, captured.err
 
-    def test_the_refused_task_is_recorded_failed_with_its_reason(self, repo, capsys):
-        text = _first_run(repo, capsys)
-        statuses = _statuses(repo)
+
+@pytest.fixture
+def front_door_stop(stop_cache, capsys, tmp_path_factory):
+    """That stop, shared by this module's tests that only read it."""
+    stop = shared_stop(
+        stop_cache, "front-door", capsys, tmp_path_factory, _gate_world, _front_door_run)
+    yield stop
+    stop.assert_untouched()
+
+
+class TestThePolicyStop:
+    """The tests that only read the first stop share one run of it
+    (``gate_first_stop``, ``front_door_stop``); a test that resumes from it
+    runs its own."""
+
+    def test_the_refused_task_is_recorded_failed_with_its_reason(self, gate_first_stop):
+        stop = gate_first_stop
+        statuses, reasons = stop.statuses, stop.reasons
         assert {t: statuses[t] for t in ("T001", "T002", "T003", "T004")} == {
             "T001": "completed", "T002": "completed", "T003": "completed",
             "T004": "completed",
         }
-        assert statuses["T005"] == "failed", statuses
-        assert _reason(repo, "T005").startswith(
+        assert statuses["T005"] == "failed", dict(statuses)
+        assert reasons["T005"].startswith(
             "Write policy violation (pre-dispatch): src/vendor/stamp.js"
-        ), _reason(repo, "T005")
-        assert statuses["T006"] == "pending" and "T005 failed" in _reason(repo, "T006")
+        ), reasons["T005"]
+        assert statuses["T006"] == "pending" and "T005 failed" in reasons["T006"]
         assert statuses["T007"] == "pending"
-        assert _reason(repo, "T007").startswith(
+        assert reasons["T007"].startswith(
             "not run — upstream check T002 reported problems")
-        assert "[write-subagents] T005 refused before dispatch" in text
+        assert "[write-subagents] T005 refused before dispatch" in stop.text
 
-    def test_the_stop_names_every_answer_it_needs(self, repo, capsys):
-        text = _first_run(repo, capsys)
+    def test_the_stop_names_every_answer_it_needs(self, gate_first_stop):
+        text = gate_first_stop.text
         assert (
             "ERROR: implement stopped at T005 (Edit: add the build stamp "
             "module): refused before it was dispatched" in text
@@ -117,7 +143,7 @@ class TestThePolicyStop:
         assert "(T007 then run, told that you accepted the findings" in text
 
     def test_the_refusal_offers_allowing_the_file_as_the_users_call(
-        self, repo, capsys,
+        self, front_door_stop,
     ):
         """Fix round 20 (live run 8 #4; the user's decision: permissive).
         The stop line said "allow the file it declares in driver.write_paths
@@ -127,35 +153,27 @@ class TestThePolicyStop:
         named and worded as the user's own call, beside the skip answer."""
         from utils.write_safety import policy_skip_clause
 
-        _check(repo, passed=False)
-        assert multi_llm.main([
-            "implement", str(repo.plan), "--yes", "--exec-subagents",
-        ]) == 3
-        out = capsys.readouterr().out
+        out = front_door_stop.out
         line = [l for l in out.splitlines() if l.startswith("MULTI_LLM_RESULT:")][-1]
         error = json.loads(line.split(" ", 1)[1])["error"]
         # Fix round 21: a deny hit names the deny rule (deny wins over allow).
         allow = DENY_CLAUSE
         assert (f"To go on (your call): {allow}, then resume this phase; "
                 f"{policy_skip_clause('T005')}.") in error, error
-        report = json.loads((repo.phase_dir / "write_batch_report.json").read_text())
+        report = front_door_stop.report()
         assert report["stop"]["policy_paths"] == ["src/vendor/stamp.js"]
         assert report["stop"]["policy_rules"] == [{
             "path": "src/vendor/stamp.js", "deny": ["src/vendor/**"],
             "allowed": True,
         }]
-        reason = _reason(repo, "T005")
+        reason = front_door_stop.reasons["T005"]
         assert reason.endswith(f"Your call: {allow}, then resume."), reason
         for text in (out, error, reason):
             assert "widen" not in text and "genuinely in scope" not in text
             assert "allow it in driver.write_paths" not in text
 
-    def test_the_result_line_names_both_answers(self, repo, capsys):
-        _check(repo, passed=False)
-        assert multi_llm.main([
-            "implement", str(repo.plan), "--yes", "--exec-subagents",
-        ]) == 3
-        out = capsys.readouterr().out
+    def test_the_result_line_names_both_answers(self, front_door_stop):
+        out = front_door_stop.out
         line = [l for l in out.splitlines() if l.startswith("MULTI_LLM_RESULT:")][-1]
         error = json.loads(line.split(" ", 1)[1])["error"]
         assert error.startswith(
@@ -708,7 +726,7 @@ class TestTheNativeLeg:
         assert step["answers"][1]["answers"] == ["T005=skip"]
 
     def test_its_answers_are_the_executor_stops_word_for_word(
-        self, repo, capsys, tmp_path, monkeypatch,
+        self, repo, capsys, gate_first_stop,
     ):
         """The same fixture's first stop on the executor leg records the
         answers the tool routes list (`resume_answers`, `options`); the
@@ -724,16 +742,11 @@ class TestTheNativeLeg:
             for why, command in self._answer_pairs(out)
         ]
 
-        # A second repository, as a second process would see it.
-        registry._RUN_ANCHOR = None
-        (tmp_path / "executor-leg").mkdir()
-        other = make_repo(tmp_path / "executor-leg", monkeypatch, PLAN)
-        _policy(other, DENY)
-        monkeypatch.setenv("MOCK_LLM_WRITE_IDS", json.dumps(
-            [f"T00{n}" for n in range(1, 8)]))
-        monkeypatch.setenv("MOCK_LLM_WRITE_CHECK_IF_PROMPT_HAS", CHECK_GATE)
-        _first_run(other, capsys)
-        report = json.loads((other.phase_dir / "write_batch_report.json").read_text())
+        # A second repository, as a second process would see it: the
+        # module's shared executor stop, run in a folder of its own before
+        # this test's native stop pinned the run anchor (at this test's
+        # setup, or in an earlier test).
+        report = gate_first_stop.report()
         executor = [(entry["why"], entry["flags"]) for entry in report["stop"]["answers"]]
         assert len(executor) == 6
         assert native == executor

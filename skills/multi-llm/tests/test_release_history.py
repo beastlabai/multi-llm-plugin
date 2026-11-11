@@ -10,15 +10,32 @@ row builds a throwaway repository shaped like this one where the check looks
 (the allowlist manifest, the version owner, a payload, Codex's checked-in
 digest, a Claude tree) and tags it the way a release history would be tagged.
 
-**Every real CLI is driven, in subprocesses.** Each run is a fresh interpreter
-that loads :mod:`common.release_history`, replaces its one npm runner
-(``_run_npm``) with the row's canned registry answers (the version list, and
-the stub probe when npm lists ``0.0.0-stage``), then runs the builder's
-``__main__`` with ``--check-bump --repo <fixture>``. ``--repo`` is a real CLI
-option (the clone whose history is read); the npm stand-in is the test's alone
-and no environment variable reaches it, so nothing a release path inherits can
-fake a registry answer. A fresh interpreter per run also keeps the builders'
-module names (two import their own ``release_gate``) out of each other's way.
+**The shared rules run once, in-process; each builder's wiring runs as its real
+CLI.** Every builder's ``--check-bump`` ends in the same two calls,
+:func:`release_history.check` and :func:`release_history.print_report`, so a
+history whose answer only those two decide is graded once, by the ``shared``
+fixture: the checker itself in this interpreter, over a real scratch Git history,
+with the row's canned registry answers as its npm ``runner``. That covers every
+family and tag shape and every npm answer the rules distinguish.
+
+What the builders do NOT share is still driven through each of them (``cli``):
+Claude also runs ``release_problems`` and stops with ``ERROR:`` on a ``claude-v*``
+tag naming no version; Codex runs ``bump_history_problems`` and
+``bump_ahead_problem`` beside the shared check; OpenCode has its own wrapper and
+its ``--candidate`` and ``--registry`` options. So each builder keeps a pass row,
+a shared-refusal row that its own rules leave alone, the clone-gap rows, its
+``--help``, and the own-tree, candidate and registry rows that only one builder
+has. A ``cli`` run is a fresh interpreter that loads
+:mod:`common.release_history`, replaces its one npm runner (``_run_npm``) with
+the row's canned registry answers (the version list, and the stub probe when npm
+lists ``0.0.0-stage``), then runs the builder's ``__main__`` with ``--check-bump
+--repo <fixture>``. ``--repo`` is a real CLI option (the clone whose history is
+read); the npm stand-in is the test's alone and no environment variable reaches
+it, so nothing a release path inherits can fake a registry answer. A fresh
+interpreter per run also keeps the builders' module names (two import their own
+``release_gate``) out of each other's way. The real ``_run_npm`` (its PATH
+lookup, scratch directory, isolation from the caller's npm configuration and
+budget) has its own rows in ``TestRegistry`` and ``TestNpmStub``.
 
 **None of this touches the network or this repository's own tags.** The check
 reads the real history only on the release paths: it is deliberately out of
@@ -31,12 +48,14 @@ that policy is Claude's moved-tree rule, which does run on pull requests, and is
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
 
@@ -56,6 +75,8 @@ ENTRY_POINTS: Dict[str, Path] = {
     "codex": PACKAGING / "codex" / "build.py",
     "opencode": PACKAGING / "opencode" / "build.py",
 }
+#: For the rows about a builder's own wiring, not the shared rules: those run
+#: once, through the ``shared`` fixture.
 EVERY_ENTRY = pytest.mark.parametrize("entry", sorted(ENTRY_POINTS))
 #: The families a Claude release is compared with, in both directions.
 OTHER_FAMILY = pytest.mark.parametrize("other", ["codex", "opencode"])
@@ -254,12 +275,20 @@ runpy.run_path(spec["builder"], run_name="__main__")
 
 
 class Run:
-    def __init__(self, done: subprocess.CompletedProcess, log: Path):
-        self.code = done.returncode
-        self.stdout = done.stdout
-        self.stderr = done.stderr
-        self.npm = ([json.loads(line) for line in log.read_text("utf-8").splitlines()]
-                    if log.is_file() else [])
+    """One check's exit status, its two streams, and the npm calls it made
+    (``{"argv": [...], "timeout": ...}`` each), however it was driven."""
+
+    def __init__(self, code: int, stdout: str, stderr: str, npm: List[Dict[str, object]]):
+        self.code = code
+        self.stdout = stdout
+        self.stderr = stderr
+        self.npm = npm
+
+    @classmethod
+    def of_process(cls, done: subprocess.CompletedProcess, log: Path) -> "Run":
+        return cls(done.returncode, done.stdout, done.stderr,
+                   [json.loads(line) for line in log.read_text("utf-8").splitlines()]
+                   if log.is_file() else [])
 
     @property
     def refusals(self) -> List[str]:
@@ -290,7 +319,30 @@ def cli(tmp_path):
             [sys.executable, str(driver), str(spec)], cwd=str(tmp_path),
             capture_output=True, text=True, encoding="utf-8", timeout=120,
         )
-        return Run(done, log)
+        return Run.of_process(done, log)
+
+    return run
+
+
+@pytest.fixture
+def shared():
+    """``shared(repo, answer)``: the common checker itself, in this interpreter.
+
+    :func:`release_history.check` reads *repo*'s real Git history for ``HEAD``
+    with *answer* as its npm runner (the same canned shapes ``cli`` feeds a
+    builder), then :func:`release_history.print_report` prints it, both streams
+    captured. Those two calls are where every builder's ``--check-bump`` ends, so
+    a rule only they decide needs no builder process; the ``cli`` rows prove each
+    builder reaches them. Anything the checker raises propagates: no history
+    graded here expects one."""
+    def run(repo: Path, answer: Dict[str, object]) -> Run:
+        calls: List = []
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            report = release_history.check(repo, runner=runner(answer, calls))
+            code = release_history.print_report(report)
+        return Run(code, out.getvalue(), err.getvalue(),
+                   [{"argv": list(argv), "timeout": timeout} for argv, timeout in calls])
 
     return run
 
@@ -624,7 +676,8 @@ class TestNpmStub:
 
 
 # ===========================================================================
-# The histories the plan names, through both real CLIs
+# The histories the plan names: the shared rules once, in-process, and each
+# builder's own wiring through its real CLI
 # ===========================================================================
 
 class TestNewestReleaseOnlyUnderOpenCode:
@@ -638,9 +691,8 @@ class TestNewestReleaseOnlyUnderOpenCode:
         h.commit("0.1.1", "c")  # a shared fix on master, still saying 0.1.1
         return h
 
-    @EVERY_ENTRY
-    def test_a_later_shared_edit_at_the_same_version_is_refused(self, history, cli, entry):
-        result = cli(entry, history.root, listed("0.1.1"))
+    def test_a_later_shared_edit_at_the_same_version_is_refused(self, history, shared):
+        result = shared(history.root, listed("0.1.1"))
         _refused(result,
                  "opencode-v0.1.1 carries 0.1.1 with another shared-payload digest",
                  history.digest("opencode-v0.1.1"), history.digest())
@@ -651,18 +703,16 @@ class TestNewestReleaseOnlyUnderOpenCode:
         refusals = cli("codex", history.root, listed("0.1.1")).refusals
         assert len(refusals) == 1 and "opencode-v0.1.1" in refusals[0], refusals
 
-    @EVERY_ENTRY
-    def test_the_tagged_commit_itself_passes(self, history, cli, entry):
+    def test_the_tagged_commit_itself_passes(self, history, shared):
         history.checkout("opencode-v0.1.1")
-        _passed(cli(entry, history.root, listed("0.1.1")))
+        _passed(shared(history.root, listed("0.1.1")))
 
     def test_the_tagged_commit_passes_as_a_candidate_too(self, history, cli):
         _passed(cli("opencode", history.root, listed("0.1.1"), "--candidate", "opencode-v0.1.1"))
 
-    @EVERY_ENTRY
-    def test_a_bump_to_the_next_version_passes(self, history, cli, entry):
+    def test_a_bump_to_the_next_version_passes(self, history, shared):
         history.commit("0.1.2", "c")
-        _passed(cli(entry, history.root, listed("0.1.1")))
+        _passed(shared(history.root, listed("0.1.1")))
 
 
 class TestNewestReleaseOnlyUnderCodex:
@@ -675,10 +725,9 @@ class TestNewestReleaseOnlyUnderCodex:
         h.commit("0.1.1", "b", tag="codex-v0.1.1")
         return h
 
-    @EVERY_ENTRY
-    def test_a_later_shared_edit_at_the_same_version_is_refused(self, history, cli, entry):
+    def test_a_later_shared_edit_at_the_same_version_is_refused(self, history, shared):
         history.commit("0.1.1", "c")
-        result = cli(entry, history.root, absent())
+        result = shared(history.root, absent())
         _refused(result, "codex-v0.1.1 carries 0.1.1 with another shared-payload digest",
                  history.digest("codex-v0.1.1"), history.digest())
 
@@ -688,32 +737,28 @@ class TestNewestReleaseOnlyUnderCodex:
                  "the plugin digest moved since codex-v0.1.1",
                  "codex-v0.1.1 carries 0.1.1")
 
-    @EVERY_ENTRY
-    def test_the_tagged_commit_itself_passes(self, history, cli, entry):
+    def test_the_tagged_commit_itself_passes(self, history, shared):
         history.commit("0.1.1", "c")
         history.checkout("codex-v0.1.1")
-        _passed(cli(entry, history.root, absent()))
+        _passed(shared(history.root, absent()))
 
-    @EVERY_ENTRY
-    def test_a_same_payload_release_by_the_other_family_passes(self, history, cli, entry):
+    def test_a_same_payload_release_by_the_other_family_passes(self, history, shared):
         """OpenCode may release 0.1.1 from a commit whose shared payload is
         codex-v0.1.1's: a rig-only commit, here."""
         history.commit("0.1.1", "b", rig="# a rig edit\n", tag="opencode-v0.1.1")
-        _passed(cli(entry, history.root, listed("0.1.1")))
+        _passed(shared(history.root, listed("0.1.1")))
 
-    @EVERY_ENTRY
-    def test_a_bump_to_the_next_version_passes(self, history, cli, entry):
+    def test_a_bump_to_the_next_version_passes(self, history, shared):
         history.commit("0.1.2", "c")
-        _passed(cli(entry, history.root, absent()))
+        _passed(shared(history.root, absent()))
 
 
-@EVERY_ENTRY
-def test_an_unreleased_version_older_than_the_newest_release_is_refused(tmp_path, cli, entry):
+def test_an_unreleased_version_older_than_the_newest_release_is_refused(tmp_path, shared):
     h = History(tmp_path / "repo")
     h.commit("0.1.0", "a", tag="codex-v0.1.0")
     h.commit("0.1.2", "b", tag="opencode-v0.1.2")  # 0.1.1 skipped: legal
     h.commit("0.1.1", "c")
-    _refused(cli(entry, h.root, listed("0.1.2")),
+    _refused(shared(h.root, listed("0.1.2")),
              "the candidate's version 0.1.1 is unreleased but older than the newest "
              "release 0.1.2 (opencode-v0.1.2)")
 
@@ -725,10 +770,9 @@ class TestNpmVersionWithoutATag:
         h.commit("0.1.0", "a", tag="codex-v0.1.0")
         return h
 
-    @EVERY_ENTRY
-    def test_it_is_refused_by_name(self, history, cli, entry):
+    def test_it_is_refused_by_name(self, history, shared):
         history.commit("0.1.2", "c")
-        _refused(cli(entry, history.root, listed("0.1.1")),
+        _refused(shared(history.root, listed("0.1.1")),
                  f"npm lists {PACKAGE}@0.1.1", "no opencode-v0.1.1 tag names it")
 
     def test_a_candidate_at_that_version_cannot_be_compared(self, history, cli):
@@ -760,6 +804,8 @@ class TestNpmStagedPublishingStub:
 
     @EVERY_ENTRY
     def test_the_stub_is_reported_not_refused(self, history, cli, entry):
+        """Each builder's pass: the report it prints, and both npm questions
+        (the list, then the stub probe) asked through its own run."""
         history.commit("0.1.2", "c")
         result = cli(entry, history.root, self.NOW)
         _passed(result)
@@ -770,7 +816,8 @@ class TestNpmStagedPublishingStub:
     @EVERY_ENTRY
     def test_master_after_the_release_keeps_only_the_digest_refusal(self, history, cli, entry):
         """This repository's own state: a shared edit after opencode-v0.1.1
-        that still says 0.1.1."""
+        that still says 0.1.1. Each builder's shared refusal: printed once, exit
+        1, and nothing of the builder's own rules beside it."""
         history.commit("0.1.1", "c")
         result = cli(entry, history.root, self.NOW)
         assert result.code == 1 and len(result.refusals) == 1, result
@@ -778,50 +825,46 @@ class TestNpmStagedPublishingStub:
             "opencode-v0.1.1 carries 0.1.1 with another shared-payload digest"), result
         assert self.LINE in result.stdout
 
-    @EVERY_ENTRY
     @pytest.mark.parametrize("mark", [_UNSET, False, "true"],
                              ids=["no-stub-key", "false", "string-true"])
     def test_a_0_0_0_stage_the_registry_does_not_mark_is_still_refused(
-        self, history, cli, entry, mark,
+        self, history, shared, mark,
     ):
         history.commit("0.1.2", "c")
-        result = cli(entry, history.root, with_probe(listed(STUB, "0.1.1"), manifest(stub=mark)))
+        result = shared(history.root, with_probe(listed(STUB, "0.1.1"), manifest(stub=mark)))
         _refused(result, f"npm lists {STUB_SPEC} on {REGISTRY}",
                  f"no opencode-v{STUB} tag names it")
         assert [call["argv"][2] for call in result.npm] == [PACKAGE, STUB_SPEC], \
             "decided without asking the registry"
         assert "staged-publishing placeholder" not in result.stdout
 
-    @EVERY_ENTRY
     @pytest.mark.parametrize("probe, code", [
         (failed("E500", f"500 Internal Server Error - GET {REGISTRY}/{PACKAGE}"), "E500"),
         (failed("E429", f"429 Too Many Requests - GET {REGISTRY}/{PACKAGE}"), "E429"),
         (failed("ECONNREFUSED", "FetchError: connect ECONNREFUSED"), "ECONNREFUSED"),
         (missing_version(), "E404"),
     ], ids=["E500", "E429", "ECONNREFUSED", "E404-no-match"])
-    def test_a_stub_probe_npm_does_not_answer_refuses(self, history, cli, entry, probe, code):
+    def test_a_stub_probe_npm_does_not_answer_refuses(self, history, shared, probe, code):
         history.commit("0.1.2", "c")
-        result = cli(entry, history.root, with_probe(listed(STUB, "0.1.1"), probe))
+        result = shared(history.root, with_probe(listed(STUB, "0.1.1"), probe))
         _refused(result, f"npm could not read {STUB_SPEC}'s manifest on {REGISTRY}",
                  f"code {code}")
         assert self.LINE not in result.stdout
 
-    @EVERY_ENTRY
-    def test_any_other_untagged_version_is_still_refused(self, history, cli, entry):
+    def test_any_other_untagged_version_is_still_refused(self, history, shared):
         history.commit("0.1.3", "c")
-        result = cli(entry, history.root,
-                     with_probe(listed(STUB, "0.0.0-stage.1", "0.1.1", "0.1.2"), manifest()))
+        result = shared(history.root,
+                        with_probe(listed(STUB, "0.0.0-stage.1", "0.1.1", "0.1.2"), manifest()))
         _refused(result, f"npm lists {PACKAGE}@0.0.0-stage.1 on",
                  f"npm lists {PACKAGE}@0.1.2 on")
         assert not [r for r in result.refusals if f"{STUB_SPEC} on" in r], result
         assert self.LINE in result.stdout
 
-    @EVERY_ENTRY
-    def test_the_stub_is_no_version_to_compare_with(self, history, cli, entry):
+    def test_the_stub_is_no_version_to_compare_with(self, history, shared):
         """A candidate declaring 0.0.0-stage is unreleased and older than the
         newest release, not "a version npm lists but no tag names"."""
         history.commit(STUB, "c")
-        result = cli(entry, history.root, self.NOW)
+        result = shared(history.root, self.NOW)
         _refused(result, f"the candidate's version {STUB} is unreleased but older than "
                          "the newest release 0.1.1 (opencode-v0.1.1)")
         assert not [r for r in result.refusals if "npm lists" in r], result
@@ -835,20 +878,18 @@ class TestRegistryErrors:
         h.commit("0.1.1", "b")
         return h
 
-    @EVERY_ENTRY
     @pytest.mark.parametrize("answer, code", [
         (failed("E500", f"500 Internal Server Error - GET {REGISTRY}/{PACKAGE}"), "E500"),
         (failed("ECONNREFUSED", "FetchError: connect ECONNREFUSED"), "ECONNREFUSED"),
         (absent("another-package"), "E404"),
     ], ids=["E500", "ECONNREFUSED", "E404-other-name"])
-    def test_an_error_other_than_e404_refuses(self, history, cli, entry, answer, code):
-        result = cli(entry, history.root, answer)
+    def test_an_error_other_than_e404_refuses(self, history, shared, answer, code):
+        result = shared(history.root, answer)
         _refused(result, f"npm could not list {PACKAGE} versions", f"code {code}")
         assert result.npm and result.npm[0]["argv"][:4] == ["npm", "view", PACKAGE, "versions"]
 
-    @EVERY_ENTRY
-    def test_e404_is_the_green_answer(self, history, cli, entry):
-        result = cli(entry, history.root, absent())
+    def test_e404_is_the_green_answer(self, history, shared):
+        result = shared(history.root, absent())
         _passed(result)
         assert f"{PACKAGE} is not on {REGISTRY} (E404)" in result.stdout
 
@@ -867,58 +908,52 @@ class TestFirstRelease:
         h.commit("0.1.0", "a", tag="codex-v0.1.0")
         return h
 
-    @EVERY_ENTRY
-    def test_a_bumped_candidate_passes(self, history, cli, entry):
+    def test_a_bumped_candidate_passes(self, history, shared):
         history.commit("0.1.1", "b")
-        result = cli(entry, history.root, absent())
+        result = shared(history.root, absent())
         _passed(result)
         assert "0.1.1 is newer than every released version (newest: 0.1.0)" in result.stdout
 
-    @EVERY_ENTRY
-    def test_an_unbumped_candidate_with_other_shared_bytes_is_refused(self, history, cli, entry):
+    def test_an_unbumped_candidate_with_other_shared_bytes_is_refused(self, history, shared):
         history.commit("0.1.0", "b")
-        _refused(cli(entry, history.root, absent()),
+        _refused(shared(history.root, absent()),
                  "codex-v0.1.0 carries 0.1.0 with another shared-payload digest",
                  history.digest("codex-v0.1.0"), history.digest())
 
-    @EVERY_ENTRY
-    def test_an_unbumped_candidate_with_the_same_shared_bytes_passes(self, history, cli, entry):
+    def test_an_unbumped_candidate_with_the_same_shared_bytes_passes(self, history, shared):
         history.commit("0.1.0", "a", rig="# a rig-only edit\n")
-        _passed(cli(entry, history.root, absent()))
+        _passed(shared(history.root, absent()))
 
 
-@EVERY_ENTRY
-def test_a_tag_whose_name_is_not_its_commit_s_version_is_refused(tmp_path, cli, entry):
+def test_a_tag_whose_name_is_not_its_commit_s_version_is_refused(tmp_path, shared):
     h = History(tmp_path / "repo")
     h.commit("0.1.0", "a", tag="codex-v0.1.0")
     h.commit("0.1.1", "b", tag="opencode-v0.1.2", lightweight=True)
     h.commit("0.1.3", "c")
-    _refused(cli(entry, h.root, listed("0.1.2")),
+    _refused(shared(h.root, listed("0.1.2")),
              "opencode-v0.1.2 names 0.1.2, but its commit",
              f"{release_history.VERSION_PATH} says 0.1.1")
 
 
 class TestTwoTagsOfOneVersion:
-    @EVERY_ENTRY
-    def test_different_shared_payloads_are_refused(self, tmp_path, cli, entry):
+    def test_different_shared_payloads_are_refused(self, tmp_path, shared):
         h = History(tmp_path / "repo")
         h.commit("0.1.0", "a", tag="codex-v0.1.0")
         h.commit("0.1.1", "b", tag="codex-v0.1.1")
         h.commit("0.1.1", "c", tag="opencode-v0.1.1")
         first, second = h.digest("codex-v0.1.1"), h.digest("opencode-v0.1.1")
         h.commit("0.1.2", "d")
-        _refused(cli(entry, h.root, listed("0.1.1")),
+        _refused(shared(h.root, listed("0.1.1")),
                  "version 0.1.1 names more than one shared payload",
                  f"codex-v0.1.1 (commit", first, f"opencode-v0.1.1 (commit", second)
 
-    @EVERY_ENTRY
-    def test_one_shared_payload_on_two_commits_passes(self, tmp_path, cli, entry):
+    def test_one_shared_payload_on_two_commits_passes(self, tmp_path, shared):
         h = History(tmp_path / "repo")
         h.commit("0.1.0", "a", tag="codex-v0.1.0")
         h.commit("0.1.1", "b", tag="codex-v0.1.1")
         h.commit("0.1.1", "b", rig="# packaging-only follow-up\n", tag="opencode-v0.1.1")
         h.commit("0.1.2", "d")
-        _passed(cli(entry, h.root, listed("0.1.1")))
+        _passed(shared(h.root, listed("0.1.1")))
 
 
 class TestTheClaudeFamily:
@@ -934,86 +969,78 @@ class TestTheClaudeFamily:
     def test_it_is_a_family(self):
         assert ("claude", "claude-v") in release_history.FAMILIES
 
-    @EVERY_ENTRY
     @OTHER_FAMILY
-    def test_a_matching_digest_across_families_passes(self, history, cli, entry, other):
+    def test_a_matching_digest_across_families_passes(self, history, shared, other):
         """Release commits may differ, so long as the shared bytes do not: a rig
         edit lies between these two tags."""
         history.commit("0.1.1", "b", tag="claude-v0.1.1")
         history.commit("0.1.1", "b", rig="# a rig edit\n", tag=f"{other}-v0.1.1")
-        result = cli(entry, history.root, absent())
+        result = shared(history.root, absent())
         _passed(result)
         assert (f"0.1.1 is released (claude-v0.1.1, {other}-v0.1.1) with this same "
                 "shared payload") in result.stdout
 
-    @EVERY_ENTRY
     @OTHER_FAMILY
     def test_a_later_release_of_a_claude_version_with_other_bytes_is_refused(
-            self, history, cli, entry, other):
+            self, history, shared, other):
         history.commit("0.1.1", "b", tag="claude-v0.1.1")
         history.commit("0.1.1", "c", tag=f"{other}-v0.1.1")
         first, second = history.digest("claude-v0.1.1"), history.digest(f"{other}-v0.1.1")
         history.commit("0.1.2", "d")
-        _refused(cli(entry, history.root, absent()),
+        _refused(shared(history.root, absent()),
                  "version 0.1.1 names more than one shared payload",
                  "claude-v0.1.1 (commit", first, f"{other}-v0.1.1 (commit", second)
 
-    @EVERY_ENTRY
     @OTHER_FAMILY
     def test_a_later_claude_release_of_another_family_s_version_is_refused(
-            self, history, cli, entry, other):
+            self, history, shared, other):
         history.commit("0.1.1", "b", tag=f"{other}-v0.1.1")
         history.commit("0.1.1", "c", tag="claude-v0.1.1")
         first, second = history.digest(f"{other}-v0.1.1"), history.digest("claude-v0.1.1")
         history.commit("0.1.2", "d")
-        _refused(cli(entry, history.root, absent()),
+        _refused(shared(history.root, absent()),
                  "version 0.1.1 names more than one shared payload",
                  f"{other}-v0.1.1 (commit", first, "claude-v0.1.1 (commit", second)
 
-    @EVERY_ENTRY
     def test_a_candidate_with_other_bytes_is_refused_by_a_claude_only_release(
-            self, history, cli, entry):
+            self, history, shared):
         """What a Codex or OpenCode release cut from this commit would be stopped by."""
         history.commit("0.1.1", "b", tag="claude-v0.1.1")
         history.commit("0.1.1", "c")
-        _refused(cli(entry, history.root, absent()),
+        _refused(shared(history.root, absent()),
                  "claude-v0.1.1 carries 0.1.1 with another shared-payload digest",
                  history.digest("claude-v0.1.1"), history.digest())
 
-    @EVERY_ENTRY
     @OTHER_FAMILY
     def test_a_candidate_with_other_bytes_is_refused_by_the_other_family_s_release(
-            self, history, cli, entry, other):
+            self, history, shared, other):
         """What a Claude release cut from this commit would be stopped by."""
         history.commit("0.1.1", "b", tag=f"{other}-v0.1.1")
         history.commit("0.1.1", "c")
-        _refused(cli(entry, history.root, absent()),
+        _refused(shared(history.root, absent()),
                  f"{other}-v0.1.1 carries 0.1.1 with another shared-payload digest",
                  history.digest(f"{other}-v0.1.1"), history.digest())
 
-    @EVERY_ENTRY
     def test_a_candidate_older_than_a_claude_only_release_is_refused(
-            self, history, cli, entry):
+            self, history, shared):
         history.commit("0.1.2", "b", tag="claude-v0.1.2")
         history.commit("0.1.1", "c")
-        _refused(cli(entry, history.root, absent()),
+        _refused(shared(history.root, absent()),
                  "the candidate's version 0.1.1 is unreleased but older than the newest "
                  "release 0.1.2 (claude-v0.1.2)")
 
-    @EVERY_ENTRY
-    def test_a_candidate_newer_than_a_claude_only_release_passes(self, history, cli, entry):
+    def test_a_candidate_newer_than_a_claude_only_release_passes(self, history, shared):
         history.commit("0.1.2", "b", tag="claude-v0.1.2")
         history.commit("0.1.3", "c")
-        result = cli(entry, history.root, absent())
+        result = shared(history.root, absent())
         _passed(result)
         assert "0.1.3 is newer than every released version (newest: 0.1.2)" in result.stdout
 
-    @EVERY_ENTRY
     def test_a_claude_tag_whose_name_is_not_its_commit_s_version_is_refused(
-            self, history, cli, entry):
+            self, history, shared):
         history.commit("0.1.1", "b", tag="claude-v0.1.2", lightweight=True)
         history.commit("0.1.3", "c")
-        _refused(cli(entry, history.root, absent()),
+        _refused(shared(history.root, absent()),
                  "claude-v0.1.2 names 0.1.2, but its commit",
                  f"{release_history.VERSION_PATH} says 0.1.1")
 
@@ -1026,30 +1053,27 @@ class TestTheClaudeFamily:
         assert result.code == 1, result
         assert "tag claude-vnext does not name a strict semver version" in result.stderr
 
-    @EVERY_ENTRY
-    def test_the_report_reads_every_family(self, history, cli, entry):
+    def test_the_report_reads_every_family(self, history, shared):
         history.commit("0.1.1", "b", tag="claude-v0.1.1")
-        result = cli(entry, history.root, absent())
+        result = shared(history.root, absent())
         _passed(result)
         assert "every codex-v*, opencode-v*, claude-v* tag" in result.stdout
         assert "  claude-v0.1.1 " in result.stdout
 
-    @EVERY_ENTRY
-    def test_a_claude_tag_does_not_account_for_an_npm_version(self, history, cli, entry):
+    def test_a_claude_tag_does_not_account_for_an_npm_version(self, history, shared):
         """The npm rule stays OpenCode's: npm publishes from ``opencode-v*`` alone."""
         history.commit("0.1.1", "b", tag="claude-v0.1.1")
         history.commit("0.1.2", "c")
-        _refused(cli(entry, history.root, listed("0.1.1")),
+        _refused(shared(history.root, listed("0.1.1")),
                  f"npm lists {PACKAGE}@0.1.1", "no opencode-v0.1.1 tag names it")
 
-    @EVERY_ENTRY
-    def test_a_claude_tag_does_not_stand_in_for_the_first_release(self, tmp_path, cli, entry):
+    def test_a_claude_tag_does_not_stand_in_for_the_first_release(self, tmp_path, shared):
         """Its absence still means a clone without the tags: ``--no-tags`` plus one
         hand-fetched Claude tag must not read as a complete history."""
         h = History(tmp_path / "repo")
         h.commit("0.1.1", "b", tag="claude-v0.1.1")
         h.commit("0.1.2", "c")
-        _refused(cli(entry, h.root, absent()),
+        _refused(shared(h.root, absent()),
                  "has no codex-v0.1.0 tag (release tags found: claude-v0.1.1)")
 
     def test_claude_only_files_do_not_move_the_digest(self, history):

@@ -3,7 +3,8 @@
 ``_door`` runs a commit mode's front door, ``_review`` / ``_complete_review``
 lay out a review's record, ``_brief_of`` names a range's brief under ``FOLDER``
 and ``_sha`` resolves a revision. The repository is built with
-``tests.support.gitrepo``.
+``tests.support.gitrepo`` once per session, and each test gets a copy from
+``tests.support.git_template``.
 
 Fixtures, not registered suite-wide (``repo`` belongs to
 ``tests.support.gate_fixture`` there), so import the function name:
@@ -43,6 +44,7 @@ from utils.commit_review import (
 )
 from utils.state_manager import StateManager
 
+from tests.support.git_template import copy_of
 from tests.support.gitrepo import commit_file as _commit, git as _git, init_repo
 
 #: The front door's repositories: on ``main``, with an identity in their own
@@ -215,10 +217,10 @@ def door_seams(monkeypatch):
     cli_common.clear_invocation()
 
 
-@pytest.fixture(name="repo")
-def door_repo(tmp_path, monkeypatch):
-    """Three commits (c1 a.py+b.py+docs, c2 b.py, c3 a.py); cwd is the root."""
-    root = _init(tmp_path / "repo")
+def _build_door_repo(path: Path) -> None:
+    """The three commits ``door_repo`` copies; ``tests.support.git_template``
+    runs this once per session."""
+    root = _init(path)
     (root / "docs").mkdir()
     (root / "docs" / "x.md").write_text("# Context plan\n\nKeep errors loud.\n", encoding="utf-8")
     (root / "src").mkdir()
@@ -226,6 +228,15 @@ def door_repo(tmp_path, monkeypatch):
     _commit(root, "a.py", "a = 1\n", "c1: start")
     _commit(root, "b.py", "b = 2\n", "c2: add b")
     _commit(root, "a.py", "a = 3\n", "c3: change a")
+
+
+@pytest.fixture(name="repo")
+def door_repo(tmp_path, tmp_path_factory, monkeypatch):
+    """Three commits (c1 a.py+b.py+docs, c2 b.py, c3 a.py); cwd is the root.
+
+    A copy of one template per session, not 13 git processes per test (see
+    ``tests.support.git_template``)."""
+    root, _ = copy_of(tmp_path_factory, "commit-door", _build_door_repo, tmp_path / "repo")
     monkeypatch.chdir(root)
     return root
 

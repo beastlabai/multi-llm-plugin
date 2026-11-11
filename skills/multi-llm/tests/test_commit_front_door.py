@@ -56,6 +56,7 @@ from tests.support.commit_door import (
     door_repo,  # noqa: F401 - the repo fixture
     door_seams,  # noqa: F401 - the seams fixture
 )
+from tests.support.git_template import copy_of  # noqa: E402
 
 HOST = ["--host", "claude-code"]
 #: review-code's real ``main``, kept before the ``fronted`` fixture swaps it out.
@@ -242,11 +243,16 @@ class TestReRecord:
 # ===========================================================================
 
 
-@pytest.fixture
-def long_repo(tmp_path, monkeypatch):
-    root = _init(tmp_path / "long")
+def _build_long_repo(path: Path) -> None:
+    root = _init(path)
     for index in range(26):
         _commit(root, f"f{index:02d}.py", f"x = {index}\n", f"commit {index:02d}")
+
+
+@pytest.fixture
+def long_repo(tmp_path, tmp_path_factory, monkeypatch):
+    """26 commits, copied from a per-session template (82 git processes to build)."""
+    root, _ = copy_of(tmp_path_factory, "commit-door-long", _build_long_repo, tmp_path / "long")
     monkeypatch.chdir(root)
     return root
 

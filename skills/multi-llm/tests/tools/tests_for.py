@@ -677,18 +677,34 @@ def render_map(
     return "\n".join(lines)
 
 
-def generate(tests_dir: Path = TESTS_DIR) -> str:
+def generate_parts(
+    tests_dir: Path = TESTS_DIR,
+) -> Tuple[Dict[str, str], Dict[str, List[Importer]], str]:
+    """``(modules, mapping, rendered map)`` for *tests_dir*, built afresh on every
+    call: what ``generate`` returns, with the parts it is rendered from."""
     modules = source_modules(tests_dir.parent)
-    return render_map(modules, build_map(tests_dir, modules), tests_dir)
+    mapping = build_map(tests_dir, modules)
+    return modules, mapping, render_map(modules, mapping, tests_dir)
 
 
-def check(map_path: Path = MAP_PATH, tests_dir: Path = TESTS_DIR) -> Optional[str]:
-    """None when the committed map is fresh, else the one-line message to print."""
+def generate(tests_dir: Path = TESTS_DIR) -> str:
+    return generate_parts(tests_dir)[2]
+
+
+def check(
+    map_path: Path = MAP_PATH, tests_dir: Path = TESTS_DIR, generated: Optional[str] = None,
+) -> Optional[str]:
+    """None when the committed map is fresh, else the one-line message to print.
+
+    *generated* is ``generate(tests_dir)`` when the caller has already rendered it
+    (the suite builds the real map once and reads it several ways); otherwise the
+    map is rendered here, afresh on every call. Nothing is cached between calls.
+    """
     try:
         current = map_path.read_text(encoding="utf-8")
     except OSError:
         current = None
-    if current == generate(tests_dir):
+    if current == (generate(tests_dir) if generated is None else generated):
         return None
     return (
         f"ERROR: {MAP_RELATIVE} is stale (the module-to-tests mapping changed). "

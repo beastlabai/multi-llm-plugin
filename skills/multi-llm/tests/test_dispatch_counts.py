@@ -15,22 +15,67 @@ after T005):
   (01b, 01c) and when it dispatched two (fix 02) — and the status poll read
   "implement 1/4 batches ok, 0/4 items applied" for a resume that ran nothing.
 
+Fix round 28 (live run 12, the stop fixture on OpenCode and Codex): the first
+run printed "Organized into 3 execution batches" and then batch lines for
+batches 0, 1, 2 and 3. Batch 3 was T005, refused before any runner started:
+the count rightly left it out, but its line still said ``batch 3:``, so the
+log read as four batches, and the resumes that dispatched nothing said
+"Organized into 0 execution batches" beside the same line. A task no runner
+started now names no batch, so the batches shown are the ones counted
+(``BATCH_LINE``).
+
 These tests drive the real orchestrators against the mock runner, through the
-fixture of ``test_check_gate_fixture.py``.
+fixture of ``test_check_gate_fixture.py``. A test that only reads a first stop
+shares the module's one run of it (``gate_first_stop``, ``live_stop``,
+``allow_stop``); a test that resumes, answers or records anything after it
+runs its own.
 """
 
 from __future__ import annotations
 
+import functools
 import json
 import re
 
+import pytest
+
 import multi_llm  # noqa: E402
 from tests.support.gate_fixture import (
-    ALLOW, DENY, FINDINGS, PLAN as CHECK_GATE_PLAN, _check, _first_run, _policy,
+    ALLOW, DENY, FINDINGS, PLAN as CHECK_GATE_PLAN, _check, _first_run, _first_run_parts,
+    _gate_world, _policy,
+)
+from tests.support.shared_stop import (  # noqa: F401 - the fixtures
+    gate_first_stop_fixture, module_stop_cache, shared_stop,
 )
 from tests.support.implement_world import _dispatched_titles, _implement
 from utils.state_manager import get_or_create_state
 from tests.support.dispatch_world import LIVE_LAYOUT, _emit, _etas, _run, _util
+
+#: A ``[write-subagents] batch N: TXXX`` line: the batch a dispatched task ran in.
+BATCH_LINE = re.compile(r"^\[write-subagents\] batch (\d+): (T\d{3}) ", re.M)
+
+
+@pytest.fixture
+def live_stop(stop_cache, capsys, tmp_path_factory):
+    """The first stop of the live fixture's layout (run 8, ``LIVE_LAYOUT``),
+    shared by this module's tests that only read it."""
+    stop = shared_stop(
+        stop_cache, "live-layout", capsys, tmp_path_factory,
+        functools.partial(_gate_world, plan_text=LIVE_LAYOUT), _first_run_parts)
+    yield stop
+    stop.assert_untouched()
+
+
+@pytest.fixture
+def allow_stop(stop_cache, capsys, tmp_path_factory):
+    """The first stop with the policy allowing T005, so only T002's findings
+    hold anything back (T007), shared by this module's tests that only read
+    it."""
+    stop = shared_stop(
+        stop_cache, "allow", capsys, tmp_path_factory,
+        functools.partial(_gate_world, policy=ALLOW), _first_run_parts)
+    yield stop
+    stop.assert_untouched()
 
 
 class TestTheNativeEtaEndsAtTheTasksDispatched:
@@ -281,12 +326,8 @@ class TestTheExecutorEtaEndsAtTheTasksDispatched:
             "T006 skipped with a skipped task"
         ) in text, text
 
-    def test_a_task_a_check_holds_leaves_the_total(self, repo, capsys):
-        _policy(repo, ALLOW)
-        _check(repo, passed=False)
-        assert _implement(repo) == 3
-        text = capsys.readouterr()
-        text = text.out + text.err
+    def test_a_task_a_check_holds_leaves_the_total(self, allow_stop):
+        text = allow_stop.text
         etas = _etas(text)
         assert etas[-1] == (6, 6), etas
         assert etas[0] == (1, 7), etas  # T007 counted until T002 reported
@@ -310,24 +351,8 @@ class TestTheFirstRunEtaCountsWhatItDispatches:
     counted T005, refused before dispatch, and T006, never reached. The total
     starts from the walk the `Organized into` line prints now."""
 
-    @staticmethod
-    def _live(tmp_path, monkeypatch):
-        from tests.support.implement_world import make_repo
-
-        repo = make_repo(tmp_path, monkeypatch, LIVE_LAYOUT)
-        _policy(repo, DENY)
-        monkeypatch.setenv("MOCK_LLM_WRITE_IDS", json.dumps(
-            [f"T00{n}" for n in range(1, 8)]))
-        monkeypatch.setenv(
-            "MOCK_LLM_WRITE_CHECK_IF_PROMPT_HAS", "Title: Check the module")
-        repo.tmp_path = tmp_path
-        return repo
-
-    def test_the_live_layout_counts_the_five_it_dispatches(
-        self, tmp_path, monkeypatch, capsys,
-    ):
-        repo = self._live(tmp_path, monkeypatch)
-        text = _first_run(repo, capsys)
+    def test_the_live_layout_counts_the_five_it_dispatches(self, live_stop):
+        text = live_stop.text
         assert _organized(text) == [
             "Organized into 3 execution batches: 5 task(s) to dispatch "
             "(T007 waits on a check's verdict)"], text
@@ -348,10 +373,11 @@ class TestTheFirstRunEtaCountsWhatItDispatches:
         assert "T005 refused before dispatch" in text
 
     def test_the_status_line_agrees_with_it_at_the_stop(
-        self, tmp_path, monkeypatch, capsys,
+        self, live_stop, monkeypatch, capsys,
     ):
-        repo = self._live(tmp_path, monkeypatch)
-        _first_run(repo, capsys)
+        # `status` writes nothing; `live_stop` checks that it did not.
+        repo = live_stop
+        repo.enter(monkeypatch)
         line, polled = _status_progress(repo, capsys)
         assert "stopped, implement 4/4 tasks ok, " in line, line
         # Fix round 24 (live run 10 #7): tasks, not a second count of them
@@ -365,10 +391,10 @@ class TestTheFirstRunEtaCountsWhatItDispatches:
         progress = get_or_create_state(repo.plan).state["metrics_progress"]["implement"]
         assert progress["total_batches"] == 4
 
-    def test_the_fixture_layout_counts_the_four_before_the_refusal(self, repo, capsys):
+    def test_the_fixture_layout_counts_the_four_before_the_refusal(self, gate_first_stop):
         """T007 sits after T005 in this decomposition, so the walk never
         reaches it either: four lines, ending N/N."""
-        text = _first_run(repo, capsys)
+        text = gate_first_stop.text
         assert _etas(text) == [(1, 4), (2, 4), (3, 4), (4, 4)], text
 
     def test_a_stop_the_walk_did_not_foresee_says_so_on_the_last_line(
@@ -453,26 +479,49 @@ class TestTheExecutorSaysWhatItsRunDispatches:
     It is the scheduler's now, printed once per run, and counts what the run
     dispatches, beside the `resume: kept …` line that names what it kept."""
 
-    def test_the_first_run_counts_the_tasks_before_the_refused_one(self, repo, capsys):
-        text = _first_run(repo, capsys)
+    def test_the_first_run_counts_the_tasks_before_the_refused_one(self, gate_first_stop):
+        text = gate_first_stop.text
         # T005 is refused in its batch and the run stops there: T006 and
         # T007 (in later batches of this decomposition) are never reached.
         assert _organized(text) == [
             "Organized into 3 execution batches: 4 task(s) to dispatch"]
         assert text.count("[ETA] implement: task ") == 4
+        # Fix round 28: the count matches the batches the log shows, and the
+        # refused task is named with no batch of its own.
+        count = re.search(r"Organized into (\d+) execution batch(?:es)?:", text)
+        assert count, text
+        shown = {int(index) for index, _task in BATCH_LINE.findall(text)}
+        assert len(shown) == int(count.group(1)) == 3, (sorted(shown), text)
+        assert "[write-subagents] T005 refused before dispatch" in text
+        assert not any(task == "T005" for _index, task in BATCH_LINE.findall(text))
 
     def test_a_resume_that_changes_nothing_says_it_dispatches_nothing(
         self, repo, capsys,
     ):
         """01b (`--resume`) and 01c (plain): "4 task(s) to dispatch" before
-        "dispatched 0"."""
+        "dispatched 0". Fix round 28: and no batch line, also through the
+        front door with a host, as the live stop fixture resumes."""
+
+        def front_door_resume():
+            code = multi_llm.main([
+                "implement", str(repo.plan), "--host", "codex", "--yes",
+                "--exec-subagents", "--resume",
+            ])
+            captured = capsys.readouterr()
+            return code, captured.out + captured.err
+
         _first_run(repo, capsys)
-        for flags in (("--resume",), ()):
-            code, text = _run(repo, capsys, *flags)
+        for resume in (
+            lambda: _run(repo, capsys, "--resume"),
+            lambda: _run(repo, capsys),
+            front_door_resume,
+        ):
+            code, text = resume()
             assert code == 3, text
             assert _organized(text) == [
                 "Organized into 0 execution batches: 0 task(s) to dispatch"], text
             assert "dispatched 0; refused before dispatch 1 (T005)" in text
+            assert not BATCH_LINE.findall(text), text
         assert _dispatched_titles(repo) == []
 
     def test_the_fix_path_counts_the_check_and_its_waiter(self, repo, capsys):
@@ -654,9 +703,12 @@ class TestTheStatusProgressLineNamesWhatAResumeKept:
             kept in text for text in result.get("progress_lines") or []
         ), result
 
-    def test_a_first_run_has_nothing_kept_to_name(self, repo, capsys):
-        _first_run(repo, capsys)
-        line, _result = self._progress(repo, capsys)
+    def test_a_first_run_has_nothing_kept_to_name(
+        self, gate_first_stop, monkeypatch, capsys,
+    ):
+        # `status` writes nothing; `gate_first_stop` checks that it did not.
+        gate_first_stop.enter(monkeypatch)
+        line, _result = self._progress(gate_first_stop, capsys)
         assert "kept from an earlier run" not in line, line
 
 
@@ -705,12 +757,13 @@ class TestEverySurfaceCountsTheSameTasks:
     "implement 6/7 batches ok, 5/7 items applied" on `status --view run` and
     the OpenCode poll line."""
 
-    def test_a_task_a_check_holds_is_out_of_both_totals(self, repo, capsys):
-        _policy(repo, ALLOW)
-        _check(repo, passed=False)
-        assert _implement(repo) == 3
-        text = capsys.readouterr()
-        assert _etas(text.out + text.err)[-1] == (6, 6)
+    def test_a_task_a_check_holds_is_out_of_both_totals(
+        self, allow_stop, monkeypatch, capsys,
+    ):
+        repo = allow_stop
+        assert _etas(repo.text)[-1] == (6, 6)
+        # `status` writes nothing; `allow_stop` checks that it did not.
+        repo.enter(monkeypatch)
         line, polled = _status_progress(repo, capsys)
         assert "implement 6/6 tasks ok, " in line and "items applied" not in line, line
         # Still named on the line, with the check that holds it.

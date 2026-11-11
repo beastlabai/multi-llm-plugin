@@ -9,20 +9,41 @@ module does not. Pure and zero-spend.
 from __future__ import annotations
 
 import fnmatch
+from types import MappingProxyType
+from typing import Mapping, NamedTuple, Tuple
 
 import pytest
 
 from .tools import tests_for
 
 
-def test_the_committed_map_is_fresh():
-    assert tests_for.check() is None, tests_for.check()
+class RealMap(NamedTuple):
+    modules: Mapping[str, str]
+    mapping: Mapping[str, Tuple[tests_for.Importer, ...]]
+    rendered: str
 
 
-def test_the_stale_message_names_the_fix(tmp_path):
-    problem = tests_for.check(tmp_path / "missing.md")
-    assert problem is not None
-    assert "make tests-map" in problem and "MODULE_TESTS.md" in problem
+@pytest.fixture(scope="module")
+def real_map():
+    """The real tree's modules, mapping and rendered map (``generate()``'s own
+    build), built once for the tests that read it: one build parses every test
+    file and takes seconds, and these tests only read the result. The views are
+    read-only, so no test can change what the next one sees.
+
+    The cache lives here, not in the generator: the scratch-tree tests below
+    change their trees between calls and need ``generate()``/``check()`` to
+    rebuild every time."""
+    modules, mapping, rendered = tests_for.generate_parts()
+    return RealMap(
+        MappingProxyType(dict(modules)),
+        MappingProxyType({module: tuple(found) for module, found in mapping.items()}),
+        rendered,
+    )
+
+
+def test_the_committed_map_is_fresh(real_map):
+    problem = tests_for.check(generated=real_map.rendered)
+    assert problem is None, problem
 
 
 def _scratch(tmp_path):
@@ -33,6 +54,14 @@ def _scratch(tmp_path):
     tests_dir.mkdir()
     (tests_dir / "test_alpha.py").write_text("from utils import alpha\n", encoding="utf-8")
     return tests_dir
+
+
+def test_the_stale_message_names_the_fix(tmp_path):
+    """A missing committed file is stale. A scratch tree serves: the message does
+    not depend on which tree was scanned."""
+    problem = tests_for.check(tmp_path / "missing.md", _scratch(tmp_path))
+    assert problem is not None
+    assert "make tests-map" in problem and "MODULE_TESTS.md" in problem
 
 
 def test_a_test_that_maps_to_no_module_leaves_the_map_unchanged(tmp_path):
@@ -129,11 +158,10 @@ def test_a_registered_plugins_fixture_counts_for_the_tests_that_request_it(tmp_p
     assert [item.test for item in mapping["utils.beta"]] == ["test_uses.py"]
 
 
-def test_the_status_punctuation_tests_still_cover_the_provider_registry():
+def test_the_status_punctuation_tests_still_cover_the_provider_registry(real_map):
     """The one edge U41's move lost before plugin fixtures were followed."""
-    mapping = tests_for.build_map(tests_for.TESTS_DIR, tests_for.source_modules(tests_for.TESTS_DIR.parent))
     assert "test_status_why_punctuation.py" in [
-        item.test for item in mapping["utils.provider_registry"]]
+        item.test for item in real_map.mapping["utils.provider_registry"]]
 
 
 def test_module_spellings_resolve_to_one_module():
@@ -217,14 +245,12 @@ def test_the_declared_sweeps_name_real_files_modules_and_reasons():
             assert any(fnmatch.fnmatchcase(m, pattern) for m in modules), (sweep.test, pattern)
 
 
-def test_the_provider_loops_map_to_every_adapter():
-    modules = tests_for.source_modules()
-    mapping = tests_for.build_map()
+def test_the_provider_loops_map_to_every_adapter(real_map):
     for module in ("utils.providers.gemini", "utils.providers.codex"):
-        tests = {i.test for i in mapping[module]}
+        tests = {i.test for i in real_map.mapping[module]}
         assert {"test_retry_ladder.py", "test_reasoning_effort_ladder.py"} <= tests, module
-    assert "test_commit_front_door.py" in {i.test for i in mapping["utils.commit_brief"]}
-    assert "utils.commit_brief" in modules
+    assert "test_commit_front_door.py" in {i.test for i in real_map.mapping["utils.commit_brief"]}
+    assert "utils.commit_brief" in real_map.modules
 
 
 def _harness_world(tmp_path):
@@ -276,11 +302,9 @@ def test_every_e2e_suite_has_a_harness_row_and_every_row_a_suite():
         assert all(module in modules for module in suite.modules), name
 
 
-def test_the_e2e_suites_reach_their_orchestrators_and_commit_modules():
-    mapping = tests_for.build_map()
-
+def test_the_e2e_suites_reach_their_orchestrators_and_commit_modules(real_map):
     def tests(module):
-        return {item.test for item in mapping[module]}
+        return {item.test for item in real_map.mapping[module]}
 
     assert "test_e2e_code_review.py" in tests("code_review_orchestrator")
     assert "test_e2e_commit_modes.py" in tests("utils.commit_apply")

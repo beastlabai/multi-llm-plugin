@@ -191,12 +191,9 @@ def _guard_message(path, lineno, form, name, owner):
 def test_no_test_writes_a_moved_name_on_run_status():
     """This file is the one exception: it exercises those writes on purpose."""
     scanner = MovedNameWriteScanner(run_status._MOVED_TO, "run_status")
-    tests_dir = Path(__file__).parent
     problems = [
         _guard_message(path.relative_to(SKILL_ROOT), *hit)
-        for path in sorted(tests_dir.rglob("*.py"))
-        if path != Path(__file__)
-        for hit in scanner.scan(path.read_text(), str(path))
+        for path, hit in scanner.scan_dir(Path(__file__).parent, skip=Path(__file__))
     ]
     assert problems == [], "\n".join(problems)
 

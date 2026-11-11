@@ -830,10 +830,17 @@ class TestForceIsANewRound:
     ):
         """Plan §2.5, *A review that re-reports a batch byte for byte*: the review
         runs again, every batch it finds is one that already landed, and none is
-        dispatched a second time."""
+        dispatched a second time. The apply that kept every batch "records itself
+        completed with a stamp newer than the review and exits 0, and the next
+        re-run exits 2".
+
+        One forced round serves both halves: the stamps and the re-run are read
+        only after every assertion on the forced round itself, and the re-run is
+        the first thing that runs after it."""
         world, second, bytes_after_round_one, writes_before = (
             self._round_one_then_an_identical_forced_round(tmp_path, mode))
 
+        # -- the forced round: reviewed again, nothing dispatched or written twice --
         assert second.exit_code == 0, second.explain()
         assert len(world.calls_of("review")) == 2, "the review was not run again"
         steps = second.step_flags()
@@ -844,12 +851,7 @@ class TestForceIsANewRound:
             bytes_after_round_one), "an edit was applied twice"
         assert second.result["state"] == "done"
 
-    @pytest.mark.parametrize("mode", ["improve-plan", "improve-code"])
-    def test_the_next_rerun_of_such_a_round_is_already_complete(self, tmp_path, mode):
-        """Plan §2.5: the apply that kept every batch "records itself completed with
-        a stamp newer than the review and exits 0, and the next re-run exits 2"."""
-        world, second, _, _ = self._round_one_then_an_identical_forced_round(tmp_path, mode)
-        assert second.exit_code == 0, second.explain()
+        # -- the apply is stamped after the new review, so the next re-run is done --
         review_phase, apply_phase = (
             ("review-plan", "apply-suggestions") if mode == "improve-plan"
             else ("code-review", "apply-code-fixes"))
@@ -1449,25 +1451,14 @@ class TestImproveCommits:
         assert set(fixes.get("changed_files") or ()) == edited, (fixes, refocused.explain())
         assert fixes.get("skipped_changed"), fixes
 
-    def test_a_file_edited_by_hand_after_the_stop_is_skipped_and_named(self, tmp_path):
+    @pytest.mark.parametrize("by_hand", [False, True], ids=["untouched", "edited by hand"])
+    def test_the_continuation_applies_every_batch_left(self, tmp_path, by_hand):
+        """The stop leaves the second batch failed; ``--resume`` finishes the rest.
+        A file edited by hand after the stop is skipped and named in the
+        ``[COMMIT_FIXES]`` block, and its bytes are never overwritten."""
         world = CommitWorld(tmp_path)
         assert world.improve(env=world.env(IMPROVE_E2E_FAIL_CALL="2")).exit_code == 3
         assert world.report("apply-fixes")["tasks"][1]["status"] == "batch_failed"
-        hand = world.committed["src/auth.py"] + b"# edited by hand\n"
-        (world.repo / "src/auth.py").write_bytes(hand)
-        resumed = world.run("improve-commits", "--models", MODEL, "--yes",
-                            "--exec-subagents", "--resume", plan=world.pinned)
-        assert resumed.exit_code == 0, resumed.explain()
-        fixes = resumed.result["commit_fixes"]
-        assert "src/auth.py" in fixes["changed_files"], fixes
-        assert any("src/auth.py" in line for line in fixes["lines"]), fixes["lines"]
-        assert "[COMMIT_FIXES]" in resumed.stdout
-        assert (world.repo / "src/auth.py").read_bytes() == hand, "the hand edit was overwritten"
-
-    @pytest.mark.parametrize("by_hand", [False, True], ids=["untouched", "edited by hand"])
-    def test_the_continuation_applies_every_batch_left(self, tmp_path, by_hand):
-        world = CommitWorld(tmp_path)
-        assert world.improve(env=world.env(IMPROVE_E2E_FAIL_CALL="2")).exit_code == 3
         if by_hand:
             hand = world.committed["src/auth.py"] + b"# edited by hand\n"
             (world.repo / "src/auth.py").write_bytes(hand)
@@ -1479,7 +1470,10 @@ class TestImproveCommits:
         if by_hand:
             # the hand-edited file's group is skipped and named, and only it
             assert fixes["changed_files"] == ["src/auth.py"], fixes
-            assert (world.repo / "src/auth.py").read_bytes() == hand
+            assert any("src/auth.py" in line for line in fixes["lines"]), fixes["lines"]
+            assert "[COMMIT_FIXES]" in resumed.stdout
+            assert (world.repo / "src/auth.py").read_bytes() == hand, (
+                "the hand edit was overwritten")
             applied = [task for task in final["tasks"] if task["write_outcome"] == "applied"]
             assert world.bytes_of()["src/security.py"] == _commit_marked(
                 world, applied)["src/security.py"]

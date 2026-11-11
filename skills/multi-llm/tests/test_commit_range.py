@@ -70,6 +70,8 @@ from utils.commit_range import (  # noqa: E402
 from utils.git_utils import empty_tree_id  # noqa: E402
 from utils.text_clip import clip  # noqa: E402
 
+from tests.support.git_template import copy_of  # noqa: E402
+
 UTC = timezone.utc
 JST = timezone(timedelta(hours=9), "UTC+9")
 EST = timezone(timedelta(hours=-5), "UTC-5")
@@ -191,18 +193,35 @@ def _case_insensitive_fs(where: Path) -> bool:
         probe.unlink()
 
 
-@pytest.fixture
-def linear(tmp_path):
-    """c1..c5 on main, one per day ten to six days before the pinned clock."""
-    repo = Repo(_root(tmp_path))
+def _templated(tmp_path, tmp_path_factory, name, build):
+    """A copy of the shape *build* makes, from a per-session template
+    (``tests.support.git_template``): ``(Repo, what build returned)``.
+
+    The shapes below pin every date against ``NOW`` and run under
+    ``_git_env``, so a fresh build already had the template's SHAs. *build*
+    returns ``(value, count)``; the copy's ``Repo`` keeps the count, which
+    names the files its next default commit writes."""
+    root, (value, count) = copy_of(tmp_path_factory, name, build, _root(tmp_path),
+                                   env=lambda: os.environ)
+    repo = Repo(root, init=False)
+    repo.count = count
+    return repo, value
+
+
+def _build_linear(path: Path):
+    repo = Repo(path)
     made = [repo.commit(f"c{i}", at=ep(NOW) - (11 - i) * DAY) for i in range(1, 6)]
-    return repo, made
+    return made, repo.count
 
 
 @pytest.fixture
-def forked(tmp_path):
-    """main: a, b, c; feature forked at a: f1, f2; lonely: an orphan."""
-    repo = Repo(_root(tmp_path))
+def linear(tmp_path, tmp_path_factory):
+    """c1..c5 on main, one per day ten to six days before the pinned clock."""
+    return _templated(tmp_path, tmp_path_factory, "commit-range-linear", _build_linear)
+
+
+def _build_forked(path: Path):
+    repo = Repo(path)
     base = ep(NOW) - 20 * DAY
     a = repo.commit("a", at=base)
     b = repo.commit("b", at=base + DAY)
@@ -214,7 +233,13 @@ def forked(tmp_path):
     repo.git("switch", "-q", "--orphan", "lonely")
     lone = repo.commit("lone", at=base + 5 * DAY)
     repo.git("checkout", "-q", "main")
-    return repo, {"a": a, "b": b, "c": c, "f1": f1, "f2": f2, "lone": lone}
+    return {"a": a, "b": b, "c": c, "f1": f1, "f2": f2, "lone": lone}, repo.count
+
+
+@pytest.fixture
+def forked(tmp_path, tmp_path_factory):
+    """main: a, b, c; feature forked at a: f1, f2; lonely: an orphan."""
+    return _templated(tmp_path, tmp_path_factory, "commit-range-forked", _build_forked)
 
 
 # ---------------------------------------------------------------------------
@@ -652,16 +677,20 @@ def test_since_a_tag_is_tag_to_head(linear):
     assert cr.kind == KIND_SINCE and cr.phrase == "since v2" and cr.window is None
 
 
-@pytest.fixture
-def dated(tmp_path):
-    repo = Repo(_root(tmp_path))
+def _build_dated(path: Path):
+    repo = Repo(path)
     made = {
         "old": repo.commit("old", at=jst(2026, 9, 30, 12, 0), tz=JST),
         "a": repo.commit("a", at=jst(2026, 10, 1, 10, 0), tz=JST),
         "b": repo.commit("b", at=jst(2026, 10, 1, 14, 5, 30), tz=JST),
         "c": repo.commit("c", at=jst(2026, 10, 2, 9, 0), tz=JST),
     }
-    return repo, made
+    return made, repo.count
+
+
+@pytest.fixture
+def dated(tmp_path, tmp_path_factory):
+    return _templated(tmp_path, tmp_path_factory, "commit-range-dated", _build_dated)
 
 
 @pytest.mark.parametrize("date_text,cutoff,cutoff_text,expect,base", [

@@ -788,7 +788,14 @@ class TestNoRealLLMCalls:
         mock_provider: MockProvider,
         assertions: AssertionHelpers,
     ):
-        """Verify call count matches number of providers requested."""
+        """Verify call count matches number of providers requested.
+
+        The run must succeed first: the count was once read only on success,
+        so a failed run passed without checking anything. One model with
+        validation skipped is one review call, and probes such as
+        ``--version`` answer before the mock logs a call, so the log holds
+        exactly that call.
+        """
         _configure_scenario(skill_runner, mock_provider, "happy_path")
 
         plan = fixture_manager.create_plan(
@@ -806,10 +813,11 @@ class TestNoRealLLMCalls:
             timeout=30,
         )
 
-        if result.success:
-            # Should have at least 1 call for 1 model
-            call_count = mock_provider.get_call_count()
-            assert call_count >= 1, f"Expected at least 1 mock call, got {call_count}"
+        assert result.success, f"review_plan failed: {result.stderr}"
+        providers = [call.provider for call in mock_provider.get_calls()]
+        assert providers == ["cursor-agent"], (
+            f"expected one mock call for the one model requested, got {providers}"
+        )
 
 
 class TestPerformance:

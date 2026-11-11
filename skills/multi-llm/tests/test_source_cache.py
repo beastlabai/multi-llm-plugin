@@ -1,13 +1,15 @@
 """``tests/source_cache``: the shared parsed-source cache stays fresh within one process.
 
 The contract is in ``tests/source_cache.py``'s module docstring: directory
-membership is rescanned on every call, and a cached tree is reused only while
-the file's bytes are unchanged, whatever its timestamp says.
+membership is rescanned on every call, and a cached tree or derived value is
+reused only while the file's bytes are unchanged, whatever its timestamp says.
 """
 import ast
+import gc
 import os
+import weakref
 
-from tests.source_cache import python_files, source_text, source_tree
+from tests.source_cache import derived, python_files, source_text, source_tree
 
 
 def _assigned_name(tree):
@@ -69,3 +71,68 @@ class TestContentFreshness:
         assert source_text(module) == "name = 'é'\nother = 2\n"
         tree = source_tree(module)
         assert ast.get_source_segment(source_text(module), tree.body[1]) == "other = 2"
+
+
+_SEEN = []
+
+
+def _record(tree):
+    """A derived function that notes each tree it is handed (weakly)."""
+    _SEEN.append(weakref.ref(tree))
+    return _assigned_name(tree)
+
+
+class TestDerivedValues:
+    def setup_method(self):
+        _SEEN.clear()
+
+    def test_unchanged_content_computes_once(self, tmp_path):
+        module = tmp_path / "m.py"
+        module.write_text("safe = 1\n", encoding="utf-8")
+        assert derived(module, _record) == "safe"
+        os.utime(module, ns=(0, 0))  # a timestamp change alone is not a new version
+
+        assert derived(module, _record) == "safe"
+        assert len(_SEEN) == 1
+
+    def test_an_equal_length_rewrite_with_its_timestamp_restored_is_recomputed(self, tmp_path):
+        module = tmp_path / "m.py"
+        module.write_text("safe = 1\n", encoding="utf-8")
+        before = os.stat(module)
+        assert derived(module, _record) == "safe"
+
+        module.write_text("evil = 2\n", encoding="utf-8")
+        os.utime(module, ns=(before.st_atime_ns, before.st_mtime_ns))
+        after = os.stat(module)
+        assert (after.st_mtime_ns, after.st_size) == (before.st_mtime_ns, before.st_size)
+
+        assert derived(module, _record) == "evil"
+        assert len(_SEEN) == 2
+
+    def test_the_tree_it_was_computed_from_is_not_kept(self, tmp_path):
+        """Only the value stays: a whole-tree scan must not hold every tree."""
+        module = tmp_path / "m.py"
+        module.write_text("safe = 1\n", encoding="utf-8")
+        assert derived(module, _record) == "safe"
+        gc.collect()
+
+        assert _SEEN[0]() is None
+        assert derived(module, _record) == "safe"
+        assert len(_SEEN) == 1
+
+    def test_a_tree_source_tree_cached_is_the_one_it_reads(self, tmp_path):
+        module = tmp_path / "m.py"
+        module.write_text("safe = 1\n", encoding="utf-8")
+        tree = source_tree(module)
+
+        assert derived(module, _record) == "safe"
+        assert _SEEN[0]() is tree
+
+    def test_a_later_source_tree_call_keeps_the_value(self, tmp_path):
+        module = tmp_path / "m.py"
+        module.write_text("safe = 1\n", encoding="utf-8")
+        assert derived(module, _record) == "safe"
+
+        assert source_tree(module) is source_tree(module)
+        assert derived(module, _record) == "safe"
+        assert len(_SEEN) == 1

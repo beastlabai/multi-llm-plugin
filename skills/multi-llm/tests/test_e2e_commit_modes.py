@@ -558,18 +558,21 @@ class TestApplyCommitFixes:
             "apply-commit-fixes", "apply-code-fixes", "done")
         assert run.result["user_next_step"]["complete"] is True
 
-    def test_status_after_a_foreground_apply_prints_the_saved_block(self, tmp_path):
-        # Review D, finding 1: a phase that ran in the foreground has no run
-        # record (`no_run`), and one such view used to suppress the block for
-        # the whole poll, so the hand-typed `status <pinned>` never showed it.
-        world = _reviewed(tmp_path)
-        applied = apply_fixes(world, world.pinned)
-        assert applied.exit_code == 0, applied.explain()
-        fixes = block(applied, "[COMMIT_FIXES] ", "[COMMIT_FIXES_END]")
-        status = world.run("status", plan=world.pinned)
-        assert status.exit_code in (0, 2), status.explain()
-        assert block(status, "[COMMIT_FIXES] ", "[COMMIT_FIXES_END]") == fixes
-        assert status.result["commit_fixes"]["lines"] == fixes
+        # -- summary.md: a file the user reads, so it names the commit brief and
+        # never calls it a plan ----------------------------------------------------
+        summary = (world.out / "apply-fixes" / "summary.md").read_text(encoding="utf-8")
+        assert f"**Commit brief**: {world.repo / world.brief_rel}" in summary, summary[:400]
+        assert "**Plan**:" not in summary
+
+        if typed == "pinned":
+            # -- `status <pinned>` after this foreground apply prints the saved block.
+            # A phase that ran in the foreground has no run record (`no_run`), and
+            # that view must not suppress the block the apply saved. Run last:
+            # nothing above changes what the apply left.
+            status = world.run("status", plan=world.pinned)
+            assert status.exit_code in (0, 2), status.explain()
+            assert block(status, "[COMMIT_FIXES] ", "[COMMIT_FIXES_END]") == fixes
+            assert status.result["commit_fixes"]["lines"] == fixes
 
     def test_a_file_edited_after_the_review_is_skipped_and_named(self, tmp_path):
         world = _reviewed(tmp_path)
@@ -595,15 +598,6 @@ class TestApplyCommitFixes:
         summary = (world.out / "apply-fixes" / "summary.md").read_text(encoding="utf-8")
         assert f"### {AUTH_FINDING} [commit_guard]" in summary
         assert "**Files**: `src/auth.py`" in summary
-
-    def test_the_summary_names_the_commit_brief(self, tmp_path):
-        """§2.8: ``summary.md`` is a file the user reads, and the apply's core
-        names it in the report; it never calls the brief a plan."""
-        world = _reviewed(tmp_path)
-        assert apply_fixes(world, world.pinned).exit_code == 0
-        summary = (world.out / "apply-fixes" / "summary.md").read_text(encoding="utf-8")
-        assert f"**Commit brief**: {world.repo / world.brief_rel}" in summary, summary[:400]
-        assert "**Plan**:" not in summary
 
     @pytest.mark.parametrize("where", ["report.md", "user_selections.json"])
     def test_a_finding_skipped_in_the_reports_is_not_applied(self, tmp_path, where):

@@ -59,6 +59,7 @@ from tests.support.improve_world import (  # noqa: E402
     improve_stub,  # noqa: F401 - the stub fixture
 )
 from tests.support.commit_door import _commit, _git, _init  # noqa: E402
+from tests.support.git_template import copy_of  # noqa: E402
 
 IMPROVE = "improve-commits"
 FOLDER = "plans/commit-reviews"
@@ -85,22 +86,34 @@ def clean(monkeypatch):
     cli_common.clear_invocation()
 
 
-@pytest.fixture
-def repo(tmp_path, monkeypatch):
-    """Three commits (c1 a.py, c2 b.py, c3 a.py); the cwd is the root."""
-    root = _init(tmp_path / "repo")
+def _build_repo(path: Path) -> None:
+    root = _init(path)
     _commit(root, "a.py", "a = 1\n", "c1: start")
     _commit(root, "b.py", "b = 2\n", "c2: add b")
     _commit(root, "a.py", "a = 3\n", "c3: change a")
+
+
+def _build_root_repo(path: Path) -> None:
+    _commit(_init(path), "a.py", "a = 1\n", "only")
+
+
+# Both are copies of a per-session template (``tests.support.git_template``),
+# one git process per test instead of 13 and 7.
+
+
+@pytest.fixture
+def repo(tmp_path, tmp_path_factory, monkeypatch):
+    """Three commits (c1 a.py, c2 b.py, c3 a.py); the cwd is the root."""
+    root, _ = copy_of(tmp_path_factory, "improve-commits", _build_repo, tmp_path / "repo")
     monkeypatch.chdir(root)
     return root
 
 
 @pytest.fixture
-def root_repo(tmp_path, monkeypatch):
+def root_repo(tmp_path, tmp_path_factory, monkeypatch):
     """One commit: ``HEAD`` is the root, so the default range is a root range."""
-    root = _init(tmp_path / "one")
-    _commit(root, "a.py", "a = 1\n", "only")
+    root, _ = copy_of(tmp_path_factory, "improve-commits-root", _build_root_repo,
+                      tmp_path / "one")
     monkeypatch.chdir(root)
     return root
 

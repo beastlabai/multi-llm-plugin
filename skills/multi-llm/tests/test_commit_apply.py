@@ -22,6 +22,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -54,6 +55,8 @@ from utils.output_handler import output_dir_path  # noqa: E402
 from utils.state_manager import compute_plan_hash, stamp_stable_ids  # noqa: E402
 from utils.write_safety import file_sha256  # noqa: E402
 
+from tests.support.git_template import copy_of  # noqa: E402
+
 FOLDER = "plans/commit-reviews"
 
 
@@ -85,16 +88,44 @@ def _commit(root: Path, message: str, files: Optional[Dict[str, Optional[str]]] 
     return _git(root, "rev-parse", "HEAD")
 
 
-@pytest.fixture
-def repo(tmp_path, monkeypatch):
-    root = tmp_path / "repo"
+def _init_repo(root: Path) -> None:
     root.mkdir()
     _git(root, "init", "-q", "-b", "master")
     _git(root, "config", "user.name", "t")
     _git(root, "config", "user.email", "t@example.invalid")
     _git(root, "config", "commit.gpgsign", "false")
+
+
+@pytest.fixture
+def repo(tmp_path, tmp_path_factory, monkeypatch):
+    """An empty repository with its own identity: a copy of a per-session
+    template (``tests.support.git_template``), no git process per test."""
+    root = tmp_path / "repo"
+    copy_of(tmp_path_factory, "commit-apply-empty", _init_repo, root, env=lambda: os.environ)
     monkeypatch.chdir(root)
     return root
+
+
+def _on_the_seed(repo: Path, tmp_path_factory, name: str, commits):
+    """What ``commits(root)`` returns, after it has run on *repo*.
+
+    While *repo* is still the empty seed ``repo`` copied (``.git`` alone, no
+    commit, nothing staged) the seed is swapped for a copy of a per-session
+    template that ran ``commits`` on that same seed; otherwise ``commits``
+    runs on *repo* in place, as it always did."""
+    dot_git = repo / ".git"
+    if not (os.listdir(repo) == [".git"] and not (dot_git / "index").exists()
+            and not (dot_git / "packed-refs").exists()
+            and not any((dot_git / "refs" / "heads").iterdir())):
+        return commits(repo)
+
+    def build(path: Path):
+        _init_repo(path)
+        return commits(path)
+
+    shutil.rmtree(dot_git)
+    _, built = copy_of(tmp_path_factory, name, build, repo, env=lambda: os.environ)
+    return built
 
 
 def _suggestion(file: str, title: str, *, line=(1, 2), extra: str = "") -> Dict[str, Any]:
@@ -232,13 +263,19 @@ def _block(out: str) -> List[str]:
     return lines[start[0]:end + 1]
 
 
-@pytest.fixture
-def ranged(repo):
-    """``base..head`` touching a.py, b.py and c.py in two commits."""
-    base = _commit(repo, "init", {"a.py": "a = 1\n", "b.py": "b = 1\n", "c.py": "c = 1\n",
+def _ranged_commits(root: Path):
+    base = _commit(root, "init", {"a.py": "a = 1\n", "b.py": "b = 1\n", "c.py": "c = 1\n",
                                   "README.md": "# r\n"})
-    first = _commit(repo, "touch a and b", {"a.py": "a = 2\n", "b.py": "b = 2\n"})
-    head = _commit(repo, "touch c", {"c.py": "c = 2\n"})
+    first = _commit(root, "touch a and b", {"a.py": "a = 2\n", "b.py": "b = 2\n"})
+    head = _commit(root, "touch c", {"c.py": "c = 2\n"})
+    return base, first, head
+
+
+@pytest.fixture
+def ranged(repo, tmp_path_factory):
+    """``base..head`` touching a.py, b.py and c.py in two commits."""
+    base, first, head = _on_the_seed(repo, tmp_path_factory, "commit-apply-ranged",
+                                     _ranged_commits)
     return repo, base, first, head
 
 
@@ -558,11 +595,17 @@ class TestTheProtectedSet:
 
 class TestDeletedFiles:
 
+    @staticmethod
+    def _commits(root: Path):
+        base = _commit(root, "init", {"d.py": "d = 1\n", "keep.py": "k = 1\n"})
+        deleting = _commit(root, "drop d", {"d.py": None})
+        head = _commit(root, "more", {"keep.py": "k = 2\n"})
+        return base, deleting, head
+
     @pytest.fixture
-    def deleted(self, repo):
-        base = _commit(repo, "init", {"d.py": "d = 1\n", "keep.py": "k = 1\n"})
-        deleting = _commit(repo, "drop d", {"d.py": None})
-        head = _commit(repo, "more", {"keep.py": "k = 2\n"})
+    def deleted(self, repo, tmp_path_factory):
+        base, deleting, head = _on_the_seed(repo, tmp_path_factory, "commit-apply-deleted",
+                                            self._commits)
         return repo, base, deleting, head
 
     def test_still_absent_passes_and_the_prompt_names_its_history(self, deleted, capsys):
@@ -1192,10 +1235,13 @@ def _complete(root: Path, base: Optional[str], head: str, when: str, **kw) -> Pa
 
 class TestSelectReview:
 
+    @staticmethod
+    def _commits(root: Path):
+        return [_commit(root, f"c{i}", {f"f{i}.py": f"{i}\n"}) for i in range(5)]
+
     @pytest.fixture
-    def history(self, repo):
-        shas = [_commit(repo, f"c{i}", {f"f{i}.py": f"{i}\n"}) for i in range(5)]
-        return repo, shas
+    def history(self, repo, tmp_path_factory):
+        return repo, _on_the_seed(repo, tmp_path_factory, "commit-apply-history", self._commits)
 
     def test_shared_head_takes_the_newest_and_names_the_other(self, history):
         repo, s = history

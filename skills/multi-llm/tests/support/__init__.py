@@ -24,4 +24,6 @@ Two kinds of module, and ``tests/test_support_package.py`` checks both:
   module (``write_orchestrators.orchestrator_repo.__wrapped__``).
 
 ``gitrepo`` holds the hermetic git helpers (no developer ``~/.gitconfig``).
+``shared_stop`` runs a world to its stop once per test module, for the tests
+that only read that stop.
 """

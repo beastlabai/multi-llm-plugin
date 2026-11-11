@@ -8,12 +8,14 @@ policy refuses, so ``implement`` stops on it before dispatching it. Built on
 
 Fixtures (registered suite-wide by ``tests/conftest.py``): ``repo``, the world
 with the ``DENY`` policy and every edit and check scripted. A test file that
-defines its own ``repo`` overrides it.
+defines its own ``repo`` overrides it. ``tests.support.shared_stop`` runs this
+world to its first stop once per test module, for the tests that only read it.
 """
 
 from __future__ import annotations
 
 import json
+from typing import Tuple
 
 import pytest
 
@@ -95,14 +97,21 @@ def _policy(repo, text: str) -> None:
     registry._config = None
 
 
-@pytest.fixture
-def repo(tmp_path, monkeypatch):
-    obj = make_repo(tmp_path, monkeypatch, PLAN)
-    _policy(obj, DENY)
+def _gate_world(tmp_path, monkeypatch, plan_text: str = PLAN, policy: str = DENY):
+    """The ``repo`` fixture's body, with the plan and the policy parameters, so
+    a shared stop (``tests.support.shared_stop``) builds exactly the world a
+    fresh test gets."""
+    obj = make_repo(tmp_path, monkeypatch, plan_text)
+    _policy(obj, policy)
     monkeypatch.setenv("MOCK_LLM_WRITE_IDS", json.dumps(
         [f"T00{n}" for n in range(1, 8)]))
     monkeypatch.setenv("MOCK_LLM_WRITE_CHECK_IF_PROMPT_HAS", CHECK_GATE)
-    yield obj
+    return obj
+
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    yield _gate_world(tmp_path, monkeypatch)
     registry._config = None
 
 
@@ -115,12 +124,18 @@ def _check(repo, *, passed: bool, reply_status=None) -> None:
         repo.monkeypatch.delenv("MOCK_LLM_WRITE_CHECK_STATUS", raising=False)
 
 
-def _first_run(repo, capsys, reply_status=None) -> str:
+def _first_run_parts(repo, capsys, reply_status=None) -> Tuple[str, str]:
+    """:func:`_first_run`'s stdout and stderr, kept apart."""
     _check(repo, passed=False, reply_status=reply_status)
     assert _implement(repo) == 3
     captured = capsys.readouterr()
     repo.log.unlink(missing_ok=True)
-    return captured.out + captured.err
+    return captured.out, captured.err
+
+
+def _first_run(repo, capsys, reply_status=None) -> str:
+    out, err = _first_run_parts(repo, capsys, reply_status)
+    return out + err
 
 
 def _dispatched_prompt(repo, title: str) -> str:

@@ -1,10 +1,13 @@
 """The write half of the subagent executor: D3f/D3g/D3h/D3l/D3n.
 
-Every dispatch here goes through a real subprocess against
+Almost every dispatch here goes through a real subprocess against
 ``tests/mocks/mock_llm.py`` — never a live API — because the things worth pinning
 live in the seam between this process and an edit-capable agent CLI: the rendered
 argv, the pinned ``cwd``, the pre-batch snapshot, the byte comparison that decides
-the outcome, and the audit line written before the child starts.
+the outcome, and the audit line written before the child starts. The exceptions
+take the in-process ``respond=`` seam on purpose: the native half of each
+native/executor parity row, and a few tests that read only the scheduler's own
+counts (``WriteEnv.native_edits``), where a child would only add launch time.
 
 Test groups map onto the design items:
 
@@ -264,6 +267,39 @@ class WriteEnv:
             self.monkeypatch.setenv("MOCK_LLM_PROSE", "1")
         else:
             self.monkeypatch.delenv("MOCK_LLM_PROSE", raising=False)
+
+    def native_edits(self, entries, result):
+        """A ``respond=`` callback doing in this process what :meth:`edits`
+        programs the mock runner to do.
+
+        For a test that reads only what the scheduler counted, a real child adds
+        nothing but process launches (on Windows a ``.cmd`` shim, then Node, then
+        Python), so it can take the native-dispatcher seam instead. The callback
+        still makes the declared edit, byte for byte as the mock's ``patch``
+        mode does, because ``_classify`` compares bytes: an ``applied`` reply
+        with nothing moved is re-sent, then judged a clean failure. It answers
+        with a fresh copy of the same report on every dispatch, as the mock
+        prints it anew, and keeps the id of each task it was handed in
+        ``respond.dispatched``.
+        """
+        for entry in entries:
+            # The only mode mirrored here; another would need its own twin.
+            assert entry.get("mode") == "patch", entry
+        report = json.dumps(result)
+
+        def respond(task, prompt):
+            respond.dispatched.append(task["task_id"])
+            for entry in entries:
+                path = Path(entry["path"])
+                if not path.is_absolute():
+                    path = self.root / path
+                path.write_bytes(
+                    path.read_bytes() + str(entry["content"]).encode("utf-8")
+                )
+            return json.loads(report)
+
+        respond.dispatched = []
+        return respond
 
     def enable_call_log(self) -> Path:
         path = self.tmp_path / "calls.jsonl"
@@ -4273,12 +4309,24 @@ class TestAResumeSaysWhatItKept:
 
     def test_a_run_that_kept_nothing_says_nothing(self, env):
         """Every apply run resumes unless `--fresh`, so a first run reaches
-        the tally too; with nothing kept its batch lines say it all."""
-        env.edits([_patch_edit(env.plan)],
-                  result={"status": "applied", "ids": ["s0"],
-                          "files_touched": ["plans/p.md"], "summary": "S0"})
+        the tally too; with nothing kept its batch lines say it all.
+
+        A single run with nothing to resume reads only the scheduler's own
+        lines, so it dispatches through the in-process seam
+        (`WriteEnv.native_edits`). The counted case above keeps the real
+        child: its resume reads what that child's run left on disk."""
+        respond = env.native_edits(
+            [_patch_edit(env.plan)],
+            result={"status": "applied", "ids": ["s0"],
+                    "files_touched": ["plans/p.md"], "summary": "S0"})
         lines = []
-        env.scheduler([env.apply_task(0)], finalize=False, log=lines.append).run()
+        result = env.scheduler(
+            [env.apply_task(0)], finalize=False, log=lines.append,
+            respond=respond,
+        ).run()
+        # It ran and finished, so the silence is the tally's, not a dead run's.
+        assert result.exit_code == 0, result.messages
+        assert respond.dispatched == ["apply-batch-0"]
         assert not [l for l in lines if "resume:" in l], lines
 
 
@@ -4725,7 +4773,14 @@ class TestTheEtaLineUsesThisRunsOwnBatchCount:
     plan's decomposition put them (5..9 here) and still include a deferred
     human task never dispatched — `EtaLines.record`/`EtaLines.start` used to
     pass both straight through, so every line read `batch 6/6` ...
-    `batch 10/6 ... WARNING: batch_index > total_batches`."""
+    `batch 10/6 ... WARNING: batch_index > total_batches`.
+
+    These rows read only what the scheduler counted, so they dispatch through
+    the in-process seam (`WriteEnv.native_edits`): the same declared edit, the
+    same reply, no child. Both legs reach the counts through the same
+    `_record_batch_effects`, and `EtaLines` never asks which invoker ran a task.
+    The executor leg's own `[ETA]` lines stay pinned on real runs in
+    `test_dispatch_counts.py`."""
 
     def test_batch_and_total_are_this_runs_own_not_the_plans(self, env):
         state = FakeState(env.tmp_path / "state.json")
@@ -4740,17 +4795,20 @@ class TestTheEtaLineUsesThisRunsOwnBatchCount:
             5, kind="implement", task_id="T014", executor_role="human",
             batch_index=13,
         ))
-        env.edits([_patch_edit(env.plan)],
-                  result={"status": "applied",
-                          "ids": [f"T{6 + i:03d}" for i in range(5)],
-                          "files_touched": ["plans/p.md"], "summary": "S"})
+        respond = env.native_edits(
+            [_patch_edit(env.plan)],
+            result={"status": "applied",
+                    "ids": [f"T{6 + i:03d}" for i in range(5)],
+                    "files_touched": ["plans/p.md"], "summary": "S"})
         lines = []
         result = env.scheduler(
             tasks, state=state, kind="implement", resume=True,
             human_task_strategy=STRATEGY_SKIP_DEPENDENTS, finalize=False,
-            log=lines.append,
+            log=lines.append, respond=respond,
         ).run()
         assert result.exit_code == 0, result.messages
+        # Five dispatches, the deferred manual task never among them.
+        assert respond.dispatched == [f"T{6 + i:03d}" for i in range(5)]
 
         eta_lines = [l for l in lines if l.startswith("[ETA] implement:")]
         assert len(eta_lines) == 5, lines
@@ -4788,18 +4846,20 @@ class TestTheEtaLineUsesThisRunsOwnBatchCount:
             )
             for i in range(2)
         ]
-        env.edits([_patch_edit(env.plan)],
-                  result={"status": "applied", "ids": ["T001", "T002"],
-                          "files_touched": ["plans/p.md"], "summary": "S"})
+        respond = env.native_edits(
+            [_patch_edit(env.plan)],
+            result={"status": "applied", "ids": ["T001", "T002"],
+                    "files_touched": ["plans/p.md"], "summary": "S"})
         lines = []
         result = env.scheduler(
             tasks, state=state, kind="implement", finalize=False,
-            log=lines.append,
+            log=lines.append, respond=respond,
         ).run()
         assert result.exit_code == 0, result.messages
         # One batch dispatched, two tasks finished — the two units the line used
         # to mix.
         assert result.batches_dispatched == [0]
+        assert respond.dispatched == ["T001", "T002"]
 
         eta_lines = [l for l in lines if l.startswith("[ETA] implement:")]
         assert len(eta_lines) == 2, lines
@@ -4832,16 +4892,18 @@ class TestTheEtaLineUsesThisRunsOwnBatchCount:
                         "files_touched": ["plans/p.md"], "summary": "done"}),
             encoding="utf-8",
         )
-        env.edits([_patch_edit(env.plan)],
-                  result={"status": "applied", "ids": ["T002"],
-                          "files_touched": ["plans/p.md"], "summary": "S"})
+        respond = env.native_edits(
+            [_patch_edit(env.plan)],
+            result={"status": "applied", "ids": ["T002"],
+                    "files_touched": ["plans/p.md"], "summary": "S"})
         lines = []
         result = env.scheduler(
             tasks, state=state, kind="implement", resume=True, finalize=False,
-            log=lines.append,
+            log=lines.append, respond=respond,
         ).run()
         assert result.exit_code == 0, result.messages
         assert [o.skipped for o in result.outcomes] == [True, False]
+        assert respond.dispatched == ["T002"]
 
         eta_lines = [l for l in lines if l.startswith("[ETA] implement:")]
         assert len(eta_lines) == 1, lines
@@ -4859,15 +4921,18 @@ class TestTheEtaLineUsesThisRunsOwnBatchCount:
                         "files_touched": ["plans/p.md"], "summary": "done"}),
             encoding="utf-8",
         )
-        env.edits([_patch_edit(env.plan)],
-                  result={"status": "applied", "ids": ["s1"],
-                          "files_touched": ["plans/p.md"], "summary": "S"})
+        respond = env.native_edits(
+            [_patch_edit(env.plan)],
+            result={"status": "applied", "ids": ["s1"],
+                    "files_touched": ["plans/p.md"], "summary": "S"})
         lines = []
         result = env.scheduler(
             tasks, state=state, resume=True, finalize=False, log=lines.append,
+            respond=respond,
         ).run()
         assert result.exit_code == 0, result.messages
         assert [o.skipped for o in result.outcomes] == [True, False]
+        assert respond.dispatched == ["apply-batch-1"]
         eta_lines = [l for l in lines if l.startswith("[ETA] apply-suggestions:")]
         assert len(eta_lines) == 1, lines
         assert "batch 2/2" in eta_lines[0], eta_lines
@@ -4897,15 +4962,25 @@ class TestAStoppedRunSaysSoOnItsEtaLines:
         ), eta
 
     def test_a_run_that_finishes_says_nothing_of_a_stop(self, env):
-        env.edits([_patch_edit(env.plan)],
-                  result={"status": "applied", "ids": ["s0"],
-                          "files_touched": ["plans/p.md"], "summary": "S"})
+        """Only the scheduler's own lines are read, so this dispatches through
+        the in-process seam (`WriteEnv.native_edits`); the stop above keeps the
+        real child, since its stop is a reply that moved bytes."""
+        respond = env.native_edits(
+            [_patch_edit(env.plan)],
+            result={"status": "applied", "ids": ["s0"],
+                    "files_touched": ["plans/p.md"], "summary": "S"})
         state = FakeState(env.tmp_path / "state.json")
         lines = []
         result = env.scheduler(
             [env.apply_task(0)], state=state, finalize=False, log=lines.append,
+            respond=respond,
         ).run()
         assert result.exit_code == 0, result.messages
+        # The batch did run and reach its N/N line, so the absence below is
+        # about the stop, never about a run that dispatched nothing.
+        assert respond.dispatched == ["apply-batch-0"]
+        eta = [l for l in lines if l.startswith("[ETA] apply-suggestions:")]
+        assert eta and "batch 1/1" in eta[0], lines
         assert not [l for l in lines if "run stopped" in l], lines
 
 
@@ -4913,7 +4988,11 @@ class TestTheClosingEtaLineGoesToThePhaseLog:
     """F7 (2026-09-17): `metrics.finish_phase_in_state` printed the closing
     `[ETA] … phase complete` line to stderr itself, so in a foreground or
     in-process `full` run it landed somewhere none of the per-batch lines did.
-    It is returned now, and the scheduler logs it like the rest."""
+    It is returned now, and the scheduler logs it like the rest.
+
+    The routing is this process's own, so the row dispatches through the
+    in-process seam (`WriteEnv.native_edits`) with the mock runner's edit and
+    reply; a child's output never reaches `capsys` either way."""
 
     def test_the_phase_complete_line_lands_beside_the_batch_lines(
         self, env, monkeypatch, capsys
@@ -4921,15 +5000,17 @@ class TestTheClosingEtaLineGoesToThePhaseLog:
         from utils import tracking
 
         monkeypatch.setattr(tracking, "get_all_modified_files", set)
-        env.edits([_patch_edit(env.plan)],
-                  result={"status": "applied", "ids": ["s0"],
-                          "files_touched": ["plans/p.md"], "summary": "S"})
+        respond = env.native_edits(
+            [_patch_edit(env.plan)],
+            result={"status": "applied", "ids": ["s0"],
+                    "files_touched": ["plans/p.md"], "summary": "S"})
         state = FakeState(env.tmp_path / "state.json")
         lines = []
         result = env.scheduler(
-            [env.apply_task(0)], state=state, log=lines.append,
+            [env.apply_task(0)], state=state, log=lines.append, respond=respond,
         ).run()
         assert result.exit_code == 0, result.messages
+        assert respond.dispatched == ["apply-batch-0"]
 
         closing = [l for l in lines if "phase complete" in l]
         assert len(closing) == 1, lines
@@ -5145,16 +5226,22 @@ class TestMirrorDenominatorsExcludeDeferredHumanTasks:
     task(s) `human_task_strategy` skips — they never dispatch, so a clean run
     that finished everything it could mirrored one short of its own task
     count (measured 2026-09-16: a 14-task implement run with one deferred
-    manual task read `13/14 batches ok`)."""
+    manual task read `13/14 batches ok`).
+
+    The mirror's counts are the scheduler's own, written by the same
+    `WriteReports.mirror_status` whichever invoker ran the task, so this row
+    dispatches through the in-process seam (`WriteEnv.native_edits`) with the
+    same declared edit and reply the mock runner would give."""
 
     def test_a_skipped_human_task_does_not_count_toward_the_denominators(
         self, env
     ):
         from utils import status_file
 
-        env.edits([_patch_edit(env.plan)],
-                  result={"status": "applied", "ids": ["s1"],
-                          "files_touched": ["plans/p.md"], "summary": "S"})
+        respond = env.native_edits(
+            [_patch_edit(env.plan)],
+            result={"status": "applied", "ids": ["s1"],
+                    "files_touched": ["plans/p.md"], "summary": "S"})
         tasks = [
             env.apply_task(0, task_id="T-human", executor_role="human",
                            expected_ids=["T-human"]),
@@ -5162,8 +5249,10 @@ class TestMirrorDenominatorsExcludeDeferredHumanTasks:
         ]
         result = env.scheduler(
             tasks, human_task_strategy=STRATEGY_SKIP_DEPENDENTS,
+            respond=respond,
         ).run()
         assert result.exit_code == 0, result.messages
+        assert respond.dispatched == ["T-real"]
         mirror = status_file.read_status(
             str(env.phase_dir)
         )["progress"]["write_subagents"]

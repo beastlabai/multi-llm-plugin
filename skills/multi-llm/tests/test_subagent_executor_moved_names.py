@@ -348,12 +348,9 @@ class _AnyName(dict):
 def test_no_test_writes_any_name_on_the_executor():
     """This file is the one exception: it exercises those writes on purpose."""
     scanner = MovedNameWriteScanner(_AnyName(), EXECUTOR)
-    tests_dir = Path(__file__).parent
     problems = [
         _guard_message(path.relative_to(SKILL_ROOT), *hit)
-        for path in sorted(tests_dir.rglob("*.py"))
-        if path != Path(__file__)
-        for hit in scanner.scan(path.read_text(encoding="utf-8"), str(path))
+        for path, hit in scanner.scan_dir(Path(__file__).parent, skip=Path(__file__))
     ]
     assert problems == [], "\n".join(problems)
 
