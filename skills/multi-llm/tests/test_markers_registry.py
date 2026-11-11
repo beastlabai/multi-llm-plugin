@@ -342,6 +342,8 @@ class TestTheScannerRules:
         repo = skill.parents[1]
         _write(repo, "packaging/codex/mcp_server.py", 'print("[SERVER_ONE] ready")\n')
         _write(repo, "packaging/codex/multi-llm/utils/emit.py", 'print("[MIRROR_ONE]")\n')
+        _write(repo, "packaging/opencode/dist/index.mjs",
+               'function f(x) {\n  return `[BUILT_ONE] uv is required, ${x}`\n}\n')
         _write(repo, "packaging/opencode/src/index.mjs", '''
             // [JS_COMMENT] a comment
             /* [JS_BLOCK] a block */

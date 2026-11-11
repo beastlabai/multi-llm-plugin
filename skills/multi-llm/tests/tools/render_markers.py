@@ -100,8 +100,10 @@ PARTIAL_MARKER_RE = re.compile(r"\[(?=[A-Z0-9_\x00]*\x00)(?=[A-Z0-9_\x00]*[A-Z])
 #: Directories the source scan never enters. ``tests`` holds fixtures, not emitters.
 SKIP_DIRS = frozenset({"tests", "__pycache__", "node_modules"})
 
-#: ``packaging/<host>/multi-llm/`` are generated copies of the skill, scanned once already.
-GENERATED_DIRS = frozenset({"multi-llm"})
+#: ``packaging/<host>/multi-llm/`` are generated copies of the skill, scanned once already;
+#: ``packaging/opencode/dist/`` is the gitignored bundle the OpenCode package build writes
+#: from ``src/``, so scanning it would make the page depend on whether a build ran.
+GENERATED_DIRS = frozenset({"multi-llm", "dist"})
 
 #: The hand-written ``packaging/`` sources the scan reads.
 PACKAGING_SUFFIXES = (".py", ".mjs", ".js")
