@@ -112,6 +112,42 @@ _GIT_GLOBAL_OPTIONS_WITH_VALUE = frozenset({"-C", "-c", "--git-dir", "--work-tre
 _PLANTABLE_DRIVER_KEYS = r"^(filter\..+\.(clean|smudge|process|required)|core\.attributesfile)$"
 _DRIVER_SCOPES_A_BATCH_CAN_WRITE = frozenset({"local", "worktree"})
 
+#: The words, in any case, without which the repository's own config file
+#: cannot give the probe anything to report, so :func:`planted_driver_overrides`
+#: may answer ``[]`` without starting git (on Windows each git process costs
+#: tens of milliseconds, and the probe ran before every plugin git call).
+#: Git spells a section and a key in ASCII letters, digits, ``-`` and ``.``
+#: only, compared case-insensitively, with no escapes and no line continuation
+#: outside values, so a ``filter.<name>.*`` key cannot be written without the
+#: letters ``filter``, nor ``core.attributesFile`` without ``attributesfile``.
+#: ``include`` covers ``include.path`` and ``includeIf``, which read another
+#: file into the same scope; ``worktree`` covers ``extensions.worktreeConfig``
+#: (a second, worktree-scoped file) and ``core.worktree``. Any of them, even
+#: in a value or a comment, sends the call to the probe: a false alarm costs
+#: one git process, a miss would run a planted driver.
+_CONFIG_WORDS_THE_PROBE_MUST_READ = (b"filter", b"attributesfile", b"include", b"worktree")
+
+#: The ``GIT_*`` variables that move neither which repository git finds nor
+#: which files it reads as that repository's own config. Identity, prompts,
+#: tracing, and the global, system and command-line config layers (whose
+#: drivers the probe leaves in force anyway) are all here. Any other ``GIT_*``
+#: variable that is set (``GIT_DIR``, ``GIT_COMMON_DIR``, ``GIT_WORK_TREE``,
+#: ``GIT_CEILING_DIRECTORIES``, ``GIT_CONFIG``, ``GIT_OBJECT_DIRECTORY``, or
+#: one this list does not know) sends every call to the probe.
+_GIT_ENV_THAT_MOVES_NO_REPOSITORY_CONFIG = frozenset({
+    "GIT_OPTIONAL_LOCKS", "GIT_TERMINAL_PROMPT", "GIT_ASKPASS", "GIT_EDITOR",
+    "GIT_SEQUENCE_EDITOR", "GIT_PAGER", "GIT_SSH", "GIT_SSH_COMMAND", "GIT_SSH_VARIANT",
+    "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_AUTHOR_DATE",
+    "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL", "GIT_COMMITTER_DATE",
+    "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM",
+    "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
+    "GIT_TRACE", "GIT_TRACE2", "GIT_TRACE2_EVENT", "GIT_TRACE2_PERF",
+    "GIT_TRACE_PERFORMANCE", "GIT_TRACE_SETUP", "GIT_TRACE_PACKET", "GIT_TRACE_CURL",
+    "GIT_MERGE_AUTOEDIT", "GIT_FLUSH", "GIT_PROTOCOL_FROM_USER",
+})
+#: ``GIT_CONFIG_KEY_<n>`` / ``GIT_CONFIG_VALUE_<n>``: the command-line layer too.
+_GIT_ENV_COMMAND_CONFIG = re.compile(r"^GIT_CONFIG_(KEY|VALUE)_\d+$")
+
 
 def _hardened_argv(*args: str) -> List[str]:
     """``git`` plus the static :data:`GIT_HARDENING_ARGS` plus ``args``: the
@@ -145,6 +181,86 @@ def _cwd_from_global_options(args: Sequence[str]) -> Optional[str]:
     return None
 
 
+def _head_is_valid(git_dir: str) -> bool:
+    """Whether ``<git_dir>/HEAD`` passes git's own check (``validate_headref``):
+    a symbolic ref into ``refs/``, or an object id. A directory whose HEAD fails
+    it is not a repository to git, which then keeps looking above it."""
+    head = os.path.join(git_dir, "HEAD")
+    if os.path.islink(head):
+        return os.readlink(head).startswith("refs/")
+    with open(head, "rb") as handle:
+        data = handle.read(256)
+    if data.startswith(b"ref:"):
+        return data[4:].lstrip(b" \t").startswith(b"refs/")
+    return re.match(rb"^([0-9a-f]{40}|[0-9a-f]{64})\s*$", data) is not None
+
+
+def _repository_config_names_no_driver(cwd: Optional[str]) -> bool:
+    """``True`` only when the repository git would find from ``cwd`` certainly
+    defines no driver :func:`planted_driver_overrides` reports, read from its
+    one config file without starting git. ``False`` whenever that is not
+    certain, and the caller then asks git.
+
+    Certain means all of:
+
+    * no ``GIT_*`` variable outside :data:`_GIT_ENV_THAT_MOVES_NO_REPOSITORY_CONFIG`
+      is set, so git discovers the repository from ``cwd`` as below;
+    * walking up from ``cwd`` (resolved, as git sees it), the first directory
+      holding a ``.git`` holds a real ``.git`` directory that git itself would
+      accept: a valid HEAD and ``objects``/``refs`` directories, else git walks
+      past it to a repository above. No level on the way is itself a ``.git``
+      directory or holds a ``HEAD`` (git also accepts a bare repository there),
+      and none is unreadable. A gitfile (a linked worktree or a submodule), a
+      symlinked ``.git`` or no repository at all is not certain;
+    * that directory has no ``commondir`` (a linked worktree's config lives in
+      the main repository) and no ``config.worktree``;
+    * its ``config``, if any, holds none of :data:`_CONFIG_WORDS_THE_PROBE_MUST_READ`.
+
+    The file is read on every call, never cached: the batch that plants a
+    driver runs between the plugin's git calls.
+    """
+    for name in os.environ:
+        upper = name.upper()
+        if (upper.startswith("GIT_") and upper not in _GIT_ENV_THAT_MOVES_NO_REPOSITORY_CONFIG
+                and not _GIT_ENV_COMMAND_CONFIG.match(upper)):
+            return False
+    level = os.path.realpath(cwd or os.getcwd())
+    while True:
+        if os.path.basename(level).lower() == ".git":
+            return False
+        dot_git = os.path.join(level, ".git")
+        try:
+            info = os.lstat(dot_git)
+        except FileNotFoundError:
+            info = None
+        if info is not None:
+            if not stat.S_ISDIR(info.st_mode):
+                return False
+            break
+        if os.path.lexists(os.path.join(level, "HEAD")):
+            return False
+        parent = os.path.dirname(level)
+        if parent == level:
+            return False
+        level = parent
+    # git's is_git_directory: both directories searchable (access X_OK) and HEAD valid.
+    for name in ("objects", "refs"):
+        path = os.path.join(dot_git, name)
+        if not (os.path.isdir(path) and os.access(path, os.X_OK)):
+            return False
+    if not _head_is_valid(dot_git):
+        return False
+    if (os.path.lexists(os.path.join(dot_git, "commondir"))
+            or os.path.lexists(os.path.join(dot_git, "config.worktree"))):
+        return False
+    try:
+        with open(os.path.join(dot_git, "config"), "rb") as handle:
+            text = handle.read().lower()
+    except FileNotFoundError:
+        return True
+    return not any(word in text for word in _CONFIG_WORDS_THE_PROBE_MUST_READ)
+
+
 def planted_driver_overrides(cwd: Optional[str] = None) -> List[str]:
     """The ``-c`` overrides that neutralize every filter driver, and any
     ``core.attributesFile``, the repository at ``cwd`` defines in its own
@@ -153,7 +269,17 @@ def planted_driver_overrides(cwd: Optional[str] = None) -> List[str]:
     :func:`git_argv` call — and empty outside a repository, when git is
     absent, or when the probe fails: a probe may not fail a git call. Read
     on every call rather than cached, because the batch that plants a driver
-    runs between the plugin's git calls (~1 ms measured)."""
+    runs between the plugin's git calls (~1 ms measured on Linux, tens of ms
+    on Windows).
+
+    The probe is skipped when the repository's config file is read directly
+    and cannot name such a driver (:func:`_repository_config_names_no_driver`),
+    which is the usual case; anything that read cannot settle goes to git."""
+    try:
+        if _repository_config_names_no_driver(cwd):
+            return []
+    except (OSError, ValueError):
+        pass
     try:
         proc = subprocess.Popen(
             _hardened_argv(

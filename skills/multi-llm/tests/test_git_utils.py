@@ -2829,3 +2829,214 @@ class TestThePluginsGitCallsRunNothingPlanted:
         assert ".git/info/exclude" in change
         assert f"include.path target {included} changed" in change
         assert ".git/config changed" not in change
+
+
+# ---------------------------------------------------------------------------
+# The probe is skipped only when the repository's own config cannot name a
+# driver (each git process costs tens of ms on Windows, one per plugin call)
+# ---------------------------------------------------------------------------
+
+def _repo_with_config(tmp_path, text: str = "") -> Path:
+    """A fresh repository whose ``.git/config`` gets *text* appended."""
+    from tests.support.gitrepo import init_repo
+    root = init_repo(tmp_path / "repo")
+    if text:
+        with open(root / ".git" / "config", "a", encoding="utf-8") as handle:
+            handle.write(text)
+    return root
+
+
+@pytest.fixture
+def probes(monkeypatch):
+    """Every driver probe started, as its argv: the probe is the one
+    ``_hardened_argv`` call that asks ``git config`` for the plantable keys."""
+    from utils import git_utils
+    seen = []
+    real = git_utils._hardened_argv
+
+    def spy(*args):
+        if args[:1] == ("config",) and git_utils._PLANTABLE_DRIVER_KEYS in args:
+            seen.append(args)
+        return real(*args)
+
+    monkeypatch.setattr(git_utils, "_hardened_argv", spy)
+    return seen
+
+
+class TestTheProbeIsSkippedOnlyWhenTheConfigCannotNameADriver:
+    """``planted_driver_overrides`` reads the repository's ``config`` itself and
+    starts no git process only when that file cannot define a driver. Every
+    doubt (a word that could, another file in the same scope, a repository
+    git might find differently) goes to the probe, which then still finds the
+    driver: a miss would let a planted filter run."""
+
+    def test_a_plain_repository_is_answered_without_starting_git(self, tmp_path, probes):
+        from utils.git_utils import planted_driver_overrides
+        root = _repo_with_config(tmp_path, '[user]\n\tname = t\n[lfs]\n\turl = x\n')
+        assert planted_driver_overrides(str(root)) == []
+        assert git_argv("status", cwd=str(root))[-1] == "status"
+        assert probes == []
+
+    def test_the_file_is_read_again_on_every_call(self, tmp_path, probes):
+        """Nothing is cached: a batch plants its driver between two calls."""
+        from utils.git_utils import planted_driver_overrides
+        root = _repo_with_config(tmp_path)
+        assert planted_driver_overrides(str(root)) == []
+        with open(root / ".git" / "config", "a", encoding="utf-8") as handle:
+            handle.write('[filter "planted"]\n\tclean = cat\n')
+        assert "filter.planted.clean=" in planted_driver_overrides(str(root))
+        assert len(probes) == 1
+
+    @pytest.mark.parametrize("text, expected", [
+        ('[filter "planted"]\n\tclean = cat\n', "filter.planted.clean="),
+        ('[FiLtEr "planted"]\n\tsmudge = cat\n', "filter.planted.clean="),
+        ('[filter.planted]\n\tprocess = cat\n', "filter.planted.clean="),
+        ('[core]\n\tattributesFile = /tmp/attrs\n', "core.attributesFile="),
+        ('[CORE]\n\tATTRIBUTESFILE = /tmp/attrs\n', "core.attributesFile="),
+    ], ids=["filter", "filter-any-case", "filter-old-syntax", "attributesfile",
+            "attributesfile-any-case"])
+    def test_a_driver_in_the_config_goes_to_the_probe_and_is_neutralized(
+            self, tmp_path, probes, text, expected):
+        from utils.git_utils import planted_driver_overrides
+        root = _repo_with_config(tmp_path, text)
+        overrides = planted_driver_overrides(str(root))
+        assert probes, "a config naming a driver was answered without the probe"
+        assert any(item.startswith(expected) for item in overrides), overrides
+
+    @pytest.mark.parametrize("key", ["include.path", "includeIf.gitdir:/.path"])
+    def test_a_driver_reached_through_an_include_goes_to_the_probe(
+            self, tmp_path, probes, key):
+        from utils.git_utils import planted_driver_overrides
+        root = _repo_with_config(tmp_path)
+        included = tmp_path / "evil.inc"
+        included.write_text('[filter "inc"]\n\tclean = cat\n', encoding="utf-8")
+        subprocess.run(["git", "config", key, str(included)], cwd=root, check=True)
+        assert "filter.inc.clean=" in planted_driver_overrides(str(root))
+        assert probes
+
+    def test_a_driver_in_the_worktree_config_goes_to_the_probe(self, tmp_path, probes):
+        from utils.git_utils import planted_driver_overrides
+        root = _repo_with_config(tmp_path)
+        for args in (["config", "core.repositoryFormatVersion", "1"],
+                     ["config", "extensions.worktreeConfig", "true"],
+                     ["config", "--worktree", "filter.wt.clean", "cat"]):
+            subprocess.run(["git", *args], cwd=root, check=True)
+        assert (root / ".git" / "config.worktree").is_file()
+        assert "filter.wt.clean=" in planted_driver_overrides(str(root))
+        assert probes
+
+    def test_a_linked_worktree_goes_to_the_probe(self, tmp_path, probes):
+        """Its ``.git`` is a file and its config lives in the main repository."""
+        from tests.support.gitrepo import commit_file, git
+        from utils.git_utils import planted_driver_overrides
+        root = _repo_with_config(tmp_path, '[filter "planted"]\n\tclean = cat\n')
+        commit_file(root, "a.txt", "a\n", "a")
+        linked = tmp_path / "linked"
+        git(root, "worktree", "add", "-q", str(linked))
+        assert (linked / ".git").is_file()
+        assert "filter.planted.clean=" in planted_driver_overrides(str(linked))
+        assert probes
+
+    @pytest.mark.parametrize("damage", ["empty", "bad-head", "no-refs"])
+    def test_a_git_directory_git_would_walk_past_goes_to_the_probe(
+            self, tmp_path, probes, damage):
+        """git skips a ``.git`` that is not a repository and uses the one above,
+        so the planted driver above must still be found from below."""
+        from utils.git_utils import planted_driver_overrides
+        root = _repo_with_config(tmp_path, '[filter "above"]\n\tclean = cat\n')
+        nested = root / "sub" / ".git"
+        nested.mkdir(parents=True)
+        if damage != "empty":
+            # Each case breaks exactly one of git's three conditions.
+            (nested / "objects").mkdir()
+            if damage != "no-refs":
+                (nested / "refs").mkdir()
+            (nested / "HEAD").write_text(
+                "garbage\n" if damage == "bad-head" else "ref: refs/heads/master\n",
+                encoding="utf-8")
+            (nested / "config").write_text("[core]\n\tbare = false\n", encoding="utf-8")
+        assert "filter.above.clean=" in planted_driver_overrides(str(root / "sub"))
+        assert probes
+
+    def test_a_commondir_in_the_git_directory_goes_to_the_probe(self, tmp_path, probes):
+        """git reads the config of the directory ``.git/commondir`` names as
+        the repository's own (``local``), and a batch can write that file: a
+        clean ``config`` beside it proves nothing."""
+        from utils.git_utils import planted_driver_overrides
+        elsewhere = _repo_with_config(tmp_path / "elsewhere", '[filter "common"]\n\tclean = cat\n')
+        root = _repo_with_config(tmp_path)
+        (root / ".git" / "commondir").write_text(f"{elsewhere / '.git'}\n", encoding="utf-8")
+        assert "filter.common.clean=" in planted_driver_overrides(str(root))
+        assert probes
+
+    def test_a_bare_repository_on_the_way_up_goes_to_the_probe(self, tmp_path, probes):
+        """git accepts a directory that is itself a repository, before any above."""
+        from utils.git_utils import planted_driver_overrides
+        outer = _repo_with_config(tmp_path)
+        bare = outer / "bare"
+        subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+        with open(bare / "config", "a", encoding="utf-8") as handle:
+            handle.write('[filter "bare"]\n\tclean = cat\n')
+        assert "filter.bare.clean=" in planted_driver_overrides(str(bare))
+        assert probes
+
+    def test_a_cwd_inside_the_git_directory_goes_to_the_probe(self, tmp_path, probes):
+        from utils.git_utils import planted_driver_overrides
+        root = _repo_with_config(tmp_path, "")
+        planted_driver_overrides(str(root / ".git" / "refs"))
+        assert probes
+
+    def test_outside_any_repository_git_answers(self, tmp_path, probes):
+        from utils.git_utils import planted_driver_overrides
+        lonely = tmp_path / "lonely"
+        lonely.mkdir()
+        if subprocess.run(["git", "rev-parse"], cwd=lonely, capture_output=True).returncode == 0:
+            pytest.skip("the temporary directory is inside a repository here")
+        assert planted_driver_overrides(str(lonely)) == []
+        assert probes
+
+    @pytest.mark.parametrize("name, value", [
+        ("GIT_DIR", ".git"), ("GIT_COMMON_DIR", "/elsewhere"),
+        ("GIT_CEILING_DIRECTORIES", "/"), ("GIT_CONFIG", "/elsewhere/config"),
+        ("GIT_SOMETHING_NEW", "1"),
+    ])
+    def test_a_variable_that_can_move_the_repository_goes_to_the_probe(
+            self, tmp_path, probes, monkeypatch, name, value):
+        from utils.git_utils import planted_driver_overrides
+        root = _repo_with_config(tmp_path)
+        monkeypatch.setenv(name, value)
+        planted_driver_overrides(str(root))
+        assert probes, f"{name} set, and the probe was skipped"
+
+    def test_identity_and_the_outer_config_layers_keep_the_fast_answer(
+            self, tmp_path, probes, monkeypatch):
+        from utils.git_utils import planted_driver_overrides
+        root = _repo_with_config(tmp_path)
+        for name, value in (("GIT_AUTHOR_NAME", "t"), ("GIT_CONFIG_GLOBAL", os.devnull),
+                            ("GIT_CONFIG_NOSYSTEM", "1"), ("GIT_CONFIG_COUNT", "1"),
+                            ("GIT_CONFIG_KEY_0", "user.name"), ("GIT_CONFIG_VALUE_0", "t"),
+                            ("GIT_OPTIONAL_LOCKS", "0")):
+            monkeypatch.setenv(name, value)
+        assert planted_driver_overrides(str(root)) == []
+        assert probes == []
+
+    @pytest.mark.skipif(os.name == "nt", reason="a POSIX symlink and permission bits")
+    def test_a_symlinked_or_unsearchable_git_directory_goes_to_the_probe(
+            self, tmp_path, probes):
+        from utils.git_utils import planted_driver_overrides
+        root = _repo_with_config(tmp_path, '[filter "planted"]\n\tclean = cat\n')
+        linked = tmp_path / "linked"
+        linked.mkdir()
+        (linked / ".git").symlink_to(root / ".git")
+        planted_driver_overrides(str(linked))
+        assert len(probes) == 1
+        if os.geteuid() == 0:
+            return  # root searches every directory, as git run as root does
+        clean = _repo_with_config(tmp_path / "second")
+        refs = clean / ".git" / "refs"
+        refs.chmod(0o600)
+        try:
+            planted_driver_overrides(str(clean))
+        finally:
+            refs.chmod(0o755)
+        assert len(probes) == 2
