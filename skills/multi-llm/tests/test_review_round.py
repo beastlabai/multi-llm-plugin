@@ -1631,10 +1631,16 @@ class TestForceNeverBreaksALiveLock:
 
         plan = tmp_path / "p.md"
         plan.write_text("# Plan\n", encoding="utf-8")
+        # A group of its own, as a real detached worker has: on Windows the abort
+        # is a CTRL_BREAK_EVENT to the holder's console group, and
+        # `start_new_session` is POSIX-only, so a holder spawned with it alone
+        # shared this process's group and the break reached pytest and the CI
+        # step's PowerShell (first hosted Windows run, 2026-11-11).
         holder = subprocess.Popen(
             [sys.executable, "-c", _STOPPABLE_RUN, str(SKILL_ROOT), str(tmp_path),
              "run-stop-0001", str(plan)],
-            stdout=subprocess.PIPE, text=True, start_new_session=True,
+            stdout=subprocess.PIPE, text=True,
+            **process_control.new_process_group_kwargs(),
         )
         try:
             while holder.stdout.readline().strip() != "running":
