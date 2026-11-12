@@ -78,7 +78,9 @@ ROUTES: Dict[str, Route] = {
     # The capture covers the OpenRouter and Kilo backends only; native ids are
     # in UNCHECKED_MODELS.
     "kilocode": Route("kilocode", _backends("openrouter", "kilo")),
-    "opencode": Route("opencode", _verbatim),
+    # `opencode models` lists only the providers logged in on the capture host
+    # (Zen and OpenRouter); native ids are in UNCHECKED_MODELS.
+    "opencode": Route("opencode", _backends("opencode", "openrouter")),
     "omp": Route("omp", _verbatim),
     "cline": Route("openrouter", _strip_backend("openrouter")),
     "goose": Route("openrouter", _strip_backend("openrouter")),
@@ -91,14 +93,13 @@ ROUTES: Dict[str, Route] = {
 }
 
 _LOGGED_IN = "needs a logged-in capture"
-_NETWORK = "needs a network capture (`make refresh-model-catalogs SOURCES={}`)"
 
 #: provider -> why its ids are not checked. Every registered adapter is either
 #: here or routed to a committed snapshot, never both and never neither.
 UNCHECKED: Dict[str, str] = {
     "claude-code": "no listing command; aliases (`sonnet`, `opus`) resolve server-side",
     "gemini": "no listing command in gemini-cli",
-    "muse": "no listing command; `muse model-profile show <id>` checks one id at a time",
+    "muse": "no listing command, and `muse model-profile show <id>` accepts any id",
     "cursor-agent": f"{_LOGGED_IN}: `cursor-agent models` exits 1 without a login, "
                     "and its output format is not captured here, so it has no parser",
     "agy": f"{_LOGGED_IN}: `agy models` needs the Google sign-in, and its output "
@@ -106,16 +107,6 @@ UNCHECKED: Dict[str, str] = {
     "grok": f"{_LOGGED_IN}: `grok models`, and its output format is not captured "
             "here, so it has no parser",
     "vibe": "entries are aliases in $VIBE_HOME/config.toml, not catalog ids",
-    "opencode": _NETWORK.format("opencode"),
-    "omp": _NETWORK.format("omp"),
-    "cline": _NETWORK.format("openrouter"),
-    "goose": _NETWORK.format("openrouter"),
-    "aider": _NETWORK.format("openrouter"),
-    "pi": _NETWORK.format("openrouter"),
-    "kimi": _NETWORK.format("openrouter"),
-    "qwen-code": _NETWORK.format("openrouter"),
-    "copilot": _NETWORK.format("openrouter"),
-    "fx": _NETWORK.format("openrouter"),
 }
 
 #: (provider, model id with its effort split off) -> why that one id is not
@@ -123,8 +114,14 @@ UNCHECKED: Dict[str, str] = {
 UNCHECKED_MODELS: Dict[Tuple[str, str], str] = {
     ("kilocode", "openai/gpt-6-astra"):
         "native openai backend, not enabled on the capture host",
-    ("kilocode", "google/gemini-4-argon"):
+    ("kilocode", "google/gemini-4-carbon"):
         "native google backend, not enabled on the capture host",
+    ("opencode", "google/gemini-4-carbon"):
+        "native google provider, not logged in on the capture host",
+    ("opencode", "openai/gpt-6.1-sol"):
+        "native openai provider, not logged in on the capture host",
+    ("opencode", "openai/gpt-6-astra"):
+        "native openai provider, not logged in on the capture host",
 }
 
 #: Adapters whose ``build_command`` splits a spec on the ladder's

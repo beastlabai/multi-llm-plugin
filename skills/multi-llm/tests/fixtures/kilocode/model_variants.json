@@ -1,15 +1,15 @@
 {
   "_provenance": {
-    "captured": "2026-10-22",
-    "cli_version": "kilocode 7.8.15",
+    "captured": "2026-11-12",
+    "cli_version": "kilocode 7.8.27",
     "commands": [
       "kilocode models openrouter --refresh --verbose",
       "kilocode models kilo --verbose"
     ],
     "credential_free": true,
     "coverage": {
-      "openrouter": "197/372",
-      "kilo": "254/335"
+      "openrouter": "202/368",
+      "kilo": "242/322"
     },
     "scope": "OpenRouter and Kilo backend model ids named in base providers.yaml (defaults.models and providers.kilocode.models). Native openai/google entries have no variant suffix; those backends are not enabled on the capture host.",
     "note": "`variants` is the per-model list `kilocode run --variant <name>` accepts. An unsupported variant is SILENTLY IGNORED by the CLI, which is why this capture exists: nothing at run time reports the mistake."
@@ -20,7 +20,7 @@
       "low",
       "max"
     ],
-    "openrouter/anthropic/claude-fable-5.1": [
+    "openrouter/anthropic/claude-fable-5.2": [
       "high",
       "low",
       "max",
@@ -34,7 +34,6 @@
       "medium",
       "xhigh"
     ],
-    "openrouter/arcee-ai/trinity-large-thinking": [],
     "openrouter/deepseek/deepseek-v4-pro-0813": [
       "high",
       "low",
@@ -46,10 +45,18 @@
       "low",
       "medium"
     ],
-    "openrouter/google/gemini-4-argon": [
+    "openrouter/google/gemini-4-carbon": [
       "high",
       "low",
       "medium"
+    ],
+    "openrouter/meta/muse-wonder": [
+      "high",
+      "low",
+      "max",
+      "medium",
+      "minimal",
+      "xhigh"
     ],
     "openrouter/minimax/minimax-m3.1-flash": [
       "high",
@@ -58,16 +65,15 @@
       "medium",
       "xhigh"
     ],
-    "openrouter/moonshotai/kimi-k3": [
+    "openrouter/moonshotai/kimi-k3.1-pro": [
       "high",
       "low",
       "max",
       "none"
     ],
-    "openrouter/nex-agi/nex-n2.5-pro": [
+    "openrouter/nex-agi/nex-n2.6": [
       "high",
-      "medium",
-      "none"
+      "medium"
     ],
     "openrouter/nvidia/nemotron-3-ultra-550b-a55b": [
       "high",
@@ -93,7 +99,7 @@
       "low",
       "medium"
     ],
-    "openrouter/tencent/hy4-preview": [
+    "openrouter/tencent/hy4": [
       "high",
       "low",
       "none"

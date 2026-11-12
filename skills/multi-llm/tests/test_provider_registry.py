@@ -279,7 +279,7 @@ class TestGetAvailableModels:
 
         # Check some known gemini models
         assert "gemini-3.8-flash" in gemini_models
-        assert "gemini-4-argon" in gemini_models
+        assert "gemini-4-carbon" in gemini_models
 
 
 class TestGetAllModelSpecs:

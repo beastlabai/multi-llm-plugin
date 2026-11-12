@@ -617,9 +617,13 @@ catalog. It reads committed files only, so it runs in CI with no credentials.
   run's summary naming the refresh command.
 
 First capture (2026-11-08): only codex, from `codex debug models --bundled`, which reads the
-catalog shipped in the binary with no login and no network; with kilocode's capture that makes
-two checked providers. opencode, omp and the OpenRouter-served adapters need a network capture,
-and cursor-agent, agy and grok a logged-in one plus a parser.
+catalog shipped in the binary with no login and no network; with kilocode's capture that made
+two checked providers. The 2026-11-12 refresh added the opencode, omp and OpenRouter snapshots,
+which check opencode, omp, cline, goose, aider, pi, kimi, qwen-code, copilot and fx too.
+`opencode models` lists only the providers logged in on the capture host (Zen and OpenRouter),
+so opencode's native `google/` and `openai/` ids are in `UNCHECKED_MODELS`. cursor-agent, agy
+and grok still need a logged-in capture plus a parser, and `muse model-profile show` is no
+check: it accepts any id.
 
 ## Provider output channels
 
