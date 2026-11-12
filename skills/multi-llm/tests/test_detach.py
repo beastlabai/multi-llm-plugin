@@ -198,6 +198,19 @@ def spawn_worker(
     return pid, done
 
 
+def _worker_story(phase_dir: Path, view: dict) -> str:
+    """What a fixture worker that did not reach the expected state left: the
+    verdict's reason, its run record and the tail of its log, which no CI log
+    shows otherwise (serial Windows leg, 2026-11-12: ``failed`` at once)."""
+    try:
+        log = Path(detach.log_path(str(phase_dir))).read_text(
+            encoding="utf-8", errors="replace")[-4000:]
+    except OSError as exc:
+        log = f"(no log: {exc})"
+    return (f"verdict {view.get('verdict')!r}, reason {view.get('reason')!r}\n"
+            f"run {status_file.read_run(str(phase_dir))!r}\nlog tail:\n{log}")
+
+
 def _await(predicate, *, timeout: float = 20.0, interval: float = 0.05):
     deadline = time.time() + timeout
     last = None
@@ -334,7 +347,7 @@ class TestRealDetachedWorker:
         pid, done = spawn_worker(tmp_path, phase, plan, run_id="run-alpha-0001")
 
         view = detach.classify_run(str(phase))
-        assert view["verdict"] == "running", view
+        assert view["verdict"] == "running", _worker_story(phase, view)
         if os.name != "nt":
             # Not on Windows: a venv's python.exe there is a launcher that runs
             # the interpreter as its child, and the worker records its own pid.
