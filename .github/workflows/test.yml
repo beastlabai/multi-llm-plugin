@@ -43,7 +43,7 @@ jobs:
       # workflow spells out: `@v4`/`@v5` are mutable refs the action owner can
       # move under us. The trailing comment names the tag each SHA came from —
       # bump the two together.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Full history, as every developer clone has. The committed-secret
           # scanner would be fine shallow, but several code-review tests build
@@ -53,7 +53,7 @@ jobs:
           # first CI run of this history, 2026-10-23). Giving each its own
           # two-commit repository is the better fix and is recorded as owed.
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       # The lint gate (`make lint`). Linux only: ruff reads source text, so one
       # runner decides it for all three, and ruff is in the project's dev group.
       - name: Lint
@@ -99,7 +99,7 @@ jobs:
       # that hit its cap is cancelled and pytest never wrote the file anyway.
       - name: Upload per-test timings
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-test-${{ matrix.os }}
           path: ${{ runner.temp }}/junit.xml
@@ -128,11 +128,11 @@ jobs:
     timeout-minutes: ${{ matrix.os == 'windows-latest' && 240 || 120 }}
     steps:
       # Pins as in the `test` job; bump both together.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Full history, for the reason the `test` job gives.
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       # No gitleaks install: the serial job runs the committed-secret guard, and
       # the module skips with a named reason where the binary is absent.
       # pytest-xdist comes from the project's `dev` dependency group (pyproject + uv.lock),
@@ -145,7 +145,7 @@ jobs:
         run: uv run --project skills/multi-llm -- pytest skills/multi-llm/tests -n auto --dist loadfile -m "not live and not container and not package and not codex_jail" --junitxml="${{ runner.temp }}/junit.xml" --durations=25
       - name: Upload per-test timings
         if: ${{ !cancelled() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-test-parallel-${{ matrix.os }}
           path: ${{ runner.temp }}/junit.xml
@@ -171,7 +171,7 @@ jobs:
   package:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The staging step refuses a dirty tree, and `git status --porcelain`
           # needs real history to answer. Full depth rather than shallow, and
@@ -181,8 +181,8 @@ jobs:
           # The Claude rule below reads the newest `claude-v*` tag and
           # `origin/<target>`, and depth 0 is what fetches every branch too.
           fetch-depth: 0
-      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
       # Rows 1-6 only: everything that needs no Docker daemon, no registry and no
