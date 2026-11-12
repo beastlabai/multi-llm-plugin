@@ -930,7 +930,7 @@ COPY_TOKEN = "ab" * 8
 def test_a_link_planted_at_the_copys_own_name_is_removed_never_followed(
     env, tmp_path, monkeypatch,
 ):
-    """The name ``CopyFile2`` copies to (``.copy.<token>.tmp`` beside the
+    """The name ``CopyFile2`` copies to (``.copy.<pid>.<token>.tmp`` beside the
     pending name) is drawn for each copy; were it known, as here with the
     token pinned, a dangling link planted there before the pass is removed
     like one at the pending name, never followed: its target is never
@@ -942,7 +942,7 @@ def test_a_link_planted_at_the_copys_own_name_is_removed_never_followed(
     scheduler = env.scheduler([env.apply_task(0)])
     census = scheduler._sweep.census()
     blob = Path(scheduler._sweep.blob_path(digest))
-    copied = blob.with_name(f".copy.{COPY_TOKEN}.tmp")
+    copied = blob.with_name(f".copy.{os.getpid()}.{COPY_TOKEN}.tmp")
     copied.parent.mkdir(parents=True)
     absent = tmp_path / "never-created.txt"
     copied.symlink_to(absent)
@@ -981,9 +981,84 @@ def test_copy_file2_is_given_a_name_drawn_for_each_copy(env, monkeypatch):
     assert len(given) == len(drawn) == len(blobs) >= 2
     assert len(set(drawn)) == len(drawn)
     for name, token in zip(given, drawn):
-        assert name.name == f".copy.{token}.tmp" and len(token) == 16
+        assert name.name == f".copy.{os.getpid()}.{token}.tmp" and len(token) == 16
         assert name.parent in {blob.parent for blob in blobs}
         assert not os.path.lexists(name)
+
+
+def test_a_copy_a_killed_process_left_is_reclaimed_once_its_pid_is_gone(
+    tmp_path, monkeypatch,
+):
+    """A process killed between ``CopyFile2`` and the rename leaves its copy
+    under a name no later run can derive. The first copy into the folder in
+    each process removes those whose pid no process has any more, each entry
+    itself (a link there removed, never followed), and nothing else: not a
+    live pid's (a copy in flight elsewhere), not this process's, not a name
+    of another shape. Once per folder: a second copy does not look again."""
+    dead = 999_999
+    monkeypatch.setattr(write_safety, "process_alive", lambda pid: pid != dead)
+    write_safety._RECLAIMED.clear()
+    folder = tmp_path / "store"
+    folder.mkdir()
+    target = tmp_path / "elsewhere.txt"
+    target.write_bytes(b"not the pass's")
+    left = folder / f".copy.{dead}.{'ab' * 8}.tmp"
+    left.write_bytes(b"a whole copy")
+    left.chmod(0o444)
+    linked = folder / f".copy.{dead}.{'ef' * 8}.tmp"
+    linked.symlink_to(target)
+    kept = [
+        folder / f".copy.{os.getppid()}.{'cd' * 8}.tmp",
+        folder / f".copy.{os.getpid()}.{'12' * 8}.tmp",
+        folder / f".copy.{dead}.not-a-token.tmp",
+        folder / "blob.tmp",
+    ]
+    for path in kept:
+        path.write_bytes(b"kept")
+
+    name = write_safety._copy_name(str(folder / "blob.123.456.tmp"))
+
+    assert Path(name).parent == folder
+    assert not os.path.lexists(left) and not os.path.lexists(linked)
+    assert target.read_bytes() == b"not the pass's", "the link was followed"
+    assert all(path.exists() for path in kept)
+    left.write_bytes(b"left after the look")
+    write_safety._copy_name(str(folder / "blob.123.456.tmp"))
+    assert left.exists(), "a folder is looked through once per process"
+
+
+def test_a_name_put_at_the_pending_name_before_the_rename_is_reported(
+    tmp_path, monkeypatch,
+):
+    """Something put at the pending name between its clearing and the rename
+    (here a folder) refuses ``os.replace``: the copy is removed, and what
+    cannot be removed at the pending name is ``CopyNotContained``, never a
+    plain ``OSError`` its caller would let pass in silence."""
+    _by_path_with_copy_file2(monkeypatch)
+    write_safety._RECLAIMED.clear()
+    copy = write_safety._COPY_FILE2
+    folder = tmp_path / "store"
+    folder.mkdir()
+    pending = folder / "blob.1.2.tmp"
+    made: list = []
+
+    def copy_then_plant(source, destination, flags):
+        copy(source, destination, flags)
+        made.append(Path(destination))
+        pending.mkdir()
+
+    monkeypatch.setattr(write_safety, "_COPY_FILE2", copy_then_plant)
+    source_path = tmp_path / "a.py"
+    source_path.write_bytes(b"print(1)\n")
+    source = os.open(source_path, os.O_RDONLY)
+    try:
+        with pytest.raises(write_safety.CopyNotContained):
+            write_safety.write_copy(str(pending), b"print(1)\n", source,
+                                    path=str(source_path))
+    finally:
+        os.close(source)
+    assert made and not os.path.lexists(made[0]), "the copy stayed"
+    assert pending.is_dir()
 
 
 @pytest.mark.parametrize("winerror", [5, 32], ids=["access denied", "sharing violation"])

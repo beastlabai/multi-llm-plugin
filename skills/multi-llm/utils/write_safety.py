@@ -94,7 +94,9 @@ from .held_folder import (  # noqa: F401 - OPENS_WITHOUT_FOLLOWING is re-exporte
     plan_dir_of,
     write_in_plan_dir,
 )
-from .process_control import FileMutex, descriptor_owning_handle, handle_of_descriptor
+from .process_control import (
+    FileMutex, descriptor_owning_handle, handle_of_descriptor, process_alive,
+)
 from .process_state import process_cache
 from .provider_registry import get_write_paths
 # Redaction is the leaf module utils/redact.py and the state home lives in
@@ -734,9 +736,19 @@ def write_copy(pending: str, data: bytes, source: int, *,
                 if not _copied_unchanged(path, fresh, data, source, made):
                     raise OSError(
                         f"{path} changed while it was copied to {fresh}")
-                os.replace(fresh, pending)
             except BaseException as failure:
                 _discard_after(failure, fresh, made[0] if made else None)
+                raise
+            try:
+                os.replace(fresh, pending)
+            except BaseException as failure:
+                # Something put at *pending* since its clearing (a folder, a
+                # junction, a read-only file) refuses the rename. The copy
+                # goes, and so does that name, as a copy made at *pending*
+                # itself removed what it found there; what cannot be removed
+                # is CopyNotContained, never a silent OSError.
+                _discard_after(failure, fresh, made[0] if made else None)
+                _discard_after(failure, pending, None)
                 raise
             return
     info = os.fstat(source)
@@ -795,14 +807,65 @@ def _copy_file2(path: str, pending: str, fresh: str) -> None:
     _COPY_FILE2(path, fresh, _COPY_FILE2_FLAGS)
 
 
+#: :func:`_copy_name`'s names: ``.copy.<pid>.<token>.tmp``, the pid the
+#: copying process's, so a copy a killed process left can be told from one in
+#: flight (:func:`_reclaim_dead_copies`).
+_COPY_NAME = re.compile(r"\A\.copy\.(\d+)\.[0-9a-f]{16}\.tmp\Z")
+
+#: The folders :func:`_reclaim_dead_copies` has already looked through in this
+#: process: once each, never once per copy.
+_RECLAIMED_LOCK = threading.Lock()
+_RECLAIMED: Set[str] = process_cache(
+    "utils.write_safety._RECLAIMED", set, lock=_RECLAIMED_LOCK)
+
+
 def _copy_name(pending: str) -> str:
     """The name ``CopyFile2`` makes *pending*'s copy under
     (:func:`_copy_file2`): beside it, so the rename that puts it at
-    *pending* stays on one filesystem; hidden; and new for each copy, its
+    *pending* stays on one filesystem; hidden; this process's pid, then a
     token drawn now (:func:`_copy_token`), so the name cannot be known
-    before the copy makes it. Short, so it is never nearer Windows'
-    ``MAX_PATH`` than *pending* is."""
-    return os.path.join(os.path.dirname(pending), f".copy.{_copy_token()}.tmp")
+    before the copy makes it. It is 30-odd characters, which can be longer
+    than *pending*'s own name (a snapshot payload's can be 8): in a folder
+    that close to ``MAX_PATH``, without long paths, the copy fails and says
+    so. What a killed process left under such names in the folder goes first
+    (:func:`_reclaim_dead_copies`)."""
+    folder = os.path.dirname(pending)
+    _reclaim_dead_copies(folder)
+    return os.path.join(folder, f".copy.{os.getpid()}.{_copy_token()}.tmp")
+
+
+def _reclaim_dead_copies(folder: str) -> None:
+    """Remove from *folder* the copies (:data:`_COPY_NAME`) whose process is
+    gone, once per folder in this process.
+
+    A process killed between ``CopyFile2`` and the rename (every abort of a
+    detached run is ``TerminateJobObject``) leaves a whole copy under a name
+    no later run can derive, read-only when its source was. Only a name that
+    is this shape, whose pid no process has any more, goes, and only as
+    :func:`_discard` removes an entry: the entry itself, a plain file's
+    read-only attribute cleared, never through a link. A live pid's copy (one
+    in flight in another process, or a leftover whose pid was reused) stays;
+    what cannot be removed stays too. Never raises."""
+    key = os.path.abspath(folder)
+    with _RECLAIMED_LOCK:
+        if key in _RECLAIMED:
+            return
+        _RECLAIMED.add(key)
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return
+    for name in names:
+        match = _COPY_NAME.match(name)
+        if match is None:
+            continue
+        pid = int(match.group(1))
+        if pid == os.getpid() or process_alive(pid):
+            continue
+        try:
+            _discard(os.path.join(folder, name))
+        except (CopyNotContained, OSError):
+            pass
 
 
 def _copy_token() -> str:
@@ -837,6 +900,7 @@ def _written_through_handle(pending: str, data: bytes, info: os.stat_result) -> 
         _discard(pending)
         held = calls.create(pending)
     created: Optional[Tuple[int, int]] = None
+    disposed = False
     try:
         try:
             opened = os.fstat(held)
@@ -846,10 +910,20 @@ def _written_through_handle(pending: str, data: bytes, info: os.stat_result) -> 
                 view = view[os.write(held, view):]
             calls.set_basic(held, _copied_attributes(opened, info),
                             info.st_atime_ns, info.st_mtime_ns)
+        except BaseException:
+            # Deleted through the handle that made it, as it closes: no name
+            # to look up again, where a swap could stand by then.
+            try:
+                calls.dispose(held)
+                disposed = True
+            except Exception:  # noqa: BLE001 - removed by name below instead
+                pass
+            raise
         finally:
             os.close(held)
     except BaseException as failure:
-        _discard_after(failure, pending, created)
+        if not disposed:
+            _discard_after(failure, pending, created)
         raise
 
 

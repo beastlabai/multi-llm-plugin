@@ -286,9 +286,13 @@ copy was followed with both flags, and its target created with the file's bytes.
 the flags for a link at the destination. The pending name is cleared (a link there removed, never
 followed), but `CopyFile2` never copies to it, since it is predictable and a link could be planted
 there again before the copy: it copies to a name beside it drawn at random for this copy
-(`_copy_name`, `.copy.<64-bit token>.tmp`, cleared too), which nobody can know before the copy makes
-it, and the checked copy is then renamed to the pending name (`os.replace`, the entry itself, never
-through a link). The check after the copy still covers a copy that is a link: a copy that is a link or
+(`_copy_name`, `.copy.<pid>.<64-bit token>.tmp`, cleared too), which nobody can know before the copy
+makes it, and the checked copy is then renamed to the pending name (`os.replace`, the entry itself,
+never through a link). A rename refused because something was put at the pending name meanwhile
+removes the copy and that name, or reports what it could not remove (`CopyNotContained`). A process
+killed between the copy and the rename leaves its copy under a name no later run can derive, so the
+first copy into a folder in each process removes the names of that shape whose pid no process has
+any more, each as the pending name is cleared (`_reclaim_dead_copies`). The check after the copy still covers a copy that is a link: a copy that is a link or
 another reparse point once made has its entry removed, nothing is kept, and the pass warns, naming
 the link's target, since a copy that went through the link is there and a file at a path someone
 else chose is not the pass's to delete. At the source the flag copies a link as a link and changes

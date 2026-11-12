@@ -3133,8 +3133,10 @@ def _leads_console_group(child: Any, pid: int) -> bool:
         return False
 
 
-def _send_ctrl_break(pid: int) -> None:  # pragma: no cover - Windows
-    """``CTRL_BREAK_EVENT`` to the console process group *pid* leads.
+def _send_ctrl_break(pid: int) -> bool:  # pragma: no cover - Windows
+    """``CTRL_BREAK_EVENT`` to the console process group *pid* leads; whether
+    it was sent (a process with no console of its own, a detached worker,
+    cannot send one).
 
     Called only once :func:`_leads_console_group` said yes: any other number
     reaches every process on this console (:func:`kill_tree`)."""
@@ -3144,9 +3146,9 @@ def _send_ctrl_break(pid: int) -> None:  # pragma: no cover - Windows
 
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         CTRL_BREAK_EVENT = 1
-        kernel32.GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid)
+        return bool(kernel32.GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid))
     except Exception:
-        pass
+        return False
 
 
 def _windows_kill_tree(
@@ -3156,9 +3158,9 @@ def _windows_kill_tree(
     """Windows' kill by number: a break and its grace for a group this
     process made (:func:`_leads_console_group`), then the job, or
     ``taskkill /T`` without one. Any other target goes straight to the job:
-    no break can be aimed at it, so a grace would only be a wait."""
-    if _leads_console_group(child, pid):
-        _send_ctrl_break(pid)
+    no break can be aimed at it, so a grace would only be a wait. So does a
+    group whose break could not be sent (this process has no console)."""
+    if _leads_console_group(child, pid) and _send_ctrl_break(pid) is not False:
         deadline = time.time() + max(escalate_after_s, 0.0)
         while time.time() < deadline:
             if not process_alive(pid):
