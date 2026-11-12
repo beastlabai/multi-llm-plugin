@@ -817,11 +817,21 @@ def test_the_fanout_deadline_withholds_a_slot_mid_checks(tmp_path, monkeypatch, 
         entered.append(True)
         await asyncio.Future()
     monkeypatch.setattr(slot_guard.SlotGuard, "finish", checks_that_never_end)
-    # The fan-out's own deadline (2 x --timeout), shortened.
+    # The fan-out's own deadline (2 x --timeout), shortened, and counted from
+    # the moment the slot's checks begin: on a loaded runner the slot alone
+    # took longer than the 0.2 s to get there, so the deadline fired before the
+    # checks it is meant to interrupt (windows-latest, 2026-11-12).
     wait_for = asyncio.wait_for
 
     async def shorter(awaitable, timeout):
-        return await wait_for(awaitable, 0.2 if timeout == 240 else timeout)
+        if timeout != 240:
+            return await wait_for(awaitable, timeout)
+        fanout = asyncio.ensure_future(awaitable)
+        for _ in range(3000):
+            if entered or fanout.done():
+                break
+            await asyncio.sleep(0.01)
+        return await wait_for(fanout, 0.2)
     monkeypatch.setattr(asyncio, "wait_for", shorter)
 
     assert _run(lane) == 3

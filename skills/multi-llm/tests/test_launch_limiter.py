@@ -652,9 +652,12 @@ class TestARetryWaitingForItsTurn:
     def test_the_status_table_renders_its_run_time(self):
         # Stamps relative to the real clock: the table reads that one.
         stamp = lambda ago: datetime.fromtimestamp(time.time() - ago).isoformat()
+        # Half a second past ten seconds: the table floors the seconds,
+        # and 10.0 s read back on a coarse clock showed 0m09s (windows-latest,
+        # 2026-11-12).
         row = {
             "state": progress_tracker.STATE_STAGGERING, "timeout_s": 600,
-            "started_at": stamp(12.0), "dispatched_at": stamp(10.0),
+            "started_at": stamp(12.5), "dispatched_at": stamp(10.5),
             "queued_s": 2.0, "attempt": 2,
         }
         assert run_status._model_timing_text(row).startswith("0m1")
