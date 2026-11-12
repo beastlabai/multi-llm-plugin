@@ -18,7 +18,7 @@
 # in a native CLI catalog. Most providers take an optional ":effort" suffix,
 # split on the LAST colon; an unknown suffix stays part of the model name.
 # Listing commands, effort rules: docs/configuration.md#provider-blocks.
-# Catalog refreshed 2026-10-22.
+# Catalog refreshed 2026-11-12.
 providers:
   claude-code:
     default_timeout: 1800
@@ -32,7 +32,7 @@ providers:
       - haiku
       - claude-sonnet-5-5
       - claude-opus-5-5
-      - claude-fable-5-1
+      - claude-fable-5-2
       - claude-haiku-5-5
     # --fallback-model stand-ins; empty = no flag. Each entry must be a model
     # listed above, not repeated, not its own primary (#claude-code-keys):
@@ -60,7 +60,7 @@ providers:
       - gpt-5.6-sol-xhigh
       - gpt-5.6-terra-xhigh
       - gpt-5.6-luna-high
-      - gemini-4-argon-high
+      - gemini-4-carbon-high
       - gemini-3.8-flash-high
       - kimi-k3-high
       - kimi-k3-max
@@ -69,7 +69,7 @@ providers:
       - grok-4.7-high
       - claude-sonnet-5-5-xhigh
       - claude-opus-5-5-xhigh
-      - claude-fable-5-1-high
+      - claude-fable-5-2-high
       - claude-haiku-5-5-thinking-high
       - muse-wonder-1.0-xhigh
       - muse-spark-1.3-xhigh
@@ -79,7 +79,7 @@ providers:
     # No ":effort": set thinking with a custom alias in ~/.gemini/settings.json
     # and list the alias here (#provider-blocks).
     models:
-      - gemini-4-argon
+      - gemini-4-carbon
       - gemini-3.8-flash
       - gemini-3.5-flash-lite
       - gemini-flash-latest
@@ -121,7 +121,7 @@ providers:
     models:
       - opencode/big-pickle
       - opencode/nemotron-3.5-super-vl-free
-      - google/gemini-4-argon
+      - google/gemini-4-carbon
       - openai/gpt-6.1-sol
       - openai/gpt-6-astra
       # Needs stored OpenRouter auth (`opencode auth login`). Leave it without
@@ -139,6 +139,7 @@ providers:
       - gpt-6.1-sol:xhigh
       - gpt-6-astra
       - gpt-6-astra:xhigh
+      - gpt-6.1-terra
       - gpt-6-luna
     # auto | contained | off: what codex's read-only phases do where its own
     # sandbox cannot start. A project layer can only narrow it. Never enable
@@ -153,26 +154,26 @@ providers:
     # model_variants.json (`kilocode models <backend> --refresh --verbose`).
     max_concurrent: 2
     models:
-      - openrouter/moonshotai/kimi-k3:max
+      - openrouter/moonshotai/kimi-k3.1-pro:max
       - openrouter/nvidia/nemotron-3-ultra-550b-a55b
       - openrouter/z-ai/glm-5.3:max
       - kilo/z-ai/glm-5.3
       - openrouter/minimax/minimax-m3.1-flash
       - openrouter/x-ai/grok-4.7
-      - openrouter/arcee-ai/trinity-large-thinking
       - openrouter/xiaomi/mimo-v2.6-pro
       - openrouter/qwen/qwen3.8-max-0902:xhigh
-      - openrouter/tencent/hy4-preview:high
+      - openrouter/tencent/hy4:high
       - openrouter/stepfun/step-5-preview:high
       - openrouter/openai/gpt-6-astra-pro
       - openai/gpt-6-astra
-      - openrouter/nex-agi/nex-n2.5-pro
+      - openrouter/nex-agi/nex-n2.6
       - openrouter/google/gemini-3.8-flash
-      - openrouter/google/gemini-4-argon
-      - google/gemini-4-argon
+      - openrouter/google/gemini-4-carbon
+      - google/gemini-4-carbon
       - openrouter/deepseek/deepseek-v4-pro-0813
       - openrouter/anthropic/claude-sonnet-5.5
-      - openrouter/anthropic/claude-fable-5.1
+      - openrouter/anthropic/claude-fable-5.2
+      - openrouter/meta/muse-wonder
 
   cline:
     default_timeout: 1200
@@ -230,7 +231,9 @@ providers:
     default_timeout: 1800
     # ":effort" -> --reasoning-effort: none, minimal, low, medium, high, xhigh,
     # ultra (anything else fails). Without one, ~/.config/muse/settings.json
-    # decides. Wonder Full needs a Power or Maximum Usage subscription.
+    # decides. Wonder Full needs a Power or Maximum Usage subscription. muse
+    # has no OpenRouter provider (`--provider openrouter` is refused); Wonder
+    # through OpenRouter is kilocode:openrouter/meta/muse-wonder.
     models:
       - muse-wonder-1.0
       - muse-wonder-1.0:xhigh
@@ -253,6 +256,7 @@ providers:
     # OpenRouter slugs (a Kimi Code subscription is a different catalog). No
     # ":effort": a third ":" segment is part of the id.
     models:
+      - moonshotai/kimi-k3.1-pro
       - moonshotai/kimi-k3
 
   qwen-code:
@@ -427,21 +431,21 @@ defaults:
   models:
     #- cursor-agent:composer-2.5
     #- cursor-agent:gpt-5.6-sol-xhigh
-    - cursor-agent:gemini-4-argon-high
+    - cursor-agent:gemini-4-carbon-high
     - cursor-agent:grok-4.7-high
     #- cursor-agent:kimi-k3-high
     #- opencode:opencode/big-pickle
     - opencode:openrouter/deepseek/deepseek-v4.1-flash-1017
     # kilocode ignores an unpublished variant silently; these match
     # tests/fixtures/kilocode/model_variants.json.
-    - kilocode:openrouter/moonshotai/kimi-k3:max
+    - kilocode:openrouter/moonshotai/kimi-k3.1-pro:max
     - kilocode:openrouter/nvidia/nemotron-3-ultra-550b-a55b:high
     - kilocode:openrouter/z-ai/glm-5.3:max
     - kilocode:openrouter/minimax/minimax-m3.1-flash
     - kilocode:openrouter/xiaomi/mimo-v2.6-pro:high
     - kilocode:openrouter/qwen/qwen3.8-max-0902:xhigh
     - codex:gpt-6-astra:xhigh
-    - claude-code:claude-fable-5-1:high
+    - claude-code:claude-fable-5-2:high
     #- grok:grok-4.6
     #- cline:openrouter/z-ai/glm-5.3
     #- goose:openrouter/z-ai/glm-5.3
@@ -449,8 +453,8 @@ defaults:
     #- "agy:Gemini 4 Argon (High)"
     #- pi:openrouter/z-ai/glm-5.3
     #- omp:openrouter/openai/gpt-6-luna
-    #- muse:muse-spark-1.3:xhigh
-    #- kimi:moonshotai/kimi-k3
+    #- muse:muse-wonder-1.0:xhigh
+    #- kimi:moonshotai/kimi-k3.1-pro
     #- qwen-code:qwen/qwen3.8-max-0902
     #- copilot:openai/gpt-6-luna
     #- vibe:openai/gpt-6-luna
@@ -462,7 +466,7 @@ defaults:
   quick_models:
     - cursor-agent:grok-4.7-high
     - codex:gpt-6-astra:xhigh
-    - claude-code:claude-fable-5-1:high
+    - claude-code:claude-fable-5-2:high
 
   # Optional: only use defaults for specific modes
   # modes:

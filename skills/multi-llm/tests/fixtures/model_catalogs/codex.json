@@ -1,6 +1,6 @@
 {
-  "captured": "2026-11-08",
-  "cli_version": "codex-cli 0.167.0",
+  "captured": "2026-11-12",
+  "cli_version": "codex-cli 0.167.2",
   "command": "codex debug models --bundled",
   "ids": [
     "codex-auto-review",

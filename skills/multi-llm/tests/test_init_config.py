@@ -211,9 +211,9 @@ def _real_init(detected_list):
 class TestD2aGuard:
     def test_gemini_only_injects_first_model(self):
         parsed, expected, notices = _real_init(["gemini"])
-        assert parsed["defaults"]["models"] == ["gemini:gemini-4-argon"]
-        assert parsed["defaults"]["quick_models"] == ["gemini:gemini-4-argon"]
-        assert expected == ["gemini:gemini-4-argon"]
+        assert parsed["defaults"]["models"] == ["gemini:gemini-4-carbon"]
+        assert parsed["defaults"]["quick_models"] == ["gemini:gemini-4-carbon"]
+        assert expected == ["gemini:gemini-4-carbon"]
         assert any("gemini" in n and "defaults.models" in n for n in notices)
 
     def test_cline_only_injects_first_model(self):
@@ -225,19 +225,19 @@ class TestD2aGuard:
     def test_multi_offpanel_injects_both_and_names_both(self):
         parsed, _expected, notices = _real_init(["gemini", "cline"])
         assert parsed["defaults"]["models"] == [
-            "gemini:gemini-4-argon",
+            "gemini:gemini-4-carbon",
             "cline:openrouter/z-ai/glm-5.3",
         ]
         # quick_models gets only the FIRST detected provider's first model.
-        assert parsed["defaults"]["quick_models"] == ["gemini:gemini-4-argon"]
+        assert parsed["defaults"]["quick_models"] == ["gemini:gemini-4-carbon"]
         models_notice = next(n for n in notices if "defaults.models" in n)
         assert "gemini" in models_notice and "cline" in models_notice
 
     def test_covered_provider_present_no_injection(self):
-        # {gemini, claude-code}: claude-code:claude-fable-5-1:high is already in the
+        # {gemini, claude-code}: claude-code:claude-fable-5-2:high is already in the
         # panel, so the guard does NOT fire and gemini is simply absent from it.
         parsed, _expected, notices = _real_init(["gemini", "claude-code"])
-        assert parsed["defaults"]["models"] == ["claude-code:claude-fable-5-1:high"]
+        assert parsed["defaults"]["models"] == ["claude-code:claude-fable-5-2:high"]
         assert notices == []
 
     def test_notice_text_single_vs_multi(self):
@@ -264,7 +264,7 @@ class TestD2aGuard:
                 ["gemini"],
                 {
                     "gemini": [
-                        "gemini-4-argon",
+                        "gemini-4-carbon",
                         "gemini-3.8-flash",
                         "gemini-3.5-flash-lite",
                         "gemini-flash-latest",
@@ -275,7 +275,7 @@ class TestD2aGuard:
                 ["gemini", "cline"],
                 {
                     "gemini": [
-                        "gemini-4-argon",
+                        "gemini-4-carbon",
                         "gemini-3.8-flash",
                         "gemini-3.5-flash-lite",
                         "gemini-flash-latest",
@@ -327,9 +327,9 @@ class TestEndToEndInit:
         assert "supports_json_output" not in written["providers"]["claude-code"]
         # Only detected providers' defaults specs are uncommented.
         assert written["defaults"]["models"] == [
-            "cursor-agent:gemini-4-argon-high",
+            "cursor-agent:gemini-4-carbon-high",
             "cursor-agent:grok-4.7-high",
-            "claude-code:claude-fable-5-1:high",
+            "claude-code:claude-fable-5-2:high",
         ]
 
         # The file resolves cleanly through load_config (fresh cache), with the
@@ -391,8 +391,8 @@ class TestEndToEndInit:
         _reset_cache()
         assert init_config.main(["--dir", str(tmp_path)]) == 0
         _reset_cache()
-        assert registry.get_default_models(anchor=str(tmp_path)) == ["gemini:gemini-4-argon"]
-        assert registry.get_quick_models(anchor=str(tmp_path)) == ["gemini:gemini-4-argon"]
+        assert registry.get_default_models(anchor=str(tmp_path)) == ["gemini:gemini-4-carbon"]
+        assert registry.get_quick_models(anchor=str(tmp_path)) == ["gemini:gemini-4-carbon"]
         _reset_cache()
 
     def test_modes_example_safe_when_claude_and_cursor_detected(self, tmp_path, monkeypatch):

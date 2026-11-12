@@ -324,7 +324,7 @@ class TestKimiProvider:
 
         models = load_base_config()["providers"]["kimi"]["models"]
 
-        assert models[0] == "moonshotai/kimi-k3"
+        assert models[0] == "moonshotai/kimi-k3.1-pro"
         assert KimiProvider().get_env(models[0])["KIMI_MODEL_NAME"] == models[0]
 
     def test_defaults_models_gains_no_uncommented_row(self):
