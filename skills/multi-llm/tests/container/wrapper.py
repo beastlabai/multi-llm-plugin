@@ -593,8 +593,16 @@ def run_uv(argv: list[str]) -> int:
                 forwarded.insert(1, flag)
 
     started = time.time()
+    # close_fds=False: an exec would keep every inheritable descriptor, and the
+    # product relies on that. A `--detach` launcher hands its worker the phase
+    # lock as an inherited descriptor named in MULTI_LLM_PHASE_LOCK_FD (code
+    # health U81), and the worker's `uv run` reaches real uv through this tee.
+    # Popen's default close_fds=True closed it, so every detached worker found
+    # its own launcher holding the lock and refused (opencode package gate row
+    # 8, 2026-11-12). The wrapper's own descriptors are non-inheritable
+    # (PEP 446), so only what the caller passed down crosses.
     proc = subprocess.Popen([real, *forwarded], env=env, stdout=subprocess.PIPE,
-                            stderr=None, text=True, bufsize=1)
+                            stderr=None, text=True, bufsize=1, close_fds=False)
     captured: list[str] = []
     assert proc.stdout is not None
     for line in proc.stdout:
