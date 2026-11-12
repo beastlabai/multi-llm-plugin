@@ -337,15 +337,18 @@ def _copy_file2_off_windows(source, destination, flags):
     """``CopyFile2`` as Windows runs it, for the platforms without it: a link
     at the source's own name copied as a link (``COPY_FILE_COPY_SYMLINK``),
     any other source read by path through any link above it, the destination
-    created new, failing on any name there, a dangling link included
-    (``COPY_FILE_FAIL_IF_EXISTS`` with ``COPY_FILE_COPY_SYMLINK``, as
-    ``CopyFileEx`` documents them), then ``copy2``'s metadata, taken after
-    the read."""
+    created new, failing on any name there (``COPY_FILE_FAIL_IF_EXISTS``)
+    but a link to nothing, which is followed and its target created with
+    the copy, as the Windows CI showed (2026-11-12) though ``CopyFileEx``
+    documents that ``COPY_FILE_COPY_SYMLINK`` makes it fail on any link
+    there, then ``copy2``'s metadata, taken after the read."""
     assert flags & 0x809 == 0x809, (
-        "shutil.copy2's flag, an exclusive creation, and no link followed")
+        "shutil.copy2's flag, an exclusive creation, and a link copied as one")
     if os.path.islink(source):
         os.symlink(os.readlink(source), destination)
         return
+    if os.path.islink(destination) and not os.path.exists(destination):
+        destination = os.path.realpath(destination)
     handle = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL
                      | getattr(os, "O_NOFOLLOW", 0), 0o600)
     with open(source, "rb") as reader, os.fdopen(handle, "wb") as writer:
@@ -583,9 +586,11 @@ def test_a_link_planted_at_the_pending_name_is_replaced_never_written_through(
     """The pending copy's name is predictable (digest, pid, thread), and a
     runner that can write the phase dir can plant a link there before the
     pass runs. The copy is created exclusively and never through a link
-    (the name cleared first, then ``COPY_FILE_FAIL_IF_EXISTS`` where
-    ``CopyFile2`` copies), so the link's target is neither written, re-moded
-    nor, for a dangling link, created."""
+    (the name cleared first; ``CopyFile2`` copies to a name drawn for the
+    copy and the copy is renamed there; the plain copy is created without
+    following a link, through one handle on Windows, where ``os.open``'s
+    ``O_EXCL`` follows a dangling one), so the link's target is neither
+    written, re-moded nor, for a dangling link, created."""
     scheduler = env.scheduler([env.apply_task(0)])
     census = scheduler._sweep.census()
     source = env.root / "src" / "a.py"
@@ -610,6 +615,69 @@ def test_a_link_planted_at_the_pending_name_is_replaced_never_written_through(
         assert not os.path.lexists(victim)
     assert not blob.is_symlink() and blob.read_bytes() == source.read_bytes()
     assert not os.path.lexists(pending)
+
+
+def _opens_as_windows_does(monkeypatch) -> None:
+    """``os.open`` as Windows' C runtime runs it: ``O_CREAT | O_EXCL`` is
+    ``CreateFile``'s ``CREATE_NEW``, which follows a link at the name to a
+    target that does not exist and creates that target (the Windows CI,
+    2026-11-12), and ``O_NOFOLLOW`` stops nothing, as Windows has none."""
+    real = os.open
+
+    def open_(path, flags, mode=0o777, *, dir_fd=None):
+        if (dir_fd is None and flags & os.O_CREAT and flags & os.O_EXCL
+                and os.path.islink(path) and not os.path.exists(path)):
+            path = os.path.realpath(path)
+        return real(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", open_)
+
+
+@pytest.mark.parametrize("planted", ["to a file", "dangling"])
+def test_the_plain_copy_on_windows_is_made_through_one_handle_never_through_a_link(
+    env, tmp_path, monkeypatch, planted,
+):
+    """Windows without ``CopyFile2`` (Python before 3.12, a refused
+    ``CopyFile2``): ``os.open``'s ``O_EXCL`` there follows a dangling link
+    planted at the pending name and creates its target with the file's bytes
+    (the Windows CI, 2026-11-12; emulated off Windows). The plain copy is
+    made through one handle instead (``CREATE_NEW`` on the name itself,
+    never followed), the name cleared when anything is there, and the
+    source's times set through that handle: the link's target is neither
+    written nor created, and the blob holds the file's bytes and
+    modification time."""
+    if os.name != "nt":
+        calls = _HeldCopy()
+        monkeypatch.setattr(write_safety, "_held_copy_calls", lambda: calls)
+        monkeypatch.setattr(write_safety, "_EXCLUSIVE_OPEN_FOLLOWS_LINKS", True)
+        _opens_as_windows_does(monkeypatch)
+    monkeypatch.setattr(write_safety, "OPENS_WITHOUT_FOLLOWING", False, raising=False)
+    monkeypatch.setattr(write_safety, "_COPY_FILE2", None, raising=False)
+    source = env.root / "src" / "a.py"
+    os.utime(source, ns=(1_600_000_000_000_000_000, 1_650_000_000_987_654_300))
+    scheduler = env.scheduler([env.apply_task(0)])
+    census = scheduler._sweep.census()
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    blob = Path(scheduler._sweep.blob_path(digest))
+    pending = Path(f"{blob}.{os.getpid()}.{threading.get_ident()}.tmp")
+    pending.parent.mkdir(parents=True)
+    victim = tmp_path / "victim.txt"
+    if planted == "to a file":
+        victim.write_bytes(b"not the executor's to write\n")
+    pending.symlink_to(victim)
+
+    kept = scheduler._sweep.retain(census)
+
+    assert kept["src/a.py"] == digest
+    if planted == "to a file":
+        assert victim.read_bytes() == b"not the executor's to write\n"
+    else:
+        assert not os.path.lexists(victim)
+    assert not blob.is_symlink() and blob.read_bytes() == source.read_bytes()
+    assert blob.stat().st_mtime_ns == 1_650_000_000_987_654_300
+    assert not os.path.lexists(pending)
+    if os.name != "nt":
+        assert ("create", str(pending)) in calls.calls
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows will not move a file, or a "
@@ -784,11 +852,12 @@ def test_a_refused_copy_that_cannot_be_removed_is_reported(
 def test_a_link_at_the_pending_name_once_copied_is_refused_and_named(
     env, tmp_path, monkeypatch,
 ):
-    """Whatever ``CopyFile2`` makes of a link put at the pending name after
-    it was cleared, a pending name that is a link once the copy was made is
-    refused: the link is removed, never followed, nothing is retained, and
-    the warning names where the copy may have been written, which the pass
-    does not remove (a path someone else chose is not its to delete)."""
+    """Whatever ``CopyFile2`` makes of a link put at the name it copies to
+    (which needs that name's token, drawn for the copy), a copy that is a
+    link once made is refused: the link is removed, never followed, nothing
+    is retained, and the warning names where the copy may have been
+    written, which the pass does not remove (a path someone else chose is
+    not its to delete)."""
     _by_path_with_copy_file2(monkeypatch)
     followed = tmp_path / "followed.txt"
 
@@ -813,36 +882,108 @@ def test_a_link_at_the_pending_name_once_copied_is_refused_and_named(
     assert "was a link to" in warnings[0]
 
 
-@_WINDOWS_COPY_FILE2
 def test_a_dangling_link_planted_before_the_copy_is_not_followed(
     env, tmp_path, monkeypatch,
 ):
-    """The pending name is cleared, then ``CopyFile2`` creates it. A dangling
-    link planted in between: ``COPY_FILE_FAIL_IF_EXISTS`` alone lets
-    ``CopyFileEx`` follow it and create its target; with
-    ``COPY_FILE_COPY_SYMLINK`` it is documented to fail on any link there.
-    The link's target is never created, and the store holds only blobs that
-    hold the bytes their names are the digest of."""
+    """The pending name is cleared, then the file is copied. A dangling link
+    planted at that predictable name in between was followed on Windows when
+    ``CopyFile2`` copied to it: its target was created with the file's bytes,
+    ``COPY_FILE_FAIL_IF_EXISTS`` with ``COPY_FILE_COPY_SYMLINK``
+    notwithstanding, though ``CopyFileEx`` documents that the pair fails on
+    any link there (the Windows CI, 2026-11-12; emulated so elsewhere). So
+    ``CopyFile2`` never copies to the pending name: it copies to a name
+    beside it drawn for that copy, and the checked copy is renamed over
+    whatever is at the pending name by then, never through it. The link's
+    target is never created, and the blob holds the file's bytes."""
+    _by_path_with_copy_file2(monkeypatch)
+    source = env.root / "src" / "a.py"
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    scheduler = env.scheduler([env.apply_task(0)])
+    blob = Path(scheduler._sweep.blob_path(digest))
+    pending = Path(f"{blob}.{os.getpid()}.{threading.get_ident()}.tmp")
     absent = tmp_path / "never-created.txt"
 
     def plant_then_copy(source, destination, flags, copy) -> None:
-        os.symlink(absent, destination)
+        pending.symlink_to(absent)
         copy(source, destination, flags)
 
-    copy_file2, fired = _copying(env.root / "src" / "a.py", plant_then_copy)
+    copy_file2, fired = _copying(source, plant_then_copy)
     monkeypatch.setattr(write_safety, "_COPY_FILE2", copy_file2)
-    scheduler = env.scheduler([env.apply_task(0)])
 
     kept = scheduler._sweep.retain(scheduler._sweep.census())
 
     assert fired
+    assert Path(fired[0]).parent == pending.parent and Path(fired[0]) != pending
     assert not os.path.lexists(absent)
-    if "src/a.py" in kept:
-        blob = Path(scheduler._sweep.blob_path(kept["src/a.py"]))
-        assert blob.read_bytes() == (env.root / "src" / "a.py").read_bytes()
-    for blob in _blobs(scheduler):
-        if not blob.name.endswith(".tmp"):
-            assert hashlib.sha256(blob.read_bytes()).hexdigest() == blob.name, blob
+    assert kept["src/a.py"] == digest
+    assert not blob.is_symlink() and blob.read_bytes() == source.read_bytes()
+    assert not os.path.lexists(pending) and not os.path.lexists(fired[0])
+    for kept_blob in _blobs(scheduler):
+        assert hashlib.sha256(kept_blob.read_bytes()).hexdigest() == kept_blob.name
+
+
+#: A token pinned for the name ``CopyFile2`` copies to, so a test can plant
+#: something there beforehand, as only someone who knew the token could.
+COPY_TOKEN = "ab" * 8
+
+
+def test_a_link_planted_at_the_copys_own_name_is_removed_never_followed(
+    env, tmp_path, monkeypatch,
+):
+    """The name ``CopyFile2`` copies to (``.copy.<token>.tmp`` beside the
+    pending name) is drawn for each copy; were it known, as here with the
+    token pinned, a dangling link planted there before the pass is removed
+    like one at the pending name, never followed: its target is never
+    created, and the blob holds the file's bytes."""
+    _by_path_with_copy_file2(monkeypatch)
+    monkeypatch.setattr(write_safety, "_copy_token", lambda: COPY_TOKEN)
+    source = env.root / "src" / "a.py"
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    scheduler = env.scheduler([env.apply_task(0)])
+    census = scheduler._sweep.census()
+    blob = Path(scheduler._sweep.blob_path(digest))
+    copied = blob.with_name(f".copy.{COPY_TOKEN}.tmp")
+    copied.parent.mkdir(parents=True)
+    absent = tmp_path / "never-created.txt"
+    copied.symlink_to(absent)
+
+    kept = scheduler._sweep.retain(census)
+
+    assert not os.path.lexists(absent)
+    assert kept["src/a.py"] == digest
+    assert not blob.is_symlink() and blob.read_bytes() == source.read_bytes()
+    assert not os.path.lexists(copied)
+
+
+def test_copy_file2_is_given_a_name_drawn_for_each_copy(env, monkeypatch):
+    """Every name ``CopyFile2`` is given lies beside its pending name, in the
+    same folder (so the rename that follows stays on one filesystem), is
+    never that predictable name, and holds a token drawn for that copy, so
+    no two copies share one and none can be known before the copy."""
+    _by_path_with_copy_file2(monkeypatch)
+    copy = write_safety._COPY_FILE2
+    given: list = []
+
+    def recording(source, destination, flags):
+        given.append(Path(destination))
+        return copy(source, destination, flags)
+
+    monkeypatch.setattr(write_safety, "_COPY_FILE2", recording)
+    draw = write_safety._copy_token
+    drawn: list = []
+    monkeypatch.setattr(write_safety, "_copy_token",
+                        lambda: drawn.append(draw()) or drawn[-1])
+    scheduler = env.scheduler([env.apply_task(0)])
+
+    kept = scheduler._sweep.retain(scheduler._sweep.census())
+
+    blobs = {Path(scheduler._sweep.blob_path(digest)) for digest in kept.values()}
+    assert len(given) == len(drawn) == len(blobs) >= 2
+    assert len(set(drawn)) == len(drawn)
+    for name, token in zip(given, drawn):
+        assert name.name == f".copy.{token}.tmp" and len(token) == 16
+        assert name.parent in {blob.parent for blob in blobs}
+        assert not os.path.lexists(name)
 
 
 @pytest.mark.parametrize("winerror", [5, 32], ids=["access denied", "sharing violation"])
@@ -986,8 +1127,9 @@ class _HeldCopy:
         self.writers: set = set()
         self.bound: dict = {}
         self.calls: list = []
-        # Taken now: a test that records calls naming the copy patches `os`.
-        self._lstat, self._fstat = os.lstat, os.fstat
+        # Taken now: a test that records calls naming the copy patches `os`,
+        # and one that runs `os.open` as Windows does follows a link with it.
+        self._open, self._lstat, self._fstat = os.open, os.lstat, os.fstat
         self._unlink, self._replace = os.unlink, os.replace
         self._utime, self._fchmod = os.utime, getattr(os, "fchmod", None)
 
@@ -1005,13 +1147,13 @@ class _HeldCopy:
         elif not named.st_mode & stat.S_IWUSR:
             raise _winerror(5, "access is denied", path)
         else:
-            held = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+            held = self._open(path, os.O_RDWR | os.O_NOFOLLOW)
         self.bound[held] = os.fspath(path)
         self.calls.append(("bind", os.fspath(path)))
         return held
 
     def create(self, path):
-        held = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        held = self._open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
         self.bound[held] = os.fspath(path)
         self.calls.append(("create", os.fspath(path)))
         return held
@@ -1788,14 +1930,16 @@ def test_a_link_at_the_restore_copys_name_once_copied_is_refused_and_named(
 def test_a_link_planted_at_the_restore_copys_name_is_never_written_through(
     env, tmp_path, restoring, planted,
 ):
-    """The temp name is predictable (the file's name and the pid). A link a
-    runner planted there is never written through nor removed: the staged
-    copy's exclusive creation (``O_EXCL``, the ``linkat`` naming an
-    ``O_TMPFILE`` file, Windows' ``CREATE_NEW`` on the name itself) refuses
-    the name, and so does ``CopyFile2``'s (``COPY_FILE_FAIL_IF_EXISTS`` with
-    ``COPY_FILE_COPY_SYMLINK``), so the file is skipped, the link's target is
-    neither written nor, for a dangling link, created, and the link stays,
-    named for the user to look at."""
+    """The temp name holds a token drawn for each attempt, pinned here as
+    though a runner knew it. A link it planted there is never written
+    through nor removed: the staged copy's exclusive creation (``O_EXCL``,
+    the ``linkat`` naming an ``O_TMPFILE`` file, Windows' ``CREATE_NEW`` on
+    the name itself) refuses the name, and the ``CopyFile2`` restore looks
+    first and refuses it too, since ``CopyFile2`` follows a dangling link
+    whatever its flags (the Windows CI, 2026-11-12; emulated so elsewhere),
+    so the file is skipped, the link's target is neither written nor, for a
+    dangling link, created, and the link stays, named for the user to look
+    at."""
     target = env.root / "src" / "a.py"
     snapshot, _payload = _snapshot_of(env)
     target.write_bytes(b"a = 2\n")
@@ -2264,7 +2408,11 @@ def test_a_snapshot_holds_the_bytes_it_hashed(env):
     assert entry.existed and entry.size == len(target.read_bytes())
     assert entry.sha256 == hashlib.sha256(payload.read_bytes()).hexdigest()
     assert payload.read_bytes() == target.read_bytes()
-    assert stat.S_IMODE(payload.stat().st_mode) == 0o640
+    # The file's mode as the platform keeps it: Windows keeps only the
+    # read-only bit, so 0o640 reads back there as 0o666.
+    assert stat.S_IMODE(payload.stat().st_mode) == stat.S_IMODE(target.stat().st_mode)
+    if os.name != "nt":
+        assert stat.S_IMODE(payload.stat().st_mode) == 0o640
     assert payload.stat().st_mtime_ns == 1_650_000_000_000_000_000
     for absent in ("src/new.py", "src/dir"):
         assert not snapshot.entry_for(absent).existed

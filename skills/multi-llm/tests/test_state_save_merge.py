@@ -925,6 +925,33 @@ class TestOneMetricEvent:
         assert len(entries) == 1
         assert "[METRICS_DUPLICATE]" in capsys.readouterr().err
 
+    def test_the_same_record_twice_in_one_clock_tick_is_one_entry_and_named(
+            self, run, capsys, monkeypatch):
+        """Windows' clock ticks every ~16 ms, so two quick records of one
+        event carry one timestamp and the two writers' lists come out equal
+        (emulated here with a clock that does not move): the second record
+        still collapses by the identity rule, and says so."""
+        moment = metrics.datetime(2026, 11, 12, 10, 0, 0)
+
+        class OneTick(metrics.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return moment
+
+        monkeypatch.setattr(metrics, "datetime", OneTick)
+        first = StateManager(run)
+        second = StateManager(run)
+        self._record(first, duration_ms=1000, token_count=10)
+        self._record(second, duration_ms=1000, token_count=10)
+        assert (first.state["metrics"]["implement"]
+                == second.state["metrics"]["implement"])
+        first.save()
+        second.save()
+
+        entries = _on_disk(second)["metrics"]["implement"]
+        assert len(entries) == 1
+        assert "[METRICS_DUPLICATE]" in capsys.readouterr().err
+
     def test_conflicting_records_keep_the_one_saved_first(self, run, capsys):
         first = StateManager(run)
         second = StateManager(run)

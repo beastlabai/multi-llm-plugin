@@ -1502,7 +1502,13 @@ def _merge_metrics(
     for phase in dict.fromkeys([*own, *file, *was]):
         before, mine_list, their_list = (
             t.get(phase, _ABSENT) for t in (was, own, file))
-        if their_list == mine_list or their_list == before:
+        # Both writers' lists equal is no reason to skip the identity rule
+        # when both changed it: two managers that recorded one event with the
+        # same timestamp (Windows' clock ticks every ~16 ms, so two quick
+        # records share one) made the same change twice, and that second
+        # record collapses, with its `[METRICS_DUPLICATE]` line, as one whose
+        # timestamp differs does.
+        if their_list == before:
             continue
         if mine_list == before:
             _put(target, phase, their_list)

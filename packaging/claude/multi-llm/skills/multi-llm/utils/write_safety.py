@@ -613,16 +613,34 @@ def read_capped(handle: int, limit: int, *, size_hint: int = 0) -> Optional[byte
 #: data streams, file attributes and EFS encryption.
 _COPY_FILE2 = getattr(_winapi, "CopyFile2", None)
 #: ``shutil.copy2``'s flag, plus ``COPY_FILE_FAIL_IF_EXISTS`` (0x1 in
-#: WinBase.h), so the copy itself is the exclusive creation of *pending*, and
-#: ``COPY_FILE_COPY_SYMLINK`` (0x800): without it ``CopyFileEx`` is documented
-#: to fail on a link already at the destination only when the link's target
-#: exists, so a dangling one is followed; with both it fails on any link
-#: there. At the source it copies a link as a link, and the source was
-#: checked to be a regular file, so a link there is a swap, refused after the
-#: copy (docs/development/write-safety.md, the rollback store's reads).
+#: WinBase.h), so the copy itself is the exclusive creation of its name, and
+#: ``COPY_FILE_COPY_SYMLINK`` (0x800). ``CopyFileEx`` documents that with
+#: both the copy fails on any link already at the destination, and with
+#: ``COPY_FILE_FAIL_IF_EXISTS`` alone only on one whose target exists. Windows
+#: does not do so for a regular source: with both flags, a link at the
+#: destination to a target that does not exist is followed and that target
+#: created with the copy's bytes (``windows-latest``, CI of 2026-11-12, a
+#: link planted at the name between its clearing and the copy). So nothing
+#: rests on the flags for a link there: ``CopyFile2`` only ever copies to a
+#: name nobody can know before it makes it (:func:`_copy_name`, and the
+#: restore's :func:`_staging_name`), cleared or checked empty first. At the source
+#: the flag copies a link as a link, and the source was checked to be a
+#: regular file, so a link there is a swap, refused after the copy
+#: (docs/development/write-safety.md, the rollback store's reads).
 _COPY_FILE2_FLAGS = (getattr(_winapi, "COPY_FILE_ALLOW_DECRYPTED_DESTINATION", 0x8)
                      | getattr(_winapi, "COPY_FILE_FAIL_IF_EXISTS", 0x1)
                      | getattr(_winapi, "COPY_FILE_COPY_SYMLINK", 0x800))
+#: Whether ``os.open``'s exclusive creation can be written through a link
+#: already at the name. On Windows ``O_CREAT | O_EXCL`` is ``CreateFile``'s
+#: ``CREATE_NEW`` without ``FILE_FLAG_OPEN_REPARSE_POINT``, and there is no
+#: ``O_NOFOLLOW``: a link at the name to a target that does not exist is
+#: followed and that target created (``windows-latest``, CI of 2026-11-12,
+#: the store's plain copy over a link planted at its pending name). POSIX
+#: ``open(2)`` with ``O_CREAT | O_EXCL`` refuses any link there (``EEXIST``),
+#: dangling or not. Where it can, :func:`write_copy` makes its plain copy
+#: through :meth:`_HeldCopyCalls.create` instead
+#: (:func:`_written_through_handle`).
+_EXCLUSIVE_OPEN_FOLLOWS_LINKS = os.name == "nt"
 #: The ``CopyFile2`` refusal ``shutil.copy2`` answers with a plain copy.
 _ERROR_ACCESS_DENIED = getattr(_winapi, "ERROR_ACCESS_DENIED", 5)
 
@@ -676,42 +694,55 @@ def write_copy(pending: str, data: bytes, source: int, *,
     * Windows on Python 3.12+ (``CopyFile2``), with *path* the name *source*
       was opened by: copied by path with ``CopyFile2``, as ``shutil.copy2``
       copies there, so the copy keeps the source's alternate data streams,
-      attributes and EFS encryption, and ``COPY_FILE_FAIL_IF_EXISTS`` with
-      ``COPY_FILE_COPY_SYMLINK`` makes the copy the exclusive creation, never
-      through a link. Then *pending* must be a plain new file (no link, no
-      reparse point, no other name), *path* must still name the file
-      *source* reads (``lstat`` against ``fstat``) and *pending* must hold
-      exactly *data*, so a blob never holds bytes other than the ones read
-      and hashed; otherwise *pending* is removed, its read-only attribute
-      (which ``CopyFile2`` copies) cleared first, as is whatever a failed
-      ``CopyFile2`` left there. Where ``CopyFile2`` refuses access,
+      attributes and EFS encryption. ``CopyFile2`` follows a link to nothing
+      at its destination whatever the flags (:data:`_COPY_FILE2_FLAGS`), so
+      it never copies to *pending*, which a link can be planted at between
+      its clearing and the copy, but to a name beside it drawn at random for
+      this copy (:func:`_copy_name`), which nobody can know before the copy
+      makes it. Then that copy must be a plain new file (no link, no reparse
+      point, no other name), *path* must still name the file *source* reads
+      (``lstat`` against ``fstat``) and the copy must hold exactly *data*, so
+      a blob never holds bytes other than the ones read and hashed; then it
+      is renamed to *pending* (``os.replace``: the entry itself, never
+      through a link). Otherwise the copy is removed, its read-only
+      attribute (which ``CopyFile2`` copies) cleared first, as is whatever a
+      failed ``CopyFile2`` left there. Where ``CopyFile2`` refuses access,
       ``shutil.copy2`` falls back to a plain copy, and so does this.
+    * Windows otherwise (Python before 3.12, a refused ``CopyFile2``, no
+      *path*): :func:`_written_through_handle`, as ``os.open``'s exclusive
+      creation follows a link to nothing there
+      (:data:`_EXCLUSIVE_OPEN_FOLLOWS_LINKS`).
     * Elsewhere: *data* is written, and the times, extended attributes,
       mode and flags come from the descriptor *source*, ``fstat``-ed now,
       after the read, as ``copy2`` stats after copying, never from a path
       that can name another file by now. The times and mode are set through
-      the new file's descriptor where the platform can (not Windows)."""
+      the new file's descriptor where the platform can."""
     if path is not None and _COPY_FILE2 is not None:
+        fresh = _copy_name(os.fsdecode(pending))
         try:
-            _copy_file2(os.fsdecode(path), os.fsdecode(pending))
+            _copy_file2(os.fsdecode(path), os.fsdecode(pending), fresh)
         except CopyNotContained:
             raise
         except BaseException as failure:
-            # Whatever a failed copy left at *pending* (part of a copy) goes.
-            _discard_after(failure, pending, None)
+            # Whatever a failed copy left at its name (part of a copy) goes.
+            _discard_after(failure, fresh, None)
             if getattr(failure, "winerror", None) != _ERROR_ACCESS_DENIED:
                 raise
         else:
             made: List[Tuple[int, int]] = []
             try:
-                if not _copied_unchanged(path, pending, data, source, made):
+                if not _copied_unchanged(path, fresh, data, source, made):
                     raise OSError(
-                        f"{path} changed while it was copied to {pending}")
+                        f"{path} changed while it was copied to {fresh}")
+                os.replace(fresh, pending)
             except BaseException as failure:
-                _discard_after(failure, pending, made[0] if made else None)
+                _discard_after(failure, fresh, made[0] if made else None)
                 raise
             return
     info = os.fstat(source)
+    if _EXCLUSIVE_OPEN_FOLLOWS_LINKS:
+        _written_through_handle(os.fsdecode(pending), data, info)
+        return
     flags = (os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
              | _CLOEXEC | getattr(os, "O_NOINHERIT", 0) | getattr(os, "O_BINARY", 0))
     try:
@@ -730,7 +761,7 @@ def write_copy(pending: str, data: bytes, source: int, *,
             _copy_xattrs(source, stream.fileno())
             if by_descriptor:
                 _copy_times_and_mode(stream.fileno(), info)
-        if not by_descriptor:  # pragma: no cover - Windows, once the file is closed
+        if not by_descriptor:  # pragma: no cover - descriptors take neither, once closed
             _copy_times_and_mode(pending, info)
         if hasattr(info, "st_flags") and hasattr(os, "chflags"):  # pragma: no cover - BSD, macOS
             try:
@@ -744,15 +775,96 @@ def write_copy(pending: str, data: bytes, source: int, *,
         raise
 
 
-def _copy_file2(path: str, pending: str) -> None:
-    """``CopyFile2`` of *path* to the new file *pending*. A name already
-    there (a leftover, or a link planted there, dangling or not) is removed
-    first, never followed, or nothing is copied; a link put back in between
-    makes the copy fail (``COPY_FILE_FAIL_IF_EXISTS`` with
-    ``COPY_FILE_COPY_SYMLINK``), and :func:`_copied_unchanged` refuses one
-    whatever ``CopyFile2`` made of it."""
+def _copy_file2(path: str, pending: str, fresh: str) -> None:
+    """``CopyFile2`` of *path* to the new file *fresh* (:func:`_copy_name`),
+    which :func:`write_copy` renames to *pending* once it is checked. A name
+    already at *pending* (a leftover, or a link planted at that predictable
+    name, dangling or not) is removed first, never followed, or nothing is
+    copied, and so is one at *fresh*, which only someone who knew its token
+    can have put there.
+
+    Never copied to *pending* itself: a link to nothing put there between
+    its clearing and the copy would be followed, and its target created
+    with the copy's bytes, ``COPY_FILE_FAIL_IF_EXISTS`` with
+    ``COPY_FILE_COPY_SYMLINK`` notwithstanding (:data:`_COPY_FILE2_FLAGS`).
+    Nobody can plant one at *fresh* before ``CopyFile2`` makes it, as its
+    token is drawn now; :func:`_copied_unchanged` still refuses a copy that
+    is a link once made."""
     _discard(pending)
-    _COPY_FILE2(path, pending, _COPY_FILE2_FLAGS)
+    _discard(fresh)
+    _COPY_FILE2(path, fresh, _COPY_FILE2_FLAGS)
+
+
+def _copy_name(pending: str) -> str:
+    """The name ``CopyFile2`` makes *pending*'s copy under
+    (:func:`_copy_file2`): beside it, so the rename that puts it at
+    *pending* stays on one filesystem; hidden; and new for each copy, its
+    token drawn now (:func:`_copy_token`), so the name cannot be known
+    before the copy makes it. Short, so it is never nearer Windows'
+    ``MAX_PATH`` than *pending* is."""
+    return os.path.join(os.path.dirname(pending), f".copy.{_copy_token()}.tmp")
+
+
+def _copy_token() -> str:
+    """A random token for one copy's name (:func:`_copy_name`)."""
+    return secrets.token_hex(8)
+
+
+def _written_through_handle(pending: str, data: bytes, info: os.stat_result) -> None:
+    """:func:`write_copy`'s plain copy on Windows, where ``os.open``'s
+    exclusive creation follows a link to nothing at the name
+    (:data:`_EXCLUSIVE_OPEN_FOLLOWS_LINKS`): *pending* made as a new file and
+    held through one handle (:meth:`_HeldCopyCalls.create`: ``CREATE_NEW``
+    with ``FILE_FLAG_OPEN_REPARSE_POINT``, on the name itself, failing on
+    any name there, a link included, never following it), *data* written
+    through it, and the source's times and read-only attribute (*info*, its
+    ``fstat`` after the read) set through it as ``copystat``'s ``os.utime``
+    and ``os.chmod`` give them there, all before it closes: nothing is set
+    by path, where the name can be swapped for a link between two calls. A
+    name already at *pending* is removed first (:func:`_discard`), never
+    followed, and the creation tried once more. What a failure leaves is
+    removed as :func:`write_copy` removes it. Raises ``OSError`` when the
+    handle calls cannot be loaded: nothing is then copied, as ``os.open``
+    could write through a link."""
+    calls = _held_copy_calls()
+    if calls is None:
+        raise OSError(
+            f"the Windows calls that create {pending} without following a link "
+            f"could not be loaded, so nothing was copied")
+    try:
+        held = calls.create(pending)
+    except FileExistsError:
+        _discard(pending)
+        held = calls.create(pending)
+    created: Optional[Tuple[int, int]] = None
+    try:
+        try:
+            opened = os.fstat(held)
+            created = (opened.st_dev, opened.st_ino)
+            view = memoryview(data)
+            while view:
+                view = view[os.write(held, view):]
+            calls.set_basic(held, _copied_attributes(opened, info),
+                            info.st_atime_ns, info.st_mtime_ns)
+        finally:
+            os.close(held)
+    except BaseException as failure:
+        _discard_after(failure, pending, created)
+        raise
+
+
+def _copied_attributes(made: os.stat_result, info: os.stat_result) -> int:
+    """The attributes a plain copy made on Windows (*made*, its handle's
+    ``fstat``) takes from its source (*info*): its own, with the read-only
+    one set or cleared as the source's mode says, as ``os.chmod`` sets it
+    for ``copystat`` there (``SetFileAttributesW`` with the other attributes
+    kept)."""
+    attributes = getattr(made, "st_file_attributes", 0) & _SETTABLE_ATTRIBUTES
+    if info.st_mode & stat.S_IWRITE:
+        attributes &= ~stat.FILE_ATTRIBUTE_READONLY
+    else:
+        attributes |= stat.FILE_ATTRIBUTE_READONLY
+    return attributes or _FILE_ATTRIBUTE_NORMAL
 
 
 def _copied_unchanged(path: str, pending: str, data: bytes, source: int,
@@ -3281,12 +3393,17 @@ def _restored_by_copy_file2(source: str, tmp: str, target: str,
     or when the calls that hold it cannot be loaded. Otherwise its own name
     must be that regular file (``lstat`` against ``fstat``) and the bytes read
     through the descriptor must hash to *sha256* when it is given.
-    ``CopyFile2`` then copies it by path to *tmp* with
-    ``COPY_FILE_FAIL_IF_EXISTS`` and ``COPY_FILE_COPY_SYMLINK``: any name
-    already there, a link included, fails the copy and is left as it is. A
-    failed copy that left nothing at *tmp* returns ``False``; one that left
-    something raises. The copy is checked and put back by
-    :func:`_publish_held`."""
+    Any name already at *tmp*, a link included, is left as it is and the
+    file skipped (:func:`_already_there`), as the staged restore's exclusive
+    creation refuses it: ``CopyFile2`` would follow a link to nothing there
+    and create its target with the payload's bytes, its flags
+    notwithstanding (:data:`_COPY_FILE2_FLAGS`). *tmp*'s token is drawn for
+    this attempt (:func:`_staging_name`), so nobody can put a link there
+    between that look and the copy. ``CopyFile2`` then copies the payload
+    by path to *tmp* with ``COPY_FILE_FAIL_IF_EXISTS`` and
+    ``COPY_FILE_COPY_SYMLINK``. A failed copy that left nothing at *tmp*
+    returns ``False``; one that left something raises. The copy is checked
+    and put back by :func:`_publish_held`."""
     calls = _held_copy_calls()
     if calls is None:
         return False
@@ -3302,6 +3419,12 @@ def _restored_by_copy_file2(source: str, tmp: str, target: str,
             raise OSError(
                 f"the snapshot payload no longer matches the manifest (recorded "
                 f"{_short(sha256)}, payload {_short(digest)}); nothing written")
+        try:
+            os.lstat(tmp)
+        except FileNotFoundError:
+            pass
+        else:
+            raise _already_there(tmp)
         try:
             _COPY_FILE2(source, tmp, _COPY_FILE2_FLAGS)
             copied = _identity_at(tmp)

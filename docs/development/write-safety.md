@@ -233,10 +233,15 @@ waits on a FIFO (`O_NONBLOCK`). On Linux and macOS the blob takes the source's t
 attributes, mode and flags from the descriptor, `fstat`-ed after the read as `shutil.copy2` stats
 after copying, because restore copies them back onto the file (`_replace_with_payload`). The
 pending copy is created exclusively and never through a link, its times and mode set through
-its own descriptor (by path once closed, on Windows without `CopyFile2`): its name is predictable
-(digest, pid, thread), and `shutil.copy2` wrote through a link a runner planted there. On Windows
-restore puts back the streams and attributes the store keeps too, for a file that is not read-only,
-and its encryption where it can (below). Tests: `tests/test_write_sweep_sees_the_same.py`.
+its own descriptor: its name is predictable (digest, pid, thread), and `shutil.copy2` wrote through
+a link a runner planted there. On Windows without `CopyFile2` (Python before 3.12, a refused
+`CopyFile2`) `os.open`'s `O_CREAT | O_EXCL` is `CreateFile`'s `CREATE_NEW`, which follows a link to
+nothing at the name and creates its target (the Windows CI showed it, 2026-11-12), so the copy is
+made and held through one handle instead (`_written_through_handle`: `_HeldCopyCalls.create`,
+`CREATE_NEW` with `FILE_FLAG_OPEN_REPARSE_POINT`, as the staged restore makes its file), and its
+times and read-only attribute are set through that handle before it closes, never by path. On
+Windows restore puts back the streams and attributes the store keeps too, for a file that is not
+read-only, and its encryption where it can (below). Tests: `tests/test_write_sweep_sees_the_same.py`.
 
 **The pre-batch snapshot reads each declared file once too, and an adopted write copies only bytes
 that hash to its blob's name** (fable review F9, 2026-11-10). U80's rule covered the store only:
@@ -272,18 +277,23 @@ descriptor. Where `CopyFile2` refuses access it falls back to the descriptor cop
 back to `copyfile`; any other failure keeps nothing. Before 3.12 there is no `CopyFile2`, `copy2`
 was `copyfile` plus `copystat` there, and the descriptor copy keeps the same. `shutil.copy2`
 overwrites its destination, so an exclusively created placeholder could be swapped for a link before
-it opened it; the pending name is cleared instead (a link there removed, never followed) and
-`CopyFile2` creates it. `CopyFileEx`
-documents what the flags do with a link already at the destination: with `COPY_FILE_FAIL_IF_EXISTS`
-alone the copy fails "only if the target of the symbolic link exists", so a dangling link is followed
-and its target created; with `COPY_FILE_COPY_SYMLINK` as well it "fails in all cases". The
-`CopyFile2` page says nothing either way, so the check after the copy does not rest on it: a pending
-name that is a link or another reparse point once the copy is made has its entry removed, nothing is
-kept, and the pass warns, naming the link's target, since a copy that went through the link is there
-and a file at a path someone else chose is not the pass's to delete. At the source the flag copies a
-link as a link and changes nothing else ("If the source file is not a symbolic link, there is no
-change in behavior"); the source was checked to be a regular file, so a link there is a swap and its
-link copy is refused. `CopyFile2` keeps the source's attributes, read-only included, and Windows will
+it opened it; `CopyFile2` creates the copy itself instead. `CopyFileEx` documents what the flags do
+with a link already at the destination: with `COPY_FILE_FAIL_IF_EXISTS` alone the copy fails "only if
+the target of the symbolic link exists", so a dangling link is followed and its target created; with
+`COPY_FILE_COPY_SYMLINK` as well it "fails in all cases". Windows does not do so for a regular source:
+on the Windows CI (2026-11-12) a dangling link planted at the destination between its clearing and the
+copy was followed with both flags, and its target created with the file's bytes. So nothing rests on
+the flags for a link at the destination. The pending name is cleared (a link there removed, never
+followed), but `CopyFile2` never copies to it, since it is predictable and a link could be planted
+there again before the copy: it copies to a name beside it drawn at random for this copy
+(`_copy_name`, `.copy.<64-bit token>.tmp`, cleared too), which nobody can know before the copy makes
+it, and the checked copy is then renamed to the pending name (`os.replace`, the entry itself, never
+through a link). The check after the copy still covers a copy that is a link: a copy that is a link or
+another reparse point once made has its entry removed, nothing is kept, and the pass warns, naming
+the link's target, since a copy that went through the link is there and a file at a path someone
+else chose is not the pass's to delete. At the source the flag copies a link as a link and changes
+nothing else ("If the source file is not a symbolic link, there is no change in behavior"); the
+source was checked to be a regular file, so a link there is a swap and its link copy is refused. `CopyFile2` keeps the source's attributes, read-only included, and Windows will
 not delete a read-only file, so removing a refused copy clears that attribute first: only when the
 name still holds the copy read back (same `(st_dev, st_ino)`), a regular file with no other name and
 no reparse point, and on the entry itself (`os.chmod(..., follow_symlinks=False)` on 3.13+ and 3.12's
@@ -297,10 +307,16 @@ descriptor copy that fails part-way.
 
 What these checks leave open, precisely:
 
-1. Between clearing the pending name and `CopyFile2` creating it, a link planted there makes the
-   copy fail, as documented for `CopyFileEx` (a Windows test plants a dangling one there and asserts
-   its target is never created). Were `CopyFile2` to follow it instead, the check after the copy
-   still refuses the copy and names the link's target, but the file written there stays.
+1. `CopyFile2` follows a dangling link at its destination, so the copy's own name is all that keeps
+   it from writing through one: planting a link there before the copy makes it needs that name's
+   64-bit token, drawn just before the copy. Tests plant a dangling link at the pending name inside
+   the copy call (the Windows CI's case: its target is never created, and the copy is renamed over
+   the link) and, with the token pinned, at the copy's own name before the pass (removed, never
+   followed). A link at the copy's name once the copy is made is refused and named, as above, but
+   what the copy wrote through it stays. Between the check of the copy and its rename to the pending
+   name, a writer of the store folder can swap the copy for something else, which the rename then
+   moves there, never through a link; such a writer can rewrite a blob anyway (item 4), and
+   `TaskSnapshot.adopt` copies only a blob that hashes to its name.
 2. The folders above the pending name (`rollback_store/ab/`) are created and reached by path, so a
    junction planted at one redirects where the copy is created, as it redirected base's `copy2`
    (hardening the store's path is a design of its own).
@@ -328,10 +344,13 @@ that is not, came back as plaintext. There `_replace_with_payload` now restores 
 2. The payload's own name must be that regular file (`lstat` against `fstat`), and the bytes read
    through the descriptor must hash to the manifest's digest (`restore_path`, the commit write
    policy's restore, has no digest: the copy is checked against the bytes read). `CopyFile2` copies
-   it to the temp name beside the file with `COPY_FILE_FAIL_IF_EXISTS` and `COPY_FILE_COPY_SYMLINK`,
-   so any name already there, a link included, fails the copy and is left as it is, never removed
-   or followed, as the staged restore's exclusive creation refuses it. A failed copy that left
-   nothing there takes the staged restore; one that left something skips the file and names it.
+   it to the temp name beside the file with `COPY_FILE_FAIL_IF_EXISTS` and `COPY_FILE_COPY_SYMLINK`.
+   Any name already there, a link included, skips the file and is left as it is, never removed or
+   followed, as the staged restore's exclusive creation refuses it: it is looked up first, since
+   `CopyFile2` follows a dangling link there whatever its flags (the store's paragraph above), and
+   the temp name's token is drawn for this attempt, so nobody can put one there between the look and
+   the copy. A failed copy that left nothing there takes the staged restore; one that left something
+   skips the file and names it.
 3. The copy is bound once: opened by path as itself (`FILE_FLAG_OPEN_REPARSE_POINT`) to read, write,
    delete and set attributes, shared for reading alone (`_HeldCopyCalls.bind`). A handle already
    open on it to write or delete refuses the bind (a sharing violation): the file is skipped and the
