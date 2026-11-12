@@ -1621,6 +1621,12 @@ class TestEarlySandboxWarning:
         monkeypatch.setattr(sandbox_walk, "ADVISORY_PROBE_BUDGET_S", 0.5)
         assert "warning" not in jailhost.status(host_id="claude-code")["phases"]["implement"]
         assert executor._SANDBOX_PROBE_CACHE == {} and executor._SANDBOX_DECISIONS == {}
+        # The reader's hanging probe records itself once its interpreter is up,
+        # which a loaded Windows runner can take longer than the 0.5 s budget
+        # for: cut first, it leaves no record (windows-latest, 2026-11-12). So
+        # the dispatch's own probe is counted, not the total.
+        probed = len(jailhost.wrapper.records(probe=True))
+        assert probed <= 1
         jailhost.wrapper.set(probe="deny")
         request = JailRequest(
             repo_root=str(jailhost.repo), kind="implement", write_scope=WRITE_SCOPE_REPO_WIDE,
@@ -1630,7 +1636,7 @@ class TestEarlySandboxWarning:
             "codex", key="driver.subagent_runner", spec="codex:gpt-5.5",
             profile=PROFILE_AGENT_WRITE, anchor=str(jailhost.plan), jail_request=request,
         ) == "plugin-landlock"
-        assert len(jailhost.wrapper.records(probe=True)) == 2
+        assert len(jailhost.wrapper.records(probe=True)) == probed + 1
 
     def test_the_advisory_probe_hands_the_canary_no_target_in_the_source_tree(self, jailhost):
         """`status` and `init` are advisory readers: their probe must create
