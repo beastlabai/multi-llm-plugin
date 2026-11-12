@@ -794,34 +794,65 @@ def test_a_refused_read_only_copy_is_removed(env, monkeypatch):
     assert not [line for line in lines if "WARNING" in line], lines
 
 
-@pytest.mark.parametrize("failure", ["copied by path, then refused",
-                                     "the copy failed midway"])
+@pytest.mark.parametrize("failure", [
+    "copied by path, then refused",
+    pytest.param("the copy failed midway", marks=pytest.mark.skipif(
+        os.name == "nt", reason="Windows makes its plain copy through one handle: "
+        "the handle row")),
+    "the handle copy failed midway",
+])
 def test_a_refused_copy_that_cannot_be_removed_is_reported(
     env, monkeypatch, failure,
 ):
     """A refused copy can hold another file's bytes, so one that cannot be
     removed is not dropped like an ordinary failed copy: the file has no
     rollback point, a warning names what is left, the retention warning
-    gives it as the reason, and its bytes count against the store budget."""
+    gives it as the reason, and its bytes count against the store budget.
+    The handle row is Windows' plain copy (``_written_through_handle``,
+    emulated off Windows): its delete through the handle is refused too."""
     target = env.root / "src" / "a.py"
+    wanted = os.stat(target)
+    fired: list = []
+
+    def first_for_the_target(info) -> bool:
+        if fired or (info.st_dev, info.st_ino) != (wanted.st_dev, wanted.st_ino):
+            return False
+        fired.append(True)
+        return True
+
     if failure.startswith("copied by path"):
         _by_path_with_copy_file2(monkeypatch)
         copy_file2, fired = _copying(target, _copy_then_change)
         monkeypatch.setattr(write_safety, "_COPY_FILE2", copy_file2)
-    else:
+    elif failure == "the copy failed midway":
         monkeypatch.setattr(write_safety, "_COPY_FILE2", None, raising=False)
         copy_xattrs = write_safety._copy_xattrs
-        wanted = os.stat(target)
-        fired = []
 
         def fail_midway(source, copy) -> None:
-            opened = os.fstat(source)
-            if fired or (opened.st_dev, opened.st_ino) != (wanted.st_dev, wanted.st_ino):
-                return copy_xattrs(source, copy)
-            fired.append(True)
-            raise OSError(errno.EIO, "failed midway")
+            if first_for_the_target(os.fstat(source)):
+                raise OSError(errno.EIO, "failed midway")
+            return copy_xattrs(source, copy)
 
         monkeypatch.setattr(write_safety, "_copy_xattrs", fail_midway)
+    else:
+        if os.name != "nt":
+            calls = _HeldCopy()
+            monkeypatch.setattr(write_safety, "_held_copy_calls", lambda: calls)
+            monkeypatch.setattr(write_safety, "_EXCLUSIVE_OPEN_FOLLOWS_LINKS", True)
+            _opens_as_windows_does(monkeypatch)
+        monkeypatch.setattr(write_safety, "_COPY_FILE2", None, raising=False)
+        attributes = write_safety._copied_attributes
+
+        def fail_as_it_sets_them(made, info):
+            if first_for_the_target(info):
+                raise OSError(errno.EIO, "failed midway")
+            return attributes(made, info)
+
+        def refuse(self, held):
+            raise PermissionError(errno.EACCES, "refused")
+
+        monkeypatch.setattr(write_safety, "_copied_attributes", fail_as_it_sets_them)
+        monkeypatch.setattr(type(write_safety._held_copy_calls()), "dispose", refuse)
     real_unlink = os.unlink
 
     def unlink(path, *args, **kwargs):
