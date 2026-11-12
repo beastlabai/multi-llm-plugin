@@ -59,7 +59,7 @@ def test_only_the_outcome_module_attaches_the_tail_keys():
             continue
         names = sorted(set(_calls(path)))
         if names:
-            found[str(path.relative_to(SKILL_DIR))] = names
+            found[path.relative_to(SKILL_DIR).as_posix()] = names
     assert set(found) == {"utils/provider_outcome.py"}, found
 
 

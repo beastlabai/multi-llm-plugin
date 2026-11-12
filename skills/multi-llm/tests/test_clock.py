@@ -227,6 +227,7 @@ def test_a_continuation_compares_any_two_stamp_spellings(where, record_kind, com
     assert scope_policy_runs.resolve_run_choice(None, state(10), "improve-code") is None
 
 
+@_needs_tzset
 def test_the_ordered_comparison_does_not_depend_on_the_zone_of_the_machine(new_york):
     state = {
         "scope_policy_runs": {"improve-code": {

@@ -48,7 +48,7 @@ YAML_FILES = _repository_yaml_files()
 
 
 def _ids(paths):
-    return [str(p.relative_to(REPO_ROOT)) for p in paths]
+    return [p.relative_to(REPO_ROOT).as_posix() for p in paths]
 
 
 def _load_all(text, loader):
@@ -268,7 +268,7 @@ class TestTheFileCache:
     def test_file_signature_tells_missing_from_a_broken_link(self, tmp_path):
         path = tmp_path / "a.yaml"
         assert yaml_io.file_signature(path) is None
-        path.write_text("a: 1\n", encoding="utf-8")
+        path.write_bytes(b"a: 1\n")  # bytes: a text write is "\r\n" (6 bytes) on Windows
         signature = yaml_io.file_signature(path)
         st = os.stat(path)
         assert signature == (st.st_dev, st.st_ino, len("a: 1\n"), st.st_mtime_ns, st.st_ctime_ns)

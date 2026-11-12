@@ -390,9 +390,12 @@ class TestTheRoundFollowUp:
     def test_a_plan_keeps_every_stored_flag(self, here):
         plan = _plan(here, head_ref=False)
         command = self._lane(plan).round_follow_up({"replay_flags": self.STORED})
+        # The plan path as the POSIX shell every follow-up targets reads it
+        # (`cli_common._quote`): bare here, single-quoted on Windows, whose
+        # backslashes the shell would otherwise eat.
         assert command.endswith(
-            f"review-code {plan} --base-ref {BASE} --models cursor-agent:auto "
-            f"--scope-policy expand --reaggregate"), command
+            f"review-code {shlex.quote(str(plan))} --base-ref {BASE} "
+            f"--models cursor-agent:auto --scope-policy expand --reaggregate"), command
 
     def test_a_live_invocation_of_the_mode_wins(self, here):
         plan = _plan(here, head_ref=False)

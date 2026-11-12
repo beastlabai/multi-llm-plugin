@@ -202,6 +202,7 @@ class TestHomeRendering:
     ])
     def test_the_home_renders_only_where_it_starts_a_path(self, monkeypatch, raw, shown):
         monkeypatch.setenv("HOME", "/home/u")
+        monkeypatch.setenv("USERPROFILE", "/home/u")  # expanduser's source on Windows
         assert landlock_dispatch.render_home_text(raw) == shown
 
     @pytest.mark.parametrize("escape", ["\n", "\t", "\r", '"'])
@@ -212,6 +213,7 @@ class TestHomeRendering:
         user sees it (``jail_denied_text``), while a backup copy of the home
         inside the same escaped text keeps its head."""
         monkeypatch.setenv("HOME", "/home/u")
+        monkeypatch.setenv("USERPROFILE", "/home/u")  # expanduser's source on Windows
         hidden = json.dumps({"error": f"Permission denied{escape}/home/u/.cache/item"})
         backup = json.dumps({"error": f"Permission denied{escape}/mnt/backup/home/u/x"})
         for lane in (_executor, _fanout):

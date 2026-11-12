@@ -908,7 +908,9 @@ class TestTheReportLine:
 
         report = tmp_path / "report.md"
         whole = report.read_text(encoding="utf-8")
-        report.write_text(whole.replace("\n", "\r\n"), encoding="utf-8")
+        # CRLF bytes as such: a text-mode write of "\r\n" on Windows would put
+        # "\r\r\n" on disk, two line ends to any reader, which no editor writes.
+        report.write_bytes(whole.replace("\n", "\r\n").encode("utf-8"))
         assert review_round.report_seal(tmp_path) == (R1, True, True)  # CRLF-safe
         report.write_text("\n".join(whole.split("\n")[:2]) + "\n", encoding="utf-8")
         assert review_round.report_seal(tmp_path) == (R1, False, True)  # cut short
@@ -979,6 +981,22 @@ def _holder_pid(phase_dir: Path) -> Any:
     return (process_control.read_lock_holder(str(phase_dir / ".lock")) or {}).get("pid")
 
 
+def _announced_pid(line: str, word: str) -> int:
+    """The pid a holder this file starts announced as ``<word> <pid>``: its own
+    ``os.getpid()``, the number its lock label and its run record carry, so the
+    number every refusal names.
+
+    Never ``Popen.pid``. On Windows ``sys.executable`` is the venv's
+    ``Scripts\\python.exe``, a launcher that starts the base interpreter as a
+    child of its own: ``Popen.pid`` names the launcher, which holds nothing,
+    while the interpreter that took the lock records a different pid (the
+    first hosted Windows runs, 2026-11-11). On POSIX the two are one number.
+    """
+    head, _, pid = line.strip().partition(" ")
+    assert head == word and pid.isdigit(), f"expected '{word} <pid>', got {line!r}"
+    return int(pid)
+
+
 def _refused_at_the_lock(result, holder_pid) -> None:
     assert result.exit_code == 3, result.stdout + result.stderr
     assert (f"another run of this phase is in progress (pid {holder_pid}"
@@ -1040,9 +1058,11 @@ class TestTwoOverlappingRuns:
 
 
 #: A review-code run held at one of Codex's interleaving points: it writes
-#: ``gate`` and waits for ``go`` on stdin, then carries on.
+#: ``gate`` and waits for ``go`` on stdin, then carries on. The gate reads
+#: ``ready <pid>`` (:func:`_announced_pid`), renamed into place whole so the
+#: test never reads it half-written.
 _PAUSED_RUN = r"""
-import asyncio, sys
+import asyncio, os, sys
 from pathlib import Path
 sys.path[:0] = [sys.argv[4]]
 import code_review_orchestrator as cro
@@ -1051,7 +1071,9 @@ from utils import review_round as rr
 mode, plan, gate = sys.argv[1], sys.argv[2], Path(sys.argv[3])
 
 def pause():
-    gate.write_text("ready", encoding="utf-8")
+    part = gate.with_name(gate.name + ".part")
+    part.write_text(f"ready {os.getpid()}", encoding="utf-8")
+    os.replace(part, gate)
     assert sys.stdin.readline().strip() == "go"
 
 if mode == "opening":
@@ -1135,6 +1157,7 @@ class TestCodexInterleavingsStopAtTheLock:
                     assert run_a.poll() is None, log.read_text(encoding="utf-8")
                     assert time.monotonic() < deadline, "run A never reached its pause"
                     time.sleep(0.05)
+                holder = _announced_pid(gate.read_text(encoding="utf-8"), "ready")
                 round_a = review_round.current_round(phase_dir)
                 if mode == "seal":
                     # B's verdicts reject every finding A's report keeps.
@@ -1160,7 +1183,7 @@ class TestCodexInterleavingsStopAtTheLock:
                     run_a.kill()
         output = log.read_text(encoding="utf-8")
 
-        _refused_at_the_lock(run_b, run_a.pid)
+        _refused_at_the_lock(run_b, holder)
         assert after == before
         assert run_a.returncode == 0, output
         assert review_round.current_round(phase_dir) == round_a
@@ -1335,7 +1358,8 @@ def _args(**flags):
 
 #: A live process holding ``sys.argv[2]`` until its stdin closes. With a run
 #: id in ``sys.argv[3]`` it holds it as a detached run would: its label names
-#: the run and the checkpoint beside the lock records it.
+#: the run and the checkpoint beside the lock records it. Once it holds the
+#: lock it prints ``held <pid>`` (:func:`_announced_pid`).
 _HOLDER = r"""
 import os, sys
 sys.path.insert(0, sys.argv[1])
@@ -1352,20 +1376,24 @@ if run_id:
     })
 else:
     lock.acquire({"holder": "review-code (foreground)", **me})
-print("held", flush=True)
+print(f"held {os.getpid()}", flush=True)
 sys.stdin.readline()
 """
 
 
 def _hold_in_another_process(lock: Path, run_id: str = ""):
-    """A live process holding *lock* as a run would, until its stdin closes."""
+    """A live process holding *lock* as a run would, until its stdin closes.
+
+    Its ``own_pid`` is the pid it recorded in the lock's label, the one every
+    refusal names; its ``pid`` is the process this test started, which on
+    Windows is the venv launcher, never the holder (:func:`_announced_pid`)."""
     import subprocess
 
     holder = subprocess.Popen(
         [sys.executable, "-c", _HOLDER, str(SKILL_ROOT), str(lock), *([run_id] if run_id else [])],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
     )
-    assert holder.stdout.readline().strip() == "held"
+    holder.own_pid = _announced_pid(holder.stdout.readline(), "held")
     return holder
 
 
@@ -1483,7 +1511,7 @@ class TestOneWriterPerPhaseDir:
             assert time.monotonic() - started < 5
             assert stop.value.code == 3
             out = capsys.readouterr().out
-            assert f"another run of this phase is in progress (pid {holder.pid}, alive)" in out
+            assert f"another run of this phase is in progress (pid {holder.own_pid}, alive)" in out
             assert "review-code (foreground) owns this phase dir" in out
             with detach.PhaseRun() as run, pytest.raises(SystemExit) as stop:
                 self._take(run, tmp_path, internal_worker=True, internal_run_id="r")
@@ -1494,7 +1522,7 @@ class TestOneWriterPerPhaseDir:
                 self._take(run, tmp_path, detach=True)
             assert stop.value.code == 3
             err = capsys.readouterr().err
-            assert f"is held by review-code (foreground) (pid {holder.pid}, alive)" in err
+            assert f"is held by review-code (foreground) (pid {holder.own_pid}, alive)" in err
             assert "nothing was launched" in err
         finally:
             holder.communicate("\n", timeout=10)
@@ -1550,7 +1578,7 @@ class TestOneWriterPerPhaseDir:
             after = _snapshot(plan)
         finally:
             holder.communicate("\n", timeout=10)
-        _refused_at_the_lock(result, holder.pid)
+        _refused_at_the_lock(result, holder.own_pid)
         assert "Auto-healed" not in result.stdout
         assert after == before
 
@@ -1587,7 +1615,7 @@ class TestABusyLauncherStopsAtItsEntry:
             holder.communicate("\n", timeout=10)
         assert after == before
         assert result.exit_code == 3, result.stdout + result.stderr
-        assert f"is held by review-code (foreground) (pid {holder.pid}" in result.stderr
+        assert f"is held by review-code (foreground) (pid {holder.own_pid}" in result.stderr
 
     def test_if_not_running_re_attaches_from_the_checkpoint_alone(self, tmp_path, capsys):
         """`--if-not-running` onto the live detached run that holds the dir:
@@ -1689,7 +1717,7 @@ class TestForceNeverBreaksALiveLock:
             holder.communicate("\n", timeout=10)
         err = capsys.readouterr().err
         assert "--force stops only a detached run" in err
-        assert f"pid {holder.pid}" in err
+        assert f"pid {holder.own_pid}" in err
 
     def test_a_holder_that_outlives_the_wait_is_refused_and_keeps_its_lock(
             self, tmp_path, capsys, monkeypatch):

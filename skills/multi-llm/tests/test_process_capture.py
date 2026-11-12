@@ -32,10 +32,16 @@ SKILL_DIR = Path(__file__).resolve().parents[1]
 POSIX_ONLY = pytest.mark.skipif(os.name == "nt", reason="POSIX shells and signals")
 
 #: Both drain shapes run on POSIX: the selector thread (POSIX's own) and the
-#: per-pipe blocking readers (the only shape Windows supports).
-DRAINS = pytest.mark.parametrize(
-    "selectable", [True, False], ids=["selector-drain", "reader-threads"],
-)
+#: per-pipe blocking readers (the only shape Windows supports). The selector
+#: drain does not run on Windows: ``select`` takes sockets only there, never a
+#: pipe (``WinError 10038``), and ``PipeCapture`` never picks it there
+#: (``selectable=None`` is ``os.name != "nt"``, and no lane passes one).
+DRAINS = pytest.mark.parametrize("selectable", [
+    pytest.param(True, id="selector-drain", marks=pytest.mark.skipif(
+        os.name == "nt", reason="the POSIX drain: Windows selects sockets only, "
+                                "and PipeCapture never uses it there")),
+    pytest.param(False, id="reader-threads"),
+])
 
 #: Bytes that exercise every decode rule ``Popen.communicate`` applies in text
 #: mode: CRLF and lone CR translation, an invalid byte, a multi-byte character,
@@ -838,14 +844,16 @@ _PRINTS_FOREVER = (
 
 
 class _CountTicks:
-    """Asks for a stop at the fifth ``tick`` line, and records each chunk."""
+    """Asks for a stop at the fifth ``tick`` line, and records each chunk. A
+    watch sees the raw bytes, and a Python child's text-mode stdout ends its
+    lines with ``\\r\\n`` on Windows, so a line ends at ``\\n`` either way."""
 
     def __init__(self, at=5):
         self.at, self.seen, self.chunks = at, 0, 0
 
     def __call__(self, chunk):
         self.chunks += 1
-        self.seen += chunk.count(b"tick\n")
+        self.seen += chunk.replace(b"\r\n", b"\n").count(b"tick\n")
         return f"saw {self.seen} ticks" if self.seen >= self.at else None
 
 

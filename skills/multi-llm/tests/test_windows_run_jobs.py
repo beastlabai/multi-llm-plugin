@@ -790,6 +790,12 @@ class TestTheKillSites:
         assert launch_ready() == 0
         assert windows.names()[-1] == "close" and windows.terminated == []
 
+    @pytest.mark.skipif(
+        os.name == "nt",
+        reason="the POSIX launch hands the worker the held phase lock's descriptor "
+               "(PhaseLock.handoff_fd, fcntl), a route Windows never takes and cannot "
+               "run: there the launch releases the lock and the run's job is the kill "
+               "(the rows above); Linux and macOS run this row")
     def test_off_windows_a_failed_handshake_is_the_kill_it_was(
         self, posix, host_locks, launch_ready, monkeypatch
     ):

@@ -17,6 +17,7 @@ clean poll's fields the line keeps (:data:`FAULTS`, against :data:`CLEAN`).
 from __future__ import annotations
 
 import json
+import shlex
 import signal
 import subprocess
 import sys
@@ -153,7 +154,13 @@ def make_plan(root: Path) -> Path:
 
 def result_payload(out: str, root: Path) -> Dict[str, Any]:
     """The poll's ``MULTI_LLM_RESULT`` object, with *root* and the skill
-    directory spelled ``<root>`` and ``<skill>``, and ``/`` between path parts."""
+    directory spelled ``<root>`` and ``<skill>``, and ``/`` between path parts.
+
+    A ``next`` command is spelled argument by argument (``shlex.split``): it
+    is encoded for the POSIX shell (``cli_common._quote``), which leaves a
+    path bare where it needs no quoting and single-quotes a Windows one,
+    whose backslashes it must not leave as escapes. What must hold is the
+    arguments it passes, whatever quoting a path needed."""
     line = [ln for ln in out.splitlines() if ln.startswith(cli_common.RESULT_MARKER)][-1]
     payload = json.loads(line[len(cli_common.RESULT_MARKER):])
     skill = str(cli_common.skill_dir())
@@ -168,7 +175,10 @@ def result_payload(out: str, root: Path) -> Dict[str, Any]:
             return {key: spell(item) for key, item in value.items()}
         return value
 
-    return spell(payload)
+    spelled = spell(payload)
+    if isinstance(payload.get("next"), str):
+        spelled["next"] = " ".join(spell(arg) for arg in shlex.split(payload["next"]))
+    return spelled
 
 
 #: The exit-1 line of a poll that recorded nothing (the dispatcher's own).

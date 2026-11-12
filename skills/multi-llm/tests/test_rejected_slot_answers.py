@@ -173,7 +173,17 @@ def _reject_and_leave_the_file(lane, monkeypatch) -> None:
 # No salvage of a rejected answer (Codex's three base-lane repros)
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("check", ["write", "mode", "home"])
+#: The ``mode`` row flips an owner-execute bit under the plugin's jail. Windows
+#: has neither: ``chmod`` there toggles the read-only flag alone, ``lstat``
+#: derives the execute bit from the file's extension, and git for Windows sets
+#: ``core.fileMode`` false, which turns ``mode_snapshot`` off. The row cannot
+#: be expressed there (tests/test_slot_guard_parity.py skips the same way).
+_CHECKS = ["write", pytest.param("mode", marks=pytest.mark.skipif(
+    os.name == "nt", reason="POSIX file modes (the mode check); Windows runs no plugin jail",
+)), "home"]
+
+
+@pytest.mark.parametrize("check", _CHECKS)
 def test_a_rejected_slot_is_never_salvaged(tmp_path, monkeypatch, capsys, check):
     lane = _lane(PlanLane, tmp_path, monkeypatch)
     findings = lane.findings(["Rejected answer"])
@@ -1130,7 +1140,10 @@ def test_a_phase_without_withheld_answers_is_told_its_run_replaces_the_file():
     damaged one, and moving the file aside alone is safe there."""
     advice = status_file.unreadable_checkpoint_advice("/work/out/implement", phase="implement")
     assert "run the phase again: its run keeps the damaged file" in advice
-    assert "move /work/out/implement/.status.json aside" in advice
+    # The checkpoint's path joined as the platform joins it (`status_path`): a
+    # real phase dir on Windows, `C:\...\implement`, names `C:\...\implement\.status.json`.
+    checkpoint = os.path.join("/work/out/implement", ".status.json")
+    assert f"move {checkpoint} aside" in advice
     assert "Never move" not in advice and "--reaggregate" not in advice
 
 

@@ -115,7 +115,14 @@ def test_same_bytes_same_file_and_a_changed_core_a_new_one(repo, capsys, monkeyp
 
 def _aged(path: Path) -> None:
     stamp = time.time() - multi_llm.CORE_FILE_MAX_AGE_S - 60
-    os.utime(path, (stamp, stamp), follow_symlinks=False)
+    if os.utime in os.supports_follow_symlinks:
+        os.utime(path, (stamp, stamp), follow_symlinks=False)
+    elif not path.is_symlink():
+        # Windows cannot set a link's own mtime (`follow_symlinks=False` raises
+        # NotImplementedError); a regular file or folder takes the plain call, and a
+        # link keeps its fresh mtime, so the never-removes-a-link rows there rest on
+        # the sweep's type check alone, not on the link also being too young.
+        os.utime(path, (stamp, stamp))
 
 
 def test_core_files_older_than_the_limit_are_pruned(repo, capsys):

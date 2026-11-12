@@ -691,12 +691,18 @@ class TestARefusedDetachedRestart:
 #: Stages a front door's ``--detach`` launch as the launcher does
 #: (``commit_front_door.prepare``) and prints the worker argv that launch
 #: hands its child (``_fronted_argv``, then ``detach.build_worker_argv``).
-#: Its own process: ``prepare`` reads the cwd and the environment.
+#: Its own process: ``prepare`` reads the cwd and the environment. Its streams
+#: are set up first, as every entry that reaches ``prepare`` sets them up (each
+#: commit door's ``main`` and the dispatcher's call ``bootstrap_streams``): the
+#: commit block ``prepare`` prints holds a U+2212 minus, which a Windows pipe's
+#: cp1252 default cannot encode (``UnicodeEncodeError`` before any stage).
 #: argv: <skill dir> <door mode> <run id> <door tokens...>
 _STAGE_SCRIPT = """\
 import json, sys
 sys.path.insert(0, sys.argv[1])
 from utils import commit_front_door, detach
+from utils.stream_bootstrap import bootstrap_streams
+bootstrap_streams()
 prep = commit_front_door.prepare(sys.argv[2], sys.argv[4:])
 mode, recorded, _called = commit_front_door._fronted_argv(prep)
 print("STAGED " + json.dumps({
