@@ -323,6 +323,7 @@ class TestFinishedDistribution:
         sources = {
             **_index_modes(PAYLOAD),
             **_index_modes(".claude-plugin/plugin.json"),
+            **_index_modes(".claude-plugin/icon.png"),
             **_index_modes("hooks"),
             **_index_modes("LICENSE"),
         }
@@ -1900,6 +1901,8 @@ _URL = re.compile(r"https?://[^\s)>\"'`]+")
 
 #: A citation with ``<mode>`` in it, which stands for every mode with a core file.
 MODE_PLACEHOLDER = "instructions/<mode>.md"
+#: A citation with ``<file>`` in it, which stands for every bundled reference a core names.
+REFERENCE_PLACEHOLDER = "references/<file>.md"
 
 #: Plan names the shipped text uses as examples of the *user's* plan. Anything else
 #: under ``plans/`` is a citation of a working note, which is never published.
@@ -1955,7 +1958,7 @@ class TestRuntimeReferences:
         unresolved = []
         for relative, text in _runtime_text(PLUGIN_DIR).items():
             for cited in _token_citations(text):
-                if cited == MODE_PLACEHOLDER or _resolves(skill, cited):
+                if cited == REFERENCE_PLACEHOLDER or _resolves(skill, cited):
                     continue
                 unresolved.append((relative, cited))
         assert unresolved == []
@@ -1963,12 +1966,25 @@ class TestRuntimeReferences:
     def test_the_mode_placeholder_stands_for_real_files(self):
         """(tree) It cannot be checked as a path, so it is checked as what it means."""
         skill = PLUGIN_DIR / PAYLOAD
-        assert "`${CLAUDE_SKILL_DIR}/instructions/<mode>.md`" in (skill / "SKILL.md").read_text(
+        assert f"`{MODE_PLACEHOLDER}`" in (skill / "instructions" / "full-workflow.md").read_text(
             encoding="utf-8",
         )
         for mode in mode_table.MODES:
             if mode.instruction_file:
                 assert (skill / "instructions" / mode.instruction_file).is_file(), mode.name
+
+    def test_the_reference_placeholder_stands_for_real_files(self):
+        """(tree) The rule in step 4 is only true if the cores' citations are real files."""
+        skill = PLUGIN_DIR / PAYLOAD
+        assert f"${{CLAUDE_SKILL_DIR}}/{REFERENCE_PLACEHOLDER}" in (skill / "SKILL.md").read_text(
+            encoding="utf-8",
+        )
+        named = set()
+        for core in (skill / "instructions").glob("*.md"):
+            named |= set(re.findall(r"references/[\w-]+\.md", core.read_text(encoding="utf-8")))
+        assert named
+        for cited in sorted(named):
+            assert (skill / cited).is_file(), cited
 
     def test_every_bare_skill_path_resolves(self):
         """(tree) The same rule for a citation without the token, which reads as a path
@@ -1979,7 +1995,7 @@ class TestRuntimeReferences:
         for relative, text in _runtime_text(PLUGIN_DIR).items():
             for match in _BARE_CITATION.finditer(text):
                 cited = match.group(1).rstrip(".")
-                if cited == MODE_PLACEHOLDER:
+                if cited in (MODE_PLACEHOLDER, REFERENCE_PLACEHOLDER):
                     continue
                 if not _resolves_bare(skill, cited):
                     unresolved.append((relative, cited))

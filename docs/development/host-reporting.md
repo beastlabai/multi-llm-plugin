@@ -108,7 +108,8 @@ decides, and the results of the phase calls its message made before it, are on f
 
 Racing 03's wakeup re-ran `--generate-tasks` and kept `claude -p` alive 16 minutes.
 Every error allows, a session that never ran the dispatcher pays the wait for its own call to be on
-file and one grep, a prompt the user typed ends the phase's hold, and `state.json` is not
+file and two greps (for a Bash call naming `multi_llm.py`, not the bare word: the transcript stores the
+`SessionStart` doctor hook's output, whose problem lines name it), a prompt the user typed ends the phase's hold, and `state.json` is not
 read (only the transcript says which phase this session started). SKILL.md tells the host the same,
 and to send a batch back to its subagent (`SendMessage`) rather than edit its files.
 

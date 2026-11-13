@@ -171,7 +171,7 @@ class TestSchema:
     #: note; **no consumer branches on it to decide what runs**, which is what
     #: keeps it on the admissible side of the line. The moment something does,
     #: it stops being an optional key.
-    OPTIONAL_KEYS = {"shim_max_lines", "headless_invocation", "package"}
+    OPTIONAL_KEYS = {"shim_max_lines", "min_host_version", "headless_invocation", "package"}
 
     def test_only_lint_and_doc_keys_are_optional(self):
         schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
@@ -216,6 +216,23 @@ class TestSchema:
             "the tuple; the runtime floor is what turns a malformed install into "
             "one actionable error instead of a KeyError mid-dispatch."
         )
+
+    def test_the_claude_code_baseline_is_a_record_and_not_a_package(self):
+        """Its floor needs no install route, and nothing may branch on it."""
+        row = HOSTS["claude-code"]
+        assert row["min_host_version"].count(".") == 2
+        assert row["provenance"]["min_host_version"] == "verified"
+        assert "package" not in row
+        with pytest.raises(ValueError):
+            caps.next_command_template("claude-code", "package")
+        schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+        host = schema["definitions"]["host"]["properties"]
+        assert "No consumer branches on it" in host["min_host_version"]["description"]
+        assert "min_host_version" not in host["provenance"]["required"]
+        assert "min_host_version" not in schema["definitions"]["host"]["required"]
+        readers = [SKILL_ROOT / "multi_llm.py", *(SKILL_ROOT / "utils").rglob("*.py")]
+        for path in readers:
+            assert '"min_host_version"' not in path.read_text(encoding="utf-8"), path.name
 
     def test_every_optional_key_is_provenance_tracked(self):
         """Optional does not mean unattributed."""
@@ -689,6 +706,10 @@ class TestConservativeResolution:
         },
     }
 
+    #: claude-code 2.1.319 down to 2.1.100, 2026-11-07: the runs behind the row's
+    #: `min_host_version`, described in the comment beside that key. The reference
+    #: host is exempt from this ledger, so that comment is the record.
+    #:
     #: Cells the reference host carried as `verified` before this ledger existed
     #: (D5b, 227af2d), by its own use as the host the skill was written on, with no
     #: recorded run id behind them. Exactly these two are exempt from the
@@ -841,7 +862,7 @@ class TestShimBijection:
                     "per host belongs in capabilities.yaml, in a verb slot, or in "
                     "that host's own template"
                 )
-            for tool in ("Task", "AskUserQuestion", "run_in_background"):
+            for tool in ("Agent", "Task", "AskUserQuestion", "run_in_background"):
                 assert tool not in text, (
                     f"{path.name} names the host tool '{tool}'"
                 )
@@ -941,6 +962,19 @@ class TestVerbResolution:
                 "the poll loop was written for.\n"
                 f"  sentence: {sentence}"
             )
+
+    def test_the_native_detach_sentence_stays_tightened_and_on_one_line(self):
+        """`SKILL.md` loads this on every run, and only the detaching modes use it. It was
+        814 words before the tightening (810 on 2026-11-07, plus F04's clause, which it
+        keeps). A numbered layout would spend the shim's line budget,
+        so a new requirement replaces words here rather than adding a file an agent is
+        told to open (`hosts/snippets/poll-loop.md`'s rule)."""
+        sentence = caps.verb_sentence("claude-code", "detach")
+        assert len(sentence.split()) <= 700
+        assert "\n" not in sentence
+        assert "`status` reading `ended in foreground without a final state`" in sentence
+        skill = (Path(caps.__file__).parent.parent / "SKILL.md").read_text(encoding="utf-8")
+        assert f"- {sentence}\n" in skill
 
     def test_the_native_detach_sentence_says_which_models_and_which_finished(self):
         """2026-09-20: the launch named a count and never a model.

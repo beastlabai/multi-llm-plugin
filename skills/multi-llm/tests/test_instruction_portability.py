@@ -851,6 +851,23 @@ class TestServedCoreIsTokenFree:
         assert multi_llm.main(["util", "instructions", "no-such-mode"]) == 3
         capsys.readouterr()
 
+    def test_a_missing_core_reports_the_install_and_claims_nothing(
+        self, capsys, monkeypatch, tmp_path
+    ):
+        """`SKILL.md` step 4 sends this to the user: a raw read of the same missing
+        file recovers nothing, and no artifact may suggest a core was served."""
+        monkeypatch.setattr(multi_llm, "skill_dir", lambda: tmp_path)
+        assert multi_llm.main(["util", "instructions", "review-plan"]) == 1
+        captured = capsys.readouterr()
+        text = captured.out + captured.err
+        assert "core instruction file missing" in text
+        assert "corrupt or partial" in text
+        assert "reinstall" in text
+        result = cli_common.parse_result_line(captured.out.strip().splitlines()[-1])
+        assert result["artifacts"] == []
+        assert cli_common.RESULT_MARKER in captured.out
+        assert multi_llm.CORE_END_MARKER not in text
+
     #: Modes with no core instruction file *by design* — they are pure flag
     #: surfaces with no workflow to narrate. Pinned so the set cannot grow
     #: silently: a new mode landing here means a shim's read step now says
@@ -4030,3 +4047,39 @@ class TestTheRepositorysOwnCheckRunsBare:
                 if hit:
                     found.append(f"{path.relative_to(SKILL_ROOT)}:{number}: {hit.group(0)}")
         assert found == []
+
+
+class TestTheSharedApplyParagraph:
+    """Three apply cores carry one paragraph, inline. Only one core loads per run, so
+    this costs no tokens, but the copies can drift apart.
+
+    It stays in the raw files rather than behind a shared fragment, because the
+    renderer and any raw read substitute placeholders and expand nothing else. The other
+    two paragraphs these cores look to share differ on purpose (step numbers, "file
+    check" against "snapshot diff"), so they are not held equal here.
+    """
+
+    CORES = ("apply-suggestions", "apply-task-suggestions", "apply-code-fixes")
+    OPENING = "**The last subagent returning is not the end of the phase.**"
+
+    @classmethod
+    def _paragraph(cls, text):
+        start = text.index(cls.OPENING)
+        assert text[start - 2:start] == "\n\n", "not a whole paragraph"
+        return text[start:text.index("\n\n", start)]
+
+    def _raw(self, core):
+        return (SKILL_ROOT / "instructions" / f"{core}.md").read_text(encoding="utf-8")
+
+    def test_the_three_copies_are_identical(self):
+        paragraphs = {core: self._paragraph(self._raw(core)) for core in self.CORES}
+        assert len(set(paragraphs.values())) == 1, paragraphs
+        assert "human-decision items" in paragraphs[self.CORES[0]]
+
+    @pytest.mark.parametrize("core", CORES)
+    def test_the_raw_file_holds_the_whole_text_and_renders_it_unchanged(self, core):
+        raw = self._raw(core)
+        paragraph = self._paragraph(raw)
+        assert "{" not in paragraph, "nothing in it may need expanding"
+        rendered = cli_common.render_instruction_text(raw, FIXTURE_SKILL_DIR)
+        assert self._paragraph(rendered) == paragraph

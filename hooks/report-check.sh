@@ -15,7 +15,7 @@
 #   script exits at once: it blocks at most once per turn and cannot loop.
 # - A transcript with no `[NEXT_COMMAND` and no `[WORKFLOW_COMPLETE]` text,
 #   and no Bash call that ran `multi_llm.py`, exits at once too, before uv is
-#   looked up: a session that never ran the dispatcher pays two greps.
+#   looked up: a session that never ran the dispatcher pays three greps.
 #   The dispatcher call is enough (fix round 27): Claude Code writes the
 #   transcript in batches, so when this hook starts the turn's newest entries
 #   are not on file yet, and the block the turn's last call printed can be one
@@ -54,7 +54,8 @@ while [ ! -f "$transcript" ] && [ "$i" -lt 20 ]; do
 done
 [ -f "$transcript" ] || exit 0
 grep -q -F -e '[NEXT_COMMAND' -e '[WORKFLOW_COMPLETE]' "$transcript" 2>/dev/null \
-  || grep -q -E '"name"[[:space:]]*:[[:space:]]*"Bash".*multi_llm\.py' "$transcript" 2>/dev/null \
+  || LC_ALL=C grep -E '"name"[[:space:]]*:[[:space:]]*"Bash"' "$transcript" 2>/dev/null \
+     | LC_ALL=C grep -q -F 'multi_llm.py' \
   || exit 0
 
 root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)}"

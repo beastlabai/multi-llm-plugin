@@ -1,3 +1,5 @@
+If you are running the skill rather than developing it, ignore this file.
+
 # Multi-LLM Skill — Development Guide
 
 This guide applies when developing the plugin under `skills/multi-llm/`.

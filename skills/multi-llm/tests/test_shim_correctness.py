@@ -45,6 +45,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 SKILL_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(SKILL_ROOT))
@@ -835,20 +836,152 @@ class TestReferenceShimSpecifics:
         text = self.SKILL_MD.read_text(encoding="utf-8")
         assert "--host claude-code" in text
 
-    def test_the_description_triggers_on_commit_reviews(self):
-        """plans/review-commits.md §2.9: the phrases a user says about the
-        commits they made reach the skill."""
-        line = next(
-            l for l in self.SKILL_MD.read_text(encoding="utf-8").splitlines()
-            if l.startswith("description:")
-        )
-        for trigger in ("'review my last commit'", "'review the last N commits'",
-                        "'review this branch's commits'",
-                        "'fix the issues in my last commit'"):
-            assert trigger in line, trigger
+    #: Every public mode and the phrases that select it, the acceptance fixture of
+    #: step 3's mapping. A phrase missing from the description means the skill does
+    #: not trigger on that request.
+    MODE_TRIGGERS = {
+        "review-plan": ("review my plan",),
+        "apply-suggestions": ("apply the suggestions",),
+        "improve-plan": ("improve my plan", "review and apply the suggestions"),
+        "generate-tasks": ("generate tasks from plan", "generate tasks from the plan"),
+        "review-tasks": ("review the tasks",),
+        "apply-task-suggestions": ("apply the task suggestions",),
+        "implement": ("implement this plan",),
+        "review-code": ("run code review", "review the code against the plan"),
+        "apply-code-fixes": ("apply the code fixes",),
+        "improve-code": ("improve the code", "review and fix the code"),
+        "review-commits": (
+            "review my last commit", "review the last N commits", "review this branch's commits",
+        ),
+        "apply-commit-fixes": ("fix the issues in my last commit",),
+        "improve-commits": ("review and fix this branch's commits",),
+        "full": ("run the full multi-llm workflow",),
+        "ask": (
+            "ask the models about my plan", "ask a question about this plan",
+            "ask the models a question about my plan",
+        ),
+        "status": ("check the multi-llm run status",),
+        "init": ("set up multi-llm providers for this repo",),
+    }
+    #: Triggers that select no specific workflow, or that are not phrases at all.
+    #: Step 3 names each of them; the description names all but `/multi-llm`,
+    #: which invokes the skill by name rather than through its description.
+    OTHER_TRIGGERS = ("multi-llm", "/multi-llm", "use multiple models to review", "--ask")
+
+    #: The phrases the description itself must carry, quoted as it quotes them: the
+    #: old description's triggers, which a measured activation depends on, plus one
+    #: phrase for each mode a request can name without saying multi-llm. The 1,024
+    #: character cap leaves no room for every phrase step 3 maps (2026-11-12: a
+    #: rewrite carrying all of them activated 0 of 6 times on 'review the last 2
+    #: commits' against 2 of 5 for the old text; this set, kept beside the old
+    #: text's "Use this skill whenever" sentence, activated 5 of 8).
+    DESCRIPTION_TRIGGERS = (
+        "'review my plan'", "'multi-llm'", "'run code review'", "'generate tasks from plan'",
+        "'implement this plan'", "'use multiple models to review'",
+        "'ask the models about my plan'", "'ask a question about this plan'", "'--ask'",
+        "'improve my plan'", "'review and apply the suggestions'", "'improve the code'",
+        "'review and fix the code'", "'review my last commit'", "'review the last N commits'",
+        "'review this branch's commits'", "'fix the issues in my last commit'",
+        "'review the tasks'", "'apply the suggestions'", "'apply the task suggestions'",
+        "'apply the code fixes'",
+    )
+    #: Modes with no phrase of their own in the description, and the words in it
+    #: that reach them: three name multi-llm, so its own trigger covers them.
+    REACHED_OTHERWISE = {
+        "improve-commits": "review or fix the commits they made",
+        "full": "'multi-llm'",
+        "status": "'multi-llm'",
+        "init": "'multi-llm'",
+    }
+
+    @staticmethod
+    def _description_value(text):
+        """The description as YAML reads it, not as a line of text. Only its own line
+        is parsed, because the `argument-hint` line beside it is not strict YAML."""
+        line = next(l for l in text.splitlines() if l.startswith("description:"))
+        return yaml.safe_load(line)["description"]
+
+    @classmethod
+    def _missing_triggers(cls, description):
+        return [t for t in cls.DESCRIPTION_TRIGGERS if t not in description]
+
+    @classmethod
+    def _unreached_modes(cls, description):
+        return [
+            mode for mode, phrases in cls.MODE_TRIGGERS.items()
+            if not any(f"'{p}'" in description for p in phrases)
+            and cls.REACHED_OTHERWISE.get(mode, "\0") not in description
+        ]
+
+    def test_the_fixture_covers_every_public_mode(self):
+        public = {mode.name for mode in mode_table.MODES if mode.name in self.MODE_TRIGGERS}
+        assert set(self.MODE_TRIGGERS) == public
+        flags = set(re.findall(r"--([a-z-]+)", mode_table.render_argument_hint().split("]")[0]))
+        assert set(self.MODE_TRIGGERS) == flags
+        assert len(self.MODE_TRIGGERS) == 17
+
+    def test_the_description_triggers_on_every_mode_and_retained_alias(self):
+        description = self._description_value(self.SKILL_MD.read_text(encoding="utf-8"))
+        assert self._missing_triggers(description) == []
+        assert self._unreached_modes(description) == []
+        assert "Use this skill whenever the user wants to" in description
         # Skill descriptions are capped at 1024 characters.
-        description = line.split("description:", 1)[1].strip().strip('"')
         assert len(description) <= 1024, len(description)
+
+    def test_the_modes_reached_through_multi_llm_name_it(self):
+        for mode, words in self.REACHED_OTHERWISE.items():
+            if words == "'multi-llm'":
+                assert all("multi-llm" in p for p in self.MODE_TRIGGERS[mode]), mode
+
+    def test_every_description_trigger_selects_a_mode_in_step_3(self):
+        mapped = {f"'{p}'" for phrases in self.MODE_TRIGGERS.values() for p in phrases}
+        others = {f"'{t}'" for t in self.OTHER_TRIGGERS}
+        assert set(self.DESCRIPTION_TRIGGERS) <= mapped | others
+
+    def test_step_3_maps_every_phrase_to_its_mode(self):
+        text = self.SKILL_MD.read_text(encoding="utf-8")
+        paragraph = next(
+            line for line in text.splitlines() if line.startswith("**A request in plain words**")
+        )
+        for mode, phrases in self.MODE_TRIGGERS.items():
+            for phrase in phrases:
+                start = paragraph.index(f"'{phrase}'")
+                # The nearest mode word after a phrase is the one it selects.
+                assert re.match(r"[^`]*`" + re.escape(mode) + "`", paragraph[start:]), (mode, phrase)
+
+    def test_step_3_keeps_the_literal_rules_apart_from_the_words(self):
+        text = self.SKILL_MD.read_text(encoding="utf-8")
+        assert "**No mode flag means `review-plan`.**" in text
+        assert "never add a flag they did not type" in text
+        assert "A missing plan path, or an empty or unquoted question, is an error" in text
+        paragraph = next(
+            line for line in text.splitlines() if line.startswith("**A request in plain words**")
+        )
+        assert "before step 4" in paragraph
+        assert "add no other flag" in paragraph
+        assert "never from the conversation" in paragraph
+        assert "ask for a missing one before dispatching; `init` needs neither" in paragraph
+        assert "a commit mode takes its range instead of a plan path" in paragraph
+        assert "pass the question as the one single-quoted argument after the plan path" in paragraph
+        # The range is a form the dispatcher reads: the trigger phrase itself is not one.
+        assert "`this branch` for 'this branch's commits'" in paragraph
+        assert "bare `multi-llm`, `/multi-llm` or 'use multiple models to review' names no workflow" in paragraph
+        assert "does not override a user's requirement" in paragraph
+        assert "ask which they mean instead of dispatching" in paragraph
+
+    @pytest.mark.parametrize("phrase", [
+        "'review and apply the suggestions'", "'review the tasks'", "'generate tasks from plan'",
+        "'--ask'", "'use multiple models to review'", "'multi-llm'",
+    ])
+    def test_removing_a_required_phrase_fails_the_check(self, phrase):
+        description = self._description_value(self.SKILL_MD.read_text(encoding="utf-8"))
+        assert phrase in description
+        assert phrase in self._missing_triggers(description.replace(phrase, "removed"))
+
+    def test_removing_a_mode_s_only_route_fails_the_check(self):
+        description = self._description_value(self.SKILL_MD.read_text(encoding="utf-8"))
+        cut = description.replace("review or fix the commits they made", "removed")
+        assert self._unreached_modes(cut) == ["improve-commits"]
 
     def test_the_argument_hint_still_renders_from_the_mode_table(self):
         line = next(
@@ -865,6 +998,135 @@ class TestReferenceShimSpecifics:
         for grant in ("Bash(uv:*)", "Bash(PYTHONUNBUFFERED=1 uv:*)",
                       "Bash(command -v uv)", "Task", "AskUserQuestion"):
             assert grant in text, grant
+
+    # -- step 4: a failed read, and where bundled references live ---------------
+    def test_the_raw_core_fallback_stays_deleted(self):
+        """No failure of `util instructions` left a raw read that recovered anything.
+
+        Reproduced 2026-11-07: a missing or unreadable core fails both ways, a
+        non-UTF-8 one is a corrupt install, and a broken import or missing lock takes
+        every later dispatcher call down with it.
+        """
+        text = self.SKILL_MD.read_text(encoding="utf-8")
+        for gone in ("instructions/<mode>.md", "full-workflow.md", "init-config.md",
+                     "documented fallback", "{UV_RUN_FLAGS}"):
+            assert gone not in text, gone
+
+    def test_a_failed_read_is_reported_and_status_stays_dispatcher_driven(self):
+        text = self.SKILL_MD.read_text(encoding="utf-8")
+        step_4 = text[text.index("## 4. Load"):text.index("## 5. Capability")]
+        assert "`status` has no core" in step_4
+        assert "`status --help`" in step_4
+        assert "report its last error line and stop" in step_4
+        assert "corrupt or partial install" in step_4
+        assert "reinstall the plugin" in step_4
+        assert "blocks every later dispatcher command" in step_4
+        # None of this may lean on a result line: a failed launch prints none.
+        failure = step_4[step_4.index("If a `util instructions` call fails"):]
+        for field in ("`artifacts`", "MULTI_LLM_RESULT", "`state`"):
+            assert field not in failure, field
+
+    @staticmethod
+    def _reference_rule_problems(text):
+        """Why step 4's rule for bundled references is not intact, if it is not."""
+        step_4 = text[text.index("## 4. Load"):text.index("## 5. Capability")]
+        problems = []
+        if "`references/<file>.md` are relative to the skill directory" not in step_4:
+            problems.append("the rule is gone")
+        if 'Read `"${CLAUDE_SKILL_DIR}/references/<file>.md"`' not in step_4:
+            problems.append("the skill-dir prefix is gone")
+        if "never a repo-relative path" not in step_4:
+            problems.append("repo-relative lookup is no longer forbidden")
+        if "preserve dispatcher-supplied artifact paths and user-repository paths" not in step_4:
+            problems.append("artifact and repository paths are no longer preserved")
+        for folder in ("prompts", "schemas", "hosts"):
+            if f"${{CLAUDE_SKILL_DIR}}/{folder}/<" in step_4 or f"`{folder}/<" in step_4:
+                problems.append(f"the rule widened to {folder}/")
+        return problems
+
+    def test_bundled_references_resolve_from_the_skill_dir(self):
+        assert self._reference_rule_problems(
+            self.SKILL_MD.read_text(encoding="utf-8")
+        ) == []
+
+    @pytest.mark.parametrize("old,new,expected", [
+        ("Bundled resource references the core names as `references/<file>.md` are relative "
+         "to the skill directory: ", "", "the rule is gone"),
+        ('"${CLAUDE_SKILL_DIR}/references/<file>.md"', '"references/<file>.md"',
+         "the skill-dir prefix is gone"),
+        ("never a repo-relative path", "any path", "repo-relative lookup is no longer forbidden"),
+        ("preserve dispatcher-supplied artifact paths and user-repository paths", "carry on",
+         "artifact and repository paths are no longer preserved"),
+        ('Read `"${CLAUDE_SKILL_DIR}/references/<file>.md"`',
+         'Read `"${CLAUDE_SKILL_DIR}/references/<file>.md"` and `"${CLAUDE_SKILL_DIR}/prompts/<file>"`',
+         "the rule widened to prompts/"),
+    ])
+    def test_the_reference_rule_check_catches_each_regression(self, old, new, expected):
+        text = self.SKILL_MD.read_text(encoding="utf-8")
+        assert old in text
+        assert expected in self._reference_rule_problems(text.replace(old, new))
+
+    # -- section 5: the subagent tool, and sending a batch back ------------------
+    def test_the_legacy_task_sentence_is_separate_and_conditional(self):
+        text = self.SKILL_MD.read_text(encoding="utf-8")
+        sentence = caps.verb_sentence("claude-code", "subagents")
+        assert "`Agent`" in sentence and "`Task`" not in sentence
+        assert f"{sentence} If `Agent` is unavailable and `Task` is exposed, use `Task` instead.\n" in text
+
+    def test_no_grant_was_added_as_a_presumed_permission_fix(self):
+        """Neither tool was gated in default mode, so `allowed-tools` keeps its alias."""
+        frontmatter = self.SKILL_MD.read_text(encoding="utf-8").split("---\n")[1]
+        grants = re.findall(r"^  - (.+)$", frontmatter, re.M)
+        assert "Task" in grants
+        assert "Agent" not in grants
+        assert "SendMessage" not in grants
+
+    def test_sending_a_batch_back_is_qualified(self):
+        text = self.SKILL_MD.read_text(encoding="utf-8")
+        version = caps.entry("claude-code")["min_host_version"]
+        assert (
+            "send the batch back to the subagent that ran it with `SendMessage`, loading that "
+            "tool through `ToolSearch` first if it is deferred" in text
+        )
+        assert (
+            "If `SendMessage` stays unavailable, tell the user this host cannot resume the batch, "
+            f"which takes `SendMessage` (Claude Code {version} and newer have it), and leave the "
+            "batch pending: never claim it complete or create a replacement subagent." in text
+        )
+        # A refused edit stops the phase the same way a refused command does: the
+        # skill's Write and Edit grants expire with the turn too (2.1.322, 2026-11-12).
+        assert "If a dispatcher command or an edit then needs approval" in text
+        assert "Never edit a batch's files yourself" in text
+        # The guidance stays out of the rendered sentences the byte comparison owns.
+        for sentence in caps.verb_sentences("claude-code"):
+            assert "SendMessage" not in sentence
+
+    def test_subagents_stay_in_the_turn_that_holds_the_permission_rules(self):
+        """The prompting operation behind this item, found 2026-11-07. A background
+        subagent ended the turn, and in the next one `allowed-tools` no longer applied:
+        `util check-reply` and `--reaggregate` were refused, and the phase never reported.
+        The same run with the subagents in the foreground finished in one turn."""
+        text = self.SKILL_MD.read_text(encoding="utf-8")
+        assert (
+            "Pass `run_in_background: false` on each subagent call, putting a wave's calls in "
+            "one message, so the replies come back in this turn" in text
+        )
+        assert "permission rules last only for the turn that loaded it" in text
+        for sentence in caps.verb_sentences("claude-code"):
+            assert "run_in_background: false" not in sentence
+
+    def test_the_documented_baseline_is_the_recorded_one(self):
+        version = caps.entry("claude-code")["min_host_version"]
+        installation = (SKILL_ROOT.parent.parent / "docs" / "installation.md").read_text(encoding="utf-8")
+        assert f"Claude Code {version} or newer" in installation
+
+    def test_the_development_guide_tells_a_running_skill_to_ignore_it(self):
+        """`CLAUDE.md` imports the guide as soon as a file under the skill is read in a
+        checkout, and its commands conflict with this shim's "never `cd`"."""
+        guide = (SKILL_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        assert guide.splitlines()[0] == (
+            "If you are running the skill rather than developing it, ignore this file."
+        )
 
     def test_the_shim_is_the_only_place_naming_the_host_placeholder(self):
         text = self.SKILL_MD.read_text(encoding="utf-8")

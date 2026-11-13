@@ -317,7 +317,9 @@ the model, and leaves the network unconfined — each warning, a bad `MULTI_LLM_
 a sandbox probe with no result; an undeclared probe is not one), and one `NOTE` naming every probe
 that ran out of budget). Any `NOTE` makes the summary say checking was incomplete instead of "no
 problems"; the full table and the repair text are a plain `doctor`'s, and
-`--json` is complete either way (about 450 characters here against 4,350 before, 2026-11-08); beside it, a `Stop` hook runs `hooks/report-check.sh`
+`--json` is complete either way (about 450 characters here against 4,350 before, 2026-11-08). The hook drops the dispatcher's
+`MULTI_LLM_RESULT` line, and only that line, anchored at the line start, so the protocol line nobody
+reads there never enters the context; every other caller still gets it. Beside it, a `Stop` hook runs `hooks/report-check.sh`
 (plans/next-phase-command.md T11), which exits 0 at once when `stop_hook_active` is set or when
 the transcript holds no `[NEXT_COMMAND`/`[WORKFLOW_COMPLETE]` text and no Bash call that ran
 `multi_llm.py` (a `grep` before uv is even looked up; the call is enough

@@ -34,11 +34,46 @@ unfilled slot, no deferral to the agent, no env assignment beyond `MULTI_LLM_SKI
 paragraph copied in, every named mode resolving through the real parser), so the per-host
 `.tmpl` files pick it up with no edit.
 
+**The spawn sentence names `Agent`, and `allowed-tools` keeps `Task`.** `Agent` is the tool's current
+name and `Task` its compatibility alias. Neither that spelling nor `SendMessage` is a permission
+question: both were called with no denial in default permission mode, and subagent launches do not
+prompt. A session's `init` event can still list `Task` while the model calls `Agent`.
+
+**What does prompt mid-phase is measured, and neither is the subagent tool (2.1.319, 2026-11-07).**
+
+- A skill's `allowed-tools` last only for the turn that loaded it. A background subagent ended the
+  turn, and in the next one `util check-reply` and `--reaggregate` read "This command requires
+  approval", which a headless session refuses, so the phase never reported. With
+  `run_in_background: false` on each subagent call, the same run under the same settings finished in
+  one turn, which is why `SKILL.md` asks for it. A subagent the host moves to the background anyway
+  still reaches that later turn.
+- A `SendMessage` resume always runs in the background, and 2.1.319 has no tool to wait on it inside
+  the turn, so a send-back ends the turn and the next dispatcher command needs approval: an
+  interactive session asks the user, and a headless default-mode run refuses it. Re-measured on
+  2.1.322 (2026-11-12): unchanged, still no wait tool (`TaskOutput` is gone), and the skill's
+  `Write`/`Edit` grants expire with the turn too, so the parent's next edit to the plan or to a
+  `.multi-llm/` snapshot also asks. `SKILL.md` says to
+  carry on and treat that as the host asking, never as something to work around. The plugin ships no
+  `PreToolUse` allow hook for it (decided 2026-11-12): widening a permission is the user's call, and
+  `docs/installation.md` ("Headless Claude Code runs in default permission mode") has the opt-in.
+- In default permission mode Claude Code also asks before a shell command creates a file in the
+  working directory. So the detached launch's redirect into `orchestrator-run.log`, and any `mkdir` of
+  a first run's phase dir, ask whatever the allow rules say. `--permission-mode acceptEdits` clears both,
+  but not the later turn's dispatcher commands above: run `01b` was `acceptEdits` and still read
+  "This command requires approval".
+
+**The plugin-host baseline is `min_host_version` on the claude-code row of `hosts/capabilities.yaml`.**
+It is the lowest build the skill was run on with subagent creation and `SendMessage` resumption both
+working, and the comment beside the key has the measurement. Nothing enforces it. `SKILL.md` names the
+same version to a user whose build cannot resume a batch, and a test holds the two together. The
+reviewer adapter's floor in `utils/providers/claude_code.py` protects a different thing, the CLI's JSON
+result envelope, and stays separate.
+
 ## Host capability ownership
 
 **`hosts/capabilities.yaml` is the verb→mechanism map, and it is data (D5b).** One entry per host id,
 validated against `schemas/host_capabilities.schema.json` (every field required except a closed set of lint/doc keys
-— `shim_max_lines`, `headless_invocation`, `package` — each admissible only
+— `shim_max_lines`, `min_host_version`, `headless_invocation`, `package` — each admissible only
 because it governs a lint or a generated document and never a dispatch decision; a defaulted
 *capability* is the silent guess the schema exists to remove).
 `subagents`/`ask`/`detach` are the three verbs;

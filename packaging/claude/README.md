@@ -20,6 +20,7 @@ still loads the root directly during development, but that layout is not what us
 | In the tree | Comes from |
 | --- | --- |
 | `.claude-plugin/plugin.json` | the root manifest, verbatim |
+| `.claude-plugin/icon.png` | the root listing icon, verbatim |
 | `hooks/hooks.json`, `hooks/doctor.sh`, `hooks/report-check.sh`, `hooks/wakeup-check.sh` | the root `hooks/`, verbatim, with the mode git records |
 | `LICENSE` | the repository root |
 | `skills/multi-llm/` | the shared runtime allowlist, the product-under-test section of `skills/multi-llm/tests/container/context_manifest.txt` |

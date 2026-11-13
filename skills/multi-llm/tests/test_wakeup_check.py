@@ -91,6 +91,11 @@ class TestRefusedWhileAPhaseRuns:
         assert "Keep waiting for the phase's subagents" in reason
         assert "completion notification arrives on its own" in reason
         assert "never schedule a phase command to run again" in reason
+        # It agrees with SKILL.md's wait paragraph: a detached launch is polled,
+        # and only a background subagent is waited on by ending the turn.
+        assert "Poll a detached launch with its `status` call" in reason
+        assert "end your turn once nothing else is left to do" in reason
+        assert "is how you wait" not in reason
 
     def test_cron_create_is_refused_too(self, tmp_path, capsys):
         path = racing_03(Transcript()).write(tmp_path / "t.jsonl")
@@ -321,13 +326,16 @@ class TestTheShimSaysSo:
         paragraph = self._paragraph()
         assert "wait in this session for what it started" in paragraph
         assert "completion notification arrives on its own" in paragraph
+        # The hook's refusal repeats this, so the two must not disagree.
+        assert "once nothing else is left to do, end your turn" in paragraph
+        assert "is how you wait" not in paragraph
 
     def test_it_sends_a_batch_back_rather_than_editing_it(self):
         """Racing 08's host sent a batch back with `SendMessage` when its
         diff broke the game; the shim makes that the rule."""
         paragraph = self._paragraph()
-        assert "send the batch back to the subagent that ran it (`SendMessage`)" in paragraph
-        assert "never edit a batch's files yourself" in paragraph
+        assert "send the batch back to the subagent that ran it with `SendMessage`" in paragraph
+        assert "Never edit a batch's files yourself" in paragraph
 
 
 # ---------------------------------------------------------------------------

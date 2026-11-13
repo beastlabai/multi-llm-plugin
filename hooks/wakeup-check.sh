@@ -21,9 +21,11 @@
 #   `tool_use_id` to be on file, at most 2 s (20 steps of 0.1 s; at once
 #   where `sleep` takes no fraction), and the util waits the same way for the
 #   results of the phase calls that message made before it.
-# - A transcript with no `multi_llm.py` in it then exits at once too, before
-#   uv is looked up: a session that never ran the dispatcher pays that wait
-#   (0.1-0.2 s measured on 2.1.293) and one grep.
+# - A transcript with no Bash call naming `multi_llm.py` then exits at once too,
+#   before uv is looked up: a session that never ran the dispatcher pays that wait
+#   (0.1-0.2 s measured on 2.1.293) and two greps, which take the keys in either
+#   order. The call, not the bare word: a hook's own output is stored in the
+#   transcript, and the doctor's can name it.
 # - The util's stdout also carries the dispatcher's `MULTI_LLM_RESULT` line,
 #   and Claude Code parses hook stdout as JSON only when the whole of it is
 #   JSON, so only the decision line (`{"hookSpecificOutput"...`) is passed on.
@@ -58,7 +60,9 @@ while [ "$i" -lt 20 ]; do
   i=$((i + 1))
 done
 [ -f "$transcript" ] || exit 0
-grep -q -F 'multi_llm.py' "$transcript" 2>/dev/null || exit 0
+# Per line, in either key order: a Bash tool call, and the dispatcher's name on the same line.
+LC_ALL=C grep -E '"name"[[:space:]]*:[[:space:]]*"Bash"' "$transcript" 2>/dev/null \
+  | LC_ALL=C grep -q -F 'multi_llm.py' || exit 0
 
 root="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)}"
 skill="$root/skills/multi-llm"

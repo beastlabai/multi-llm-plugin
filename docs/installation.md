@@ -150,6 +150,7 @@ Unlike the Claude Code command, `codex plugin marketplace remove` removes only t
 
 | Requirement | Why |
 | --- | --- |
+| **Claude Code plugin only:** Claude Code 2.1.200 or newer | The oldest build this plugin was run on with subagents and `SendMessage` both working. Of the older builds tried, 2.1.150 and 2.1.100 can start a subagent but cannot send a batch back to it for more work; builds between 2.1.150 and 2.1.200 were not tried. |
 | [`uv`](https://docs.astral.sh/uv/) on your `PATH` | The orchestrators run as `uv run` Python scripts. uv installs their dependencies (just `pyyaml`) on first use. If `uv` is missing when a mode starts (`--init`, `--review-plan`, `--review-code`, ...), the skill prints the installation instructions from `skills/multi-llm/hosts/uv-missing.txt` and stops (exit 3) — it never installs uv and never offers to. Install location and installer differ per OS: on **Linux/macOS** the official installer (`curl -LsSf https://astral.sh/uv/install.sh \| sh`) puts `uv` in `~/.local/bin/uv`; on **macOS** Homebrew installs to `/opt/homebrew/bin/uv` (Apple Silicon) or `/usr/local/bin/uv` (Intel), and MacPorts to `/opt/local/bin/uv`; on **Windows** the official installer is PowerShell (`powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 \| iex"`) and creates `%USERPROFILE%\.local\bin\uv.exe` — which Git Bash sees as `~/.local/bin/uv.exe` (note the `.exe`); `winget install --id=astral-sh.uv -e` and `pipx install uv` also work. |
 | Python >= 3.10 (usually nothing to install) | The orchestrators need Python 3.10 or newer, and `uv` supplies it: if no suitable interpreter is installed, `uv` downloads a managed one on first use, which needs the network once. **Codex plugin only:** the plugin's tool server starts on the system `python3` before `uv` is involved, so python3 >= 3.9 must be on `PATH` under exactly that name. |
 | [Git](https://git-scm.com/), and a Git repository to run in | `--review-code`, `--implement` and the apply modes read diffs and stage files with `git`. `--init` writes its config at the Git root, and the per-project config is only discovered inside a Git repository. |
@@ -157,6 +158,31 @@ Unlike the Claude Code command, `codex plugin marketplace remove` removes only t
 | One or more provider CLIs | You only need the CLIs for the models you actually run. See [Providers](providers.md). |
 
 The plugin ships its own `pyproject.toml`/`uv.lock`, so no manual Python setup is required beyond the Codex plugin's `python3` - `uv` resolves the environment the first time a mode runs.
+
+## Headless Claude Code runs in default permission mode
+
+The skill's own permission rules (`allowed-tools`) last only for the turn that loaded it, and in default permission mode Claude Code also asks before a shell command creates a file in the working directory. An interactive session shows you those questions. A headless `claude -p` run refuses them, so a phase can stop part-way: at a fan-out's launch (its redirect into `orchestrator-run.log`, or the `mkdir` of a first run's phase directory), or after a batch is sent back to its subagent, because that resume runs in the background and ends the turn. The plugin grants nothing extra on your behalf. To run headless in default mode, opt in yourself. The two stops need different fixes, so a phase that both launches a fan-out and sends a batch back needs both:
+
+- **A fan-out's launch** (`--review-plan`, `--review-tasks`, `--review-code`, `--review-commits`, `--ask`): run with `--permission-mode acceptEdits`, which lets the launch's redirect and a first run's `mkdir` go ahead. On 2.1.319 allow rules did not clear it. The mode is wider than these two steps and lasts the whole session: Claude Code then accepts every file edit, and common filesystem commands such as `mkdir`, in the working directory and any added directories without asking, so the narrower `Edit` rules below do not limit it.
+- **A later turn** (after a batch is sent back): allow the skill's dispatcher command, and its edits to the plan and to the run's snapshots under `.multi-llm/tmp/`. Adjust `plans/**` to wherever your plans live. `acceptEdits` alone does not cover this: on 2.1.319 a later turn's dispatcher command still needed approval.
+
+  ```json
+  {
+    "permissions": {
+      "allow": [
+        "Bash(uv run --frozen --no-dev --project \"*/skills/multi-llm\" -- python \"*/skills/multi-llm/multi_llm.py\" *)",
+        "Edit(plans/**)",
+        "Edit(.multi-llm/tmp/**)"
+      ]
+    }
+  }
+  ```
+
+  With exactly these three rules, Claude Code 2.1.322 finished an `--apply-suggestions` phase with no denials in default mode, including a batch sent back to its subagent. With the `Bash` rule alone, it stopped at the parent's next edit.
+
+  **What the `Bash` rule allows.** In a Claude Code rule `*` matches any text, spaces and `..` included, so this rule is not limited to the plugin's files: it allows any command that starts with `uv run --frozen --no-dev --project "` and has that shape. Writing the plugin's installed path in full instead of the first two `*` is narrower, but on 2.1.322 it refused one of the commands a phase runs (one with a `$(…)` substitution), and the path changes with every plugin update. For comparison, the skill grants itself `Bash(uv:*)` for the turn that loads it.
+
+  Put the rules where a headless run reads them: your user settings (`~/.claude/settings.json`), or a file passed with `--settings <file>`. A headless run ignores a project's `.claude/settings.json` until you have trusted that folder in an interactive session; it says so on stderr ("this workspace has not been trusted").
 
 ## The plugin's own providers.yaml
 

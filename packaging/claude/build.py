@@ -16,6 +16,7 @@ must equal the committed one).
 staged                                from
 ====================================  =========================================
 ``.claude-plugin/plugin.json``        the root manifest, verbatim
+``.claude-plugin/icon.png``           the root listing icon, verbatim
 ``hooks/hooks.json``                  the root hook configuration, verbatim
 ``hooks/doctor.sh``                   the root hook script, verbatim
 ``hooks/report-check.sh``             the root hook script, verbatim
@@ -86,6 +87,7 @@ PAYLOAD_RELATIVE = "skills/multi-llm"
 #: the install copies the directory wholesale.
 PLUGIN_FILES: Mapping[str, str] = {
     ".claude-plugin/plugin.json": ".claude-plugin/plugin.json",
+    ".claude-plugin/icon.png": ".claude-plugin/icon.png",
     "LICENSE": "LICENSE",
     "hooks/hooks.json": "hooks/hooks.json",
     "hooks/doctor.sh": "hooks/doctor.sh",
@@ -105,6 +107,7 @@ PACKAGING_INPUTS: Tuple[str, ...] = (
     "packaging/claude/build.py",
     "packaging/common/payload.py",
     ".claude-plugin/plugin.json",
+    ".claude-plugin/icon.png",
     "hooks/hooks.json",
     "hooks/doctor.sh",
     "hooks/report-check.sh",

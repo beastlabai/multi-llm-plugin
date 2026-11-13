@@ -81,6 +81,7 @@ CLAUDE = Distribution(
     regen="make claude-regen",
     copied={
         ".claude-plugin/plugin.json": ".claude-plugin/plugin.json",
+        ".claude-plugin/icon.png": ".claude-plugin/icon.png",
         "LICENSE": "LICENSE",
         "hooks/hooks.json": "hooks/hooks.json",
         "hooks/doctor.sh": "hooks/doctor.sh",

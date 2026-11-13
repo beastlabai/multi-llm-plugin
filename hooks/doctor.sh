@@ -10,6 +10,11 @@
 # `--version` strings are reused, keyed on each executable's file identity
 # (utils/cli_version_cache.py); auth and sandbox probes run every time.
 #
+# A hook's stdout enters the model's context in every session. The dispatcher
+# ends with its `MULTI_LLM_RESULT` line, the protocol its callers read, and nobody
+# reads it here, so that one line, matched from the start of the line, stops at
+# this boundary; every other line, the doctor's summary and problems, goes on.
+#
 # uv is looked for the way `utils/unattended.find_uv()` and every rendered shim
 # look for it: $MULTI_LLM_UV, then PATH, then the documented install locations
 # (`hosts/uv-missing.txt`). Silent when none resolves: the first real command
@@ -38,5 +43,11 @@ fi
 
 # `--frozen --no-dev` is `utils/unattended.uv_run_args()`'s default list, spelled
 # out here for the same reason SKILL.md spells it out: nothing renders this file.
-"$uv" run --frozen --no-dev --project "$skill" -- python "$skill/multi_llm.py" doctor --warn-only 2>/dev/null
+out=$("$uv" run --frozen --no-dev --project "$skill" -- python "$skill/multi_llm.py" doctor --warn-only 2>/dev/null)
+[ -n "$out" ] || exit 0
+# Drop the dispatcher's protocol line, which means nothing to a session that ran no
+# phase. `LC_ALL=C` keeps sed byte-wise, so a multibyte locale that cannot decode a
+# warning's dash never drops the warnings; if sed itself fails, print it all.
+filtered=$(printf '%s\n' "$out" | LC_ALL=C sed '/^MULTI_LLM_RESULT: {/d') || filtered=$out
+[ -z "$filtered" ] || printf '%s\n' "$filtered"
 exit 0
