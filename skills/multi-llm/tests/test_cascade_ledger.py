@@ -449,19 +449,31 @@ class TestBudget:
         assert text.endswith(overflow + "\n")
         assert len(text) <= limit
 
-    def test_the_reviewer_overflow_names_the_full_ledger_and_the_validator_no_path(self, tmp_path):
+    def test_the_reviewer_overflow_names_the_full_ledger_and_the_validator_no_path(self):
         built = self._ledger()
-        full = tmp_path / "stage-3" / "inputs" / "ledger-full.md"
-        changes = tmp_path / "stage-3" / "inputs" / "changes-so-far.diff"
-        reviewer = ledger.render_reviewer(built, full_path=full, changes_path=changes, limit=1000)
-        assert len(reviewer) <= 1000
+        # Rendering never touches the files, so a fixed path keeps the block's
+        # length the same on every platform (a macOS tmp_path is twice as long
+        # as a Linux one, and both paths are in the block's fixed text).
+        inputs = Path("/runs/plan/improve-plan/cascades/c1/stage-3/inputs")
+        full = inputs / "ledger-full.md"
+        changes = inputs / "changes-so-far.diff"
+
+        def render(limit):
+            return ledger.render_reviewer(built, full_path=full, changes_path=changes, limit=limit)
+
+        # Room for the most important entry above the block with none.
+        limit = len(render(0)) + 60
+        reviewer = render(limit)
+        assert len(reviewer) <= limit
+        assert built.rejected[3].line() in reviewer  # R2-1, the first by priority
+        assert "6 more entries are left out" in reviewer
         assert "left out here to keep this block short; every entry is in " \
                f"{os.path.abspath(full)}." in reviewer
         assert reviewer.rstrip("\n").endswith(os.path.abspath(changes))
         validator = ledger.render_validator(built, limit=400)
         assert len(validator) <= 400
         assert "more entries are left out" in validator
-        assert str(tmp_path) not in validator and "ledger-full" not in validator
+        assert "cascades" not in validator and "ledger-full" not in validator
 
     def test_the_inline_cap_is_eight_thousand(self):
         assert ledger.LEDGER_INLINE_MAX_CHARS == 8000
