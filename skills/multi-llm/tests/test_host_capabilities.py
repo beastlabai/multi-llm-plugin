@@ -693,6 +693,10 @@ class TestConservativeResolution:
     #: fresh registry install, offline use, restart, and the 0.1.3 -> 0.1.4
     #: upgrade pass all nine criteria in records/20261101T061412Z-opencode-release-network-check.json.
     #: Reconfirms the package cell; no other provenance is promoted.
+    #: opencode 1.19.5, 2026-11-12, later npm release opencode-v0.1.8:
+    #: fresh registry install, offline use, restart, and the 0.1.4 -> 0.1.8
+    #: upgrade pass all nine criteria in records/20261112T160945Z-opencode-release-network-check.json.
+    #: Reconfirms the package cell; no other provenance is promoted.
     RECORDED_SMOKES = {
         "claude-code": {"next_command.skill"},
         "codex": {
