@@ -138,6 +138,12 @@ HARNESS_SUITES: Dict[str, HarnessSuite] = {
     "test_e2e_html_report.py": HarnessSuite(
         ("utils.html_report_generator",), "the HTML report written and reimported by a phase run",
     ),
+    "test_e2e_improve_cascade.py": HarnessSuite(
+        ("utils.improve_cascade", "utils.improve_cascade_next", "utils.cascade_archive",
+         "utils.cascade_ledger", "utils.improve_workflow", "utils.improve_steps"),
+        "improve-plan and improve-code --cascade through multi_llm.py, and the native "
+        "leg's planner chain",
+    ),
     "test_e2e_improve_modes.py": HarnessSuite(
         ("utils.improve_workflow", "utils.improve_steps", "utils.commit_review"),
         "improve-plan, improve-code and improve-commits through multi_llm.py",

@@ -902,6 +902,82 @@ round refuses that batch with the same words, before any child starts, and nothi
 dispatched. A round started while a batch's model runs is caught at the next batch; no lock is
 held across model execution (Codex review of F02, #2, and its re-check, #3).
 
+**A cascade stage's round records which stage it is** (`utils/cascade_provenance.py`; the cascade
+itself: workflows.md, [A cascade (`--cascade`)](workflows.md#a-cascade---cascade)). A round id
+cannot bind a round to a stage, since every retry fan-out stamps a new one, so a review-plan or
+review-code run given the hidden `--cascade-stage-file <manifest>` records a `cascade` block in its
+`.status.json`: `schema_version`, `cascade_id`, `mode`, `stage`, `of`, `model`, `manifest` (the
+absolute path), `manifest_sha256` and `files` (`{input name: sha256}`), built from the manifest after
+every hash it lists is verified (`block_from_manifest`) and declared in
+`schemas/status_file.schema.json`. `review_lane.check_cascade_stage` makes those checks before the
+phase dir, its lock, `state.json` or the checkpoint is touched, and refuses a manifest whose cascade
+is not the one the composite's `cascade-current.json` names as running, or whose stage is closed
+(`check_current`, exit 3); `open_round` makes the manifest checks again under the checkpoint mutex
+and is the block's one writer. Like the withheld-model maps, the opening write
+carries the block by three rules (`next_block`):
+
+- **Flag given:** record its block; but a fan-out that keeps results (not `--rerun-all`) over another
+  stage's block stops at exit 3, needs-human, since two stages' results would share one round.
+- **Flag absent, the stage's round resumed** (`resumes_stage`: no `--rerun-all`, and the fan-out's
+  requested specs are exactly the block's one model: a `--force` resume that reuses the model's
+  result or dispatches it again, however the review words its retry): carry the recorded block
+  over. `replay_flags` drops the hidden flag, so a printed retry never replays it, and this rule is
+  what keeps that retry the stage's round. It needs the retry to name the stage's model, and the
+  replay flags of a review the composite ran in its own process name none, so every printed `--force`
+  retry of review-plan and review-code (the zero-result `Retry with:`, the lane's `retry_command`,
+  the every-reviewer-failed reaggregate exit, the other-round refusals, review-code's partial
+  completion and stale-completion lines) passes its flags through `cascade_provenance.retry_flags`:
+  with a block on record (or, at the zero-result exit, the manifest the run's hidden flag names),
+  any model selector gives way to `--models <the block's model>`.
+- **Flag absent otherwise** (`--rerun-all`, another model, or a second model beside the stage's):
+  no block. A round started by hand is not the cascade's, which is how the cascade sees a foreign
+  round replace its stage's, and its reviewers, validators and judge render no ledger: a
+  `--review-plan --force --models X Y` after a finished cascade gets today's prompts and needs no
+  `cascades/` file.
+
+Every later write on the review path merges (`update_status`) and a `--reaggregate` writes no
+opening, so the block stays with its round; a `--reaggregate` given the flag is checked and records
+nothing. A block on record that is present but malformed raises (`read_block`), never reads as no
+cascade: a renderer that took it for none would render today's prompt inside a cascade stage.
+
+**Its readers verify before they render.** The reviewer prompt (`round_prior_rounds`, after the
+opening write), validation materialization (`validator_prior_rounds`) and the judge
+(`ApplyOrchestratorBase._cascade_judge`, which reads its review round's block read-only, before any
+verdict file is read) each read their frozen ledger file through `ledger_text`, which checks it
+against `files` before a byte reaches a prompt. A changed or missing file, or a malformed block,
+stops that call at exit 3, needs-human, before any model is called, verdict ingested or task file
+written. A round with no block renders today's bytes everywhere. The judge's task file records the
+stage and its ledger's digest (`inputs.cascade_stage`, `inputs.judge_ledger_sha256`), and a verdict
+file beside a task file of another stage is moved aside before ingestion, so a group id repeated
+across stages is judged again (workflows.md,
+[The cascade's forward ledger](workflows.md#the-cascades-forward-ledger)).
+
+**Validation binds its inline ledger like its other inputs.** Validators get the stage's
+`ledger-validator.md` inline, never as a file pointer
+([Materialized task contract](delegation.md#materialized-task-contract)), so
+`materialize_validation_round` records its sha256 as the task file's `inputs.prior_rounds_sha256`
+(`schemas/subagent_tasks.schema.json`; absent outside a cascade and at a stage whose ledger is
+empty). Only those prompts ask for `reraise_of`, the id of the earlier round's rejected entry a group
+repeats, and `merge_batched_validation_results` keeps the field only from a task file that recorded
+the hash, so every other round's records keep their shape. A kept value is normalized
+(`normalize_reraise`: stripped, line breaks folded, clipped to 200 characters; an unknown id, a list
+or a number is kept as text and still counts as a re-raise; only an absent, null or blank value means
+none), written on the group's record in `validation.json` (`save_validation_results`) and onto the
+group as `validation_reraise_of` (`apply_validation_to_groups`). The reports show it beside the
+verdict as `re-raises <id>`: plan reports through `format_group`, code reports through
+`_format_issue` (`(group verdict; re-raises R1-3)`), `report.html` from `validationReraiseOf`. The
+cascade's per-round table counts it (workflows.md,
+[Counting and the per-round table](workflows.md#counting-and-the-per-round-table)).
+
+**No verdict crosses two ledgers.** Group ids are content hashes, so a later stage whose findings
+repeat an earlier stage's word for word regroups to the same hashes, and its batches carry the same
+group ids. `prior_rounds_moved` compares a task file's `inputs.prior_rounds_sha256` with the hash this
+round's task file would record (`prior_rounds_digest`, from the block on record); absent on both is
+today's behaviour. A fan-out's regroup over an equal hash set keeps the batch files only when they
+agree (`retire_validation_for_regroup`; otherwise the whole round retires, so no batch of the
+earlier stage is skipped as done), and `validation_source_decision` does not reuse a
+`validation.json` beside a task file that disagrees.
+
 ## Consuming checked bytes
 
 **A run uses the bytes it checked, wrote or validated, never a later read of the same file**

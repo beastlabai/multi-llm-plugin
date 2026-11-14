@@ -34,6 +34,9 @@ It installs as a **Claude Code plugin**, and the same workflow runs inside **Cod
 # Review the plan, then apply the validated suggestions to it, unattended
 /multi-llm:multi-llm --improve-plan plans/my-feature.md --quick
 
+# The same, one model at a time, cheapest first: each reviews the previous one's result
+/multi-llm:multi-llm --improve-plan plans/my-feature.md --cascade --models claude-code:haiku codex:gpt-6-luna claude-code:claude-fable-5-2:high
+
 # Review your last commit (no plan needed)
 /multi-llm:multi-llm --review-commits
 
@@ -238,6 +241,8 @@ You don't have to run the whole chain: **every step is also a standalone entry p
 
 `--improve-plan` runs the *Implementation Plan* pair above and `--improve-code` the *Code Review* pair, each as one unattended command: a judge agent decides every `needs-human-decision` item and nobody is asked. **They edit files without asking** - `--improve-plan` the plan in place, `--improve-code` source files anywhere in the repository - so commit or stash first; git is the way back. Re-runs, `--force`, undo and cost: [docs/workflows.md](docs/workflows.md#review-and-apply-in-one-command).
 
+**One model at a time: `--cascade`.** Normally every model reviews the same text in parallel, and the merged findings are applied once. The second and third models then mostly report what the first already found, and nobody reviews the edits the apply made. With `--cascade`, each model gets its own review-then-apply round, in your `--models` order, cheapest first. Each round reviews the result of the round before it, so later, stronger models spend their effort on what is left, including mistakes the earlier edits introduced: a lock that deadlocks, a test that cannot fail, a section the edit forgot to update. A cascade takes about 1.5 to 2 times as long, because the rounds run one after another. In our test runs, the same models gave better plans as a cascade, and code that was as correct but came with better tests. A parallel round finds about as many of the issues already in the text, and is the quicker pass. When to use which, and what we measured: [docs/workflows.md](docs/workflows.md#cascade-one-model-at-a-time).
+
 ### 3.3 Review commits
 
 `--review-commits` reviews what was committed, not what is on disk, and needs no plan: the commit messages are the stated intent, and every model reviews the range's net change. Leave the range out to review the last commit, or type one right after the mode word, before any flag - `HEAD~2`, `main..HEAD`, `last 3 commits`, `yesterday`, `this branch`. `--apply-commit-fixes` then applies the validated fixes as uncommitted edits, and `--improve-commits` does both, unattended. Nothing commits, amends or rebases. The range forms, the report, `--focus` and `--context-plan`: [docs/commit-reviews.md](docs/commit-reviews.md).
@@ -253,6 +258,7 @@ You don't have to run the whole chain: **every step is also a standalone entry p
 | `--agent-decide` | In the apply modes, let a judge agent decide every `needs-human-decision` finding instead of asking you. |
 | `--no-confirm` | Skip confirmation prompts, for unattended runs. |
 | `--scope-policy expand\|preserve` | `expand` (the default) allows warranted scope extensions; `preserve` keeps the run within the agreed scope ([details](docs/workflows.md#scope-policy)). |
+| `--cascade` | With `--improve-plan` / `--improve-code`: one review-then-apply round per model, in your list's order (cheapest first), each reviewing the previous round's result ([details](docs/workflows.md#cascade-one-model-at-a-time)). |
 
 When the models disagree or a suggestion is borderline, validation marks it `needs-human-decision`. On Claude Code the apply modes ask you about each one, each with a **Let the agent decide** option, per item or for a whole batch; on Codex and OpenCode, and with `--agent-decide`, a judge agent decides them all. The judge salvages partially-valid findings rather than dropping them, and the HTML report badges every finding **Approved / Salvaged / Skipped**.
 

@@ -309,6 +309,7 @@
     "exact_options": [
       "--all",
       "--approve-all",
+      "--cascade",
       "--consolidate",
       "--dry-run",
       "--files",

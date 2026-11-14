@@ -1,0 +1,170 @@
+# The container provider lane's scenario for `--improve-plan --cascade`
+# (tests/test_container_improve_cascade.py).
+#
+# WHAT IT IS: ONE rule at the front, then `container_full_chain.yaml`'s
+# `prompts:` list VERBATIM. A cascade's turns are the chain's turns (the plan
+# review fan-out, its validation, the apply batches, the CLIs' side turns), with
+# one difference: from stage 2 on, the reviewer prompt carries the forward
+# ledger, the `## Earlier review rounds` block the earlier stages left
+# (`{prior_rounds}` in prompts/plan_review.txt). The chain's review-plan rule
+# still matches that prompt (nothing in the ledger trips its lookahead), so this
+# file needs no new answer; the front rule exists so the stub log can SAY which
+# turn carried the ledger.
+#
+# THE FRONT RULE serves the same bytes as the chain's review-plan rule
+# (`review_plan/raw_suggestions.json`), so the later stage's groups are the
+# first stage's and the chain's validation verdict sheet joins them (a group id
+# is a function of the suggestion text and the member count only). It names the
+# file through this directory (`../container_scenarios/../responses/...`)
+# because the stub logs a rule's `fixture` string as written: a log line with
+# that spelling is a reviewer turn whose prompt held the ledger, and one with
+# the chain's spelling is a turn whose prompt did not. It is first because the
+# first matching rule answers; it carries the side-turn lookahead every product
+# rule carries, so a session-title turn quoting a ledger-bearing prompt still
+# resolves to the title rule.
+#
+# WHY IT IS NOT A NEW RULE IN `container_full_chain.yaml`, AND NOT IN
+# `scenarios/`: the same two reasons `container_commit_modes.yaml` gives (a
+# chain rule needs a recorded container turn; every file in `scenarios/` is swept
+# by the generic parity sweep). This directory ships into the image
+# (`tests/fixtures/**` in tests/container/context_manifest.txt).
+#
+# KEPT HONEST, AT ZERO COST, BY `tests/test_e2e_improve_cascade.py`
+# (`TestTheContainerCascadeScenario`): its rules after the first are pinned to
+# the chain scenario's as parsed YAML, and every prompt a hermetic two-stage
+# cascade sends resolves to the rule that owns it, the front rule for the later
+# stage's reviewer alone.
+
+name: "Container Improve Cascade"
+description: "The chain's turns, with a later cascade stage's ledger-bearing review told apart"
+
+on_unmatched: fail
+
+prompts:
+  # ------------------------------------------------- review-plan, a later stage
+  # The reviewer prompt of cascade stage 2 or later: the plan review's opening
+  # line, then the ledger heading the earlier stages' archive renders.
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*You are reviewing an implementation plan for completeness, correctness, and clarity\\..*\\n## Earlier review rounds\\n"
+    fixture: "../container_scenarios/../responses/review_plan/raw_suggestions.json"
+    description: "review-plan fan-out of a cascade stage after the first (its prompt carries the forward ledger)"
+
+  # ---------------------------------------------------------------- side turns
+  # Not product turns: the CLI's own session-title generator. Answered with a
+  # plain title so the CLI proceeds to the turn we are actually testing.
+  - pattern: "Generate a concise, sentence-case title|You are a title generator\\. You output ONLY a thread title|Generate a short title \\(four words or less\\)|You are tasked with generating the session title"
+    fixture: "../responses/session_title/plain_title.txt"
+    description: "session-title generator (claude-code, opencode, kilocode, goose, grok)"
+
+  # muse fires background reminder tasks in parallel with the real turn; their
+  # output reaches no parser of ours, but under `on_unmatched: fail` they still
+  # have to be answered or every muse row fails on a turn nobody reads.
+  - pattern: "You are a reminder observer for the main agent"
+    fixture: "../responses/muse_reminder/no_reminder.md"
+    description: "muse background reminder observer"
+
+  # ------------------------------------------------- nested-exec preflight probe
+  # Not a phase: `--exec-subagents` runs one throwaway `agent-readonly` turn
+  # before the batch is scheduled (D3c), and on the six rows whose runner is
+  # `opencode:stub/stub-model` it reaches the stub like any other turn. Measured
+  # on `tests/container/runs/20260922T084502Z/`: 11 129 chars, of which the last
+  # 72 are exactly `utils/subagent_executor.NESTED_PROBE_PROMPT` and the leading
+  # 11 057 are the opencode runner's own preamble — the sha is IDENTICAL on the
+  # codex-hosted and opencode-hosted rows, which is what proves the body is ours
+  # and not the host CLI's (all six pass `--runner opencode:stub/stub-model`).
+  # Unanswered, it was 1 of the 17 `unmatched: true` records each of those rows
+  # carried; the other 16 are this phase's three validation prompts counted by
+  # occurrence, which the restructure above already resolves.
+  #
+  # THE FIXTURE DELIBERATELY WITHHOLDS THE TOKEN THE PROBE ASKS FOR, and that is
+  # the whole point of the entry. `_probe_nested_exec` reads its reply back
+  # (since 2026-09-22): the token present means `nested_exec: allowed`, absent
+  # means `unknown` under a warning naming the miss. Answering here with
+  # `MULTI_LLM_NESTED_EXEC_OK` would therefore promote a rig-authored string into
+  # a capability verdict — and `hosts/capabilities.yaml` records `nested_exec`
+  # for hosts `codex` and `opencode` as `unknown`, annotated "Filled by the Phase
+  # 3 nested-exec smoke", so that verdict has somewhere real to land. The stub is
+  # not a model and this lane measured nothing about nested exec, so the turn is
+  # accounted for (no `unmatched`, no drift alarm) while the verdict stays the
+  # honest `unknown` it already was, now stated in the log rather than implied by
+  # a 422.
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*Reply with exactly this token and nothing else: MULTI_LLM_NESTED_EXEC_OK"
+    fixture: "../responses/nested_exec/probe_not_measured.txt"
+    description: "nested-exec preflight probe: utils/subagent_executor.NESTED_PROBE_PROMPT"
+
+  # -------------------------------------------------------------- review-plan
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*You are reviewing an implementation plan for completeness, correctness, and clarity\\."
+    fixture: "../responses/review_plan/raw_suggestions.json"
+    description: "review-plan fan-out: prompts/plan_review.txt"
+
+  # --------------------------------------------------------------- validation
+  # Three phases, one opening line, and the discriminators are STRUCTURAL: the
+  # code-review guidance paragraph, then "has the plan been decomposed yet".
+  # Nothing here reads a group id — see the header for the measurement that
+  # ruled that out. The three rules are mutually exclusive BY CONSTRUCTION
+  # (each carries the negative of every discriminator above it), not by list
+  # order, because `matching_rules()` — what the non-overlap sweep in
+  # `tests/test_scenario_matcher_parity.py` asserts on — collects every match
+  # and not just the winning one.
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*You are validating review suggestions for accuracy\\..*Each issue record carries `file` and `line_range`"
+    fixture: "../responses/validation/code_review_valid.json"
+    description: "code-review issue validation (the guidance paragraph is the discriminator)"
+
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent))(?!.*Each issue record carries `file` and `line_range`).*You are validating review suggestions for accuracy\\..*(?:\\n## Context \\(Tasks file|\\n## Implementation Tasks)"
+    fixture: "../responses/validation/task_suggestions_valid.json"
+    description: "review-tasks suggestion validation (the task list is in the prompt: its own context block, or the plan's task section)"
+
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent))(?!.*Each issue record carries `file` and `line_range`)(?!.*(?:\\n## Context \\(Tasks file|\\n## Implementation Tasks)).*You are validating review suggestions for accuracy\\."
+    fixture: "../responses/validation/plan_suggestions_valid.json"
+    description: "review-plan suggestion validation (the only one whose prompt predates decomposition)"
+
+  # ------------------------------------------------------------- write phases
+  # All four dispatch the `agent-write` profile through
+  # utils/write_batch_scheduler.py. The stub emits no tool call, so each batch
+  # lands on the documented NO-OP: status ok, write_outcome no-op, zero bytes
+  # moved, the loop continues. The document shape is
+  # schemas/write_batch_result.schema.json — a prose answer here is a rung-6
+  # schema_invalid, which is never retried, and the phase ends at exit 3.
+  #
+  # This comment said CLEAN FAILURE until 2026-09-22, and the word moved in the
+  # product, not here: all four fixtures below have claimed {"status": "no-op"}
+  # since f62cc89 (2026-08-15), and 1633dd4 (2026-09-16) split the classifier's
+  # empty-diff branch so that a `no-op` CLAIM over an empty diff is its own
+  # verdict rather than a clean failure. Nothing in this file changed — the four
+  # rules, their fixtures and `on_unmatched: fail` are untouched. The derivation
+  # is in tests/test_container_full_chain.py's module docstring, and
+  # runs/20260921T224840Z records `no-op` on all 130 of the sweep's batches.
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*Apply the following (?:\\d+ related )?suggestions? to the plan file"
+    fixture: "../responses/write_batches/apply_suggestions.json"
+    description: "apply-suggestions batch: utils/suggestion_batcher.format_batch_for_prompt"
+
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*Apply the following (?:\\d+ related )?task suggestions? to the tasks file"
+    fixture: "../responses/write_batches/apply_task_suggestions.json"
+    description: "apply-task-suggestions batch"
+
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*You are implementing a specific task from a larger plan\\."
+    fixture: "../responses/write_batches/implement.json"
+    description: "implement batch: prompts/implementation_task.txt"
+
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*Fix the following (?:\\d+ related issues in|code issue)"
+    fixture: "../responses/write_batches/apply_code_fixes.json"
+    description: "apply-code-fixes batch: utils/code_fix_batcher.format_fix_batch_prompt"
+
+  # ----------------------------------------------------------- generate-tasks
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*You are decomposing the plan `[^`]+` into implementation tasks\\."
+    fixture: "../responses/generate_tasks/tasks_v1.json"
+    description: "task generation: tests/golden/prompts/task_generation.txt"
+
+  # ------------------------------------------------------------- review-tasks
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*You are reviewing implementation tasks that were generated from a feature plan\\."
+    fixture: "../responses/review_tasks/coverage_suggestions.json"
+    description: "review-tasks fan-out: prompts/task_review.txt"
+
+  # -------------------------------------------------------------- review-code
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*You are reviewing code changes that implement a feature plan\\."
+    fixture: "../responses/code_review/container_issues.json"
+    description: "review-code fan-out: prompts/code_review.txt"
+
+  # ---------------------------------------------------------------------- ask
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*You are answering a question about an implementation plan\\."
+    fixture: "../responses/ask/plan_question.md"
+    description: "standalone ask: prompts/ask.txt"

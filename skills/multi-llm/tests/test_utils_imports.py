@@ -508,7 +508,9 @@ _FRONT_DOOR_HELP = frozenset({
 #: The project modules each reader path loads (the set it loaded before the
 #: function-level imports were hoisted, ef8d750e). ``status --view run`` of a
 #: stopped review-then-apply composite spells its continuation through
-#: ``improve_workflow``, and reads the workflow; it runs no review or apply, so
+#: ``improve_workflow``, asks ``improve_cascade`` (and with it
+#: ``cascade_provenance``) whether a cascade of it is unfinished, and reads
+#: the workflow; it runs no review or apply, so
 #: the review engine, the executor and the write path's reporting stay unloaded.
 #: improve-commits' door also hands a worker its stage applier (``detach``).
 #: A path may load fewer modules; a module missing here is one an import made
@@ -516,11 +518,13 @@ _FRONT_DOOR_HELP = frozenset({
 READER_PATHS: Dict[str, frozenset] = {
     "status": frozenset({
         "check_workflow_prerequisites", "full_workflow_orchestrator", "modes", "utils",
-        "utils.advisory", "utils.atomic_io", "utils.batch_reply", "utils.check_records",
+        "utils.advisory", "utils.atomic_io", "utils.batch_reply", "utils.cascade_provenance",
+        "utils.check_records",
         "utils.cli_common", "utils.clock", "utils.codex_trust", "utils.commit_apply",
         "utils.commit_paths", "utils.commit_range", "utils.commit_spelling", "utils.detach",
         "utils.failure_capture", "utils.git_utils", "utils.held_folder", "utils.host_capabilities",
-        "utils.human_decisions", "utils.importance", "utils.improve_workflow",
+        "utils.human_decisions", "utils.importance", "utils.improve_cascade",
+        "utils.improve_workflow",
         "utils.json_extractor", "utils.judge_vocab", "utils.known_checks",
         "utils.landlock_dispatch", "utils.landlock_exec", "utils.llm_client", "utils.manual_tasks",
         "utils.metrics", "utils.next_phase", "utils.next_phase_words", "utils.output_handler",

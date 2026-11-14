@@ -1,6 +1,6 @@
 # Workflow orchestration
 
-Read when changing task generation, full or composite workflows, commit reviews, ask mode, or implementation bookkeeping.
+Read when changing task generation, full or composite workflows (a composite's `--cascade` included), commit reviews, ask mode, or implementation bookkeeping.
 
 Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes retain detailed contracts and regression history from that guide. Paths beginning with `docs/`, `packaging/`, or `plans/` are repository-relative; other implementation paths are relative to `skills/multi-llm/`. Dated incidents explain the rules; verify version-specific claims against current code.
 
@@ -9,6 +9,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [Task generation](#task-generation)
 - [Full workflow state machine](#full-workflow-state-machine)
 - [Improve-plan and improve-code](#improve-plan-and-improve-code)
+- [A cascade (`--cascade`)](#a-cascade---cascade)
 - [Commit reviews](#commit-reviews)
 - [Ask mode](#ask-mode)
 - [Implementation artifacts and state](#implementation-artifacts-and-state)
@@ -349,6 +350,604 @@ with its status and abort commands, never joined, `--force` included, and
 `ImproveWorkflow.run_mode` holds each step's phase-dir `.lock` while it runs
 (`full` gets neither). `--interactive` is exit 3 before
 `--yes` is implied.
+
+## A cascade (`--cascade`)
+
+**`--cascade` turns `--improve-plan` and `--improve-code` into one review-then-apply round per
+model, one model after another** (`utils/improve_cascade.py`, `utils/cascade_provenance.py`,
+`utils/cascade_ledger.py`, `utils/cascade_archive.py`). A stage is today's composite run on a
+derived namespace (`derive_stage_args`), so `skip_reason`, `step_flags` and `plan_steps` decide what
+a stage runs, unchanged, and each stage reviews the work as the stage before it left it. Three parts
+are the cascade's own: the forward ledger (later stages are told what earlier ones rejected and
+changed), a per-stage archive with a per-round table, and per-stage resume. `improve-commits` does
+not take the flag (`takes_cascade`: a fix commit moves the pinned range's head), so its parsers
+refuse it as unknown. Without `--cascade`, and with no unfinished cascade on record, nothing
+changes: the same flags, prompts byte for byte, files and report.
+
+**`advance` is the only writer.** `peek` and `applies` are read-only: they answer before a detach
+boundary and in the read-only native planner, so a refused or finished launch leaves nothing behind.
+`advance` creates, continues or abandons a cascade, binds the review round on record to the current
+stage, closes out a finished stage, freezes the next stage's inputs, and hands back a `StagePlan`
+(the stage to run, its namespace and the notices to print first), `Complete` or `NotACascade`. Its
+first call of an invocation (`initial=True`, the user's flags) may start, restart or abandon a
+cascade; a later call is bound to a `cascade_id`, ignores the restart and selector flags, never
+starts one, and refuses with `[CASCADE_CONFLICT]` once the pointer names another (or an abandoned)
+cascade. A later call also names the stage it follows (`after_stage`): when, after binding,
+close-out and skipping, the current stage is still that one, neither closed nor skipped, it raises
+`StageNotFinished` (exit 3: the stage's steps stopped before it was done) instead of handing the
+same stage out again, so neither leg can run a stage's paid review over and over. Refusals are `CascadeRefusal` (`code` 3 or 1, `message` printed whole; `refusal_exit`
+prints an exit 3 through `fail_closed`, so the result line is needs-human).
+
+**`advance` reads, decides and writes under the composite run dir's lock** (`_planning`): the
+`process_control.PhaseLock` every writer of that dir takes
+([One writer per phase dir](runtime.md#one-writer-per-phase-dir)), re-reading the pointer and the
+record after taking it. Without it two planners started together (two native `util improve-cascade
+next` calls, or an executor run beside one) both read "no cascade", each created its own and both
+handed out a paid stage-1 review. A lock this process already holds on the run dir (the detached
+worker holds it for its whole run; `improve_workflow.holding`'s registry or
+`process_control.held_phase_lock`) is used as it is and left held. One it takes is tried
+`STEP_LOCK_ATTEMPTS` × `STEP_LOCK_RETRY_S` apart, as a composite step tries its own, and registered
+with `holding` while held, so the close-out it may run takes the review and apply locks after it and
+re-enters the run dir's (the run → review → apply order holds). A lock another live run holds is
+exit 3 with `live_owner_refusal`'s text (`<composite> cascade planner` names a planner holding it),
+nothing read or written. An initial call decides once before taking it, read-only: an answer that
+writes nothing (not a cascade run, a finished cascade's command again) takes no lock and creates no
+run dir. Two planners started together therefore hand out one cascade: the other is refused, or,
+when the first released the lock within its retries, continues that same cascade at stage 1.
+
+### The pointer and the record
+
+**One directory per cascade, and a pointer naming the current one:**
+
+```text
+{plan}/<composite>/cascade-current.json                  the pointer
+{plan}/<composite>/cascades/<YYYYmmddTHHMMSS>-<id8>/
+    record.json          the record
+    start.md             improve-plan: the plan when the cascade started
+    files.txt            improve-code: the frozen --files list, when one was typed
+    summary.md           the per-round table (a view)
+    ledger.md            every ledger entry up to the last closed stage (a view)
+    stage-<k>/inputs/    frozen at the stage's start, manifest.json last, never rewritten
+    stage-<k>/artifacts/ published once at close-out, .complete.json last inside it
+```
+
+`<composite>` is the composite's run dir (`improve-plan/`, `improve-code/`) and `<id8>` the first
+8 characters of `cascade_id`. The stamp has no colons and stage dirs are named by index, not model,
+to keep archived paths short (Windows). The pointer is
+`{"schema_version": 1, "cascade_id": …, "dir": "cascades/<stamp>-<id8>"}`. A new cascade never
+renames or reuses a path: its directory, `start.md` / `files.txt` and record are written first, an
+unfinished predecessor is marked `abandoned`, and only then is the pointer replaced, so a crash
+leaves at worst an orphan directory nobody reads. `--force` without `--cascade` marks the unfinished cascade `abandoned` and removes the
+pointer. Finished and abandoned cascades stay where they are.
+
+**`record.json`** holds `cascade_id`, `mode`, `state` (`running`, `finished`, `abandoned`),
+`started_at`, `finished_at`, `scope_policy` (for the stages not started yet), `selectors`
+(`files_file`: `"files.txt"` or null; `base_ref` as typed or null; both null on improve-plan) and one
+entry per stage: `index`, `model`, `state` (`pending` until its inputs are frozen and it is handed
+out, then `running`, `done` once closed out, or `skipped`), `bound_round`, `scope_policy` (the one
+it started under), `started_at`, `finished_at`, `skip_reason` and `counts`. Both files are written
+atomically inside the plan's output dir (`write_in_plan_dir`) and checked on **every read** against
+`schemas/cascade_record.schema.json` through `schema_validator` (the plugin's draft-07 subset, so
+`jsonschema` stays a dev dependency), plus what a schema cannot say: the record's id is the
+pointer's, its dir name ends in that id's first 8 characters, the mode is this composite's, and the
+indexes run 1..n. A file that fails is `CascadeRecordError`, exit 3, naming the file and the way
+out (repair it, or move the pointer aside): planning from a damaged record would start a new paid
+cascade or continue at the wrong stage (the `StateReadError` precedent). An abandoned cascade on
+the pointer reads as none.
+
+### Stages and the stage namespace
+
+**The stages are the review's resolved model list, in its order** (`resolve_stage_models`:
+`interactive.resolve_models`, unattended, anchored at the plan, with the review's phase word):
+`--models` as typed, else the `--quick` list, else `defaults.modes.<review>` / `defaults.models`;
+canonical, duplicates collapsed, never reordered (weakest first is the user's order, and the user
+docs say so). Creation prints `[IMPROVE_CASCADE] new cascade <id8>: <n> stages (<models>)`; with no
+model flag typed it also prints `[AUTO_RESOLVED] models: <list> (<defaults key>)` once, because each
+stage's review receives `--models` and so never records the auto-selection. One model is a
+one-stage cascade that prints `NOTE: --cascade with one model is a single round`.
+
+**improve-code's typed selectors are frozen at the start**, so a bare continuation reproduces them.
+A typed `--files` or `--files-from <file>` list is read through review-code's own reader and written
+once to `files.txt`; every stage's review gets `--files-from <absolute files.txt>`, never one
+`--files` token per path (Windows command-line limits, and verbatim copying on the native leg).
+`--base-ref` is recorded as typed and every review and apply gets it. `--files-from -` is refused
+with exit 1 (`files_from_stdin_refusal`'s words): a stage's review runs long after the shell's stdin
+is gone. With no selector typed, each stage's review resolves review-code's default scope as today;
+that scope follows `tracked_files`, which the apply updates, so a later stage's default scope
+includes earlier stages' fixes. A fix outside a typed list is not reviewed again: widening the scope
+across stages is out of scope, and the user docs say so.
+
+**`derive_stage_args` sets every planning input explicitly** on a copy of the user's namespace, so
+nothing leaks from the invocation's own `--force`, `--resume` or selectors: `models` (the stage's
+one model), `quick` false, `force` (a fresh round, from the binding below), `resume` false (the
+apply's `--resume` stays `Records.apply_in_progress`'s inference, which already tells a new review
+cycle from an apply in progress), `scope_policy` (the typed one, else the stage's), `files` none,
+`files_from` (`files.txt`, when typed), `base_ref` (the recorded one), `cascade_stage_file` (the
+stage's absolute manifest path) and `cascade` true. `step_flags` adds
+`--cascade-stage-file <manifest>` last to every review of a stage, stage 1 included, and
+`plan_steps` plans step 1b as `skip (cascade)`: the per-round table is the cascade's summary, a
+one-model round rarely reaches the consolidation threshold, and the pass can still be run by hand on
+the live review. Every stage starts
+with a fresh round (`--force --rerun-all`), stage 1 included, so a completed non-cascade review on
+record is never read as stage 1's result.
+
+**The stage namespace plans; it never prints a continuation.** Its `models`, `files_from` and
+`scope_policy` are the stage's, so `continuation_flags` on it would name one model and the frozen
+file. The continuation is built from the user's own namespace with `cascade` true, which puts
+`--cascade` right before `--resume` and never `--force`, a stage's derived `--models` or the frozen
+selectors (`recorded_continuation(..., cascade=True)` for the readers below).
+
+**The scope policy** is the typed `--scope-policy` at the start, else none: each round then resolves
+its own, and a new review round is `expand`. A stage records the policy it started under. A
+different value typed on a continuation becomes the record's policy for the stages not started yet
+(a `NOTE:` names them), while the round under way follows today's rules (`[SCOPE_POLICY_CONFLICT]`
+for a review round already started); it is never a `[CASCADE_CONFLICT]`. The default does not
+change; the user docs recommend `preserve`, because extensions compound over rounds.
+
+### Provenance and binding
+
+**A retry cannot be told from a foreign review by its model or its round id** (every fan-out stamps
+a new `round_id`), so each stage's review carries explicit provenance. `utils/cascade_provenance.py`
+owns the format and imports nothing from the orchestrators.
+
+- **The manifest.** `freeze_inputs` writes the stage's inputs, then `write_manifest` writes
+  `stage-<k>/inputs/manifest.json` **last**: `cascade_id`, `mode`, `stage`, `of`, `model` and
+  `files` (`{name: {sha256, bytes}}`). An `inputs/` without a manifest is a crash mid-write and is
+  removed and rebuilt; once the manifest exists nothing in `inputs/` is rewritten, and a later
+  `freeze_inputs` only verifies it (`load_manifest`, every hash), so every call of the stage's
+  rounds and the archive read the same bytes.
+- **The hidden flag.** `--cascade-stage-file <manifest>` (help suppressed) is on review-plan's and
+  review-code's parsers; review-commits forwards to review-code's parser, so only a hand-typed flag
+  reaches it there. The composite always passes it absolute, because the dispatcher moves the cwd
+  to the repository root; one typed relative is read from the cwd like the plan (the dispatcher's
+  mode input-path options, detach's path flags). `replay_flags` drops it in every spelling, as it
+  drops `--commit-stage` (`--cascade` is an exact option there, being a prefix of the hidden flag),
+  so it never reaches durable replay flags, "Retry with:" lines or `status`.
+- **Checked before anything is written.** `review_lane.check_cascade_stage` verifies the manifest
+  (`block_from_manifest`), that it is the composite's current handoff (`check_current`: the run
+  dir's `cascade-current.json` names the manifest's cascade, its `record.json` is `running`, and the
+  manifest's stage is not `done` or `skipped` there), and that the round could record its block,
+  before the phase dir, its lock, `state.json` or the checkpoint is touched: a refused stage leaves
+  nothing, and a `--detach` launcher refuses in the foreground. A command printed for a cascade
+  superseded since (`--force --cascade`, a second planner), abandoned or finished, or for a stage
+  already closed out, is `StaleHandoff`, exit 3 (`ERROR: cascade stage handoff refused: …; run the
+  composite's command again with --cascade`), never a paid review no cascade binds. The check reads
+  both files without a lock: the planner writes them atomically, the pointer last. A `--reaggregate`
+  given the flag gets the same checks and records nothing; it continues the round on record, block
+  and all.
+- **Recorded by the opening checkpoint.** `open_round` verifies the manifest again and writes the
+  round's `cascade` block under the checkpoint mutex, by `next_block`'s three carry-over rules
+  (review-results.md, [Round identity](review-results.md#round-identity)).
+- **Read where a ledger is rendered.** The reviewer prompt (`round_prior_rounds`), validation
+  materialization (`validator_prior_rounds`) and the judge (`cascade_judge`) read the block
+  from the review round's `.status.json` and their frozen file through `ledger_text`, which
+  verifies its hash before a byte reaches a prompt. A changed or missing file, or a malformed block,
+  stops that call at exit 3 (`error_line`: restore the file, or start a new cascade with
+  `--force --cascade`). A call that renders no ledger checks nothing.
+
+**Binding, on each `advance`, for the current stage k.** `bound_round` is the review round id most
+recently seen carrying stage k's block; binding only asks whether it is set, so `advance` need not
+see every retry round.
+
+| The review dir's `cascade` block | Meaning | Action |
+| --- | --- | --- |
+| this cascade's stage k, the round live or with results | stage k's round (a first fan-out or a retry) | bind: `bound_round` is its `round_id`, the stage `running`; today's rules decide what runs, and a done apply is closed out |
+| this cascade's stage k, finished with no model result | stage k's review failed | a middle stage is skipped; the last stage starts over on an initial call and stops at exit 3 on a later one ([Zero-result stages](#zero-result-stages)) |
+| none, another cascade's or an earlier stage's, and `bound_round` unset | stage k's review has not started | a fresh round (`force`, so `[IMPROVE_STEP_FRESH]`) |
+| anything but stage k, and `bound_round` set | a foreign round replaced stage k's (a hand-run `--review-plan --force --rerun-all`, same model or not, or a `--force` round with any model list but the stage's one model) | `NOTE: the review on record is not this cascade's stage <k>; starting stage <k> over`; `bound_round` cleared, fresh round |
+
+Before any of it, a stage whose `artifacts/` the archive already published for this cascade is
+closed from those files, whatever the live dirs hold now. An `artifacts/` whose `.complete.json`
+does not check out stops there, at exit 3 naming the directory (`_published_counts`, through
+`read_complete`), before any binding or hand-out: left to the close-out, the refusal would come only
+after a foreign round on record had sent the stage's paid review and apply round again. An
+unreadable review `.status.json` (present, not a JSON object) is exit 3 naming it too, never "no
+block": a bound stage would take the foreign-round row and start over.
+
+### The cascade's forward ledger
+
+**Later reviewers, validators and the judge are told what earlier stages rejected and what they
+changed** (`utils/cascade_ledger.py`). The ledger is built from the **archived** stages only
+(`stage-<j>/artifacts/` with a valid `.complete.json`): the live phase dirs are replaced by the next
+round's `--force --rerun-all`, and `state.json` keeps one record per group id, so a later write
+overwrites an earlier round's. A skipped stage has no archive and contributes nothing, and the
+reviewer block's "N automated review rounds" counts archived stages.
+
+**Two lists, one stable id per entry**, numbered per stage in `grouped.json` order, then any ids no
+group carries, sorted:
+
+- *Rejected or held back*, `R<stage>-<n>`, with the stage's model, the group's title and importance,
+  a description clipped to about 240 characters and the recorded reason clipped to about 200. The
+  first source that names a group wins: a group validated `invalid` (its validator's reason), a
+  `needs-human-decision` item the judge skipped (the decision's reason), an item its batch declined
+  (the record's `details.reason`), a scope deferral of a `preserve` round (labelled
+  `held back by the scope policy (valid, not applied; raise it again only if the scope now allows
+  it)`, with the deferral's reason: never worded as a rejection). `validation_failed` groups (never judged),
+  `no-op` items (already addressed) and items the user skipped are left out.
+- *Changed by earlier rounds*, `A<stage>-<n>`, with the model, title, importance and where it
+  landed: every item recorded `applied`, at its suggestion's `reference` (else `section` or
+  `location`) on improve-plan, at the files its batch changed on improve-code (the batch's row of
+  `write_batch_report.json`, else its declared files, both from the stage's `records.json`).
+
+An entry is one line, every field `text_clip.clip`-ped:
+`- R2-3 [HIGH] (<model>) <title> — <description> — reason: <reason>`, or
+`- A1-4 [MEDIUM] (<model>) <title> — at: <where>`.
+
+**Each stage freezes four rendered files**, so no prompt re-renders entries and the prompt code
+does not depend on the ledger module; each reader reads its own file through `ledger_text`:
+
+| File | Read by | Content |
+| --- | --- | --- |
+| `ledger.md` | the reviewer prompt's `{prior_rounds}` | the whole `## Earlier review rounds` block with the rule wording; it may name `ledger-full.md` (on overflow only) and, on improve-plan, always `changes-so-far.diff`, by absolute path: reviewers read files |
+| `ledger-validator.md` | validators, inline only | the two lists under `Rejected or held back in earlier rounds:` and `Changed by earlier rounds:`; its overflow line gives a count and **no path** (the materialized-task contract has no bare file pointer); the rule text is the prompt's |
+| `ledger-judge.md` | the judge | the rejected-or-held-back list alone |
+| `ledger-full.md` | reviewers, on overflow | every entry, uncapped, stage by stage (the cascade dir's `ledger.md` view is the same rendering) |
+
+On improve-plan `inputs/` also holds `plan.before.md` (the plan's bytes at the stage's start) and
+`changes-so-far.diff` (`start.md` against it, unified; empty at stage 1). A later improve-plan stage
+whose `start.md` cannot be read is refused at exit 3 rather than frozen from part of the history.
+Stage 1's four ledger files exist and are empty.
+
+**The inline cap** is `LEDGER_INLINE_MAX_CHARS` (8,000 characters, the wording and the overflow
+line included). Over it, entries are taken in one order, every rejected entry HIGH before MEDIUM
+before LOW (the latest stage first within a level), then every applied entry (the latest stage
+first), and the first that does not fit ends the take, so a less important entry never shows in
+place of a more important one; a line counts the rest. Rendering is pure: the same archives give the
+same bytes, which the prompt tests pin.
+
+**The reviewer.** `prompts/plan_review.txt` and `prompts/code_review.txt` carry `{prior_rounds}` on
+the same line as `{scope_policy_guidance}`. `prior_rounds_block` renders a blank line and the
+ledger, or `""`, so a prompt outside a cascade or at stage 1 keeps today's bytes (pinned by
+`tests/golden/prompts/plan_review_rendered.txt` and `code_review_rendered.txt`). review-plan wraps
+its context factory with `with_prior_rounds` after the opening checkpoint; review-code reads the
+ledger once per run and passes it through its slots. A reviewer that repeats a rejected entry on
+purpose is asked to start the description with `Re-raises R<n>-<m>:`.
+
+**Validators** get the validator file inline after the scope block
+(`build_validation_prompt(..., prior_rounds=)`), under `## Earlier review rounds` with one rule: a
+group repeating a rejected entry is judged on its merits but classified `invalid` unless it answers
+the recorded reason, with the entry's id in `reraise_of` either way; a group challenging an earlier
+change is an ordinary finding.
+Only with a ledger does the reply contract gain `"reraise_of": "<R-id, or empty>"` and its rule 6;
+without one the contract keeps its bytes. How the field is bound and merged: review-results.md,
+[Round identity](review-results.md#round-identity).
+
+**The judge** of a cascade stage (any stage whose review round holds a block, stage 1 included) gets
+a `### Earlier review rounds` section after the rules: the sentence "In this run each item comes from
+one model's round, so rule 6 (model consensus) does not apply." and, when the judge ledger is not
+empty, the rejected list with its re-raise rule (skip a repeat unless it answers the recorded reason,
+and name the entry's id in the reason). `HUMAN_DECISION_JUDGE_RULES` is never edited, so the
+reference section rendered from it stays the same, and outside a cascade the judge prompt keeps its
+bytes. The apply reads the block read-only.
+
+**A judge verdict decides its group only in the stage it was judged for.** Verdict files
+(`human_decision_batch_<group id>.json`) outlive a stage in the apply dir, and group ids are content
+hashes: a later stage that repeats an earlier stage's finding word for word finds the earlier verdict
+at its own file's name, and read as it was it decided the item without the later stage's judge
+ledger (and the executor took it for a judge task already done). So in a cascade stage
+`_handle_human_decisions`, before any verdict file is read (whenever there is a group in scope or a
+verdict file on disk):
+
+1. reads the stage's judge ledger through `cascade_judge` (hash verified): a ledger that fails stops
+   at exit 3, whatever verdicts lie on disk;
+2. moves aside every verdict file unless `human_decision_tasks.json` beside it records this stage
+   and ledger (`retire_foreign_verdicts`: renamed `retired_<name>.other-stage.<stamp>.json`, out of
+   every verdict and result-name pattern, through `rename_in_plan_dir`; a file it cannot move is
+   exit 3);
+3. materializes the judge tasks with `inputs.cascade_stage` (`<cascade_id>:<stage>`) and
+   `inputs.judge_ledger_sha256`, so the verdicts written for them are this stage's, and a retry or
+   resume of the same stage reuses them as today.
+
+Outside a cascade none of this runs: no new key, no file moved, verdicts reused by group id as
+before. Step 23, the recorded decisions and the records are today's.
+
+### Close-out and the archive
+
+**A stage is done** when `skip_reason` of its apply, on the stage namespace and a fresh read of the
+records, is `completed` or `skipped` for the stage's round (the apply record not older than the
+review). Close-out (`cascade_archive.close_out`) archives it and returns its counts; `advance` then
+records the stage `done` with `finished_at` and `counts`, rewrites `summary.md`, and freezes the next
+stage's inputs. After the last stage the record is `finished` and `advance` returns `Complete`.
+
+**Copies, not moves.** The live review and apply dirs are copied into the archive and stay as the
+phases left them, so `status`, `--reaggregate` and the next-step lookup work unchanged, and the next
+stage's fresh round retires them as today. Every regular file is copied except `*.lock`; links are
+neither followed nor copied; permission bits and modification times are kept (a reader dates
+`write_batch_report.json` by its mtime). Every write goes through the plan-output containment
+helpers (`write_in_plan_dir`, `rename_in_plan_dir`, `utime_in_plan_dir` for the copied times, and
+the stage manifest's own write in `cascade_provenance.write_manifest`), never a raw join.
+
+**A live dir is never reached through a link** (`_hold_live`). `os.walk` follows a link given as its
+root, and a lock file opened through one is created at its target, so before any lock is taken every
+folder from the plan's output dir down to each live dir (run, review, apply) is read with `lstat`: a
+link there (or a junction, or anything but a folder) is `ArchiveRefusal`, exit 3, with nothing
+locked, created or copied. On Linux and macOS each live dir is then reached from the plan's
+directory one component at a time without following a link (`held_folder`'s walk) and held by its
+descriptor: its lock file is opened relative to that descriptor (`PhaseLock.acquire(dir_fd=)`,
+never through a link at the name), each held folder must still be the one at its path once every
+lock is taken, and its tree is copied with `os.fwalk` from the descriptor, so a folder swapped for a
+link during the close-out is never entered. Windows has no descriptor-relative opens: the `lstat`
+check stands, and the dir is walked by path.
+
+**Locks: the composite run dir's, then the review dir's, then the apply dir's**, always in that
+order: the same `process_control.PhaseLock` files the phase runs hold
+([One writer per phase dir](runtime.md#one-writer-per-phase-dir)). A dir that does not exist is
+passed over. A lock this process already holds (`improve_workflow.holding`'s registry or
+`process_control.held_phase_lock`: the detached worker holds its run dir's, and `advance` holds it
+while it plans) is used as it is; one it
+takes is retried as a composite step retries its own (`STEP_LOCK_ATTEMPTS` × `STEP_LOCK_RETRY_S`,
+because `status` polls take and drop every lock) and checked with `detach.refuse_unconfirmed_cleanup`.
+A lock a live run holds is never broken: exit 3 with `live_owner_refusal`'s text. After locking, the
+caller's `recheck` re-reads the round's block, its round id and the apply's completion; a stage no
+longer done raises `CloseOutRaced`, the locks are released, and `advance` plans again (three
+attempts, then exit 3). The locks stay held until publication is done.
+
+**Publication.** The archive is built in `artifacts.partial/`, `.complete.json` is written last
+inside it (`cascade_id`, `mode`, `stage`, `model`, `round_id`, `grouped_sha256`, `review_dir`,
+`apply_dir`, `published_at`, and `files`, every file's sha256 by relative path), every file is
+closed, the directory is renamed to `artifacts/`, a name that does not exist yet (Windows refuses a
+rename with open handles), and only then does `advance` update `record.json`. A `.complete.json` is
+valid only while every file it lists still hashes to its value (`read_complete`).
+
+| Found on disk | `advance` does |
+| --- | --- |
+| `inputs/` without `manifest.json` | removes and rebuilds `inputs/` |
+| `artifacts.partial/` | removes it and redoes the close-out, under the locks |
+| `artifacts/` whose `.complete.json` names this cascade and stage, the stage not `done` in the record | takes the counts from the published files (no copy, no lock) and advances the record |
+| `artifacts/` with a missing, invalid, stale or mismatched `.complete.json` | stops at exit 3 naming the directory: restore it as published (`.complete.json` lists every file's sha256), or `--force --cascade`; never move it aside, which would drop a closed stage from the ledger without a word |
+
+| In `stage-<k>/artifacts/` | |
+| --- | --- |
+| `review-plan/`, `apply-suggestions/` (improve-plan) or `code-review/`, `apply-fixes/` (improve-code) | copies of the live phase dirs |
+| `records.json` | the stage's own `state.json` entries (below) |
+| `plan.after.md`, `stage.diff` | improve-plan: the plan after the stage, and `plan.before.md` → `plan.after.md` |
+| `files-touched.txt` | improve-code: the files the stage's apply changed, from `write_batch_report.json` where present, else the declared files of each batch that applied an item (the native leg writes no report) |
+
+**`records.json` is extracted at close-out, before a later stage can overwrite anything**
+(`extract_records`):
+
+- `processed`: the `processed_<apply dir>` entries recorded after the stage's review completed
+  whose `details.grouped_sha256` is the stage's `grouped.json` hash or, unstamped, whose item is one
+  of the run's items (`write_tasks.json`'s `native_run.items` and its batches' `expected_ids`, when
+  that file is this review's: its stamp is the stage's hash and it was not emitted before the review
+  completed); an entry older than `native_run.started_at` is an earlier run's. The time window
+  comes first because group ids are content hashes: a stage whose findings repeat an earlier
+  stage's word for word has the same `grouped.json` hash, and without it the earlier stage's
+  entries would read as this stage's Applied count and `A<k>-<n>` ledger entries;
+- `human_decisions`: the `human_decisions_<apply dir>` entries recorded after the stage's review
+  completed (judge records carry no `grouped_sha256`, and each stage has a fresh review, so the
+  window is unambiguous; an undated one is kept);
+- the review's and the apply's `phases_completed` / `phases_skipped` stamps, and the review round's
+  `scope_policy` record, its deferrals included;
+- `run_items`, `batches` (task id, expected ids, declared files), `files_by_task` (from a
+  `write_batch_report.json` of this review cycle) and `nothing_to_apply`;
+- `reused_items`: from that report, the processed items of each batch an earlier stage ran and
+  this stage's apply reused without dispatching it: a row the scheduler's resume skip marked
+  `skipped` whose result file predates this stage's review completion (`_reused_row`). A resume
+  inside the stage keeps its own batches: the earlier run's row stands in for the skip
+  (`from_earlier_run`, not `skipped`), and with no such row a result file written after the
+  review is the stage's. The time window cannot catch these: when a stage's findings repeat an
+  earlier stage's word for word, the batches are the same, the resume skip finds the earlier
+  stage's result files (`already complete — skipping`) and stamps the items `processed` again
+  after this stage's review. This stage applied nothing for them, so they count as No-op, never
+  Applied, and get no `A<k>-<n>` ledger entry (`cascade_ledger.reused_items`).
+
+A per-stage code diff is out of scope: it needs a working-tree snapshot primitive (the worktree
+hashed again at every stage, loose objects written for untracked files, submodule edits seen only as
+gitlinks) that nothing in the cascade consumes. `files-touched.txt` names each stage's files, and git
+shows the cumulative change.
+
+### Counting and the per-round table
+
+**`stage_counts` has its own definitions**, read from the stage's archive only and not borrowed from
+either existing counter, because those disagree: the native report counts `applied` and `no-op` as
+items applied, `status` counts `applied` alone. Its keys are `record.json`'s `stages[k].counts`:
+
+| Column (keys) | Definition |
+| --- | --- |
+| Findings (`findings`) | the groups in the archived `grouped.json` |
+| Valid, Invalid, Needs decision (`valid`, `invalid`, `needs_decision`) | the review's `.status.json` `validation_counts`; with none, the archived `validation.json` records by status |
+| Re-raises (`reraises`) | archived `validation.json` records with a non-empty `reraise_of`; `—` for a stage with no archived stage before it |
+| Applied (`applied`) | `records.json` processed entries with status `applied` whose batch this stage's apply dispatched (not one in `reused_items`); `0 (nothing to apply)` when the apply handed out no item of the review (`nothing_to_apply`) |
+| No-op (`no_op`) | status `no-op`, plus status `applied` in `reused_items` (the native report's "items applied" is Applied + No-op, and the table's notes say both) |
+| Declined (`declined`, `skipped_by_user`) | status `declined`, plus status `skipped` (at the user's request), shown as `Declined (n skipped)` |
+| Held back (`held_back`) | the scope deferrals of the stage's review round in `records.json` (`scope_policy.deferrals`: valid findings a `preserve` policy kept out of the apply) |
+| Judge (A/V/S) (`judge_approved`, `judge_salvaged`, `judge_skipped`) | the stage's judge decisions: `decision_source` `judge_auto_decide` by `decision`, or `judge_auto_decide_salvage` |
+| Time (`time_s`) | from the stage's start in `record.json` (`stages[k].started_at`, set once when the stage is handed out, so a retry fan-out, which resets the review's `.status.json` `started_at`, does not shorten it; that `started_at` stands in only with no record) to the stage's last recorded finish: the apply's completion or skip, else the review's completion. Once the stage is closed the table prints the record's `started_at` → `finished_at`: a wall-clock span from hand-out to close-out, so a stage stopped and resumed later counts its idle time too, and the table's notes say so |
+| Cost (`cost`) | the reviewer's `usage` `cost_usd` summed, as `$x.xx est.`; validation, the judge and the apply run on the host and are not metered; `not recorded` when no model reported one, never `0` |
+
+**Only the last stage's deferrals can be released.** Each stage's fresh round
+(`--force --rerun-all`) replaces the live review, and `state.json` keeps the scope record of the
+review on record only, so a `--scope-policy expand` re-run (`releases_deferrals`) offers the
+deferrals of the last stage alone: after the cascade is finished, the composite run again without
+`--cascade`. Earlier stages' deferrals stay in their archives, are counted in Held back and reach
+later stages through the ledger as held back, never as rejected; the table's notes and the user docs
+say so.
+
+`render_summary` rewrites `summary.md` and the top-level `ledger.md` view at every close-out, skip
+and finish. A done stage's row is read from its `artifacts/` (the record's `counts` stand in for an
+archive that cannot be read); a skipped stage is one row reading `skipped: <reason>`; a stage not
+closed reads `in progress` or `not started`. Both files are views: nothing points into them and no
+prompt reads them.
+
+### Zero-result stages
+
+**A stage whose review produced nothing** (its one model in `models_failed` with
+`models_completed: []`, which the review records only on that ending; a live or interrupted fan-out
+has no `models_completed` key) is today's D6 row 3, far likelier in a one-model round than in a
+parallel one:
+
+- **A middle stage** (k < n) is recorded `skipped` with the model's failure reason. `advance` adds
+  `[CASCADE_STAGE_SKIPPED] <k> <model>: <reason>` and
+  `[AUTO_RESOLVED] partial-results-recovery: cascade stage <k> of <n> (<model>) produced no result; skipped, continuing at stage <k+1>`
+  to its notices and goes on to stage k+1, whose fresh review records again, within the same run, the
+  review completion that stage k's `--force` removed.
+- **The last stage is never skipped**: skipping it would leave `state.json` with no review
+  completion (its `--force` removed it), so a later plain `--improve-plan` would run a full new
+  round, and it is the stage the cascade exists for. On an initial call `advance` hands it out fresh;
+  on a later call it raises `CascadeRefusal` with exit 3 (`last_stage_stopped_message`: the stages
+  before it are closed; run the command again to start stage n over). That difference is how the
+  native leg's continue call tells "just failed, report the stop" from "the user ran it again".
+- `zero_result_stage` answers, read-only, whether the review on record is the current stage's and
+  produced nothing, so the executor leg can ask before any failure reporting.
+
+Any other stop (an apply batch that failed, a human-task answer owed, a scope-policy conflict, exit 1)
+stops the cascade at row 14 exactly as today, and the re-run continues that stage. A continue call
+made after such a stop (the native leg runs one after every review stop, item 4 of the cores'
+section 2C) finds the stage it follows still open and raises `StageNotFinished` (exit 3,
+`stage_not_finished_message`: what is missing, and that the command run again continues the
+stage), never that stage's block again.
+
+### Resume, re-runs and `--force`
+
+**Cascade intent comes before completion.** `preflight` is `safety_checks` (a live owner, then a
+readable `state.json` and scope; unchanged), then `completion`, then the `--files-from -` check. When
+a cascade applies (`applies`: `--cascade` typed, or an unfinished cascade on record), `completion`
+asks `peek` instead of `nothing_to_do`: `complete` is `CascadeFinished` (its `[ALREADY_COMPLETE]`
+line, exit 2, before any detach boundary), `work` goes on, a refusal returns its exit code, and
+`none` (`--force` alone over an unfinished cascade) falls back to the plain rules. Without the split
+two states would stop at `[ALREADY_COMPLETE]`: a new cascade over completed non-cascade phases, and
+a cascade interrupted after a stage's apply completed but before its close-out. `peek` raises every
+refusal `advance` would make at the start, so a refused or finished launch writes nothing.
+
+| On record (the pointer's cascade) | Typed | Result |
+| --- | --- | --- |
+| none, or an abandoned one | `--cascade` (without `--resume`, or with `--models` or `--quick`) | a new cascade from stage 1 |
+| none, or an abandoned one | `--cascade --resume` with no `--models` or `--quick` (a printed continuation kept from a cascade `--force` alone abandoned, or whose pointer was moved aside) | exit 3 `[CASCADE_CONFLICT] --resume: there is no unfinished <composite> cascade to resume (…); nothing was run`, naming the two ways to start one: `--cascade` without `--resume`, or with `--models`/`--quick`; nothing written, before any detach boundary |
+| finished, no typed model flag or selector other than the record's | `--cascade` (the printed continuation `--cascade --resume` included) | `[ALREADY_COMPLETE] cascade finished at <time> (<n> stages); --force --cascade starts a new one`, exit 2 |
+| finished | `--cascade` with a typed `--models`, `--quick`, `--files`, `--files-from` or `--base-ref` resolving to other than the record | a new cascade from stage 1 |
+| finished | no `--cascade` | today's rules on the files on record (normally `[ALREADY_COMPLETE]`: the last stage's review stays completed) |
+| unfinished | nothing, `--cascade` or `--resume` | continue at the current stage: `[IMPROVE_CASCADE] continuing stage <k> of <n> (<model>)` |
+| any | `--force --cascade` | an unfinished one is abandoned (a `NOTE:` line), then a new cascade |
+| unfinished | `--force` alone | marked `abandoned` and the pointer removed, with a `NOTE:` line; today's new round with today's models |
+| unfinished | `--models`, `--quick`, `--files`, `--files-from` or `--base-ref` resolving to other than the record | exit 3 `[CASCADE_CONFLICT]` naming the flag, both values and the two ways out: re-run without it, or `--force --cascade` |
+| unfinished | another `--scope-policy` | no conflict: the round under way follows today's rules, and the stages not started take the typed value |
+
+Only typed values are compared (`_typed_difference`, for an unfinished and a finished cascade
+alike), so a bare continuation reproduces the record; models compare in order (the order is the
+cascade), files as a set, as the review compares a scope. On a finished cascade an untyped model
+list is the record's, never today's defaults resolved again: every surface prints
+`--cascade --resume` with no model flag while a cascade runs (a continue call's `[IMPROVE_RERUN]`,
+the executor's row-14 line after a bare re-run, `util next-command`), and that command typed after
+the finish must answer `[ALREADY_COMPLETE]`, not start a new paid cascade of another list.
+Typed when no cascade is on record (the pointer gone after `--force` alone abandoned it, or moved
+aside) it refuses for the same reason (`_nothing_to_resume`): `--resume` asks to go on, and
+there is nothing to go on with.
+
+**Other readers ask for an unfinished cascade first** (`next_phase.unfinished_cascade`, over
+`cascade_status`, read-only), because between two stages every step is on record and the plain rules
+would read "everything complete". `util next-command --after` and `--blocked` on a composite, and
+`emit_resume`, answer the composite's own continuation with `--cascade`, with the why
+`continues the unfinished cascade at stage <k> of <n> (<model>)`; `status`'s `resume with:` for a
+composite run carries `--cascade` (`_composite_resume_tokens`). On a composite run's view (a run
+record in its run dir) `status` shows `cascade:        stage <k> of <n> (<model>)` in the default
+view, `--view run` and pinned polls, and `status --json` carries the run view's `cascade` key
+(`{cascade_id, state, stage, of, model, dir}`, `run_view` in `schemas/status_json.schema.json`),
+only while the cascade is `running` (`status_views.attach_cascades`). A cascade with no composite
+run record (the native leg's, or one a foreground executor run stopped in) is read from the pointer
+and the record instead (`status_views.unfinished_cascades`, which looks for the pointer first, so a
+plan with none never loads the cascade core): the run view gets a block of its own,
+`  <composite>  no run record`, the same `cascade:` line and `resume with: <composite continuation
+with --cascade --resume>`, and `status --json` a top-level `cascades` list (each with its `mode`);
+neither under `--run-id` or `--question`, and under `--phase` only for the composite it names. That
+block stands for the composite: with no run view listed, no `no run recorded for …` line precedes it.
+While any cascade is unfinished, the workflow section's suggestion (and a terminal `--view run`
+poll's trailer) reads `suggested next: <composite>  (continues the unfinished cascade at stage <k>
+of <n> (<model>))` instead of `suggested_next`, which reads every step done between two stages;
+under `--phase` only when the phase is that composite, and under a `--phase` naming another phase
+no suggestion line prints at all (`run_status._suggests`). The workflow payload itself,
+`--view workflow` and the `--json` document's `workflow` key keep their bytes, and so does every
+output without an unfinished cascade. All of it is advisory: a record that cannot be read costs the lines, not the poll, and the
+composite's own run refuses it naming the file. Once the cascade is finished,
+`--after improve-plan|improve-code` and `status` answer as today.
+
+### The two legs
+
+**Executor leg** (`ImproveWorkflow`, under `--exec-subagents`). The entry point and the worker's
+`run()` backstop use the split `preflight`, so `peek` answers before the detach boundary; only the
+foreground run and the detached worker call `advance`. The workflow loops over the stages: the
+stage's namespace stands in for the user's in every planning read (`run`'s skip gate on `force`,
+`step_argv`, `skip_reason`, `review_runs`, the scope-policy resolution), and `FullWorkflow.run`'s
+step loop is split out so it runs once per stage and returns the failed step **before**
+`_phase_failed` or `print_report` runs, which lets the cascade decide skip or stop; only then does
+the existing failure path run, once, with the cascade's continuation (`run_steps`, with
+`run` as today's behaviour on top of it; the stage namespace is `planning_args()`). Per stage it resets the
+records cache, the `_scope_resolved` cache and the per-stage result fields (consolidation
+recommendation, validation counts, notice, artifacts); `self.reports` and `_record_progress`'s steps
+are keyed by stage and phase, so stages never overwrite each other and the final report lists the
+last stage's steps. A failed review step that `zero_result_stage` reports as a middle stage's is a
+skip: the needs-human override the review set (`mark_needs_human`) is cleared through
+`unattended.clear_needs_human`, which only the cascade calls, and the loop goes on. Progress keys
+read `stage-<k>/<phase>`, and the report prints the table, then `### Stage <k> of <n>: <model>`
+with the last stage's steps; the executor prints no `[CASCADE_COMPLETE]` (the table stands in). The one `MULTI_LLM_RESULT` line is whatever the
+cascade ends with: exit 0, `done`, with the next-command lookup's `next`, or exit 3, needs-human,
+for a stopped last stage. Each `advance` after a stage passes `after_stage`, so a stage whose steps
+all ran but that the cascade does not find done stops at `StageNotFinished` instead of looping. A
+refusal of that call (`_cascade_refused`: an archive it cannot trust, a live lock at close-out,
+close-outs that kept racing, a pointer naming another cascade, `StageNotFinished`) stops as row 14
+does: the progress record's `current_phase` and `failed_phase` read `cascade`, the stop names the
+cascade's continuation (`resume_command`, with `--cascade`) and the result line's `next` is it,
+never a follow-up a phase printed before; a refusal of the run's first `advance` (nothing ran, e.g.
+`[CASCADE_CONFLICT]`) names none. The report adds the per-round table, `report_artifacts` adds `summary.md`,
+`ledger.md` and the stage dirs, and the result fields come from the last stage plus those artifacts.
+The detached worker runs the whole cascade, and its run dir's `.status.json` names the stage under
+way (`cascade_stage: {index, of, model}`, written only when the run dir already has a checkpoint,
+`null` once the cascade ends); `status` reads the pointer and the record either way.
+
+**Native leg** (Claude Code). `util improve-steps` stays read-only. When a cascade applies it runs
+the safety checks and `peek`, prints a refusal or `[ALREADY_COMPLETE]` with nothing written, and
+otherwise plans no steps and prints
+`[IMPROVE_CASCADE_NEXT] <util improve-cascade next …, with the typed flags>` and
+`[IMPROVE_RERUN] <the continuation, with --cascade>`, exit 0, so a run that stops before its first
+`next` call still has its block for the report check.
+`util improve-cascade next <plan> --mode … --host … <flags>` is the cascade's planner and recorder
+in one call: it calls
+`advance`, then prints the stage's block with the very functions `util improve-steps` prints with
+(`[IMPROVE_STEP]`, `[IMPROVE_STEP_FLAGS]`, `[IMPROVE_STEP_FRESH]`, step 1b `skip (cascade)`), plus
+`[IMPROVE_CASCADE] stage <k> of <n>: <model>`, `[CASCADE_STAGE_SKIPPED] …` when a middle stage was
+just skipped,
+`[IMPROVE_CASCADE_CONTINUE] <util improve-cascade next <plan> --mode … --host … --cascade-id <id> --after-stage <k>>`
+and `[IMPROVE_RERUN]`. The first call (from `[IMPROVE_CASCADE_NEXT]`) carries
+the typed flags and is `advance`'s initial call; `[IMPROVE_CASCADE_CONTINUE]` is bound to the
+cascade's id and to the stage the call that printed it handed out (`--after-stage <k>`, which only
+goes with `--cascade-id`), and carries no restart or selector flag, so repeating it never restarts a
+`--force --cascade` run, it stops at exit 3 `[CASCADE_CONFLICT]` once the pointer names another
+id, and at exit 3 `StageNotFinished` while stage k is still open: it never prints the block it was
+called after. It exits 0 with steps to run, 2 with `[CASCADE_COMPLETE] <n> stages; table: <summary.md path>`
+once every stage is closed, and 3 for a continue call's stop at its stage (a stopped last stage,
+or a stage not finished), with `[IMPROVE_RERUN]`. `--json` mirrors
+the improve-steps object plus a `cascade` key. `--force` without `--cascade` over an unfinished
+cascade: `util improve-steps` hands off, and `next` abandons the cascade (`NOTE:`) and prints today's
+plain step block with no `[IMPROVE_CASCADE_CONTINUE]`, so the core runs one round. The dispatcher
+lists the util in its registry and help, the plan as the path positional after the `next` word,
+`--models` in its variadic options, `--files`, `--cascade-id` and `--after-stage` among its value options and
+`--files-from` in its path options. A continue call's `[IMPROVE_RERUN]` is `--cascade --resume`
+alone (the record holds the selectors); the hand-off's and the first call's keep the typed
+selectors. A stopped last stage (`improve_cascade.LastStageStopped`) and a stage not finished
+(`improve_cascade.StageNotFinished`), both raised only on a continue call, print the stop on stderr
+and `[IMPROVE_RERUN]` on stdout (`--json`: `cascade.state` `stopped`); every other refusal prints
+nothing on stdout, and `[CASCADE_COMPLETE]` prints no `[IMPROVE_RERUN]`, so section 4's lookup is the block.
+
+**The instruction cores** (`instructions/improve-plan.md`, `instructions/improve-code.md`) get a
+section "2C. A cascade", referenced from section 1: run the `[IMPROVE_CASCADE_NEXT]` command once;
+on exit 0 run its steps as section 2 says (sections 2 and 3 apply unchanged: flags verbatim, inner
+`[NEXT_COMMAND]` blocks ignored, the stop rules); when the stage's last step is done, run the latest
+`[IMPROVE_CASCADE_CONTINUE]` command, never the first command again, until it exits 2 with
+`[CASCADE_COMPLETE]` (each call prints the next stage's block, never the same one again); when a
+stage's review step exits 3, run the continue command once before reporting a stop, and go on with
+its block if it prints `[CASCADE_STAGE_SKIPPED]`, otherwise it exits 3 and the stop is reported;
+never end the turn between stages. Sections 1, 2C and 3 name "the latest `[IMPROVE_RERUN]` command
+printed", the report check's rule: a refused first `next` call printed none, so the report ends with
+the hand-off's. Section 4's report opens with a `### Cascade` section (`summary.md`'s table copied as
+written, never recounted), then Steps 1 and 2 for the last stage, then Output Files with
+`summary.md`, `ledger.md` and the stage dirs. The Stop-hook report check knows both planners by name
+(host-reporting.md, [Claude Code report checks](host-reporting.md#claude-code-report-checks)).
+
+**Out of scope:** several models in one stage (a stage's `model` could become a list without
+changing the record's other fields), widening improve-code's review scope across stages, checks or
+tests between stages, stopping rules (repeating the last stage until it finds nothing valid),
+`--improve-commits --cascade`, `--full --cascade` and cascades of the review modes alone, a config
+key for the order (`--models` sets it), and a per-stage code diff.
 
 ## Commit reviews
 

@@ -332,7 +332,7 @@ the message), it prints one `{"decision": "block", "reason": …}` naming the mi
 whole report again (the reply becomes the run's final message; racing run 5 got back the next-steps
 section alone, fix round 14), which gives the model one more turn to copy them; on a native
 `--improve-plan`/`--improve-code` run the `[IMPROVE_RERUN]` line of a Bash call
-that ran `util improve-steps` is a block too (`report_check.planner_call_ids`, `Block.continuation`), and
+that ran `util improve-steps` (or, for a cascade, `util improve-cascade`) is a block too (`report_check.planner_call_ids`, `Block.continuation`), and
 while it is the block held a later block with no ready section, an inner phase's standalone next
 step, does not replace it, while a `util next-command` lookup's (every one prints a section)
 does: before that, review-plan's `--reaggregate` block (`--apply-suggestions <plan>`) blocked every

@@ -27,6 +27,7 @@ from utils.held_folder import (  # noqa: E402
     anchor_plan_dir,
     plan_dir_of,
     remove_in_plan_dir,
+    utime_in_plan_dir,
     write_in_plan_dir,
 )
 
@@ -249,6 +250,45 @@ class TestTheRemoval:
         with pytest.raises(OutsidePlanDir):
             remove_in_plan_dir(plan.parent / "feature" / "state.json")
         _unchanged(outside, "state.json")
+
+
+TIMES = (1_700_000_000_000_000_000, 1_700_000_100_000_000_000)
+
+
+@POSIX
+class TestTheTimes:
+    """A cascade's archive copies keep their sources' times, set as the
+    writes are made: through the folder held, never through a link."""
+
+    def test_the_times_are_set_in_the_folder_held(self, plan):
+        target = plan.parent / "feature" / "implement" / "summary.md"
+        write_in_plan_dir(target, b"# Summary\n")
+        utime_in_plan_dir(target, TIMES)
+        assert (target.stat().st_atime_ns, target.stat().st_mtime_ns) == TIMES
+
+    def test_a_folder_linked_out_is_refused(self, plan, tmp_path):
+        outside = _outside(tmp_path, "summary.md")
+        before = (outside / "summary.md").stat().st_mtime_ns
+        _swap(plan.parent / "feature" / "implement", outside)
+        with pytest.raises(OutsidePlanDir):
+            utime_in_plan_dir(plan.parent / "feature" / "implement" / "summary.md", TIMES)
+        assert (outside / "summary.md").stat().st_mtime_ns == before
+
+    @HELD
+    def test_a_link_at_the_name_is_never_followed(self, plan, tmp_path):
+        outside = _outside(tmp_path, "victim.md")
+        before = (outside / "victim.md").stat().st_mtime_ns
+        link = plan.parent / "feature" / "implement" / "summary.md"
+        os.symlink(outside / "victim.md", link)
+        utime_in_plan_dir(link, TIMES)
+        assert (outside / "victim.md").stat().st_mtime_ns == before
+
+    def test_a_file_below_no_anchored_directory_is_set_by_its_path(self, tmp_path):
+        target = tmp_path / "loose" / "file.txt"
+        target.parent.mkdir()
+        target.write_bytes(b"x")
+        utime_in_plan_dir(target, TIMES)
+        assert target.stat().st_mtime_ns == TIMES[1]
 
 
 # ---------------------------------------------------------------------------

@@ -64,7 +64,9 @@ prints the path), so you can port any custom settings into the regenerated file.
   `defaults.modes.review-plan` (`--improve-plan`) or `defaults.modes.code-review`
   (`--improve-code`; the key is `code-review`, not `review-code`), so that is the
   entry to set to change an improve run's reviewers. An `improve-plan` or
-  `improve-code` entry is read by nothing.
+  `improve-code` entry is read by nothing. Under `--cascade` that list's order
+  is also the order of the rounds, one model per round, so list the cheapest
+  model first ([Cascade](workflows.md#cascade-one-model-at-a-time)).
 - **Requires a git repo.** Discovery resolves the git root, so there's one override
   per repo, shared repo-wide (no per-subdirectory configs). Non-git projects must
   use `MULTI_LLM_PROVIDERS_CONFIG` instead.

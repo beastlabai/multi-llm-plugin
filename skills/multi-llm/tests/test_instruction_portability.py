@@ -2094,13 +2094,14 @@ INVOCATION_LINE_ALLOWLIST = {
             # `[--files <path> ...]` read as a list (Fable review 2026-10-09).
             "/multi-llm:multi-llm --improve-code <plan_path> [--quick | --models "
             "provider:model ...] [--files <path> (repeatable) | --files-from <file>] "
-            "[--base-ref REF] [--scope-policy expand|preserve] [--force] [--resume]",
+            "[--base-ref REF] [--scope-policy expand|preserve] [--cascade] [--force] "
+            "[--resume]",
             "usage", _USAGE),
     ),
     "instructions/improve-plan.md": (
         AllowedInvocationLine(
             "/multi-llm:multi-llm --improve-plan <plan_path> [--quick | --models "
-            "provider:model ...] [--scope-policy expand|preserve] [--force] "
+            "provider:model ...] [--scope-policy expand|preserve] [--cascade] [--force] "
             "[--resume]",
             "usage", _USAGE),
     ),

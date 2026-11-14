@@ -983,10 +983,12 @@ DISTRIBUTION_BUDGETS: Dict[str, Tuple[int, int]] = {
     # measured at U44b: claude-code 300 files / 11,043,439 bytes, codex 301 /
     # 11,217,795. Byte budgets raised the same day: codex had 82 KB left, and the
     # split modules each carry their docstrings; a development file leaking in
-    # still shows first in the file count.
+    # still shows first in the file count. File budgets raised 2026-11-13 for
+    # --cascade's six runtime files (five modules and the record schema, none of
+    # them development files); measured then: codex 333 files / 11,874,888 bytes.
     "claude-code": (340, 12_000_000),     # the review target: past it is a decision
-    "codex": (330, 12_000_000),
-    "opencode": (330, 12_100_000),     # unpacked; tracks the codex tree
+    "codex": (345, 12_000_000),
+    "opencode": (345, 12_100_000),     # unpacked; tracks the codex tree
 }
 
 

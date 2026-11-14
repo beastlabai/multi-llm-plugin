@@ -257,6 +257,7 @@ UTIL_CALLS = {
     "runs": ["--plan-file", PLAN],
     "next-command": [PLAN, "--after", "review-plan"],
     "improve-steps": [PLAN, "--mode", "improve-plan", "--host", "claude-code"],
+    "improve-cascade": ["next", PLAN, "--mode", "improve-plan", "--host", "claude-code"],
     "check-tasks": ["plans/x/tasks/tasks.md"],
     "check-reply": ["--tasks-file", "plans/x/review-plan/validation_tasks.json"],
     "write-prompt": ["--phase-dir", "plans/x/implement", "--task-id", "T001"],

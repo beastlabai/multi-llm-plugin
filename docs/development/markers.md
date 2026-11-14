@@ -50,8 +50,8 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 
 ## Counts
 
-- Emitted markers: 190
-- Cited by an instruction, reference, `SKILL.md` or shim template: 113
+- Emitted markers: 196
+- Cited by an instruction, reference, `SKILL.md` or shim template: 119
 - Declared not-for-the-host: 77
 - Neither (must be zero): 0
 
@@ -61,14 +61,17 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 | --- | --- | --- | --- |
 | `[ABORT_SWEEP]` | `utils/detach.py` | not for the host: runner-diagnostic | — |
 | `[ACCEPTED]` | `ask_orchestrator.py` | not for the host: phase-progress | — |
-| `[ALREADY_COMPLETE]` | `utils/improve_steps.py` `ALREADY_COMPLETE_MARKER`<br>`utils/improve_workflow.py` | `instructions/improve-code.md`<br>`instructions/improve-commits.md`<br>`instructions/improve-plan.md` | — |
-| `[AUTO_RESOLVED]` | `utils/unattended.py` `RESOLVED_MARKER` | `instructions/full-workflow.md`<br>`instructions/implement.md`<br>`instructions/improve-code.md`<br>`instructions/improve-commits.md`<br>`instructions/improve-plan.md`<br>`instructions/review-code.md`<br>+4 more | Prefix of the one stdout line every auto-resolution prints |
+| `[ALREADY_COMPLETE]` | `utils/improve_cascade.py` `ALREADY_COMPLETE_MARKER`<br>`utils/improve_steps.py` `ALREADY_COMPLETE_MARKER`<br>`utils/improve_workflow.py` | `instructions/improve-code.md`<br>`instructions/improve-commits.md`<br>`instructions/improve-plan.md` | — |
+| `[AUTO_RESOLVED]` | `utils/improve_cascade.py`<br>`utils/unattended.py` `RESOLVED_MARKER` | `instructions/full-workflow.md`<br>`instructions/implement.md`<br>`instructions/improve-code.md`<br>`instructions/improve-commits.md`<br>`instructions/improve-plan.md`<br>`instructions/review-code.md`<br>+4 more | Prefix of the one stdout line every auto-resolution prints |
 | `[BATCH_CHECK_ACCEPTED]` | `utils/check_records.py` `BATCH_CHECK_ACCEPTED_MARKER` | `instructions/implement.md` | The line a code task prints when its own check reported only findings the user accepted for a check (`--human-task <check>=done`): both… |
 | `[BATCH_CHECK_FAILED]` | `utils/check_records.py` `BATCH_CHECK_MARKER` | `instructions/apply-code-fixes.md`<br>`instructions/implement.md` | The line a code phase prints per batch whose own check failed after its edits (`CheckHolds.batch_check_lines`, `util batch-done --own-check… |
 | `[BATCH_CHECK_REPEATED]` | `utils/check_records.py` `BATCH_CHECK_REPEATED_MARKER` | `instructions/implement.md` | The line a code task prints when its own check reported only the same findings a check task of the run reported: both legs, in place of… |
 | `[BATCH_DECLINED]` | `utils/batch_done.py` `BATCH_DECLINED_MARKER` | `instructions/apply-code-fixes.md`<br>`instructions/apply-suggestions.md`<br>`instructions/apply-task-suggestions.md` | One line per item an apply batch declined with a reason (`--declined`), and per item the user chose to skip when the batch was kept as it… |
 | `[BATCH_DONE]` | `utils/batch_done.py` `MARKER` | `instructions/apply-code-fixes.md`<br>`instructions/apply-suggestions.md`<br>`instructions/apply-task-suggestions.md`<br>`instructions/implement.md` | The one stdout line a successful record prints |
 | `[BATCH_SKIPPED]` | `utils/batch_done.py` `BATCH_SKIPPED_MARKER` | `instructions/apply-code-fixes.md`<br>`instructions/apply-suggestions.md`<br>`instructions/apply-task-suggestions.md` | — |
+| `[CASCADE_COMPLETE]` | `utils/improve_cascade_next.py` `COMPLETE_MARKER` | `instructions/improve-code.md`<br>`instructions/improve-plan.md` | Every stage is closed: the line names the stage count and the per-round table |
+| `[CASCADE_CONFLICT]` | `utils/improve_cascade.py` `CONFLICT_MARKER` | `instructions/improve-code.md`<br>`instructions/improve-plan.md` | A typed flag that is not the unfinished cascade's, a continue call for another cascade, or --cascade --resume with nothing to resume |
+| `[CASCADE_STAGE_SKIPPED]` | `utils/improve_cascade.py` `SKIPPED_MARKER` | `instructions/improve-code.md`<br>`instructions/improve-plan.md` | A stage before the last whose review produced no result, recorded skipped |
 | `[CHECKPOINT_RECOVERED]` | `ask_orchestrator.py`<br>`utils/review_lane.py` `CHECKPOINT_RECOVERED_MARKER` | not for the host: run-notice | The warning line of a fresh run that recovered its phase's damaged checkpoint (`recover_damaged_checkpoint`); the round records the same… |
 | `[CHECK_BLOCKED]` | `utils/batch_done.py` `CHECK_BLOCKED_MARKER` | `instructions/implement.md` | The line naming the tasks a check with findings holds back (stdout) |
 | `[CHECK_FINDINGS]` | `utils/check_records.py` `CHECK_FINDINGS_MARKER` | not for the host: unnamed-handler | The line an implement run prints per check task that reported problems (`CheckHolds.check_findings_lines`, racing re-run 4) |
@@ -117,6 +120,9 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 | `[HIGH_PRIORITY_ISSUES]` | `code_review_orchestrator.py` | not for the host: phase-progress | — |
 | `[HUMAN_DECISION_JUDGING_PENDING]` | `utils/apply_orchestrator_base.py` | not for the host: phase-progress | — |
 | `[HUMAN_TASK_ANSWERED]` | `implement_orchestrator.py` | `instructions/implement.md` | — |
+| `[IMPROVE_CASCADE]` | `utils/improve_cascade.py` `CASCADE_MARKER` | `instructions/improve-code.md`<br>`instructions/improve-plan.md` | Where the cascade stands: a new cascade, the stage it continues, the stage to run |
+| `[IMPROVE_CASCADE_CONTINUE]` | `utils/improve_cascade_next.py` `CONTINUE_MARKER` | `instructions/improve-code.md`<br>`instructions/improve-plan.md` | The command that hands out the next stage, bound to the cascade's id |
+| `[IMPROVE_CASCADE_NEXT]` | `utils/improve_steps.py` `CASCADE_NEXT_MARKER` | `instructions/improve-code.md`<br>`instructions/improve-plan.md` | A cascade's hand-off: the `util improve-cascade next` command the core runs once, in place of a step block |
 | `[IMPROVE_RERUN]` | `utils/improve_steps.py` `RERUN_MARKER` | `SKILL.md`<br>`instructions/improve-code.md`<br>`instructions/improve-commits.md`<br>`instructions/improve-plan.md`<br>`references/host-capabilities.md` | — |
 | `[IMPROVE_SCOPE_CHANGED]` | `utils/improve_workflow.py` | `instructions/improve-code.md`<br>`instructions/improve-commits.md` | — |
 | `[IMPROVE_STEP]` | `utils/improve_steps.py` `STEP_MARKER` | `instructions/improve-code.md`<br>`instructions/improve-commits.md`<br>`instructions/improve-plan.md` | — |

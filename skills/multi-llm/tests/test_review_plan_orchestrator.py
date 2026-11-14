@@ -1903,6 +1903,9 @@ class TestTheRecordedPromptNamesTheAttemptsMinutes:
                     # The round's scope block, which the orchestration's
                     # factory adds (`with_reviewer_guidance`).
                     "scope_policy_guidance": reviewer_guidance("expand", "review-plan"),
+                    # The cascade ledger block (`with_prior_rounds`), empty
+                    # outside a cascade stage.
+                    "prior_rounds": "",
                 },
                 phase_name="review-plan",
                 invoke_phase="plan_review",

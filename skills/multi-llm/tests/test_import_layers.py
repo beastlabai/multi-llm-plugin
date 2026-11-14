@@ -94,6 +94,9 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.yaml_io",
     )),
     1: ("state", (
+        # A cascade stage's manifest and the review round's `cascade` block:
+        # read by the review phases, the prompt builders and the cascade.
+        "utils.cascade_provenance",
         "utils.cli_common",
         "utils.cli_version_cache",
         # The commit-range grammar: git and rendering only, read by the
@@ -219,6 +222,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.apply_selection_helpers",
         "utils.apply_suggestion_phase",
         "utils.backup",
+        "utils.cascade_ledger",
         "utils.commit_attribution",
         "utils.commit_report",
         "utils.commit_spelling",
@@ -251,9 +255,11 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "display_decisions",
         "finalize_tracking",
         "update_plan_tasks",
+        "utils.cascade_archive",
         "utils.commit_brief",
         "utils.commit_front_door",
         "utils.commit_review",
+        "utils.improve_cascade",
         "utils.improve_workflow",
     )),
     6: ("CLI", (
@@ -262,6 +268,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "multi_llm",
         "utils.doctor",
         "utils.host_install",
+        "utils.improve_cascade_next",
         "utils.improve_steps",
         "utils.next_phase",
         "utils.resume_state",

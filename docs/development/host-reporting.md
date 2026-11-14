@@ -129,6 +129,18 @@ read as the one version its schema's `const` allows, with one plain line
 verdict ingest); a present key keeps its value for the schema to judge (03's host dropped it copying
 the subagent's JSON).
 
+**The report check knows the composite's planners by name** (`report_check._PLANNER_RE`). A native
+`--improve-plan` / `--improve-code` run is held to its own continuation: the `[IMPROVE_RERUN]` line
+counts as a block only in the result of a Bash call that ran `multi_llm.py util improve-steps` or,
+for a cascade, `multi_llm.py util improve-cascade` (`planner_call_ids`), so the run's block is the
+latest continuation a planner call printed (a refused call prints none, and the one before it
+stands), `next` included, and an inner phase's standalone
+`[NEXT_COMMAND]` does not replace it (status.md, `Block.continuation`). `util improve-steps` keeps
+`[IMPROVE_RERUN]` beside its `[IMPROVE_CASCADE_NEXT]` hand-off, so a cascade that stops before its
+first `next` call still has its block. A `grep` or a `Read` of a file quoting the line, and
+`util instructions` printing a core, are not planner calls (workflows.md,
+[A cascade (`--cascade`)](workflows.md#a-cascade---cascade)).
+
 `util check-reply` prints `[REPLY_MISSING]` for a reply not on disk yet, no re-ask and exit
 0 on its own, and the runbooks check the whole file only once every batch's subagent returned (01
 checked while wave 2 ran). apply-code-fixes' step 7 hands the report the `[TESTS_NOT_RUN]` line

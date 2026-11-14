@@ -90,7 +90,8 @@ _SCOPE_PHASE = {PLAN_PROMPT: "review-plan", CODE_PROMPT: "code-review"}
 def _render(name, location="file", policy="expand"):
     """The prompt a reviewer receives: the three keys `invoke_with_file_output`
     injects on top of the phase's own context, which includes the round's
-    `{scope_policy_guidance}` block (default `expand`)."""
+    `{scope_policy_guidance}` block (default `expand`) and its `{prior_rounds}`
+    block (empty outside a cascade stage)."""
     path = _RESULT_PATH[name]
     block = (
         FILE_OUTPUT_LOCATION.format(path=path)
@@ -100,6 +101,7 @@ def _render(name, location="file", policy="expand"):
     return _template(name).format(
         **_CONTEXT[name],
         scope_policy_guidance=reviewer_guidance(policy, _SCOPE_PHASE[name]),
+        prior_rounds="",
         output_json_path=path,
         output_location=block,
         working_limits=render_working_limits(1200),

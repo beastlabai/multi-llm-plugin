@@ -300,8 +300,175 @@ class TestEverythingElseIsReadAsBefore:
         assert wakeup_check.phase_in_flight(_turn(t, tmp_path)) == "apply-suggestions"
 
 
+# ---------------------------------------------------------------------------
+# A cascade: every `util improve-cascade next` call is a planner call
+# ---------------------------------------------------------------------------
+# Under --cascade, `util improve-steps` hands off ([IMPROVE_CASCADE_NEXT] and
+# [IMPROVE_RERUN]), and each stage comes from a `util improve-cascade next`
+# call that prints the stage's steps, [IMPROVE_CASCADE_CONTINUE] and
+# [IMPROVE_RERUN] again. A continue call carries no selector, so its
+# continuation is the bare `--cascade --resume`: the report is held to the
+# latest one printed, never to an inner phase's [NEXT_COMMAND].
+
+#: The hand-off's and the first `next` call's continuation (the typed --quick),
+#: and every continue call's.
+CASCADE_FIRST = {mode: f"/multi-llm:multi-llm --{mode} {PLAN} --quick --cascade --resume"
+                 for mode in MODES}
+CASCADE_RERUN = {mode: f"/multi-llm:multi-llm --{mode} {PLAN} --cascade --resume"
+                 for mode in MODES}
+CASCADE_ID = "c0ffee00deadbeef0123456789abcdef"
+SUMMARY = "plans/x/improve-plan/cascades/20261113T090000-c0ffee00/summary.md"
+
+
+def _next_call(mode: str, *flags: str) -> str:
+    return f'improve-cascade next "{PLAN}" --mode {mode} --host claude-code ' + " ".join(flags)
+
+
+def _continue(mode: str) -> str:
+    return f"{DISPATCH} util {_next_call(mode, '--cascade-id', CASCADE_ID)}"
+
+
+def _stage(mode: str, k: int, of: int, rerun: str) -> str:
+    """One `next` call's stage block."""
+    return (
+        f"[IMPROVE_CASCADE] stage {k} of {of}: codex:m{k}\n"
+        f"[IMPROVE_STEP] 1 {REVIEW[mode]} run (new round, --force)\n"
+        "[IMPROVE_STEP_FRESH] 1\n"
+        f"[IMPROVE_STEP_FLAGS] 1 --yes --models codex:m{k} --force --rerun-all "
+        f"--cascade-stage-file /r/plans/x/stage-{k}/inputs/manifest.json\n"
+        f"[IMPROVE_STEP] 2 {APPLY[mode]} run (review not applied yet)\n"
+        "[IMPROVE_STEP_FLAGS] 2 --yes --agent-decide --no-confirm\n"
+        f"[IMPROVE_CASCADE_CONTINUE] {_continue(mode)}\n"
+        f"{improve_steps.RERUN_MARKER} {rerun}\n" + _result("util improve-cascade")
+    )
+
+
+def _cascade_stage_done(t: Transcript, mode: str) -> None:
+    """A stage's review and apply, each phase printing its own standalone block."""
+    _phase(t, REVIEW[mode], "--reaggregate",
+           f"[NEXT_COMMAND] {BARE_APPLY[mode]}\n" + _result(REVIEW[mode]))
+    _phase(t, APPLY[mode], "--mark-completed",
+           f"[NEXT_COMMAND] {GENERATE}\n" + _result(APPLY[mode]))
+
+
+def _cascade_started(mode: str) -> Transcript:
+    """The hand-off, the first `next` call, and stage 1 run."""
+    t = Transcript().prompt(f"/multi-llm:multi-llm --{mode} {PLAN} --cascade --quick")
+    _util(t, f'improve-steps "{PLAN}" --mode {mode} --host claude-code --cascade --quick',
+          f"[IMPROVE_CASCADE_NEXT] {DISPATCH} util {_next_call(mode, '--cascade', '--quick')}\n"
+          f"{improve_steps.RERUN_MARKER} {CASCADE_FIRST[mode]}\n" + _result("util"))
+    _util(t, _next_call(mode, "--cascade", "--quick"), _stage(mode, 1, 2, CASCADE_FIRST[mode]))
+    _cascade_stage_done(t, mode)
+    return t
+
+
+def _cascade_stopped(mode: str) -> Transcript:
+    """Stage 2 handed out by a continue call, and its apply stopped."""
+    t = _cascade_started(mode)
+    call(t, _continue(mode), _stage(mode, 2, 2, CASCADE_RERUN[mode]))
+    _phase(t, REVIEW[mode], "--reaggregate",
+           f"[NEXT_COMMAND] {BARE_APPLY[mode]}\n" + _result(REVIEW[mode]))
+    _phase(t, APPLY[mode], "--yes --agent-decide --no-confirm",
+           f"[WRITE_TASKS_FILE] plans/x/{APPLY_DIR[mode]}/write_tasks.json\n"
+           + _result(APPLY[mode]))
+    return t
+
+
+def _cascade_finished(mode: str) -> Transcript:
+    """Both stages run, `next` exits 2 with [CASCADE_COMPLETE], then the lookup."""
+    t = _cascade_started(mode)
+    call(t, _continue(mode), _stage(mode, 2, 2, CASCADE_RERUN[mode]))
+    _cascade_stage_done(t, mode)
+    call(t, _continue(mode), f"[CASCADE_COMPLETE] 2 stages; table: {SUMMARY}\n"
+         + _result("util improve-cascade", 2))
+    _util(t, f'next-command "{PLAN}" --after {mode} --host claude-code', LOOKUP)
+    return t
+
+
+class TestACascade:
+
+    @pytest.mark.parametrize("mode", MODES)
+    def test_a_stop_mid_stage_is_held_to_the_latest_continuation(self, tmp_path, capsys,
+                                                                 mode):
+        t = _cascade_stopped(mode)
+        block = report_check.last_block(_turn(t, tmp_path))
+        assert block is not None and block.continuation
+        assert block.commands() == [CASCADE_RERUN[mode]]
+        path = t.say(_stop_report(mode, ANSWER[mode], CASCADE_RERUN[mode])).write(
+            tmp_path / "t.jsonl")
+        assert run_check(capsys, path) == ""
+
+    @pytest.mark.parametrize("mode", MODES)
+    def test_the_hand_offs_continuation_alone_no_longer_passes(self, tmp_path, capsys, mode):
+        path = (_cascade_stopped(mode)
+                .say(_stop_report(mode, ANSWER[mode], CASCADE_FIRST[mode]))
+                .write(tmp_path / "t.jsonl"))
+        reason = decision_of(run_check(capsys, path))["reason"]
+        assert f"```\n{CASCADE_RERUN[mode]}\n```" in reason
+        assert "util improve-cascade next" in reason
+
+    @pytest.mark.parametrize("mode", MODES)
+    def test_an_inner_next_command_is_never_the_block(self, tmp_path, capsys, mode):
+        path = (_cascade_stopped(mode).say(_stop_report(mode, BARE_APPLY[mode]))
+                .write(tmp_path / "t.jsonl"))
+        reason = decision_of(run_check(capsys, path))["reason"]
+        assert f"```\n{CASCADE_RERUN[mode]}\n```" in reason
+        assert f"```\n{BARE_APPLY[mode]}\n```" not in reason
+
+    @pytest.mark.parametrize("mode", MODES)
+    def test_a_completed_cascade_is_held_to_its_lookup(self, tmp_path, capsys, mode):
+        t = _cascade_finished(mode)
+        block = report_check.last_block(_turn(t, tmp_path))
+        assert block is not None and not block.continuation
+        report = f"## {mode} Summary\n\n### Cascade\n\n```\n{GENERATE}\n```\n"
+        assert run_check(capsys, t.say(report).write(tmp_path / "t.jsonl")) == ""
+
+    @pytest.mark.parametrize("mode", MODES)
+    def test_a_completed_cascade_without_the_lookups_command_blocks(self, tmp_path, capsys,
+                                                                    mode):
+        report = f"## {mode} Summary\n\n```\n{CASCADE_RERUN[mode]}\n```\n"
+        path = _cascade_finished(mode).say(report).write(tmp_path / "t.jsonl")
+        reason = decision_of(run_check(capsys, path))["reason"]
+        assert f"```\n{GENERATE}\n```" in reason
+
+    @pytest.mark.parametrize("mode", MODES)
+    def test_a_completed_cascade_whose_lookup_failed_keeps_the_latest_continuation(
+            self, tmp_path, capsys, mode):
+        """No section: the last stage's apply printed `[NEXT_COMMAND]` after the
+        last `next` call's continuation, and that inner block never replaces it."""
+        t = _cascade_finished(mode)
+        t.entries.pop()  # the lookup's result
+        t.entries.pop()  # and its call
+        block = report_check.last_block(_turn(t, tmp_path))
+        assert block is not None and block.continuation
+        assert block.commands() == [CASCADE_RERUN[mode]]
+        report = f"## {mode} Summary\n\n```\n{CASCADE_RERUN[mode]}\n```\n"
+        assert run_check(capsys, t.say(report).write(tmp_path / "t.jsonl")) == ""
+
+    def test_a_stopped_last_stage_prints_the_continuation_on_its_own(self, tmp_path, capsys):
+        """The continue call exits 3 (the last stage's review produced nothing):
+        its stdout is the [IMPROVE_RERUN] line alone, which is the block."""
+        mode = "improve-plan"
+        t = _cascade_started(mode)
+        call(t, _continue(mode), _stage(mode, 2, 2, CASCADE_RERUN[mode]))
+        _phase(t, REVIEW[mode], "--yes --models codex:m2",
+               "ERROR: no model produced a result.\n" + _result(REVIEW[mode], 3))
+        call(t, _continue(mode),
+             "ERROR: cascade c0ffee00: stage 2 of 2 (codex:m2) produced no review result\n"
+             f"{improve_steps.RERUN_MARKER} {CASCADE_RERUN[mode]}\n"
+             + _result("util improve-cascade", 3))
+        block = report_check.last_block(_turn(t, tmp_path))
+        assert block is not None and block.commands() == [CASCADE_RERUN[mode]]
+        path = t.say(_stop_report(mode, CASCADE_RERUN[mode])).write(tmp_path / "t.jsonl")
+        assert run_check(capsys, path) == ""
+
+
 @pytest.mark.parametrize("command, planner", [
     (f'{DISPATCH} util improve-steps "{PLAN}" --mode improve-plan --host claude-code', True),
+    (f'{DISPATCH} util improve-cascade next "{PLAN}" --mode improve-plan --host claude-code '
+     f'--cascade-id {CASCADE_ID}', True),
+    ("uv run --project /p -- python '/p q/multi_llm.py' util improve-cascade next plans/x.md "
+     "--mode improve-code --cascade", True),
     ("uv run --project /p -- python /p/multi_llm.py util improve-steps plans/x.md "
      "--mode improve-code", True),
     ("python 'multi_llm.py' 'util' 'improve-steps' plans/x.md --mode improve-plan", True),

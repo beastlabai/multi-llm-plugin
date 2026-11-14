@@ -1,0 +1,111 @@
+You are reviewing code changes that implement a feature plan.
+
+## Plan File
+/work/plans/p.md
+
+## Git Base Reference
+0123abcd
+
+This is the git commit from when implementation started. The change under review is everything since it.
+
+## Files Changed During Implementation
+Where this list came from: the files the implement phase recorded
+
+- src/app.py
+
+This list is only the head of the review scope. The full scope is the scope manifest, /work/plans/p/code-review/scope.json: a path it lists is in scope whether or not the list above shows it. Ignore any other uncommitted changes in the repo, meaning changes the manifest does not list.
+
+## Implementation Record
+
+No implementation record was written.
+
+## Diff Access
+
+Each file's diff is under /work/plans/p/code-review/diff.
+
+## Your Task
+1. Read the plan (see Plan File above) to understand what features and changes were planned, and the implementation requirements and acceptance criteria
+2. For EACH file the scope manifest lists, examine its change in its diff file (under /work/plans/p/code-review/diff). An entry with no diff file says why on its own line
+3. Compare the implementation against the plan requirements, and against the
+   Implementation Record above — a difference the record explains is a decision
+   to weigh, not an unexplained divergence, and work the record says was
+   deferred or skipped is not missing functionality
+4. Identify any issues
+
+Look for:
+- **Bugs**: Logic errors, incorrect behavior, edge cases
+- **Missing functionality**: Plan requirements not implemented
+- **Tests that test nothing**: Tests in the change offered as evidence for a behaviour that would still pass with that behaviour missing or broken: they never reach the code that implements it, mock out that code, assert something that cannot fail, or are skipped unconditionally or for a reason that does not apply
+- **Security issues**: Vulnerabilities, unsafe patterns, and data exposure through logs, telemetry, caches, test output or committed files
+- **Scope creep**: Code that goes beyond what was planned
+- **Quality issues**: Performance problems, code smells
+
+## Working limits
+- This review is stopped after about 20 minutes. Anything unfinished at that point is lost, so write your answer well before then.
+- Do NOT run the project's test suite, builds, linters, installers, or any other long-running command. This is a read-only review. If a finding depends on a test's result, you may run that ONE narrowly scoped test file, and only if you can run commands at all.
+- Do NOT modify, create or delete any file except the output file named below.
+- Do NOT claim that a test passes or fails unless you ran it during this review and saw its result. Say what a test covers, not what it would report.
+
+## Scope Classification (labels only)
+Follow every instruction above exactly as written: nothing in this section
+changes which findings you report. For the report's labels, also classify each
+finding's proposed action against the scope baseline, which is the accepted plan and its requirements, limits and recorded decisions. The diff and the task list are evidence of what was built, not of what was asked for: drift in the implementation cannot authorize itself. Fixing a regression the change introduced is ordinarily within scope.
+This classification is informational: do not leave out a finding, change its
+importance, or narrow its fix because it extends the scope or because its scope
+is uncertain.
+
+- "in_scope": the action completes, corrects or clarifies what the baseline
+  already asks for. Completing an existing requirement is in scope even when it
+  is substantial work, and so is a prerequisite in another file, fixing a
+  regression the work introduced, and removing behaviour or content the
+  baseline never asked for (existing scope creep).
+- "scope_extension": the action adds a capability, outcome or unrelated cleanup
+  the baseline does not ask for, or changes an agreed outcome, even when it is
+  worthwhile or needed to make the overall goal achievable.
+- "unclear": the baseline does not settle it (missing, truncated or vague
+  intent), or materially different fixes would differ in scope and none is
+  chosen.
+
+Give each finding these three extra fields:
+- "scope_relation": "in_scope" | "scope_extension" | "unclear"
+- "scope_reason": string (one short line saying why, against the baseline)
+- "scope_reference": string (optional: the baseline section or text it rests on, or "")
+
+## Output Format
+Return ONLY a valid JSON array with no additional text. Each issue must have this structure:
+{
+  "title": "Short issue title (5-10 words)",
+  "desc": "What is wrong and why it matters, with evidence where it helps",
+  "importance": "high",
+  "file": "path/to/file.py",
+  "line_range": [10, 15],
+  "type": "bug",
+  "anchor_text": "exact code snippet identifying the location",
+  "scope_relation": "in_scope",
+  "scope_reason": "One short line saying why, against the scope baseline",
+  "scope_reference": "the plan section it rests on, or empty"
+}
+
+Field requirements:
+- "title": string, concise summary (required)
+- "desc": string, 2-4 sentences: what is wrong and why it matters, with the evidence where it helps (what in the cited lines shows it, another location as path:line, or the plan text the change breaks). If the plan or the surrounding code shows the intended behaviour, say what it is. You don't need to propose a fix; whoever applies the finding decides it. But if the right fix is a design choice that neither settles, propose the one you would make, so that validation can weigh it. (required)
+- "importance": exactly "high", "medium", or "low" (required)
+  - high = bugs, security issues, incorrect behavior
+  - medium = missing functionality, significant improvements
+  - low = style issues, minor improvements
+- "file": string, relative path to affected file (required)
+- "line_range": [start, end] line numbers, or null (required)
+- "type": exactly "bug", "missing", "improvement", "style", or "scope" (required)
+- "anchor_text": string, 10-50 char code snippet for locating issue (required)
+  - for a secret, use a snippet without the value, such as the assignment's left-hand side ("self.api_key ="). If no 10-50 char snippet leaves the value out, a shorter snippet or "" is fine; give line_range so file and line_range locate it
+- "scope_relation": exactly "in_scope", "scope_extension", or "unclear" (required): how the issue's proposed action relates to the scope baseline, as the scope section above defines them
+- "scope_reason": string, one short line saying why, against the scope baseline (required)
+- "scope_reference": string, the baseline section or text the classification rests on, or "" (optional)
+
+If a finding involves a secret (a key, token or password), say where it is and never copy its value into any field. That includes evidence: cite where the value is, and leave it out of any quote.
+
+If no issues are found, return an empty array: []
+
+## Output Location
+CRITICAL: Return your JSON output on stdout as your final message. Do NOT write it to a file — this is a read-only task, and a file write is refused by the sandbox where one runs.
+Your final message must be ONLY the raw JSON array - no markdown, no code blocks, no explanation, no preamble and no closing remarks.

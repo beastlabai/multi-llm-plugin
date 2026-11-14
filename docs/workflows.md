@@ -21,7 +21,7 @@ The path you pass (e.g. `plans/my-feature.md`) is always a **file**. From it, mu
 | `plans/my-feature/implement/summary.md` | `--implement` |
 | `plans/my-feature/code-review/report.md` | `--review-code`, `--apply-code-fixes` |
 | `plans/my-feature/ask/<question-slug>/answers.md` | `--ask` |
-| `plans/my-feature/improve-plan/`, `plans/my-feature/improve-code/` | `--improve-plan`, `--improve-code`: the run's own folder (`.status.json`, log and lock); the two phases it runs write their usual folders |
+| `plans/my-feature/improve-plan/`, `plans/my-feature/improve-code/` | `--improve-plan`, `--improve-code`: the run's own folder (`.status.json`, log and lock), and with `--cascade` each cascade's per-round files ([below](#cascade-one-model-at-a-time)); the two phases it runs write their usual folders |
 | `plans/commit-reviews/<base>-<head>.md` | `--review-commits`, `--apply-commit-fixes`, `--improve-commits`: the commit brief, one per range |
 | `plans/commit-reviews/<base>-<head>/code-review/report.md` (and `report.html`) | `--review-commits`, `--apply-commit-fixes` |
 | `plans/commit-reviews/<base>-<head>/improve-commits/` | `--improve-commits`: the run's own folder, as for `--improve-code` |
@@ -58,6 +58,76 @@ Throughout the README and these docs, `{plan}/...` refers to that derived direct
 - *What your tree should be.* Commit or stash first, so `git diff` shows exactly what the run changed and `git restore` undoes it. Nothing refuses a dirty tree. When the apply runs with `--exec-subagents` (the Codex and OpenCode default), it records your uncommitted paths in `{plan}/state.json` (`pre_existing_changes`) as its baseline and names them at its start (`dirty tree at start: N uncommitted path(s) recorded as the baseline …`, the first ten listed), unless the plan already holds a baseline, which it keeps and only counts (an earlier `--implement` records one, before it changed anything). Without `--exec-subagents` (the Claude Code default, where the host runs the batches), the apply records nothing about your tree and says nothing about it.
 - *What it costs.* One review call per model in the review's list (`defaults.models`, or the `--quick` or `--models` list), then validation, judging, and one write dispatch per batch. `--quick` is the cheap way to run it; `--force` pays for a whole new review round. `--improve-plan` adds one consolidation pass (one subagent call per consolidation batch) when the review recommends it - 15 or more actionable groups - and that pass changes nothing that gets applied.
 
+### Cascade: one model at a time
+
+`--cascade` changes how `--improve-plan` and `--improve-code` use your model list. Without it, every model reviews in parallel and the merged findings are applied once. With it, each model gets a round of its own, one after another: it reviews the plan (or the code) as the previous round left it, and its own validated findings are applied before the next model starts.
+
+```text
+--improve-plan plans/feature.md --cascade --models <cheap> <mid> <top>
+
+round 1: <cheap> reviews the plan; its findings are validated and applied
+round 2: <mid> reviews the result; its findings are validated and applied
+round 3: <top> reviews the result; its findings are validated and applied
+```
+
+**Why use it.**
+
+- *No duplicated effort.* In a parallel round every model reads the same text, so the models mostly report the same issues: the merged groups say "raised by 3 models", but you paid three times for one finding. In a cascade each model reviews what the earlier rounds left, so a cheap model clears out the obvious issues first and each stronger model spends its findings on what remains.
+- *The edits get reviewed too.* Applying findings writes new text (and, for `--improve-code`, new code), and that is where new mistakes come from: a lock that a nested call takes a second time and deadlocks, an acceptance test that passes without the behaviour it guards, a function the plan calls but never defines, a line the edit forgot to update. A parallel round applies once and nobody reviews the result. In a cascade every later round does, and it also flags fixes that landed only halfway or arrived without tests.
+- *No conflicting suggestions.* Each round's suggestions are written against the current text, so they cannot conflict the way merged parallel suggestions can.
+- *Rejected ideas stay rejected.* From the second round on, the reviewers, the validators and the judge are told what earlier rounds rejected, so they do not raise it again without a new argument, and what earlier rounds changed, so they check those edits rather than take them for your intent. A finding that repeats an earlier rejection is marked `re-raises R1-3` in the report (R1-3 is round 1's third rejected entry), and it is rejected unless it answers the recorded reason.
+
+**When to use it.** In our test runs (see *What we measured*, below), the same three models on the same input did better as a cascade than as a parallel round, at about 1.7 times the time and host tokens:
+
+- *Plans came out better.* A blind judge preferred the cascade's plan in all four runs, and the cascade left fewer errors in it: none of high severity, against two in the parallel runs (a lock that deadlocks on every call, and a sale step that silently does nothing). The apply step wrote both errors, and in a parallel round nobody reviews the apply.
+- *Code came out as correct, and better tested.* The final code passed about as many checks either way. The difference was the tests: every cascade fix came with tests, and those tests caught most of the defects we put back into the code. Half of the parallel runs wrote no tests.
+- *Neither mode found more of what was already wrong.* Both found about as many of the issues already in the original. The gap was no bigger than the spread between two runs of the same model. In a parallel round, the second and third models mostly repeated the first.
+
+So the cascade's gain is that each round reviews the previous round's edits. Choose by how much an unreviewed edit would cost you:
+
+- **Use a cascade** for a plan that someone else, or another model, will implement as written, and for a code fix you want to keep, guarded by tests that catch a regression.
+- **Use a parallel round** for a quick pass, a draft you will rework anyway, or a small change you will check yourself. It finds as many of the existing issues in about 60% of the time.
+- **Expect longer plans.** The cascade's plans came out about 40% longer, because each round can add to them. `--scope-policy preserve` (below) keeps that in check.
+
+**What we measured.** We compared the two on a small plan (24 lines) and on a small code change against it (21 lines), both with planted defects. Each mode ran four times, from identical inputs, with the same three models in the same order (`claude-code:haiku`, `codex:gpt-6-luna:high`, `claude-code:sonnet`). The plans were compared blind by a separate judge model, and the final code was scored by hidden checks for the planted defects.
+
+| | Parallel | Cascade |
+| --- | --- | --- |
+| Wall time, plan / code (mean) | 6.6 / 5.0 min | 11.2 / 8.1 min |
+| Host model tokens, plan run | 1x | about 1.7x |
+| Issues found that were already in the original plan | 13.0 per run | 13.25 per run |
+| Issues found in text an earlier round added | none (never reviewed) | 6.75 per run |
+| Findings of the 2nd and 3rd model that repeated the 1st model's, plan | 60 of 62 | none |
+| Final plan preferred by the blind judge | 0 of 4 | 4 of 4 |
+| Errors left in the final plan, high / medium severity (4 runs) | 2 / 7 | 0 / 4 |
+| Final plan length (mean) | 126 lines | 177 lines |
+| Final code: planted-defect checks passed (4 runs) | 33 of 40 | 35 of 40 |
+| Runs whose fix came with tests | 2 of 4 | 4 of 4 |
+| Re-introduced defects the run's own tests caught | 5 of 28 | 21 of 30 |
+
+On the issues already in the original, the two modes differed in only one case: whether a hold expires at exactly 15 minutes. Every cascade run fixed it and no parallel run did. The judge also preferred the longer plan every time, which may favour the cascade, but the error counts and the tests point the same way. This was one small plan and one small change, so treat the numbers as a sense of the trade-off, not a benchmark.
+
+- **The order is your model list's order: put the cheapest model first.** The rounds follow the review's model list exactly as it resolves without `--cascade` ([Models](#review-and-apply-in-one-command), above): `--models` as you typed it, else the `--quick` list, else the review's configured defaults, in their configured order. Nothing reorders it. With no model flag, the run names the list it picked once, on an `[AUTO_RESOLVED] models: …` line. One model makes a one-round cascade (`NOTE: --cascade with one model is a single round`).
+- **Cost and time.** A cascade of n models makes n one-model reviews, then n validations, n judge passes and n applies, one after another. The reviews cost about what one parallel round with the same models costs, but validation and the apply are paid n times, and the run takes the sum of the rounds instead of the time of the slowest model. Suggestions an earlier round already rejected come back less often, which saves validating and rejecting them again. From the second round on, each prompt carries a few thousand characters of earlier results.
+- **Use `--scope-policy preserve` with it.** Extensions compound over rounds: under the default, each round's new review is `expand`, so every model may add its own. A policy you type when the cascade starts applies to every round. Typed on a later run of an unfinished cascade, it applies to the rounds not started yet, and the round under way keeps its own ([Scope policy](#scope-policy)). Findings `preserve` holds back are counted in the table's "held back" column, and later rounds are told they were held back, not rejected. Only the last round's can still be applied: once the cascade is finished, run the mode again without `--cascade`, with `--scope-policy expand`. Each round replaces the review on record, so earlier rounds' held-back findings cannot be released that way.
+- **What `--improve-code` reviews.** `--files`, `--files-from <file>` and `--base-ref` are fixed when the cascade starts, and every round reviews the same files, so a fix an earlier round made outside that list is not reviewed again. With none of them, each round reviews review-code's default scope as usual, which takes in the files earlier rounds' fixes touched. `--files-from -` is refused with `--cascade`: pass the list in a file.
+- **No consolidation pass.** `--improve-plan --cascade` skips it (its plan line reads `skip (cascade)`); the per-round table is the summary. You can still run it by hand on the last round's review.
+- **What it writes.** Each round's phases write their usual folders (`review-plan/` and `apply-suggestions/`, or `code-review/` and `apply-fixes/`), and the next round replaces them as a `--force` round does, so every finished round is also copied aside, under `{plan}/improve-plan/cascades/<time>-<id>/` (`improve-code/` for `--improve-code`):
+  - `summary.md`: a table of what each model found and what got applied, one row per round: findings, valid, invalid, needs decision, re-raises, applied, no-op, declined, held back (by `--scope-policy preserve`), the judge's decisions, time (from the round's start to its finish, retries included) and the reviewer's recorded cost (`not recorded` when the CLI reported none);
+  - `ledger.md`: everything earlier rounds rejected or held back, and everything they changed;
+  - `record.json`: the cascade's state; `start.md`: the plan when the cascade started (`--improve-plan`); `files.txt`: your `--files` list, when you typed one (`--improve-code`);
+  - `stage-1/`, `stage-2/`, …: each round's inputs, frozen when it started, and once it is done, copies of its review and apply folders, plus the plan after the round and the round's diff (`--improve-plan`) or the files the round changed (`--improve-code`).
+
+  `{plan}/improve-plan/cascade-current.json` names the cascade under way. `{plan}/apply-suggestions/backup.md` is the plan before the last round's apply, as after a `--force` round; `start.md` is the plan before the first.
+- **Resuming.** Run the same command again, or the command a stopped run prints (it carries `--cascade`): the cascade goes on at the round where it stopped and never redoes a finished round. While a cascade is unfinished, running the mode again continues it even without `--cascade`. A different `--models`, `--quick`, `--files`, `--files-from` or `--base-ref` stops at exit 3 with `[CASCADE_CONFLICT]`, naming both values and the two ways out: leave the flag off to continue, or start a new cascade with `--force --cascade`. A continuation (`--cascade --resume` with no `--models` or `--quick`) typed when no cascade is left to resume, for example after `--force` alone abandoned it, stops the same way instead of starting a new one.
+- **A model that returns nothing.** When a round's one model produces no review result, a round in the middle is skipped (`[CASCADE_STAGE_SKIPPED]`) and the cascade goes on with the next model. The last round is never skipped: the run stops at exit 3 with the earlier rounds applied, and running the command again starts the last round over. Any other stop (an apply batch that failed, a decision owed) stops the cascade at that round, and running the command again continues it.
+- **Running a finished cascade again** prints `[ALREADY_COMPLETE] cascade finished at <time> (<n> stages); --force --cascade starts a new one` and exits 2, as every composite does when there is nothing left to do. That includes the continuation a stopped run printed (`--cascade --resume`, with no model list). The command with a different `--models`, `--quick`, `--files`, `--files-from` or `--base-ref` typed starts a new cascade. **`--force --cascade` starts another pass** over the result, abandoning an unfinished cascade first. **`--force` without `--cascade` abandons an unfinished cascade** (a `NOTE:` line says so) and runs one ordinary round with every model in parallel.
+- **Status.** While the cascade is unfinished, `--status` shows `cascade: stage <k> of <n> (<model>)` and a `resume with:` command that carries `--cascade`: under a background (`--detach`) run of the mode, or, when no background run is recorded (Claude Code runs the steps itself, or a run stopped in the foreground), on an entry of its own, `improve-plan  no run record` (`improve-code` for `--improve-code`). Its suggested next step is the cascade's continuation, not the next workflow phase. The next command a run prints, and `util next-command`, continue the cascade too.
+
+The run's report opens with the per-round table from `summary.md`, then the last round's review and apply, and lists the cascade's files. One command runs every round, on every host: Claude Code runs them one after another in one turn, and under `--exec-subagents` (the Codex and OpenCode default) the run does the same, detached or not.
+
+**Not covered.** `--improve-commits` does not take `--cascade`: each round's fixes would move the range under review. There is no `--full --cascade`, no cascade of the review modes alone, no round with several models, no checks or tests between rounds, no rule that repeats the last round until it finds nothing, and no setting for the order: `--models` sets it.
+
 ## Options
 
 These flags combine with any mode and are **position-independent** - they may appear before or after the plan path (and, for `--ask`, around the question). The one exception is a commit mode's range, which goes right after the mode word, before any flag ([Commit reviews](commit-reviews.md)). Not every flag applies to every mode.
@@ -71,6 +141,7 @@ These flags combine with any mode and are **position-independent** - they may ap
 | `--dry-run` | Show what would happen (tasks/batches) without making changes. Applies to `--implement` and the apply modes, `--apply-commit-fixes` included. |
 | `--agent-decide` | In the apply modes, let a judge agent decide every `needs-human-decision` finding instead of prompting you (see [below](#letting-the-agent-decide-ambiguous-findings)). Implied by `--yes`, which the Codex and OpenCode shims bake in. `--claude-decide` / `--let-claude-decide` are accepted legacy spellings. |
 | `--force` | **Meaning depends on mode.** In the fan-out review/ask modes (`--review-plan`, `--review-tasks`, `--review-code`, `--review-commits`, `--ask`), resume an interrupted run: keep already-completed per-model results, run only the missing models, and bypass the completed-phase / partial-completion guards. In the apply modes, it's an alias for `--yes` (confirm bulk approval). In `--improve-plan` / `--improve-code` / `--improve-commits`, it starts a new review round, then applies that round's findings ([above](#review-and-apply-in-one-command)). |
+| `--cascade` | Taken by `--improve-plan` and `--improve-code` only. One review-then-apply round per model, in your model list's order (cheapest first), each model reviewing what the previous round left. Running the command again continues an unfinished cascade; `--force --cascade` starts a new one ([above](#cascade-one-model-at-a-time)). |
 | `--rerun-all` | In the fan-out review/ask modes, re-run every model from scratch, discarding any existing per-model results. Combine with `--force` (`--force --rerun-all`) for a fresh full re-run of an already-completed phase. |
 | `--focus "<text>"` | Steer a commit review toward a priority (not a filter). Taken by the three commit modes only. Recorded with the commit brief: a later run of the same range keeps it when you leave it out, and a different value (or `--focus ""`, which clears it) restarts the review round. `--apply-commit-fixes` keeps the value the review on record used ([Commit reviews](commit-reviews.md)). |
 | `--context-plan <path>` | Give a commit review a plan as read-only context, and check the commits against it too. Taken by the three commit modes only. Copied into the review's folder when the review starts and recorded like `--focus`; type it again to review against an edited file. `--apply-commit-fixes` keeps the context plan the review on record used, and never edits it. |
