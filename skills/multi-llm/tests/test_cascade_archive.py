@@ -530,14 +530,17 @@ class TestLocks:
             lock.acquire({"holder": "review-plan (foreground)", "mode": "review-plan",
                           "pid": os.getpid(),
                           "process_start_time": process_control.process_start_time(os.getpid())})
-            print("held", flush=True)
+            print("held", os.getpid(), flush=True)
             sys.stdin.read()
         """)
         holder = subprocess.Popen(
             [sys.executable, "-c", code, _lock(world.review_dir), str(SKILL_DIR)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         try:
-            assert holder.stdout.readline().strip() == "held"
+            # Its own pid, not Popen.pid: on Windows sys.executable is the venv's
+            # launcher, which starts the interpreter that takes the lock as a child.
+            head, _, pid = holder.stdout.readline().strip().partition(" ")
+            assert head == "held" and pid.isdigit(), (head, pid)
             with pytest.raises(archive.ArchiveRefusal) as caught:
                 close(world, 1)
         finally:
@@ -545,7 +548,7 @@ class TestLocks:
             holder.wait(timeout=30)
         message = caught.value.message
         assert message.startswith("ERROR: improve-plan: a live run owns")
-        assert f"pid {holder.pid}" in message
+        assert f"pid {pid}" in message
         assert "Watch it:" in message
         assert not (world.cascade_dir / "stage-1" / "artifacts").exists()
         assert not (world.cascade_dir / "stage-1" / "artifacts.partial").exists()

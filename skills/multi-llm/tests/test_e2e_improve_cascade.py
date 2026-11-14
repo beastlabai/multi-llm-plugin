@@ -275,7 +275,7 @@ class CascadeWorld(World):
         return sorted(root.iterdir()) if root.is_dir() else []
 
     def current(self, mode: str) -> Path:
-        pointer = json.loads((self.composite_dir(mode) / "cascade-current.json").read_text())
+        pointer = json.loads((self.composite_dir(mode) / "cascade-current.json").read_text(encoding="utf-8"))
         return self.composite_dir(mode) / pointer["dir"]
 
     def reviews(self) -> List[Tuple[str, str]]:
@@ -549,11 +549,11 @@ class TestThreeStagesInOneInvocation:
                 assert validator_ledger.strip() in prompt, index
                 assert '"reraise_of"' in prompt, "the re-raise contract travels with the ledger"
                 assert str(inputs) not in prompt, "a validator prompt names a file path"
-        stage_3_ledger = (cascade_dir / "stage-3" / "inputs" / "ledger.md").read_text()
+        stage_3_ledger = (cascade_dir / "stage-3" / "inputs" / "ledger.md").read_text(encoding="utf-8")
         assert "- A1-1 " in stage_3_ledger and "- A2-1 " in stage_3_ledger, stage_3_ledger
 
         # -- the re-raise: rejected in stage 1, raised again in stage 2 ------------------
-        rejected = (cascade_dir / "stage-2" / "inputs" / "ledger-validator.md").read_text()
+        rejected = (cascade_dir / "stage-2" / "inputs" / "ledger-validator.md").read_text(encoding="utf-8")
         assert f"- R1-1 [HIGH] (cursor-agent:auto) {REJECTED_THEME} — " in rejected, rejected
         verdicts = _read(cascade_dir / "stage-2" / "artifacts" / "review-plan"
                          / "validation.json")["groups"]
@@ -565,12 +565,12 @@ class TestThreeStagesInOneInvocation:
         assert [v.get("reraise_of") for v in verdicts if v is not repeated[0]] == [None]
         assert [counts[k]["reraises"] for k in (1, 2, 3)] == [0, 1, 0]
         assert [counts[k]["invalid"] for k in (1, 2, 3)] == [1, 1, 0]
-        report_md = (cascade_dir / "stage-2" / "artifacts" / "review-plan" / "report.md").read_text()
+        report_md = (cascade_dir / "stage-2" / "artifacts" / "review-plan" / "report.md").read_text(encoding="utf-8")
         assert "re-raises R1-1" in report_md
 
         # -- one report, one result line ---------------------------------------------------
         assert run.stdout.count("### Cascade") == 1, run.stdout
-        table = [line for line in (cascade_dir / "summary.md").read_text().splitlines()
+        table = [line for line in (cascade_dir / "summary.md").read_text(encoding="utf-8").splitlines()
                  if line.startswith("|")]
         assert "\n".join(table) in run.stdout, "the report's table is not summary.md's"
         assert len(_result_lines(run)) == 1, _result_lines(run)
@@ -602,7 +602,7 @@ class TestThreeStagesInOneInvocation:
         for index, calls in enumerate(world.calls_by_stage(), start=1):
             judges = [c["prompt"] for c in calls if classify(c) == "judge"]
             assert judges, f"stage {index}: no judge prompt"
-            frozen = (cascade_dir / f"stage-{index}" / "inputs" / "ledger-judge.md").read_text()
+            frozen = (cascade_dir / f"stage-{index}" / "inputs" / "ledger-judge.md").read_text(encoding="utf-8")
             for prompt in judges:
                 assert rule_6 in prompt, index
                 if index == 1:
@@ -638,7 +638,7 @@ class TestThreeStagesInOneInvocation:
             listed = (artifacts / "files-touched.txt").read_text(encoding="utf-8").split()
             assert set(listed) == touched, (index, listed, touched)
         assert set((cascade_dir / "stage-2" / "artifacts" / "files-touched.txt")
-                   .read_text().split()) == {"src/auth.py"}
+                   .read_text(encoding="utf-8").split()) == {"src/auth.py"}
         for rel, text in expected.items():
             assert (world.repo / rel).read_bytes().decode("utf-8") == text, rel
 
@@ -647,7 +647,7 @@ class TestThreeStagesInOneInvocation:
         prompts = [prompt for _model, prompt in world.reviews()]
         assert LEDGER_HEADING not in prompts[0]
         for index, prompt in ((2, prompts[1]), (3, prompts[2])):
-            ledger = (cascade_dir / f"stage-{index}" / "inputs" / "ledger.md").read_text()
+            ledger = (cascade_dir / f"stage-{index}" / "inputs" / "ledger.md").read_text(encoding="utf-8")
             assert ledger.startswith(LEDGER_HEADING) and ledger.strip() in prompt, index
             assert "This code has already been through" in ledger
             assert "changes-so-far.diff" not in ledger, "improve-code freezes no plan diff"
@@ -894,11 +894,11 @@ class TestAMiddleStageWithNoResult:
         reason = record["stages"][1]["skip_reason"]
         assert reason and reason in skipped[0], (reason, skipped)
         assert not (cascade_dir / "stage-2" / "artifacts").exists()
-        row = _table_rows((cascade_dir / "summary.md").read_text())[2]
+        row = _table_rows((cascade_dir / "summary.md").read_text(encoding="utf-8"))[2]
         assert row[1] == STAGES[1] and row[2] == f"skipped: {reason}", row
 
         # stage 3 sees one archived round: stage 1's
-        ledger = (cascade_dir / "stage-3" / "inputs" / "ledger.md").read_text()
+        ledger = (cascade_dir / "stage-3" / "inputs" / "ledger.md").read_text(encoding="utf-8")
         assert "1 automated review round by" in ledger and "- A2-" not in ledger, ledger
         # the failing model: its attempt and the one transport retry, nothing more
         reviews = [model for model, _p in world.reviews()]

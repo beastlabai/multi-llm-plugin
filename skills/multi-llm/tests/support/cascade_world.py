@@ -82,7 +82,9 @@ class CascadeWorld:
         self.plan = root / "plans" / f"{name}.md"
         self.plan.parent.mkdir(parents=True, exist_ok=True)
         if not self.plan.exists():
-            self.plan.write_text(PLAN_TEXT, encoding="utf-8")
+            # newline="": the frozen copies are compared byte for byte, and
+            # text mode would write CRLF on Windows.
+            self.plan.write_text(PLAN_TEXT, encoding="utf-8", newline="")
         self.out = output_dir_path(self.plan)
         self.run_dir = self.out / self.names.run_phase
         self.review_dir = self.out / self.names.review_dir
@@ -266,7 +268,7 @@ class CascadeWorld:
         self.save_state(state)
         if plan_edit is not None:
             self.plan.write_text(self.plan.read_text(encoding="utf-8") + plan_edit,
-                                 encoding="utf-8")
+                                 encoding="utf-8", newline="")
 
 
 def ids(groups: Iterable[Mapping[str, Any]]) -> List[str]:

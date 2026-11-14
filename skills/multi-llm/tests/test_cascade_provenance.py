@@ -13,10 +13,11 @@ from utils import status_file
 def _inputs(tmp_path, ledger="## Earlier review rounds\n\nR1-1 …\n"):
     inputs = tmp_path / "stage-2" / "inputs"
     inputs.mkdir(parents=True)
-    (inputs / cp.REVIEWER_LEDGER).write_text(ledger, encoding="utf-8")
-    (inputs / cp.VALIDATOR_LEDGER).write_text("validator view\n", encoding="utf-8")
-    (inputs / cp.JUDGE_LEDGER).write_text("judge view\n", encoding="utf-8")
-    (inputs / cp.FULL_LEDGER).write_text("everything\n", encoding="utf-8")
+    # Bytes, as the cascade writes them: text mode would write CRLF on Windows.
+    (inputs / cp.REVIEWER_LEDGER).write_bytes(ledger.encode("utf-8"))
+    (inputs / cp.VALIDATOR_LEDGER).write_bytes(b"validator view\n")
+    (inputs / cp.JUDGE_LEDGER).write_bytes(b"judge view\n")
+    (inputs / cp.FULL_LEDGER).write_bytes(b"everything\n")
     return inputs
 
 
