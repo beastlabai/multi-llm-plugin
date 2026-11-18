@@ -291,6 +291,14 @@ class FullWorkflow:
             return "skipped"
         return None
 
+    def _scoped_check_owed(self, phase: str) -> bool:
+        """Whether *phase* is apply-code-fixes and a full check its scoped
+        batches deferred is on record (``scoped_checks.owed``)."""
+        # Imported here to keep full_workflow_orchestrator light.
+        from utils import scoped_checks
+
+        return phase == scoped_checks.PHASE and scoped_checks.owed(self.state.state) is not None
+
     def _record_skip(self, phase: str, reason: str) -> Tuple[str, str, Optional[int]]:
         """Record *phase* skipped, unless it is already recorded completed.
 
@@ -785,11 +793,16 @@ class FullWorkflow:
         asks too (``check_workflow_prerequisites._grouped_has_suggestions``), so
         the two cannot disagree.
         """
-        if self._recorded("code-review") == "skipped":
+        # A full check that scoped batches deferred is settled by the phase
+        # itself, never passed over with a skip
+        # (docs/development/checks.md#scoped-batch-checks).
+        owed = self._scoped_check_owed("apply-code-fixes")
+        if not owed and self._recorded("code-review") == "skipped":
             return self._record_skip(
                 "apply-code-fixes", "Skipped: code-review was not executed"
             )
-        if not _grouped_has_suggestions(self.plan_dir / "code-review" / "grouped.json"):
+        if not owed and not _grouped_has_suggestions(
+                self.plan_dir / "code-review" / "grouped.json"):
             return self._record_skip(
                 "apply-code-fixes",
                 "Skipped: code review produced zero actionable findings",
@@ -948,6 +961,10 @@ class FullWorkflow:
         recorded itself.
         """
         recorded = self._recorded(step.phase)
+        if recorded is not None and self._scoped_check_owed(step.phase):
+            # Its full check is owed: the phase runs to settle it, over any
+            # completion or skip on record.
+            return None
         if recorded == "completed":
             # Imported here to keep full_workflow_orchestrator light.
             from utils import scope_apply

@@ -335,6 +335,9 @@
 ## test`), run once after a code-editing phase applied its batches. Left unset
 ## the phase says so in one line rather than completing unchecked; a non-zero
 ## exit rolls nothing back and ends the phase at exit 3.
+## `batch_checks: scoped` (default `full`) has apply-code-fixes batches under
+## --exec-subagents run a pytest `verify_command` narrowed to their own tests,
+## then the full command once before the phase completes: for a slow suite.
 # driver:
 #   subagent_runner: claude-code:sonnet
 #   subagent_runner_cheap: claude-code:haiku
@@ -344,6 +347,7 @@
 #   subagent_retries: 1
 #   verify_command: null
 #   verify_timeout_s: 600
+#   batch_checks: full
 #   write_paths:
 #     allow:
 #       - '**'

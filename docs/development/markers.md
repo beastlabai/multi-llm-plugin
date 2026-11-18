@@ -50,8 +50,8 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 
 ## Counts
 
-- Emitted markers: 196
-- Cited by an instruction, reference, `SKILL.md` or shim template: 119
+- Emitted markers: 198
+- Cited by an instruction, reference, `SKILL.md` or shim template: 121
 - Declared not-for-the-host: 77
 - Neither (must be zero): 0
 
@@ -198,6 +198,8 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 | `[SANDBOX_RUNG_CHANGED]` | `utils/review_orchestrator_base.py` `SANDBOX_RUNG_CHANGED_MARKER` | not for the host: runner-diagnostic | The once-per-run line for specs that ran on the plugin's jail last run and without any sandbox this one |
 | `[SANDBOX_RUNG_RETIRED]` | `utils/providers/sandbox_rungs.py` `SANDBOX_RUNG_RETIRED_MARKER` | not for the host: runner-diagnostic | The marker for the once-only line saying a contained rung the previous run took is no longer usable (`sandbox_rung_retired_notice`) |
 | `[SANDBOX_UNAVAILABLE]` | `utils/review_orchestrator_base.py` | not for the host: runner-diagnostic | — |
+| `[SCOPED_CHECK_OWED]` | `utils/apply_orchestrator_base.py` | `instructions/apply-code-fixes.md` | — |
+| `[SCOPED_CHECK_SETTLED]` | `utils/apply_orchestrator_base.py` | `instructions/apply-code-fixes.md`<br>`instructions/improve-code.md`<br>`instructions/improve-commits.md` | — |
 | `[SCOPE_BASELINE_MOVED]` | `utils/review_orchestrator_base.py` | not for the host: run-notice | — |
 | `[SCOPE_BLOCKER]` | `utils/scope_apply.py` `BLOCKER_MARKER` | `instructions/apply-code-fixes.md`<br>`instructions/apply-suggestions.md`<br>`instructions/apply-task-suggestions.md` | — |
 | `[SCOPE_CHANGED]` | `code_review_orchestrator.py` | `instructions/review-code.md` | — |

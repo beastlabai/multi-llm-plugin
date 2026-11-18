@@ -150,6 +150,7 @@ LEG_DEFAULTS = {
         "no_op": "the native leg has no 'changed nothing' reading",
         "reports_checks": "a native record always reports its checks",
         "resumed": "a native --resume hands out only what it dispatches",
+        "scoped": "the native leg never tells a batch to run a check scoped",
     },
     "executor": {
         "check_tree": "the executor keeps a check's tree on its verdict stamp",

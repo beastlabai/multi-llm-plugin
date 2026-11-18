@@ -1926,5 +1926,12 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
         verdict = "passed" if verification.get("exit_code") == 0 else (
             f"FAILED (exit {verification.get('exit_code')})"
         )
-        parts.append(f"verification {verdict}: `{verification['command']}`")
+        scoped = verification.get("scoped_batches")
+        note = ""
+        if isinstance(scoped, list):
+            # Imported here: only a scoped run's record carries the field, and
+            # the status path stays as light as it was without one.
+            from .scoped_checks import scoped_note
+            note = f" ({scoped_note(scoped, verification.get('scoped_outcomes'))})"
+        parts.append(f"verification {verdict}: `{verification['command']}`{note}")
     return parts

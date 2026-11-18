@@ -42,6 +42,7 @@ from .apply_output_helpers import (
     write_and_emit_output,
 )
 from .cli_common import (
+    EXIT_NEEDS_HUMAN,
     add_retired_flag,
     build_parent_parser,
     add_scope_policy_argument,
@@ -74,6 +75,7 @@ from .provider_registry import set_run_anchor
 from .report_parser import load_html_selections, merge_selections
 from .state_manager import (
     CURRENT_FORMAT_VERSION,
+    ScopedCheckOwedError,
     StateManager,
     _parse_completion_time,
     group_join_ids,
@@ -129,6 +131,7 @@ from . import review_round as _review_round
 from . import write_safety
 from . import write_batch_scheduler
 from . import write_phase_bridge
+from . import scoped_checks as _scoped_checks
 from .commit_paths import document_label, read_commit_range, is_commit_brief
 from .known_checks import APPLY_FIX_BATCH_CHECKS_KEY
 from .subagent_tasks import file_content_hash
@@ -1056,6 +1059,13 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         except SystemExit:
             # Allow sys.exit() calls to propagate (used by early-exit paths)
             raise
+        except ScopedCheckOwedError as e:
+            # The state writer refused a completion no gate settled
+            # (docs/development/checks.md#scoped-batch-checks): exit 3.
+            print(f"ERROR: {e.message}", file=sys.stderr)
+            record_error(e.message)
+            self._stop_error = e.message
+            return e.exit_code
         except Exception as e:
             self.logger.error(
                 "Unexpected error in %s: %s",
@@ -1214,6 +1224,8 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         if getattr(self.args, "mark_completed", False):
             self._refuse_unusable_state()
             state = StateManager(Path(self.plan_path))
+            # A full check scoped batches deferred runs (or refuses) first.
+            self._settle_scoped_check(state)
             state.mark_phase_completed(
                 self.confirmation_phase_name or self.phase_name
             )
@@ -2510,12 +2522,15 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         word = self._scope_phase_word()
         blockers: List[Dict[str, Any]] = []
         if not self._scope_dry() and self.state is not None:
+            self._settle_scoped_check(self.state)
             _scope.record_scope_deferrals(self.state, word, self.scope_gate.deferred)
             self.state.mark_phase_completed(word)
             blockers = self._scope_close(self.state)
             if self.edits_the_plan and getattr(self.args, "resume", False):
                 self.state.refresh_plan_hash()
             self.state.save()
+            if not blockers:
+                self._announce_scoped_check_settled()
             if self.resume_dropped_groups:
                 self.print_native_tests_not_run()
         phase_dir = os.path.join(self.out_dir, self.phase_name)
@@ -3088,6 +3103,14 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         else:
             if task_file:
                 print(f"[WRITE_TASKS_FILE] {task_file}", file=sys.stderr)
+                # `driver.batch_checks: scoped` never narrows on this leg;
+                # one line says so, none when it is `full`.
+                notice = _scoped_checks.narrowing(
+                    self.write_kind, executor=False, anchor=self.plan_path,
+                    phase=self.confirmation_phase_name or self.phase_name,
+                ).line
+                if notice:
+                    print(f"[orchestrator] {notice}", file=sys.stderr)
                 # A native `--resume` promises to skip what already landed.
                 # A batch about to go out again whose `prior_changes_id` the
                 # log already holds for this phase, with no record
@@ -3102,6 +3125,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 output, output_path,
                 getattr(self, "_native_write_tasks", None) if task_file else None,
             )
+        self._announce_scoped_check_owed()
 
         # The native leg: the batches are now the host's to apply, so the phase
         # is recorded *started*, never completed — completion is the host's
@@ -3122,6 +3146,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 # same completion `--mark-completed` writes: a blocker a
                 # batch of this review declined (and `--resume` dropped)
                 # keeps the phase blocked, exit 3 below.
+                self._settle_scoped_check(self.state)
                 self.state.mark_phase_completed(word)
                 scope_blockers = self._scope_close(self.state)
                 # Under `--resume` the empty loop is what step 23 left after
@@ -3138,6 +3163,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             else:
                 self.state.mark_phase_started(word)
             self.state.save()
+            if not scope_blockers:
+                # Set only when the empty branch above ran the owed check.
+                self._announce_scoped_check_settled()
 
         # Step 34: Print summary
         try:
@@ -4639,6 +4667,68 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 self.plan_path,
             )
             return ""
+
+    def _settle_scoped_check(self, state: Any) -> None:
+        """Settle the full check apply-code-fixes batches deferred when they
+        ran the verify command scoped, before this orchestrator records the
+        phase completed itself (``scoped_checks.settle_owed_check``).
+
+        Nothing happens when none is owed, or for another phase. A pass drops
+        the record for the caller's save with the completion; anything else
+        prints why, puts its first line on the result line and exits 3 with
+        nothing recorded (docs/development/checks.md#scoped-batch-checks).
+        A dry run runs nothing: the state writer then refuses the completion.
+        """
+        if self.write_kind != "apply_code_fixes":
+            return
+        if getattr(self.args, "dry_run", False) or getattr(self.args, "dry_run_subagents", False):
+            return
+        settled = _scoped_checks.settle_owed_check(
+            state, plan_path=self.plan_path,
+            log=lambda line: print(line, file=sys.stderr),
+        )
+        if settled is None or settled.ok:
+            # A pass, for `_announce_scoped_check_settled` once it is saved.
+            self._scoped_settled = settled
+            return
+        for line in settled.lines:
+            print(line, file=sys.stderr)
+        record_error(settled.lines[0])
+        sys.exit(EXIT_NEEDS_HUMAN)
+
+    def _announce_scoped_check_settled(self) -> None:
+        """The ``[SCOPED_CHECK_SETTLED]`` line, on stderr, after an early
+        completion this orchestrator saved (the no-items exit, the
+        all-deferred exit, the native emit with no batch) settled an owed
+        full check by running it: that run is the phase's verification, so
+        the native host skips its step 7 and step 10
+        (``instructions/apply-code-fixes.md``). Nothing when none was owed,
+        and never from ``--mark-completed``, which is step 10 itself."""
+        settled = getattr(self, "_scoped_settled", None)
+        if settled is None or settled.verification is None:
+            return
+        print(f"[SCOPED_CHECK_SETTLED] "
+              f"{_scoped_checks.native_settled_line(settled.verification)}", file=sys.stderr)
+
+    def _announce_scoped_check_owed(self) -> None:
+        """The native emit's ``[SCOPED_CHECK_OWED]`` line, on stderr: an
+        earlier ``--exec-subagents`` run of apply-code-fixes left the full
+        run of the verify command owed (``scoped_checks``), so the host's
+        ``--mark-completed`` runs it and the host runs no verification of
+        its own after the loop (``instructions/apply-code-fixes.md``, steps
+        7 and 10). Also when the emit hands out no batch but leaves human
+        decisions to the host: the phase completes through the host's
+        ``--mark-completed`` then, so the host must not verify first. Nothing
+        when none is owed, for another phase, or when nothing at all is handed
+        out (that emit settles it itself)."""
+        if (self.write_kind != "apply_code_fixes" or self.state is None
+                or not (self.batches or self.needs_human)):
+            return
+        record = _scoped_checks.owed(self.state)
+        if record is None:
+            return
+        print(f"[SCOPED_CHECK_OWED] {_scoped_checks.native_owed_line(record, self.state)}",
+              file=sys.stderr)
 
     def print_native_tests_not_run(self) -> None:
         """``--mark-completed``'s ``[TESTS_NOT_RUN]`` line, for apply-code-fixes.

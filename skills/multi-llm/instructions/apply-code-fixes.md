@@ -348,7 +348,24 @@ Context line for individual review display: `File: {file}, Type: {type}`
 
 ### 7. Run Verification
 
-After all fixes are applied, run **the repository's `driver.verify_command`, if one
+**If step 2 printed a `[SCOPED_CHECK_SETTLED] …` line (on stderr), skip this step and step
+10.** The orchestrator handed out no batch, ran in full the `driver.verify_command` that
+earlier `--exec-subagents` batches of this phase ran scoped to their tests
+(`driver.batch_checks: scoped`), saw it pass and recorded the phase completed itself. That run
+is this phase's verification: run neither `driver.verify_command` nor any check in its place,
+and no `--mark-completed`. In step 8's summary write the Verification line as `passed in full
+(run by the orchestrator)`, with the command and the time the line names.
+
+**If step 2 printed a `[SCOPED_CHECK_OWED] …` line (on stderr), run nothing here.** An
+earlier `--exec-subagents` run of this phase ran `driver.verify_command` scoped to each
+batch's tests (`driver.batch_checks: scoped`) and deferred its full run, so step 10's
+`--mark-completed` runs that exact command in full, once, and its outcome is this phase's
+verification. Run neither `driver.verify_command` as it reads now nor any check in its
+place: a second full run would only repeat it, and a command changed since is one the
+batches never deferred to. In step 8's summary write the Verification line as `owed: run by
+--mark-completed`, and report the outcome step 10 prints.
+
+Otherwise, after all fixes are applied, run **the repository's `driver.verify_command`, if one
 is configured** — the check this repo declares for itself in `.multi-llm/providers.yaml`
 (`pnpm typecheck && pnpm lint:fix` in a pnpm/TypeScript repo, `cargo check`, `make test`,
 whatever it says). Run it once, from the repository root, exactly as written. Do **not**
@@ -509,11 +526,15 @@ See: [Applied Fixes Report](./my-feature/apply-fixes/summary.md)
 
 ### 10. Mark Phase Completed
 
-**Run this only if step 5's batch loop reached the end** — every batch dispatched, every batch verified in step 5.4, and step 7's verification run. Then mark the apply-code-fixes phase as completed in state.json:
+**Skip this step after a `[SCOPED_CHECK_SETTLED]` line in step 2**: the orchestrator already recorded the phase completed, after the full run that line reports (step 7).
+
+**Run this only if step 5's batch loop reached the end** — every batch dispatched, every batch verified in step 5.4, and step 7's verification run (or, after a `[SCOPED_CHECK_OWED]` line, left to this command). Then mark the apply-code-fixes phase as completed in state.json:
 
 ```bash
 uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes --plan-file "$PLAN_PATH" --mark-completed
 ```
+
+After a `[SCOPED_CHECK_OWED]` line in step 2 (an earlier `--exec-subagents` run of this phase ran `driver.verify_command` scoped to each batch's tests, under `driver.batch_checks: scoped`), this command first runs that command in full, which can take as long as the test suite; it is the phase's verification run. If it fails, or `driver.verify_command` changed since, it exits 3 with the phase not completed and says why: report that as a stop, with the command and the output it printed.
 
 **Do NOT run it if the loop stopped early** — a clean failure you aborted on, a partial application you surfaced for human review (step 5.4), or an interrupted run. The phase must stay *incomplete* in those cases, because that record is what tells a later `--resume`, `--full` run or grader that the fixes were actually applied. A stopped loop simply never reaches this step; there is nothing else to do to leave the phase open.
 

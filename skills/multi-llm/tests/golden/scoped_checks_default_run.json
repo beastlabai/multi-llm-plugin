@@ -1,0 +1,389 @@
+{
+  "exit_code": 0,
+  "finalized": true,
+  "messages": [],
+  "mirror": {
+    "phase": "apply-code-fixes",
+    "progress": {
+      "step": "complete",
+      "write_subagents": {
+        "accepted_task_ids": [],
+        "batches_dispatched": [
+          0,
+          1
+        ],
+        "human_task_strategy": null,
+        "in_flight": [],
+        "invoker": "executor",
+        "items_applied": 2,
+        "items_total": 2,
+        "kind": "apply_code_fixes",
+        "not_run_task_ids": [],
+        "ok": 2,
+        "runner_failed_task_ids": [],
+        "runner_versions": {
+          "codex:gpt-5.5": "0.163.0"
+        },
+        "skipped_task_ids": [],
+        "stopped_at_batch": null,
+        "tasks": [
+          {
+            "batch_index": 0,
+            "files_touched": [
+              "src/a.py"
+            ],
+            "status": "ok",
+            "task_id": "apply-fix-batch-0",
+            "write_outcome": "applied"
+          },
+          {
+            "batch_index": 1,
+            "files_touched": [
+              "src/a.py"
+            ],
+            "status": "ok",
+            "task_id": "apply-fix-batch-1",
+            "write_outcome": "applied"
+          }
+        ],
+        "total": 2,
+        "verification": {
+          "command": "pytest -q",
+          "duration_seconds": "<V>",
+          "exit_code": 0,
+          "output_tail": "collected 3 items",
+          "source": "env"
+        }
+      }
+    },
+    "state": "complete",
+    "updated_at": "<V>"
+  },
+  "prompts": {
+    "apply-fix-batch-0": "## Process safety (required)\n\nNever run `kill`, `pkill`, `killall` or any process-wide signal: the orchestrator that dispatched you is a sibling process, and a write subagent's `killall -9 python3` ended a whole phase (measured 2026-09-16). Do not start background servers, watchers, browsers or any other background process, and leave no process running when you finish.\n\n## Git (required)\n\nDo not stage, commit, stash or push anything (no `git add`, `git commit`, `git stash` or `git push`), even when your task makes a file trackable: leave the git index and history as you found them. The user reviews and stages the changes.\n\n## Scratch files (advisory)\n\nKeep scratch work (an extracted script to syntax-check, a probe) out of the repository and out of fixed, shared names such as a bare `check.mjs` in the system temp directory: create a fresh directory with `mktemp -d`, work only there and delete it before you finish. The write gate only sees the repository, so a file left elsewhere is invisible to it (measured 2026-10-01, OpenCode runner).\n\n## Result (required \u2014 this is how the batch is verified)\n\nDo the work below, then end your reply with ONE JSON object (a fenced ```json block is fine) of exactly this shape:\n\n```json\n{\"status\": \"applied\", \"ids\": [\"<id>\", \"...\"], \"declined\": [{\"id\": \"<id>\", \"reason\": \"<why you did not apply it>\"}], \"files_touched\": [\"<repo-relative path>\"], \"summary\": \"<one line, at most 200 characters>\", \"notes\": \"<the per-item summary requested below>\", \"check\": {\"passed\": true, \"findings\": [], \"ran\": {\"<each check command you ran>\": \"passed\"}}}\n```\n\n- `status`: `applied` if you edited any file; `no-op` if you edited nothing because every change was already present or you declined it; `failed` if you could not apply the batch.\n- `files_touched`: repo-root-relative paths you edited (empty for `no-op` and `failed`).\n- `summary`: one line; it is recorded verbatim as this batch's entry in the prior-changes log the next batch reads.\n- `notes`: the per-item summary the return format below asks for.\n- `check`: required in every reply, also when you ran no check \u2014 which checks you ran on your edits and how each one ended (see below).\n\nA reply without this JSON object is recorded as a FAILED batch even when the edits landed, so send it in every case \u2014 including when nothing needed changing.\n\n## Checks you ran (required in every reply)\n\nAlways send the `check` object in the JSON above, also when you ran no check: it is the only record of what was checked after your edits, and a reply without it leaves the checks you ran off the record.\n\n- `ran`: every check you ran on your edits \u2014 a test, a build, a type check, a linter, a syntax check \u2014 as its command mapped to how its last run ended, `\"passed\"` or `\"failed\"`.\n- `passed`: the JSON boolean `true` only when the last run of every check you ran passed, else `false`.\n- `findings`: one string per check whose last run failed: the command and what it reported, nothing else; `[]` when `passed` is `true`.\n- `note` (optional): anything you want to say about your checks, such as why one fails or that a failure is a known one. It is recorded and shown beside them and never read as a finding, so keep such words out of `findings`.\n\nA batch whose check failed answers:\n\n```json\n{\"check\": {\"passed\": false, \"findings\": [\"<one failing check: the command and what it reported>\"], \"ran\": {\"<that command>\": \"failed\", \"<another command you ran>\": \"passed\"}}}\n```\n\nIf you ran no check, say so and why: `ran` empty, no `passed`, and the reason in `not_run`:\n\n```json\n{\"check\": {\"ran\": {}, \"not_run\": \"<why no check could run on these edits>\"}}\n```\n\nReport the last run of each check. A run that failed because of how you ran it (a wrong flag, mode or path) and that you then ran correctly is reported by the corrected run, and so is a check you ran again after fixing what it found: an attempt you corrected is not a finding. The corrected run is the same check over the same scope: the full command the task or the repository names, with only what you ran wrongly put right. It is never a narrower one (fewer files or tests, a filter, or a flag such as `--passWithNoTests` that lets it pass on less). If the only run that passed was narrower, the failing run is the last run of that check: report it. Never describe a passing run as a finding.\n\nReport a failing check here even when you think your change did not cause it: the batch is then recorded as applied with a failing check, and the user is told, instead of the run reporting a clean success.\n\n## The repository's checks (run them after your edits)\n\nThis repository is known to have these check commands, each quoted exactly as found (in the repository's configuration, its package files, or the task list implement ran) and named by where it came from. The plugin never runs them itself. After your edits, run each one from the repository root, as it is written here: inside your own sandbox when you have one, never as root (no `sudo`), and never one you judge unsafe to run, such as a command that would deploy, publish, migrate or seed data, delete files, reach the network, or start a server or a watcher. Report a command you skip as `\"not run\"` and say why in `summary`.\n\n- `pytest -q` (the repository's driver.verify_command)\n\nReport them in the `check` object above, with one more key, `listed`:\n\n```json\n{\"check\": {\"passed\": false, \"findings\": [\"<command>: <what it reported>\"], \"listed\": {\"<a command, exactly as listed above>\": \"failed\", \"<another command>\": \"passed\"}}}\n```\n\n- `listed`: every command above, copied exactly as listed (without the backticks), mapped to `\"passed\"`, `\"failed\"` or `\"not run\"`. A command you could not run (its tool is missing, it needs the network or a browser) or chose not to run is `\"not run\"`: say why in `summary`; it is never a finding. A failing one is also one of the `findings`, and `passed` is then `false`.\n- Send `check` with `listed` even when you could run none of them. When none of them failed (each one passed or was not run), `passed` is `true` and `findings` is `[]`, unless another check you ran failed. When you ran no check at all, send `listed` beside the empty `ran` and the `not_run` reason, as above.\n- Report a listed check that fails even when your fixes did not cause it. If it fails because of a change you made, put it right as part of your fixes. Never make a check pass by weakening it (deleting or loosening an assertion, skipping a test); if a fix deliberately changes what a check tests, update the check to test the new behaviour and say so in `summary`.\n\n---\n\nApply fix 0 to <TMP>/repo/src/a.py\n\n(none \u2014 this is the first batch)\n\n## Result ids (required in the JSON object above)\n\n- `ids`: the ids of the fixes you applied **or found already applied by a prior batch**, from this list (numbered in the order they appear above): fix 1 = `f0`.\n- `declined`: each fix from that list you deliberately left unapplied, as `{\"id\": \"<its id>\", \"reason\": \"<why, in one sentence>\"}`; `[]` when you applied every one. The reason says what decides it: when the plan, its task list or the implementation record already decides against the fix (a rule it states, a decision it records), name which one and quote that decision; when you judge the fix wrong for this code, say why; say it needs a plan decision only when nothing there decides it. Every fix goes in exactly one of `ids` and `declined`: one left out of both reads as a fix you meant to apply and did not finish, and the run stops for a human to inspect it.\n",
+    "apply-fix-batch-1": "## Process safety (required)\n\nNever run `kill`, `pkill`, `killall` or any process-wide signal: the orchestrator that dispatched you is a sibling process, and a write subagent's `killall -9 python3` ended a whole phase (measured 2026-09-16). Do not start background servers, watchers, browsers or any other background process, and leave no process running when you finish.\n\n## Git (required)\n\nDo not stage, commit, stash or push anything (no `git add`, `git commit`, `git stash` or `git push`), even when your task makes a file trackable: leave the git index and history as you found them. The user reviews and stages the changes.\n\n## Scratch files (advisory)\n\nKeep scratch work (an extracted script to syntax-check, a probe) out of the repository and out of fixed, shared names such as a bare `check.mjs` in the system temp directory: create a fresh directory with `mktemp -d`, work only there and delete it before you finish. The write gate only sees the repository, so a file left elsewhere is invisible to it (measured 2026-10-01, OpenCode runner).\n\n## Result (required \u2014 this is how the batch is verified)\n\nDo the work below, then end your reply with ONE JSON object (a fenced ```json block is fine) of exactly this shape:\n\n```json\n{\"status\": \"applied\", \"ids\": [\"<id>\", \"...\"], \"declined\": [{\"id\": \"<id>\", \"reason\": \"<why you did not apply it>\"}], \"files_touched\": [\"<repo-relative path>\"], \"summary\": \"<one line, at most 200 characters>\", \"notes\": \"<the per-item summary requested below>\", \"check\": {\"passed\": true, \"findings\": [], \"ran\": {\"<each check command you ran>\": \"passed\"}}}\n```\n\n- `status`: `applied` if you edited any file; `no-op` if you edited nothing because every change was already present or you declined it; `failed` if you could not apply the batch.\n- `files_touched`: repo-root-relative paths you edited (empty for `no-op` and `failed`).\n- `summary`: one line; it is recorded verbatim as this batch's entry in the prior-changes log the next batch reads.\n- `notes`: the per-item summary the return format below asks for.\n- `check`: required in every reply, also when you ran no check \u2014 which checks you ran on your edits and how each one ended (see below).\n\nA reply without this JSON object is recorded as a FAILED batch even when the edits landed, so send it in every case \u2014 including when nothing needed changing.\n\n## Checks you ran (required in every reply)\n\nAlways send the `check` object in the JSON above, also when you ran no check: it is the only record of what was checked after your edits, and a reply without it leaves the checks you ran off the record.\n\n- `ran`: every check you ran on your edits \u2014 a test, a build, a type check, a linter, a syntax check \u2014 as its command mapped to how its last run ended, `\"passed\"` or `\"failed\"`.\n- `passed`: the JSON boolean `true` only when the last run of every check you ran passed, else `false`.\n- `findings`: one string per check whose last run failed: the command and what it reported, nothing else; `[]` when `passed` is `true`.\n- `note` (optional): anything you want to say about your checks, such as why one fails or that a failure is a known one. It is recorded and shown beside them and never read as a finding, so keep such words out of `findings`.\n\nA batch whose check failed answers:\n\n```json\n{\"check\": {\"passed\": false, \"findings\": [\"<one failing check: the command and what it reported>\"], \"ran\": {\"<that command>\": \"failed\", \"<another command you ran>\": \"passed\"}}}\n```\n\nIf you ran no check, say so and why: `ran` empty, no `passed`, and the reason in `not_run`:\n\n```json\n{\"check\": {\"ran\": {}, \"not_run\": \"<why no check could run on these edits>\"}}\n```\n\nReport the last run of each check. A run that failed because of how you ran it (a wrong flag, mode or path) and that you then ran correctly is reported by the corrected run, and so is a check you ran again after fixing what it found: an attempt you corrected is not a finding. The corrected run is the same check over the same scope: the full command the task or the repository names, with only what you ran wrongly put right. It is never a narrower one (fewer files or tests, a filter, or a flag such as `--passWithNoTests` that lets it pass on less). If the only run that passed was narrower, the failing run is the last run of that check: report it. Never describe a passing run as a finding.\n\nReport a failing check here even when you think your change did not cause it: the batch is then recorded as applied with a failing check, and the user is told, instead of the run reporting a clean success.\n\n## The repository's checks (run them after your edits)\n\nThis repository is known to have these check commands, each quoted exactly as found (in the repository's configuration, its package files, or the task list implement ran) and named by where it came from. The plugin never runs them itself. After your edits, run each one from the repository root, as it is written here: inside your own sandbox when you have one, never as root (no `sudo`), and never one you judge unsafe to run, such as a command that would deploy, publish, migrate or seed data, delete files, reach the network, or start a server or a watcher. Report a command you skip as `\"not run\"` and say why in `summary`.\n\n- `pytest -q` (the repository's driver.verify_command)\n\nReport them in the `check` object above, with one more key, `listed`:\n\n```json\n{\"check\": {\"passed\": false, \"findings\": [\"<command>: <what it reported>\"], \"listed\": {\"<a command, exactly as listed above>\": \"failed\", \"<another command>\": \"passed\"}}}\n```\n\n- `listed`: every command above, copied exactly as listed (without the backticks), mapped to `\"passed\"`, `\"failed\"` or `\"not run\"`. A command you could not run (its tool is missing, it needs the network or a browser) or chose not to run is `\"not run\"`: say why in `summary`; it is never a finding. A failing one is also one of the `findings`, and `passed` is then `false`.\n- Send `check` with `listed` even when you could run none of them. When none of them failed (each one passed or was not run), `passed` is `true` and `findings` is `[]`, unless another check you ran failed. When you ran no check at all, send `listed` beside the empty `ran` and the `not_run` reason, as above.\n- Report a listed check that fails even when your fixes did not cause it. If it fails because of a change you made, put it right as part of your fixes. Never make a check pass by weakening it (deleting or loosening an assertion, skipping a test); if a fix deliberately changes what a check tests, update the check to test the new behaviour and say so in `summary`.\n\n---\n\nApply fix 1 to <TMP>/repo/src/a.py\n\n- **apply-fix-batch-0** (src/a.py#00000000): edited 1 file(s): src/a.py\n\n## Result ids (required in the JSON object above)\n\n- `ids`: the ids of the fixes you applied **or found already applied by a prior batch**, from this list (numbered in the order they appear above): fix 1 = `f1`.\n- `declined`: each fix from that list you deliberately left unapplied, as `{\"id\": \"<its id>\", \"reason\": \"<why, in one sentence>\"}`; `[]` when you applied every one. The reason says what decides it: when the plan, its task list or the implementation record already decides against the fix (a rule it states, a decision it records), name which one and quote that decision; when you judge the fix wrong for this code, say why; say it needs a plan decision only when nothing there decides it. Every fix goes in exactly one of `ids` and `declined`: one left out of both reads as a fix you meant to apply and did not finish, and the run stops for a human to inspect it.\n"
+  },
+  "pytest_calls": [
+    "pytest -q"
+  ],
+  "report": {
+    "accepted_tasks": {},
+    "batches_dispatched": [
+      0,
+      1
+    ],
+    "blocked_by_check": {},
+    "dependency_overrides": {},
+    "exit": 0,
+    "finalized": true,
+    "human_task_strategy": null,
+    "kind": "apply_code_fixes",
+    "not_run_tasks": {},
+    "pending_human_tasks": [],
+    "phase": "apply-code-fixes",
+    "report_version": 1,
+    "skipped_tasks": {},
+    "stop": null,
+    "stopped_at_batch": null,
+    "summary_file": "<TMP>/repo/.multi-llm/p/apply-suggestions/summary.md",
+    "tasks": [
+      {
+        "attempt_count": 1,
+        "attempts": [
+          {
+            "attempt": 1,
+            "duration_seconds": "<V>",
+            "exit_code": 0,
+            "status": "ok",
+            "usage": {
+              "cached_input_tokens": 0,
+              "input_tokens": 10,
+              "output_tokens": 12,
+              "total_tokens": 22
+            }
+          }
+        ],
+        "batch_check": {
+          "findings": [],
+          "passed": true
+        },
+        "duration_seconds": "<V>",
+        "expected_ids": [
+          "f0"
+        ],
+        "files_touched": [
+          "src/a.py"
+        ],
+        "kind": "apply_code_fixes",
+        "output_path": "<TMP>/repo/.multi-llm/p/apply-suggestions/apply_fix_batch_0.json",
+        "profile": "agent-write",
+        "returned_ids": [
+          "f0",
+          "f1"
+        ],
+        "runner": "codex:gpt-5.5",
+        "sha256_after": {
+          "src/a.py": "77325de64b12330fa9169711d7672f0789c6f0a02cd2348c5ef71d648fd04a0a"
+        },
+        "sha256_before": {
+          "src/a.py": "cb78bd8a17f7b751fe0d4663366dcbc257204033ef7ddd64b1f2969573b5b2e2"
+        },
+        "snapshot_dir": "<TMP>/repo/.multi-llm/p/apply-suggestions/pre_batch/apply-fix-batch-0",
+        "status": "ok",
+        "summary": "edited 1 file(s): src/a.py",
+        "task_id": "apply-fix-batch-0",
+        "usage": {
+          "cached_input_tokens": 0,
+          "input_tokens": 10,
+          "output_tokens": 12,
+          "total_tokens": 22
+        },
+        "write_outcome": "applied"
+      },
+      {
+        "attempt_count": 1,
+        "attempts": [
+          {
+            "attempt": 1,
+            "duration_seconds": "<V>",
+            "exit_code": 0,
+            "status": "ok",
+            "usage": {
+              "cached_input_tokens": 0,
+              "input_tokens": 10,
+              "output_tokens": 12,
+              "total_tokens": 22
+            }
+          }
+        ],
+        "batch_check": {
+          "findings": [],
+          "passed": true
+        },
+        "duration_seconds": "<V>",
+        "expected_ids": [
+          "f1"
+        ],
+        "files_touched": [
+          "src/a.py"
+        ],
+        "kind": "apply_code_fixes",
+        "output_path": "<TMP>/repo/.multi-llm/p/apply-suggestions/apply_fix_batch_1.json",
+        "profile": "agent-write",
+        "returned_ids": [
+          "f0",
+          "f1"
+        ],
+        "runner": "codex:gpt-5.5",
+        "sha256_after": {
+          "src/a.py": "6b4830ec4c75264f3ad1024463e96cfd76924f921b221c56c97d77766b449c44"
+        },
+        "sha256_before": {
+          "src/a.py": "77325de64b12330fa9169711d7672f0789c6f0a02cd2348c5ef71d648fd04a0a"
+        },
+        "snapshot_dir": "<TMP>/repo/.multi-llm/p/apply-suggestions/pre_batch/apply-fix-batch-1",
+        "status": "ok",
+        "summary": "edited 1 file(s): src/a.py",
+        "task_id": "apply-fix-batch-1",
+        "usage": {
+          "cached_input_tokens": 0,
+          "input_tokens": 10,
+          "output_tokens": 12,
+          "total_tokens": 22
+        },
+        "write_outcome": "applied"
+      }
+    ],
+    "verification": {
+      "command": "pytest -q",
+      "duration_seconds": "<V>",
+      "exit_code": 0,
+      "output_tail": "collected 3 items",
+      "source": "env"
+    },
+    "written_at": "<V>"
+  },
+  "state": {
+    "apply_fix_batch_checks": {
+      "apply-fix-batch-0": {
+        "findings": [],
+        "grouped_sha256": "",
+        "listed": {
+          "pytest -q": "passed"
+        },
+        "prior_changes_id": "src/a.py#00000000"
+      },
+      "apply-fix-batch-1": {
+        "findings": [],
+        "grouped_sha256": "",
+        "listed": {
+          "pytest -q": "passed"
+        },
+        "prior_changes_id": "src/a.py#00000001"
+      }
+    },
+    "metrics": {
+      "apply-code-fixes": [
+        {
+          "batch_index": 1,
+          "duration_ms": "<V>",
+          "label": "apply-fix-batch-0: apply_code_fixes [applied]",
+          "run_id": "<V>",
+          "subagent_type": "codex:gpt-5.5",
+          "timestamp": "<V>",
+          "token_count": 22
+        },
+        {
+          "batch_index": 2,
+          "duration_ms": "<V>",
+          "label": "apply-fix-batch-1: apply_code_fixes [applied]",
+          "run_id": "<V>",
+          "subagent_type": "codex:gpt-5.5",
+          "timestamp": "<V>",
+          "token_count": 22
+        }
+      ]
+    },
+    "phases_completed": {
+      "apply-code-fixes": "now"
+    },
+    "plan_hash_refreshed": true,
+    "processed_apply-suggestions": {
+      "f0": {
+        "details": {
+          "grouped_sha256": "",
+          "leg": "executor",
+          "prior_changes_id": "src/a.py#00000000",
+          "task_id": "apply-fix-batch-0"
+        },
+        "status": "applied",
+        "timestamp": "<V>"
+      },
+      "f1": {
+        "details": {
+          "grouped_sha256": "",
+          "leg": "executor",
+          "prior_changes_id": "src/a.py#00000001",
+          "task_id": "apply-fix-batch-1"
+        },
+        "status": "applied",
+        "timestamp": "<V>"
+      }
+    },
+    "task_status": {
+      "apply-fix-batch-0": "completed",
+      "apply-fix-batch-1": "completed"
+    },
+    "tracked_files": [
+      {
+        "action": "created",
+        "path": ".multi-llm/p/apply-suggestions/.status.json",
+        "task_id": "apply-code-fixes"
+      },
+      {
+        "action": "created",
+        "path": ".multi-llm/p/apply-suggestions/.status.lock",
+        "task_id": "apply-code-fixes"
+      },
+      {
+        "action": "created",
+        "path": ".multi-llm/p/apply-suggestions/.write_task_inputs.json",
+        "task_id": "apply-code-fixes"
+      },
+      {
+        "action": "created",
+        "path": ".multi-llm/p/apply-suggestions/apply_fix_batch_0.json",
+        "task_id": "apply-code-fixes"
+      },
+      {
+        "action": "created",
+        "path": ".multi-llm/p/apply-suggestions/apply_fix_batch_1.json",
+        "task_id": "apply-code-fixes"
+      },
+      {
+        "action": "created",
+        "path": ".multi-llm/p/apply-suggestions/pre_batch/apply-fix-batch-0/files/000-src_a.py",
+        "task_id": "apply-code-fixes"
+      },
+      {
+        "action": "created",
+        "path": ".multi-llm/p/apply-suggestions/pre_batch/apply-fix-batch-0/manifest.json",
+        "task_id": "apply-code-fixes"
+      },
+      {
+        "action": "created",
+        "path": ".multi-llm/p/apply-suggestions/pre_batch/apply-fix-batch-1/files/000-src_a.py",
+        "task_id": "apply-code-fixes"
+      },
+      {
+        "action": "created",
+        "path": ".multi-llm/p/apply-suggestions/pre_batch/apply-fix-batch-1/manifest.json",
+        "task_id": "apply-code-fixes"
+      },
+      {
+        "action": "created",
+        "path": ".multi-llm/p/apply-suggestions/prompts/apply-fix-batch-0.prompt.txt",
+        "task_id": "apply-code-fixes"
+      },
+      {
+        "action": "created",
+        "path": ".multi-llm/p/apply-suggestions/prompts/apply-fix-batch-1.prompt.txt",
+        "task_id": "apply-code-fixes"
+      },
+      {
+        "action": "created",
+        "path": ".multi-llm/p/apply-suggestions/rollback_store/04/04151ce9de61bc542d25026928b2d2f7217d0ebabc768f74513c52ce33a1ce33",
+        "task_id": "apply-code-fixes"
+      },
+      {
+        "action": "created",
+        "path": ".multi-llm/p/apply-suggestions/rollback_store/77/77325de64b12330fa9169711d7672f0789c6f0a02cd2348c5ef71d648fd04a0a",
+        "task_id": "apply-code-fixes"
+      },
+      {
+        "action": "created",
+        "path": ".multi-llm/p/apply-suggestions/rollback_store/81/8145ffb7ae49189a29786d78eb695e736fcb0834b0d93195ad8137160ca8b4a9",
+        "task_id": "apply-code-fixes"
+      },
+      {
+        "action": "created",
+        "path": ".multi-llm/p/apply-suggestions/rollback_store/cb/cb78bd8a17f7b751fe0d4663366dcbc257204033ef7ddd64b1f2969573b5b2e2",
+        "task_id": "apply-code-fixes"
+      },
+      {
+        "action": "created",
+        "path": ".multi-llm/p/apply-suggestions/subagent_audit.jsonl",
+        "task_id": "apply-code-fixes"
+      },
+      {
+        "action": "created",
+        "path": ".multi-llm/p/prior_changes.jsonl",
+        "task_id": "apply-code-fixes"
+      },
+      {
+        "action": "created",
+        "path": "plans/p.md",
+        "task_id": "apply-code-fixes"
+      },
+      {
+        "action": "created",
+        "path": "src/a.py",
+        "task_id": "apply-code-fixes"
+      },
+      {
+        "action": "created",
+        "path": "src/b.py",
+        "task_id": "apply-code-fixes"
+      }
+    ],
+    "updated_at": "<V>"
+  },
+  "summary": "# Implementation Summary: p.md\n\n*Generated: <TS>*\n\n**Plan**: p.md\n**Phase**: apply-code-fixes\n**Invoker**: executor\n**Verification**: `pytest -q` \u2014 pass, <N>s\n\n## Summary\n\n2 batch(es) dispatched, in order; each was checked against its pre-batch snapshot before the next was dispatched.\n\n**Tasks in this decomposition**: 2 \u2014 2 done.\n\n## Task Results\n\n| Task | Outcome | Files touched | Notes |\n|------|---------|---------------|-------|\n| apply-fix-batch-0 | applied | src/a.py | edited 1 file(s): src/a.py |\n| apply-fix-batch-1 | applied | src/a.py | edited 1 file(s): src/a.py |\n\n## Files Modified\n\n- `src/a.py`\n",
+  "verification": {
+    "command": "pytest -q",
+    "duration_seconds": "<V>",
+    "exit_code": 0,
+    "output_tail": "collected 3 items",
+    "source": "env"
+  }
+}

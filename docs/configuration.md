@@ -94,6 +94,36 @@ prints the path), so you can port any custom settings into the regenerated file.
   none of them; a failing one is reported as that batch's failing check, and
   when this key is unset the closing line says what each batch reported for
   each command.
+- **`driver.batch_checks: scoped` narrows each batch's run of `verify_command`
+  (opt-in; default `full`).** Use it only when the repository's test suite is
+  slow enough that running it after every batch dominates the phase. It applies to
+  `apply-code-fixes` under `--exec-subagents` only, and only when `verify_command`
+  is one pytest command carrying options and no test paths (`pytest -q`,
+  `python -m pytest -x`, `uv run pytest`). Each batch then runs that command
+  narrowed to the tests of the files it changed, and the phase runs the full
+  command once, after the last batch, before it can be recorded completed. A
+  batch that changes `conftest.py`, `pytest.ini`, `tox.ini` or the pytest section
+  of `pyproject.toml` or `setup.cfg`, or one with a file that no test file named
+  after it covers (the module's name with a `test_` prefix or a `_test` suffix),
+  runs the command in full instead. A batch's scoped pass counts only when its report names the
+  scoped run itself, with the test files it was told to include, as one plain
+  command adding no option that filters what runs (`-k`, `-m`, `--lf`,
+  `--deselect` and the like); one that collected or ran no test is recorded
+  "not run". Any
+  other command, the native leg and every other phase run their checks as before,
+  and the run says why in one line. **The risk:** a later batch can break a test
+  that the earlier batches' narrowed runs never ran. The final full run catches
+  it, and the phase then stops at exit 3 for a human, with the command and the
+  tail of its output and nothing rolled back. Fix it and re-run with `--resume`:
+  nothing is dispatched again and only the full check runs. Until that check passes,
+  every way of completing the phase runs it first, including `--mark-completed`,
+  a resume with nothing left, and the `full` and `improve-*` workflows, and
+  `status` shows the phase in progress with that `--resume` as the next step. If
+  `verify_command` changes before then, the phase refuses to complete instead of
+  running the new command, because only the command the batches deferred settles
+  it: set `verify_command` back and resume. Run one apply of a phase at a
+  time: a foreground apply holds no phase lock, so two processes applying the
+  same phase are not detected and can leave the owed check's record wrong.
 - **`progress.interval_s` / `progress.poll_s` price two different cadences.**
   `interval_s` (default 30 s) is how often a running fan-out prints a
   `[PROGRESS]` ticker line — a stdout cadence only, so `interval_s: 0` is the
