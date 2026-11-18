@@ -358,6 +358,13 @@ driver:
   # Wall-clock ceiling for the command above. Not optional and not inherited from
   # a provider — nothing else knows how long this repo's build takes.
   verify_timeout_s: 600
+  # How apply-code-fixes batches run `verify_command` under --exec-subagents:
+  # `full` (the default) has every batch run it as written. `scoped` has each
+  # batch run it narrowed to the tests of the files it changed, and the phase
+  # then owes one full run before it can complete. Worth it only for a slow
+  # suite; it applies to a pytest command only, and a later batch can break a
+  # test the narrowed runs skipped (the full run then stops the phase at exit 3).
+  batch_checks: full
   # The declared write policy for edit-capable dispatches, resolved against the
   # pinned repo root and enforced TWICE: pre-dispatch against the batch's declared
   # file set (refused before the runner starts) and post-run against the set the

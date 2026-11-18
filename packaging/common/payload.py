@@ -986,8 +986,12 @@ DISTRIBUTION_BUDGETS: Dict[str, Tuple[int, int]] = {
     # still shows first in the file count. File budgets raised 2026-11-13 for
     # --cascade's six runtime files (five modules and the record schema, none of
     # them development files); measured then: codex 333 files / 11,874,888 bytes.
+    # Codex byte budget raised 2026-11-18 for scoped batch checks
+    # (`driver.batch_checks`: one runtime module, the state merge rule and the
+    # scheduler hooks, none of them development files); measured then: codex
+    # 334 files / 12,014,104 bytes, claude-code 334 / 11,878,592.
     "claude-code": (340, 12_000_000),     # the review target: past it is a decision
-    "codex": (345, 12_000_000),
+    "codex": (345, 12_100_000),
     "opencode": (345, 12_100_000),     # unpacked; tracks the codex tree
 }
 

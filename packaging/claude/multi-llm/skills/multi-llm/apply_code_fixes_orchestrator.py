@@ -736,10 +736,15 @@ Finalization (run by the host AFTER every batch has been applied and verified):
             self.args, "dry_run_subagents", False
         )
         if not dry and self.state is not None:
+            # An owed full check of scoped batches runs (or refuses) first:
+            # an empty or report-Skip resume completes here.
+            self._settle_scoped_check(self.state)
             self.state.mark_phase_completed(
                 self.confirmation_phase_name or self.phase_name
             )
             self.state.save()
+            # Saved: a full check run above is the phase's verification.
+            self._announce_scoped_check_settled()
             # A `--resume` whose step 23 dropped every group as already applied
             # is the native host that died after its last batch and before
             # `--mark-completed` (Fable review 2026-10-09): this exit is then

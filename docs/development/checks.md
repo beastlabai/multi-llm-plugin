@@ -12,6 +12,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [Declining or completing manual tasks](#declining-or-completing-manual-tasks)
 - [Accepted checks and batch failures](#accepted-checks-and-batch-failures)
 - [Known repository checks](#known-repository-checks)
+- [Scoped batch checks](#scoped-batch-checks)
 - [Repeated accepted findings](#repeated-accepted-findings)
 - [Attributing accepted findings](#attributing-accepted-findings)
 
@@ -301,6 +302,192 @@ command: passed in / failed in / not run in / not reported by which batch), on t
 and as `[TESTS_NOT_RUN]` from the native `apply-code-fixes --mark-completed` (`native_apply_fixes_unverified_line`); not
 on a stop, whose headline budget it would eat. Implement's tasks are not told: each carries its own
 criteria, and an accepted check's findings would come back as every later task's failure.
+
+## Scoped batch checks
+
+**`driver.batch_checks: scoped` narrows each apply-code-fixes batch's run of
+`driver.verify_command`, and the phase cannot complete until that exact command passes in full.**
+Opt-in; `full` (the default, and an absent key) changes nothing a default run leaves.
+`tests/test_scoped_batch_checks.py::TestDefaultUnchanged` checks that two ways, neither of them a
+byte comparison. On the `FakeState` path, absent and `full` leave the same normalised artifacts
+(prompts, `state.json`, the batch report, the summary, the status mirror, the messages, the verify
+run) as `tests/golden/scoped_checks_default_run.json`, captured with
+`tests/support/scoped_checks_capture.py` on the commit before the setting existed. On the
+production `StateManager` path (its merge and journal), absent and `full` leave the same normalised
+artifacts on this commit, with no scoped key in any of them. On a repository whose suite took
+about 50 s, a scoped run cut writer time by about 40%; that was measured before the
+covering-test rule below, which narrows fewer batches, so the saving is now smaller and
+unmeasured. On a fast suite it gained nothing, and one run's last writer left 14 full-suite
+failures that the narrowed runs never saw; the final full run stopped it at exit 3. So it stays
+opt-in.
+
+`utils/scoped_checks.py` owns the rule. `narrowing` narrows only when all of these hold: the setting
+is `scoped`, the batch is dispatched by the write executor (`_executor_dispatch`), the kind is
+apply-code-fixes (apply-commit-fixes too, since it runs that phase in process), and
+`verify_command` is set. The command must also be one plain pytest command carrying only options:
+`pytest`, `py.test` or `python -m pytest`, optionally under `uv run`, `poetry run` or `pdm run`.
+A word that is no option's value is a selection of its own (`narrowing_refusal`), and appended
+selectors would add to it. Anything else, the native leg (`util write-prompt` never narrows) and
+every other phase run their checks as before. Each of them logs one line saying why, and nothing
+is logged under `full`. The scheduler reads it once per run (`_run`) and again for each prompt
+(`_scoped_check_for`). A command changed since the run started is never narrowed, and neither is
+one that differs from an owed record's.
+
+**A batch runs the full check when a scoped one would test nothing of what it changes**
+(`full_check_reason`, decided on the batch's declared files when its prompt is bound): when it
+changes a file every test is collected or configured by (`conftest.py`, `pytest.ini`, `tox.ini`,
+or a `pyproject.toml`/`setup.cfg` holding a pytest section: `shared_collection_file`), or when no
+test file is known to cover one of its files (`covering_tests`: a test file covers itself, and a
+Python module is covered by a test file named after it, with a `test_` prefix or a `_test` suffix,
+among the worktree's files, listed once per run; anything else is uncovered). One line says why. A batch that narrows is told the covering test
+files the plugin found, to include in its scoped run.
+
+The narrowed batch's prompt is `known_checks_section(…, scoped=<command>, scoped_tests=…)`. The
+intro no longer says the plugin never runs the commands, and a paragraph tells the batch to run
+that one command followed only by the tests covering its changes (the ones named among them),
+report the scoped command in `ran` and its outcome under the listed command in `listed`, report
+`not run`, never `passed`, when pytest collects no test (exit code 5) or skips every test it
+selects, and run every other listed command as written. Only `verify_command` is ever narrowed,
+so the other listed commands, which may change mid-run (a task list, `package.json`), owe nothing.
+
+**The debt.** `record_owed` writes `state.json`'s `apply_fix_scoped_check` (`command_sha256` of
+the exact string, a redacted `command` for display, the `batches` that ran it scoped, a
+`token` new on every write, and `review_completed_at`, the code review's completion stamp at
+this admission, refreshed on every write) and drops the phase's earlier completion
+(`reopen_phase`). The
+scheduler writes and saves it under `_effects_lock` immediately before the narrowed prompt is
+first sent: in the dispatch's `before_attempt` hook (`_record_scoped_debt`), past the commit
+recheck, the write policy, the runner preflight and every other refusal, so a batch refused
+before it started owes nothing. The prompt is already narrowed by then, so a record that cannot
+be written refuses the batch (`ResultRejected`, nothing spawned). A dry run records nothing.
+`--fresh` keeps the record (the narrowed edits may still be in the tree).
+
+**The state writer merges it by token and holds the merged document to the debt.**
+`StateManager.save` merges the record under `metrics.state_file_lock`
+(`state_manager._merge_owed_record`). A settlement (`discharge` →
+`StateManager.discharge_scoped_check(token)`) drops it only while the file still holds the token
+it checked: a debt recorded since (a new batch, or the same batch sent again) stays. Two writers
+that each recorded batches against the same command keep both batch lists. Then, still under the
+lock, the merged document is checked (`_strip_owed_completion`): while it holds a debt,
+apply-code-fixes' completion is left out of the write. When this manager stamped that completion
+(`mark_phase_completed` journals `("completed", phase)`), everything else it changed is written
+and adopted and `ScopedCheckOwedError` (exit 3) is raised after; a stale completion it did not
+stamp is dropped quietly. The executor's `_finalize` turns that refusal into a stop
+(`_refused_completion`), and the apply orchestrator's entry point into exit 3.
+`TestTwoWritersInterleaved` interleaves two managers for both cases, `--mark-completed` and the
+executor's finalize included. The full check runs outside the state lock (it can take as long
+as the suite), and a foreground executor run holds no phase lock, so one executor run and one
+`--mark-completed` of the same phase can each run it; the merge keeps those two from leaving a
+completion beside a debt or dropping a newer one.
+
+**Run one apply of a phase at a time.** A foreground apply holds no phase lock, so two processes
+on the same phase are not detected, and these cases are left open: a `--mark-completed` in
+another process can settle the debt while an executor batch sits between its admission and its
+spawn; a competing `verify_command`'s debt can win the merge while the losing batch still spawns;
+and a refused completion can erase another process's newer phase start. A failed admission save
+can also leave a debt with no batch behind it (it needs a failed disk write). None of these is
+handled.
+
+**Every completion settles it first, through `settle_action`.** The command runs when it is
+exactly the one deferred to (a SHA-256 match, so no whitespace normalising), whatever
+`batch_checks` reads now; a note says when it is no longer `scoped`. Otherwise it refuses with
+nothing run: only the configured command is ever executed, and it is not the check the batches
+deferred. The way forward it names is to set `verify_command` back and `--resume`.
+apply-code-fixes has no `--skip` of its own (`supports_skip_flag = False`). A skip on record, one
+a composite recorded or one inferred from a newer review with nothing to fix, never passes the
+phase over while the record stands: the status reader and the composites below read the debt
+first. A pass drops the record in the same save that records the completion. A failure or a
+refusal leaves the phase not completed at exit 3, naming the command and the tail of its output.
+The callers:
+
+- `VerifyStep.run` in the executor's `_finalize`. While a run is owed it never skips for "no edit
+  on record", because a no-op or all-declined last writer still owes it. This covers a normal
+  finish, a resume whose batches are all resume skips, and an empty resume.
+- `scoped_checks.settle_owed_check`, through `ApplyOrchestratorBase._settle_scoped_check`, before
+  each completion the orchestrator records itself: `--mark-completed`, the no-items exit
+  (`handle_no_items_early_exit`: nothing left, or the rest skipped in the report), the scope
+  policy's all-deferred exit (`_scope_all_deferred_exit`, a `preserve` deferral) and the native
+  emit with nothing to hand out. It runs the command through `VerifyCommand` from the repository
+  root, announced before it starts. After the three early completions (all but
+  `--mark-completed`) save a pass, `_announce_scoped_check_settled` prints `[SCOPED_CHECK_SETTLED]`
+  (below).
+- `mark_phase_completed_in_state` raises `NeedsHuman` (exit 3) for apply-code-fixes while the
+  record stands in the state it is given, and `StateManager.save` applies the same rule to the
+  merged document, so a writer that skipped the gate, or settled a stale view, cannot complete
+  the phase. `TestEveryCompletionWriterSettlesFirst` checks each `mark_phase_completed` site for
+  the gate.
+
+**On the native leg the completion owns the final verify.** A native emit over an owed record
+(a resume after an executor run) prints `[SCOPED_CHECK_OWED]` on stderr
+(`ApplyOrchestratorBase._announce_scoped_check_owed`, text `native_owed_line`), and
+`instructions/apply-code-fixes.md` step 7 then runs no check of its own: step 10's
+`--mark-completed` runs the deferred command once, and only if `verify_command` still reads it.
+An early completion that hands out no batch (the no-items exit, the all-deferred exit, the
+native emit with nothing to hand out) has run that check itself and recorded the phase
+completed, so after the save it prints `[SCOPED_CHECK_SETTLED]` on stderr (text
+`native_settled_line`), and the shared native core (`apply-code-fixes.md`, loaded by
+apply-commit-fixes and the improve composites' apply steps too) then skips both step 7 and step
+10: without it the host's step 7 ran the suite a second time. Nothing is printed with no debt,
+after a failed check, beside a scope blocker, or from `--mark-completed`
+(`TestOrchestratorCompletions`, `test_commit_apply.py::TestAnOwedScopedCheck`).
+
+**Status shows the debt.** `check_workflow_prerequisites._mark_in_progress_apply` reopens
+apply-code-fixes as `pending` over a recorded skip, a skip inferred from a newer review with
+nothing to fix, and a completion (`owed_scoped_check`), and the debt's cycle then decides
+between `pending` and `in_progress`. (It went straight to `in_progress` at first; with a skip
+left from an earlier clean review and a debt from a later one, `next-command` then offered a
+`--resume` that replayed that review's decisions against a newer one's findings.) A debt whose `review_completed_at` is the
+code review on record now (`state_manager.owed_scoped_check_is_current`) is progress of that
+review (`apply_phase_in_progress` reads it), even before any batch recorded an outcome, so the
+phase is `in_progress` and resumed. One admitted under an earlier review leaves it pending, with
+the bare command: a newer review with findings beside an earlier cycle's batches must not be
+resumed (that would replay the earlier cycle's decisions), and its run settles the debt too.
+Either way the entry carries the stop line as `scoped_check_owed`, and `notices` repeats it
+(`TestWorkflowStatusShowsTheDebt`). `next_phase_commands` never walks past an open phase whose
+entry carries it: `util next-command --after apply-code-fixes` and `--after improve-code` (the
+composite's last phase) answer with the apply's own command, `--resume` or bare by the same
+rule, never `complete`. Because `Records.apply_in_progress` is the same predicate, the improve
+step's flags carry `--resume` for this review's debt and not for an earlier one's
+(`TestTheDebtKeepsItsReviewCycle`). Composites never pass the phase over either:
+`full`'s `skip_reason` and `step_apply_code_fixes` run apply-code-fixes instead of reading a
+completion or a stale skip, or recording a zero-findings skip. `improve_workflow.skip_reason`
+(improve-code, improve-commits and each `--cascade` stage's `_stage_done`) runs the apply when
+`Records.scoped_check_owed` is set.
+
+**Identity.** A batch told to run the command scoped has that outcome moved out of `listed` into
+`apply_fix_batch_checks[<id>].scoped` (`split_listed`), whatever its reply called it. A scoped
+`passed` stands only when the reply's `check.ran` names the scoped run itself as passed, its
+selectors include every test file the prompt named, and the batch changed no file every test is
+collected or configured by; otherwise it is recorded `not run`, with one line saying why
+(`backed_scoped`). Both the configured command and each `ran` entry are read as argv (`shlex`):
+the entry must be the command's argv followed by more words, and those words are read for what
+they select. An entry that is more than one plain command (an unquoted pipe, `||`, `&&`, `;`,
+`&`, a redirection, a substitution, a comment or a line break: `_composed`) credits nothing, and
+neither does one that adds an option selecting, deselecting or reordering what pytest runs, or
+running none (`_SELECTING_OPTIONS`, a short explicit table: `-k`, `-m`, `--deselect`,
+`--ignore`, `--ignore-glob`, `--lf`, `--ff`, `--sw`, `--co`, `-c`, `-o`, `--pyargs` and the
+like, `--collectonly` included, matched as `--opt=value`, `-kvalue` and inside `-qk`; pytest
+takes no abbreviations), or an `@file` word anywhere, an option's value included (pytest reads
+more arguments from it: `-W @args.txt` can carry a `-k`). `-x` and options that select
+nothing still count, and the configured command's own options are never read as the batch's.
+Each selector's file part is canonical against the repository root (`canonical_path`, lexical),
+so an absolute, a `./`-prefixed and a relative spelling of one file match. `ran` is read without
+`listed_check_outcomes`' length cap, so a run naming many test files still counts. What pytest
+actually executed file by file is out of reach: the plugin never sees the batch's pytest output,
+so the evidence is still the batch's own report of what it ran, and the full run the phase owes
+is what checks it (`TestScopedEvidenceIsReadAsArgv`). Two known misreadings, left as they are:
+an unquoted Windows path (`tests\test_api.py`) loses its backslashes to POSIX `shlex` and reads
+as `not run`, never as a pass; and a same-round `review-code --reaggregate` re-stamps the review,
+so a current debt reads as an earlier review's and the apply runs bare, as existing apply
+progress already does after that re-stamp (`_apply_batches_predate_review`). A scoped failure becomes a finding named
+`<command> (scoped to the batch's tests)`.
+`checks_tally` says `passed scoped to its tests in <batches>`. The full run that settles a record
+carries `scoped_batches` and `scoped_outcomes` (each batch's scoped word, read by batch id, so a
+resume's earlier batches are named) on `result.verification`, so the summary's Verification line
+and `status` add "the full run N batch check(s) scoped to the batch's tests deferred to (scoped:
+passed in …; not run in …)". A stop while the run is owed sets `result.unverified` to
+`owed_stop_line`, which names the same tally, and the Verification line reads `not run. The full
+check is owed…`.
 
 ## Repeated accepted findings
 

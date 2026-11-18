@@ -1953,3 +1953,56 @@ class TestASymlinkedContextPlan:
         assert "copy plans/x/apply-fixes/protected/docs/plan.md back over docs/plan.md" \
             in lines[1]
         assert '--context-plan ""' in lines[1]
+
+
+# ---------------------------------------------------------------------------
+# A full check scoped batches deferred, settled by an apply with nothing left
+# ---------------------------------------------------------------------------
+
+
+class TestAnOwedScopedCheck:
+    """apply-code-fixes on a commit brief, as apply-commit-fixes and the
+    improve-commits apply step run it: a guard that skips every group
+    reaches the no-items exit, which runs the full check earlier scoped
+    batches deferred, records the phase completed and says so with
+    ``[SCOPED_CHECK_SETTLED]``, so the host verifies nothing a second time
+    (docs/development/checks.md#scoped-batch-checks)."""
+
+    def test_an_all_skipped_apply_settles_it_and_says_so(self, ranged, capsys, monkeypatch,
+                                                           tmp_path):
+        from tests.mock_launchers import mock_path
+        from tests.support.scoped_checks_capture import install_pytest, pytest_calls
+        from utils import provider_registry as registry
+        from utils import scoped_checks
+        from utils.state_manager import StateManager
+
+        repo, base, _first, head = ranged
+        plan = _seed(repo, [_group("A", "a.py"), _group("B", "b.py")], base=base, head=head)
+        (repo / "a.py").write_text("x\n", encoding="utf-8")
+        (repo / "b.py").write_text("y\n", encoding="utf-8")
+        config = tmp_path / "driver.yaml"
+        config.write_text("driver:\n  verify_command: 'pytest -q'\n  batch_checks: scoped\n",
+                          encoding="utf-8")
+        paths = install_pytest(tmp_path / "bin", tmp_path)
+        # The stand-in first; no names, since the interpreter's own dir holds
+        # the real pytest, which `mock_path` refuses on Windows.
+        monkeypatch.setenv("PATH", mock_path(tmp_path / "bin"))
+        monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(config))
+        registry._config = None
+        try:
+            state = StateManager(plan)
+            assert scoped_checks.record_owed(state, "pytest -q", "apply-fix-batch-0")
+            state.save()
+            rc, _ = _run_apply(plan)
+        finally:
+            registry._config = None
+        err = capsys.readouterr().err
+        assert rc == 0, err
+        marked = [line for line in err.splitlines()
+                  if line.startswith("[SCOPED_CHECK_SETTLED] ")]
+        assert len(marked) == 1, err
+        assert "do not run --mark-completed" in marked[0]
+        assert pytest_calls(paths) == ["pytest -q"]
+        state = _state(plan)
+        assert state["phases_completed"].get("apply-code-fixes")
+        assert scoped_checks.OWED_KEY not in state

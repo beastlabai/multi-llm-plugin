@@ -179,6 +179,7 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.runner_selection",
         "utils.sandbox_walk",
         "utils.scope_apply",
+        "utils.scoped_checks",
         "utils.stop_answers",
         "utils.subagent_executor",
         "utils.subagent_prompts",

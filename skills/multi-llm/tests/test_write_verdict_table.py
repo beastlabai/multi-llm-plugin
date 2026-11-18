@@ -574,6 +574,8 @@ def _scheduler(case: Case, root: Path) -> Tuple[Any, Dict[str, Any]]:
     scheduler._audited = set()
     scheduler._told_checks = {}
     scheduler._listed_outcomes = {}
+    scheduler._told_scoped = {}
+    scheduler._scoped_outcomes = {}
     # The sweep's audit rows, the commit guard's restore and the write
     # grant's records run for real, over the same root; the sweep, the watch
     # read and the target's inode below are faked.

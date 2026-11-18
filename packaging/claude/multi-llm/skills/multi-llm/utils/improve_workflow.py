@@ -80,7 +80,8 @@ from .output_handler import (
     phase_dir_path,
 )
 from .state_manager import (
-    StateManager, _parse_completion_time, predates_review,
+    SCOPED_CHECK_PHASE, StateManager, _parse_completion_time, owed_scoped_check_in_state,
+    predates_review,
 )
 from . import commit_spelling
 from .commit_spelling import step_word
@@ -380,7 +381,8 @@ class Records:
         apply_word_at: That same record's stamp, as recorded.
         apply_predates_review: ``completion_predates(apply, review)``.
         apply_in_progress: ``apply_phase_in_progress``: progress of the review
-            on record, the inferred ``--resume``'s condition.
+            on record (an owed scoped check of that review included), the
+            inferred ``--resume``'s condition.
         requested_scope: The typed ``--files``/``--files-from`` scope, made
             repo-relative by the phase's own reader; ``None`` when no scope flag
             is typed, and for ``--files-from -``, which is never read here.
@@ -411,6 +413,11 @@ class Records:
         round_apply_policy: The policy the round's apply last ran under: its
             recorded ``apply_policy``, else its ``review_policy``; ``None``
             with no round record.
+        scoped_check_owed: The apply is apply-code-fixes and a full check its
+            scoped batches deferred is on record (``scoped_checks.owed``):
+            the apply runs to settle it, whatever its records say; with
+            ``--resume`` only when that debt is the review's on record now
+            (:attr:`apply_in_progress`).
     """
 
     mode: str
@@ -436,6 +443,7 @@ class Records:
     scope_deferrals: int = 0
     round_apply_policy: Optional[str] = None
     scope_blockers: int = 0
+    scoped_check_owed: bool = False
 
 
 def _header_changed(mode: str, document: Dict[str, Any]) -> bool:
@@ -613,6 +621,10 @@ def read_records(
         apply_in_progress=prereq.apply_phase_in_progress(state, apply_phase),
         recorded_scope=recorded_scope,
         header_changed=_header_changed(row.name, document),
+        scoped_check_owed=(
+            apply_phase == SCOPED_CHECK_PHASE
+            and owed_scoped_check_in_state(document) is not None
+        ),
         **_scope_policy_records(row.name, document, review_phase, apply_phase),
     )
 
@@ -690,7 +702,9 @@ def skip_reason(
 
     An apply runs when, in this order: its review runs (that review will be
     newer than any apply record, so neither leg reads ``state.json`` again
-    after step 1); it is started and not finished; it has neither record; or
+    after step 1); a full check its scoped batches deferred is owed
+    (:attr:`Records.scoped_check_owed`, docs/development/checks.md#scoped-batch-checks);
+    it is started and not finished; it has neither record; or
     every record of it predates the review; or a typed ``--scope-policy``
     releases the round's scope deferrals (:func:`releases_deferrals`).
     Otherwise it is passed over with the word of its newer record.
@@ -704,6 +718,8 @@ def skip_reason(
         return "completed"
     if step == apply:
         if skip_reason(mode, review, args, records) is None:
+            return None
+        if records.scoped_check_owed:
             return None
         if records.apply_started or records.apply_word is None:
             return None

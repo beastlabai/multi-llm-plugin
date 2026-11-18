@@ -28,7 +28,7 @@ import re
 import sys
 import threading
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Tuple, Type, Union
+from typing import Dict, List, Mapping, NamedTuple, Optional, Tuple, Type, Union
 
 from . import yaml_io
 from .process_state import process_cache
@@ -1081,6 +1081,14 @@ DRIVER_OPTIONAL_INT_KEYS = ("subagent_timeout_s",)
 #: skipping silently. `verify_timeout_s` is a positive int with a real default
 #: (600 s) rather than an optional one: there is no provider default to inherit.
 DRIVER_OPTIONAL_STR_KEYS = ("verify_command",)
+#: The keys whose value is one word of a fixed list, with that list.
+#: ``batch_checks`` is how apply-code-fixes batches on the executor leg run
+#: ``verify_command``: ``full`` (each batch runs it as written) or ``scoped``
+#: (narrowed to the batch's tests, owing one full run before the phase can
+#: complete; docs/development/checks.md#scoped-batch-checks).
+DRIVER_CHOICE_KEYS: Dict[str, Tuple[str, ...]] = {
+    "batch_checks": ("full", "scoped"),
+}
 #: D3l: `allow`/`deny` glob lists resolved against the pinned repo root, enforced
 #: pre-dispatch (against the batch's declared file set) and post-run (against the
 #: set the snapshot diff actually observed).
@@ -1090,6 +1098,7 @@ DRIVER_KEYS = (
     + DRIVER_POSITIVE_INT_KEYS
     + DRIVER_OPTIONAL_INT_KEYS
     + DRIVER_OPTIONAL_STR_KEYS
+    + tuple(DRIVER_CHOICE_KEYS)
     + DRIVER_PATH_POLICY_KEYS
 )
 
@@ -1126,6 +1135,7 @@ DRIVER_FALLBACKS: Dict[str, object] = {
     "subagent_retries": 1,
     "verify_command": None,
     "verify_timeout_s": 600,
+    "batch_checks": "full",
     "write_paths": DEFAULT_WRITE_PATHS,
 }
 
@@ -1244,6 +1254,16 @@ def validate_driver_block(driver: object) -> None:
                 f"non-empty shell command string (e.g. \"pnpm typecheck && pnpm "
                 f"lint\"), or null/omitted to declare no command. A blank string "
                 f"would run the shell for nothing and report a pass."
+            )
+
+    for key, choices in DRIVER_CHOICE_KEYS.items():
+        if key not in driver or driver[key] is None:
+            continue
+        if driver[key] not in choices:
+            raise ConfigError(
+                f"multi-llm config error: driver.{key} is {driver[key]!r} — "
+                f"expected one of {', '.join(choices)}, or null/omitted for "
+                f"{DRIVER_FALLBACKS[key]}."
             )
 
     for key in DRIVER_PATH_POLICY_KEYS:
@@ -1704,6 +1724,44 @@ def get_verify_settings(
     command = value.strip() if isinstance(value, str) and value.strip() else None
     timeout = max(1, int(driver["verify_timeout_s"]))
     return command, timeout, driver_layers.get("verify_command", "default")
+
+
+class BatchCheckSettings(NamedTuple):
+    """:func:`get_batch_check_settings`'s answer."""
+
+    #: ``driver.batch_checks``: ``full`` or ``scoped``.
+    mode: str
+    #: The layer that supplied it (``env``/``project``/``base``/``default``).
+    mode_layer: str
+    #: ``driver.verify_command`` as :func:`get_verify_command` gives it.
+    command: Optional[str]
+    command_layer: str
+    #: ``driver.verify_timeout_s``.
+    timeout: int
+
+
+def get_batch_check_settings(
+    anchor: Optional[Union[str, Path]] = None,
+) -> BatchCheckSettings:
+    """``driver.batch_checks`` with ``driver.verify_command``, from one load.
+
+    ``batch_checks`` decides whether apply-code-fixes batches run the command
+    narrowed, so the two (and the command's timeout and layer) are read
+    together: the command a narrowed batch defers to is the one the same
+    files configure (docs/development/checks.md#scoped-batch-checks). The
+    command is :func:`get_verify_command`'s value, never normalised further.
+    """
+    driver, driver_layers = _driver_view(anchor=anchor)
+    mode = driver.get("batch_checks")
+    if mode not in DRIVER_CHOICE_KEYS["batch_checks"]:
+        mode = str(DRIVER_FALLBACKS["batch_checks"])
+    value = driver.get("verify_command")
+    command = value.strip() if isinstance(value, str) and value.strip() else None
+    return BatchCheckSettings(
+        str(mode), driver_layers.get("batch_checks", "default"),
+        command, driver_layers.get("verify_command", "default"),
+        max(1, int(driver["verify_timeout_s"])),
+    )
 
 
 def get_write_paths(anchor: Optional[Union[str, Path]] = None) -> Dict[str, List[str]]:
