@@ -292,6 +292,24 @@ def _take_handed_lock_fd() -> Optional[int]:
     return fd
 
 
+def handed_lock_is(path: str) -> bool:
+    """Whether this process's launch handed it the lock on *path*
+    (:data:`LOCK_FD_ENV`) and it has not adopted it yet: a detached worker
+    between its entry and :meth:`RunHandle._acquire_lock`, which holds the lock
+    through that descriptor and must not read its launcher's label on it as
+    another run's. The descriptor is compared with *path* by file identity;
+    nothing is taken or adopted."""
+    if _HANDED_LOCK_FD is None:
+        _receive_handed_lock()
+    if _HANDED_LOCK_FD is None:
+        return False
+    try:
+        held, named = os.fstat(_HANDED_LOCK_FD), os.stat(path)
+    except OSError:
+        return False
+    return (held.st_dev, held.st_ino) == (named.st_dev, named.st_ino)
+
+
 def lock_path(phase_dir: str) -> str:
     return os.path.join(str(phase_dir), LOCK_NAME)
 

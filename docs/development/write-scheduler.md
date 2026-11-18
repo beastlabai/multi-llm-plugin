@@ -604,6 +604,60 @@ held the pre-run file); and what it re-stamps never destroys a rollback point: a
 (`keep_backup_aside`) and an occupied `pre_batch/<id>` slot is set aside before
 `take` whenever the scheduler is not resuming.
 
+**`--fresh` voids the earlier runs' evidence in the save that clears their records**
+(`utils/fresh_reset.py`, `tests/test_fresh_voids_resume_evidence.py`). The scheduler not
+resuming covers only the batches the `--fresh` run itself dispatches; every later run resumes from
+the result files on disk. Before 2026-11-18 a `--fresh` that dispatched nothing (`--dry-run`,
+`--dry-run-subagents`, a failure before the first batch) left every reverted batch done for the
+next run, and one that stopped at batch k left the batches after k done. At `_setup` step 10, after
+the refusal, `record_fresh_reset` stamps `fresh_reset_at_<kind>` in `state.json` and puts the
+phase's task records (`apply-batch-N`, `apply-task-batch-N`, `apply-fix-batch-N`) back to
+`pending` (reason and verdict dropped, `TASK_RESET_AT_KEY` stamped, as `implement`'s start-over
+does), in the same `save()` as the clears, so the reset happens whole or not at all. Nothing on
+disk moves:
+
+- `ResumeEvidence.task_fingerprint` hashes the stamp in, so every result bound before the reset
+  reads as made from other inputs (D2g) and is dispatched again. With no stamp the fingerprint is
+  the one it always was. The result's own verdict `inputs_fingerprint` wins over
+  `.write_task_inputs.json` (a separate write that only warns, and would keep a pre-reset entry);
+  after a reset a result with neither is not done.
+- `ResumeEvidence.cycle_cutoff` (and `_cycle_cutoff` in the apply base) is the later of the review's
+  completion and the reset: report rows, pre-batch snapshot reuse and reinstatement, and the
+  backup's recorded progress date against it. `_fresh_target_refusal` keeps the review completion:
+  it must still see what a run before a reset applied.
+- `--fresh` is refused (exit 3) while another process holds the phase dir's lock
+  (`_refuse_fresh_under_a_live_run`): that run's batches are bound without the stamp, and the next
+  run would apply them again. Not refused: a process holding the lock itself (a composite's
+  step), and a detached worker holding the lock its launcher handed it but not adopted yet
+  (`detach.handed_lock_is`, matched by file identity). It probes rather than holds the lock: a
+  hold in `_setup` (reviewed 2026-11-18, kept as
+  `bench/candidates/fresh-reset-lock-hold.CANDIDATE.patch`) broke `--fresh --detach` reattach and
+  takeover, leaked the lock when its label write failed and wrote through a symlinked `.lock`.
+  Because the live-run check refuses, `--fresh --detach --if-not-running` or `--force` over a live
+  detached run also exits 3 now (base cleared the live run's records first); abort the run, then
+  start over.
+- **Limit:** a reset under a run of the same phase voids what that run lands after it, and the next
+  run applies those batches again. Not detected: a foreground apply (it holds no phase lock), and
+  any run that takes the lock between the check and the reset's save, the first run of a phase
+  included. The instructions say never to run `--fresh` while another run of the phase is going or
+  starting. Closing it needs a phase lock that foreground apply holds too, taken through the launch
+  gate (`take_for_launch`).
+- Snapshot manifests are stamped to the second, so an earlier run's snapshot taken in the reset's
+  own second is still reused (a script, not a person, gets there).
+- `--resume` wins over `--fresh` for the whole block, the backup re-stamp and the scheduler
+  (`_fresh_start`): clearing the records under a resume re-emitted a native run's recorded batches.
+  A `--fresh --dry-run` resets as it always cleared.
+
+**`--max-batch-size` other than the phase default is refused** (`refuse_unsupported_batch_size`,
+`tests/test_batch_layout_on_resume.py`). Both batchers honour their `max_per_batch` and `max_chars`
+(`SuggestionBatch.max_items`/`max_chars`, `CodeFixBatch` the same, not serialized); until
+2026-11-18 they read the module constants and the arguments did nothing. The flag stays held at the
+default (4; 3 for apply-code-fixes) as a usage error at parse time (exit 3 through
+`multi_llm.py`; the apply-commit-fixes front door refuses it before it records the range), because resume evidence is keyed by the
+batch: a stopped run resumed under another cap forms other batches from the same items and applies
+the landed ones again. `--no-batch` changes the layout the same way and is not guarded yet: a
+default-layout stop resumed with `--no-batch` re-sends the landed items (the strict xfail there).
+
 After the loop, on the executor leg only, it calls `record_artifacts` + `detach.record_output_files`
 with the file it edited, `orchestrator_output.json`, `write_batch_report.json` and `prior_changes.jsonl`
 (a fully successful detached run reported `artifacts: []` and no `output_files`,

@@ -165,6 +165,8 @@ LAYERS: Dict[int, Tuple[str, Tuple[str, ...]]] = {
         "utils.detach",
         "utils.dispatch_spawn",
         "utils.failure_capture",
+        # What an apply `--fresh` sets aside (write_resume's evidence files).
+        "utils.fresh_reset",
         "utils.human_decisions",
         "utils.human_task_plan",
         "utils.known_checks",

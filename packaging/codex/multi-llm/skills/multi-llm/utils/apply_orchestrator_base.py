@@ -20,6 +20,7 @@ import os
 import re
 import shutil
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import (
@@ -128,6 +129,8 @@ from . import review_orchestrator_base
 from . import review_round as _review_round
 from . import write_safety
 from . import write_batch_scheduler
+from . import fresh_reset
+from . import process_control
 from . import write_phase_bridge
 from .commit_paths import document_label, read_commit_range, is_commit_brief
 from .known_checks import APPLY_FIX_BATCH_CHECKS_KEY
@@ -366,7 +369,11 @@ def build_common_arg_parser(
         "--max-batch-size",
         type=int,
         default=4,
-        help="Maximum suggestions per batch (default: 4)",
+        help=(
+            "Items per batch. Only the phase's default is accepted for now (4; "
+            "3 for apply-code-fixes): any other value is refused, see "
+            "cli_common.refuse_unsupported_batch_size"
+        ),
     )
 
     # --- Bulk Approval Options ---
@@ -1382,42 +1389,16 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # (docs/development/write-scheduler.md#scope-policy-at-the-write-seam).
         self._resolve_scope_policy()
 
-        if getattr(self.args, "fresh", False) and not getattr(
-            self.args, "resume", False
-        ):
-            # Before anything is cleared: a target still carrying the previous
-            # run's edits would take every batch a second time, and the clear
-            # below is what a plain re-run needs to skip them.
-            refusal = self._fresh_target_refusal()
-            if refusal:
-                print(refusal, file=sys.stderr)
-                raise OrchestratorError(
-                    "Phase _setup, step 10: --fresh refused, the target still "
-                    "carries the previous run's edits",
-                    exit_code=3,
-                )
-
-        if getattr(self.args, "fresh", False):
-            print(
-                "[orchestrator] Fresh start requested, clearing previous progress...",
-                file=sys.stderr,
-            )
-            self.state.clear_human_decisions(self.phase_name)
-            self.state.clear_processed_items(self.phase_name)
-            self.state.clear_processing_progress(self.phase_name)
-            if self.write_kind == "apply_code_fixes":
-                # What the void run's batches reported about
-                # their own checks is no earlier batch of this run.
-                self.state.clear_key(APPLY_FIX_BATCH_CHECKS_KEY)
-            self.state.save()
-            # Clear prior changes history for a fresh start
-            prior_changes_file = Path(self.out_dir) / "prior_changes.jsonl"
-            if prior_changes_file.exists():
-                prior_changes_file.unlink()
-                print(
-                    "[orchestrator] Cleared prior changes history.",
-                    file=sys.stderr,
-                )
+        if self._fresh_start():
+            # A run of this phase that holds its lock (a detached worker, a
+            # composite's step) keeps landing batches bound to the inputs it
+            # loaded: a reset under it would void what it lands after, for the
+            # next run to apply again. A foreground apply in another terminal
+            # holds no lock, and a run started between this check and the
+            # reset's save is not seen either: the documented limit
+            # (docs/development/write-scheduler.md).
+            self._refuse_fresh_under_a_live_run()
+            self._fresh_reset()
 
         # Step 10c: this review's earlier materialization under another
         # policy (after `--fresh`, which clears the records it reads). Its
@@ -3383,6 +3364,104 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             exit_code=3,
         )
 
+    def _fresh_start(self) -> bool:
+        """Whether this run starts the phase over: ``--fresh`` without
+        ``--resume``, which wins over it everywhere (the clears, the backup
+        re-stamp and the scheduler's resume)."""
+        return bool(getattr(self.args, "fresh", False)) and not getattr(
+            self.args, "resume", False
+        )
+
+    def _cycle_cutoff(self) -> Optional[datetime]:
+        """The cutoff this phase's own evidence is dated against: the later of
+        the review's completion and the phase's last ``--fresh`` reset
+        (:func:`utils.fresh_reset.cycle_cutoff`)."""
+        return fresh_reset.cycle_cutoff(
+            self._review_completed_at(),
+            getattr(getattr(self, "state", None), "state", None),
+            getattr(self, "write_kind", ""),
+        )
+
+    def _fresh_reset(self) -> None:
+        """``--fresh``'s target refusal, reset and clears."""
+        # Before anything is cleared: a target still carrying the previous
+        # run's edits would take every batch a second time, and the clear
+        # below is what a plain re-run needs to skip them.
+        refusal = self._fresh_target_refusal()
+        if refusal:
+            print(refusal, file=sys.stderr)
+            raise OrchestratorError(
+                "Phase _setup, step 10: --fresh refused, the target still "
+                "carries the previous run's edits",
+                exit_code=3,
+            )
+        # `--resume` wins over `--fresh` here too (`_fresh_start`): clearing
+        # the processed records and the prior-changes log under a resume
+        # re-emitted a native run's recorded batches (2026-11-18).
+        print(
+            "[orchestrator] Fresh start requested, clearing previous progress...",
+            file=sys.stderr,
+        )
+        # The reset is stamped in the same save as the clears, so it happens
+        # whole or not at all (utils/fresh_reset.py): every result bound
+        # before it reads as made from other inputs, and the cycle cutoff
+        # moves to it.
+        fresh_reset.record_fresh_reset(self.state, self.write_kind or "")
+        self.state.clear_human_decisions(self.phase_name)
+        self.state.clear_processed_items(self.phase_name)
+        self.state.clear_processing_progress(self.phase_name)
+        if self.write_kind == "apply_code_fixes":
+            # What the void run's batches reported about
+            # their own checks is no earlier batch of this run.
+            self.state.clear_key(APPLY_FIX_BATCH_CHECKS_KEY)
+        self.state.save()
+        # Clear prior changes history for a fresh start
+        prior_changes_file = Path(self.out_dir) / "prior_changes.jsonl"
+        if prior_changes_file.exists():
+            prior_changes_file.unlink()
+            print(
+                "[orchestrator] Cleared prior changes history.",
+                file=sys.stderr,
+            )
+
+    def _refuse_fresh_under_a_live_run(self) -> None:
+        """Exit 3 when another live process holds this phase dir's lock.
+
+        ``--fresh`` resets the phase in ``_setup``, before this run takes the
+        lock; a run that holds it (a detached worker, a composite's step)
+        keeps landing batches bound to the inputs it loaded, and the reset
+        would void each of them for the next run, which applies them again.
+        Not refused: a process that holds the lock itself, and a detached
+        worker holding the lock its launcher handed it but not adopted yet
+        (``detach.handed_lock_is``, matched by file identity). A probe, not a
+        hold: the lock is taken and let go at once
+        (``process_control.lock_is_free``), retried past a ``status`` probe as
+        a run's entry is. Not seen: a foreground apply (it holds no lock) and
+        a run that takes the lock between this probe and the reset's save;
+        both are the documented limit.
+        """
+        phase_dir = os.path.join(self.out_dir, self.phase_name)
+        if _detach.holds_phase_lock(phase_dir):
+            return
+        path = _detach.lock_path(phase_dir)
+        if getattr(self.args, "internal_worker", False) and _detach.handed_lock_is(path):
+            return
+        for attempt in range(_detach.ENTRY_LOCK_ATTEMPTS):
+            if attempt:
+                time.sleep(_detach.ENTRY_LOCK_RETRY_S)
+            if process_control.lock_is_free(path):
+                return
+        holder = process_control.read_lock_holder(path) or {}
+        print(
+            _detach.phase_dir_busy_message(
+                phase_dir, holder, plan_file=self.plan_path, phase=self.phase_name),
+            file=sys.stderr,
+        )
+        raise OrchestratorError(
+            "Phase _setup, step 10: --fresh refused, another run holds the phase dir",
+            exit_code=3,
+        )
+
     def _fresh_target_refusal(self) -> Optional[str]:
         """Why ``--fresh`` must not run against the target as it is, or ``None``.
 
@@ -3520,7 +3599,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         backup_path = os.path.join(phase_dir, target_backup_name(self.phase_name))
         if (
             os.path.exists(backup_path)
-            and not getattr(self.args, "fresh", False)
+            and not self._fresh_start()
             and self._phase_has_recorded_progress(phase_dir)
         ):
             print(
@@ -3538,7 +3617,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         if kept:
             about = (
                 "the file --fresh is about to back up"
-                if getattr(self.args, "fresh", False)
+                if self._fresh_start()
                 else "the file this run is about to back up"
             )
             print(
@@ -3585,7 +3664,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         if getattr(self.args, "resume", False):
             return True
 
-        reviewed_at = self._review_completed_at()
+        # The review's completion, or the phase's last `--fresh` reset when
+        # that is later: what a reset declared void is no progress.
+        reviewed_at = self._cycle_cutoff()
 
         def this_cycle(stamped: Optional[datetime]) -> bool:
             return not predates_review(stamped, reviewed_at)
@@ -3747,9 +3828,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # well, so a user who reverted the target and asked to start over got
         # exit 0 with every batch "already complete". `--resume` wins over
         # `--fresh` (the retry builder drops `--fresh` beside it, too).
-        fresh = bool(getattr(self.args, "fresh", False)) and not getattr(
-            self.args, "resume", False
-        )
+        fresh = self._fresh_start()
         try:
             scheduler = write_batch_scheduler.WriteBatchScheduler(SchedulerOptions(
                 tasks=tasks,

@@ -29,7 +29,7 @@ from utils.apply_orchestrator_base import (
     OrchestratorError,
     build_common_arg_parser,
 )
-from utils.cli_common import dispatcher_prefix
+from utils.cli_common import dispatcher_prefix, refuse_unsupported_batch_size
 from utils.judge_vocab import JUDGE_AUTO_DECIDE, JUDGE_DECIDE, canonical_value
 from utils.apply_output_helpers import (
     detail_pointer_lines,
@@ -661,7 +661,9 @@ Finalization (run by the host AFTER every batch has been applied and verified):
         # §2.1), applied by the detached worker right after its lock. Hidden.
         parser.add_argument("--commit-stage", dest="commit_stage", default=None,
                             help=SUPPRESS)
-        return parser.parse_args(argv)
+        args = parser.parse_args(argv)
+        refuse_unsupported_batch_size(parser, args)
+        return args
 
     # ----------------------------------------------------------------
     # Hooks

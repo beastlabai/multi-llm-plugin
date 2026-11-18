@@ -1031,11 +1031,14 @@ class TestCLIArgumentParsing:
             args = ApplyTaskSuggestionsOrchestrator.parse_args()
         assert args.max_batch_size == 4
 
-    def test_max_batch_size_custom(self):
-        """--max-batch-size custom value is parsed."""
+    def test_max_batch_size_custom_is_refused(self, capsys):
+        """--max-batch-size had no effect; another value than 4 is refused at
+        parse time (exit 2), not ignored."""
         with patch("sys.argv", ["prog", "--plan-file", "p.md", "--max-batch-size", "8"]):
-            args = ApplyTaskSuggestionsOrchestrator.parse_args()
-        assert args.max_batch_size == 8
+            with pytest.raises(SystemExit) as exc:
+                ApplyTaskSuggestionsOrchestrator.parse_args()
+        assert exc.value.code == 2
+        assert "--max-batch-size 8 is refused" in capsys.readouterr().err
 
     def test_min_priority_choices(self):
         """--min-priority accepts low, medium, high."""

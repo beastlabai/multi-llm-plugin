@@ -855,6 +855,26 @@ class TestNativeResumeDropsRecordedBatches:
         assert emitted_items == {
             i for t in first[1:] for i in t["expected_ids"]}
 
+    def test_resume_beside_fresh_still_drops_the_recorded_batch(self, repo, capsys):
+        """`--resume` wins over `--fresh` for the whole reset: it used to
+        clear the processed records and the log under the resume, and every
+        batch, the recorded one included, was handed out again."""
+        plan = repo
+        code, err, first = _emit(plan, capsys)
+        assert code == 0, err
+        done = first[0]
+        assert _batch_done(plan, done["task_id"]) == 0
+        capsys.readouterr()
+        assert prior_changes.append(
+            str(plan.parent / "test-plan"), done["prior_changes_id"],
+            "apply-suggestions", "batch 0 applied")
+
+        code, err, second = _emit(plan, capsys, "--resume", "--fresh")
+        assert code == 0, err
+        emitted_items = {i for t in second for i in t["expected_ids"]}
+        assert emitted_items.isdisjoint(done["expected_ids"])
+        assert emitted_items == {i for t in first[1:] for i in t["expected_ids"]}
+
     def test_a_failed_batch_is_retried(self, repo, capsys):
         """`--status failed` is a record too — the batch is dispatched again
         on resume, as the executor leg re-dispatches a failed batch, and its

@@ -94,7 +94,7 @@ plans/todo/my-feature/
 - `--min-priority {low,medium,high}`: Minimum importance level to include (default: low = all valid fixes)
 - `--include-low`: [DEPRECATED] No longer needed, low is now default. Use `--min-priority` to filter.
 - `--no-batch`: Disable smart batching (process each fix separately)
-- `--max-batch-size N`: Maximum fixes per batch (default: 3)
+- `--max-batch-size N`: Only the default (3) is accepted for now; any other value is a usage error, refused before anything runs (exit 3). It never took effect, and a stopped run resumed under another batch size would apply its finished batches a second time
 - `--base-ref REF`: Git ref to use for diffs (default: from state file)
 
 ### Scope Policy
@@ -136,7 +136,7 @@ A run with `--revalidate` or `--revalidate-model` stops at a revalidation marker
 ### Resume/State Options
 
 - `--resume`: Resume from last checkpoint, skip already-processed items
-- `--fresh`: Discard this phase's recorded progress (decisions, processed items, prior-changes log) and dispatch every batch again. Put the files the previous run's batches edited back first, or every batch lands twice: after an `--exec-subagents` run, `util restore-batch` rolls the batches back newest-first; the native loop takes no snapshot of them, so undo its batches by hand (`git diff -- <the files>` shows their edits, together with any other uncommitted edit to the same files). This phase edits no single target file, so nothing checks for you that the previous run's edits are gone. Earlier rollback points are kept aside, never overwritten.
+- `--fresh`: Discard this phase's recorded progress (decisions, processed items, prior-changes log) and dispatch every batch again. A later run no longer resumes from the earlier runs' batch results either (a `--fresh --dry-run` resets too); with `--resume` beside it, `--fresh` does nothing. Never run `--fresh` while another run of this phase is going or starting: a detached or composite run that is already running is detected and refused (exit 3; abort it first, even with `--force` or `--if-not-running`), but a run in another terminal, or one started at the same moment, is not, and the batches it finishes would be applied again. Put the files the previous run's batches edited back first, or every batch lands twice: after an `--exec-subagents` run, `util restore-batch` rolls the batches back newest-first; the native loop takes no snapshot of them, so undo its batches by hand (`git diff -- <the files>` shows their edits, together with any other uncommitted edit to the same files). This phase edits no single target file, so nothing checks for you that the previous run's edits are gone. Earlier rollback points are kept aside, never overwritten.
 - `--skip-human-review`: [DEPRECATED] Use `--skip-all-human` instead
 
 ### Batch Review Mode

@@ -498,31 +498,27 @@ class TestBatchCodeFixes:
         assert len(result) == 2
 
     def test_respects_max_per_batch(self):
-        """Test MAX_FIXES_PER_BATCH limit is respected.
-
-        Note: The max_per_batch parameter is accepted but the function
-        uses the module constant MAX_FIXES_PER_BATCH (3) via can_add().
-        """
-        # Create more fixes than MAX_FIXES_PER_BATCH (which is 3)
+        """The default cap is MAX_FIXES_PER_BATCH (3)."""
         fixes = [
             make_fix(file="src/main.py", line_range=(i * 10, i * 10 + 5), importance="MEDIUM")
             for i in range(7)
         ]
         result = batch_code_fixes(fixes)
 
-        # 7 fixes with max 3 per batch = 3 batches (3 + 3 + 1)
-        assert len(result) == 3
-        assert result[0].size == 3  # First batch full
-        assert result[1].size == 3  # Second batch full
-        assert result[2].size == 1  # Third batch has remainder
+        assert [b.size for b in result] == [3, 3, 1]
+
+    def test_a_given_max_per_batch_caps_every_batch(self):
+        """`max_per_batch` is honoured (the batch read the module constant
+        until 2026-11-18, so the argument had no effect)."""
+        fixes = [
+            make_fix(file="src/main.py", line_range=(i * 10, i * 10 + 5), importance="MEDIUM")
+            for i in range(7)
+        ]
+        assert [b.size for b in batch_code_fixes(fixes, max_per_batch=2)] == [2, 2, 2, 1]
+        assert [b.size for b in batch_code_fixes(fixes, max_per_batch=5)] == [5, 2]
 
     def test_respects_max_chars(self):
-        """Test MAX_DESCRIPTION_CHARS limit is respected.
-
-        Note: The max_chars parameter is accepted but the function
-        uses the module constant MAX_DESCRIPTION_CHARS (3000) via can_add().
-        """
-        # Create fixes with descriptions that exceed the default 3000 char limit when combined
+        """The default description cap is MAX_DESCRIPTION_CHARS (3000)."""
         fixes = [
             make_fix(
                 file="src/main.py",
@@ -534,10 +530,14 @@ class TestBatchCodeFixes:
         ]
         result = batch_code_fixes(fixes)
 
-        # 4 fixes: first 2 fit (3000 chars), next 2 fit in second batch
-        assert len(result) == 2
-        for batch in result:
-            assert batch.size == 2  # 2 fixes per batch (1500 + 1500 = 3000)
+        assert [b.size for b in result] == [2, 2]
+        assert [b.size for b in batch_code_fixes(fixes, max_chars=1500)] == [1, 1, 1, 1]
+
+    def test_a_cap_below_one_is_refused(self):
+        with pytest.raises(ValueError):
+            batch_code_fixes([make_fix()], max_per_batch=0)
+        with pytest.raises(ValueError):
+            batch_code_fixes([make_fix()], max_chars=-1)
 
     def test_batches_sorted_by_priority(self):
         """Test batches are sorted by priority score (highest first)."""

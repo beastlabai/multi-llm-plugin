@@ -839,11 +839,21 @@ class TestParseArgs:
             args = parse_args()
             assert args.no_batch is True
 
-    def test_parses_max_batch_size(self):
-        """Parses --max-batch-size option."""
+    def test_a_max_batch_size_other_than_3_is_refused(self, capsys):
+        """--max-batch-size had no effect; another value than the phase's
+        default (3 here) is refused at parse time, not ignored."""
         with patch("sys.argv", ["prog", "--plan-file", "plans/test.md", "--max-batch-size", "5"]):
-            args = parse_args()
-            assert args.max_batch_size == 5
+            with pytest.raises(SystemExit) as exc:
+                parse_args()
+        assert exc.value.code == 2
+        assert "--max-batch-size 5 is refused" in capsys.readouterr().err
+        with patch("sys.argv", ["prog", "--plan-file", "plans/test.md", "--max-batch-size", "4"]):
+            with pytest.raises(SystemExit):
+                parse_args()
+
+    def test_the_default_max_batch_size_is_accepted(self):
+        with patch("sys.argv", ["prog", "--plan-file", "plans/test.md", "--max-batch-size", "3"]):
+            assert parse_args().max_batch_size == 3
 
     def test_parses_output_format(self):
         """Parses --output-format option."""

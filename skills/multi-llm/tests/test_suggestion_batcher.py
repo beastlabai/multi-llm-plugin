@@ -577,47 +577,52 @@ class TestGroupSuggestionsForSubagents:
         assert step2_batches[0].size == 1
 
     def test_respects_max_per_batch(self):
-        """Test batching respects MAX_SUGGESTIONS_PER_BATCH constant.
-
-        Note: The max_per_batch parameter is defined but the current implementation
-        uses the global MAX_SUGGESTIONS_PER_BATCH (4) via can_add(). This test
-        verifies actual behavior.
-        """
+        """`max_per_batch` caps every batch (the batch read the module
+        constant until 2026-11-18, so a cap of 3 still made batches of 4)."""
         suggestions = [
             make_suggestion(reference="Step 1") for _ in range(10)
         ]
-        # Pass max_per_batch=3 but actual behavior uses MAX_SUGGESTIONS_PER_BATCH=4
         result = group_suggestions_for_subagents(suggestions, max_per_batch=3)
 
-        # 10 suggestions with actual max 4 per batch = 3 batches (4+4+2)
-        assert len(result) == 3
-        assert result[0].size == 4
-        assert result[1].size == 4
-        assert result[2].size == 2
+        assert [b.size for b in result] == [3, 3, 3, 1]
+
+    def test_the_default_cap_is_still_four(self):
+        suggestions = [make_suggestion(reference="Step 1") for _ in range(10)]
+        result = group_suggestions_for_subagents(suggestions)
+
+        assert [b.size for b in result] == [4, 4, 2]
 
     def test_respects_max_chars(self):
-        """Test batching respects MAX_DESCRIPTION_CHARS constant.
-
-        Note: The max_chars parameter is defined but the current implementation
-        uses the global MAX_DESCRIPTION_CHARS (2500) via can_add(). This test
-        verifies actual behavior. First suggestion always goes into batch,
-        then subsequent check char limits.
-        """
-        # Create suggestions with long descriptions
+        """`max_chars` caps a batch's descriptions; the first suggestion
+        always goes in, whatever its size."""
         suggestions = [
             make_suggestion(description="x" * 1000, reference="Step 1"),
             make_suggestion(description="x" * 1000, reference="Step 1"),
             make_suggestion(description="x" * 1000, reference="Step 1"),
         ]
-        # Actual MAX_DESCRIPTION_CHARS is 2500, so first 2 suggestions fit (2000 chars)
-        # but 3rd would exceed, so goes to new batch
         result = group_suggestions_for_subagents(suggestions, max_chars=1500)
 
-        assert len(result) == 2
-        assert result[0].size == 2
-        assert result[0].total_chars == 2000
-        assert result[1].size == 1
-        assert result[1].total_chars == 1000
+        assert [b.size for b in result] == [1, 1, 1]
+        assert [b.total_chars for b in result] == [1000, 1000, 1000]
+
+    def test_the_default_char_cap_is_still_2500(self):
+        suggestions = [
+            make_suggestion(description="x" * 1000, reference="Step 1") for _ in range(3)
+        ]
+        result = group_suggestions_for_subagents(suggestions)
+
+        assert [b.size for b in result] == [2, 1]
+
+    def test_a_cap_below_one_is_refused(self):
+        with pytest.raises(ValueError):
+            group_suggestions_for_subagents([make_suggestion()], max_per_batch=0)
+        with pytest.raises(ValueError):
+            group_suggestions_for_subagents([make_suggestion()], max_chars=0)
+
+    def test_the_caps_are_not_serialized(self):
+        [batch] = group_suggestions_for_subagents([make_suggestion()], max_per_batch=2)
+        assert "max_items" not in batch.to_dict()
+        assert "max_chars" not in batch.to_dict()
 
     def test_group_by_section_false_groups_all_together(self):
         """Test group_by_section=False groups all suggestions together."""

@@ -529,12 +529,19 @@ class TestBatchingOptions:
         for batch in output["batches"]:
             assert batch["suggestion_count"] == 1
 
-    def test_max_batch_size_limits_batch(self):
-        """Verify --max-batch-size limits suggestions per batch."""
+    def test_a_max_batch_size_other_than_the_default_is_refused(self):
+        """It had no effect, and honouring it would let a resume under another
+        size apply landed batches twice: refused at parse time (exit 2)."""
         result = run_orchestrator("--max-batch-size", "2", "--dry-run")
 
+        assert result.returncode == 2
+        assert "--max-batch-size 2 is refused" in result.stderr
+        assert "Drop the flag" in result.stderr
+
+    def test_the_default_max_batch_size_is_accepted(self):
+        result = run_orchestrator("--max-batch-size", "4", "--dry-run")
+
         assert result.returncode == 0
-        # Batches should have at most 2 suggestions
 
 
 class TestFreshStart:
