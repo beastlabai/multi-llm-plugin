@@ -75,6 +75,17 @@ TRAILING_COMMA_TITLES = [
     "Reviewer-directed instruction in source",
 ]
 
+#: The line on which the parser says each real reply breaks. The empty key
+#: breaks at its closing ``}`` (line 14) on every Python. A trailing comma is
+#: placed by the interpreter: Python 3.13 and later name the comma's own line
+#: ("Illegal trailing comma before end of object", line 12), earlier versions
+#: the closer after it ("Expecting property name enclosed in double quotes",
+#: line 13).
+SYNTAX_ERROR_LINES = {
+    "stray_empty_key": 14,
+    "trailing_commas": 12 if sys.version_info >= (3, 13) else 13,
+}
+
 
 def _stream(name: str) -> str:
     """The codex stdout of one real run: its final ``agent_message`` event."""
@@ -199,7 +210,7 @@ class TestTheExtractorOffersTheRepairedReading:
         # What every caller read before is unchanged: the last finding,
         # with the document's own syntax error beside it.
         assert result["data"]["title"] == titles[-1]
-        assert result["enclosing_syntax_error"]["line"] in (12, 14)
+        assert result["enclosing_syntax_error"]["line"] == SYNTAX_ERROR_LINES[name]
         # And the reply read whole, with what it took.
         assert _titles(result["repaired"]["data"]) == titles
         assert len(result["repaired"]["repairs"]) == changes
