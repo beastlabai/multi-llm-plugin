@@ -130,7 +130,7 @@ Then configure providers once per repository: `/multi-llm --init` writes `<git-r
 Three differences worth knowing on these hosts:
 
 - **Unattended is the default.** Claude Code is the only host with a structured question tool, so the shim bakes in `--yes`: every gate resolves from config and flags instead of prompting you. On the `install-host` file route, `--interactive` opts back into a rendered gate. The package route on `codex` and `opencode` refuses `--interactive` and `-i` instead — it spawns the dispatcher with nothing on its stdin, so the model picker they force could not prompt — and asks you to choose non-interactively: `--models "provider:model,…"` or `--quick`, or `defaults.models` in `providers.yaml`.
-- **Subagents are dispatched through a provider CLI** rather than a native task tool, so the default runner is `codex:gpt-6-astra` on `codex` and `opencode:opencode/big-pickle` on `opencode` — not a Claude subagent.
+- **Subagents are dispatched through a provider CLI** rather than a native task tool, so the default runner is `codex:gpt-6.2-astra` on `codex` and `opencode:opencode/big-pickle` on `opencode` — not a Claude subagent.
 - **Headless `opencode` needs its own separator:** `opencode run --command multi-llm -- "<args>"`.
 
 ## Capability matrix
@@ -140,7 +140,7 @@ Generated from `skills/multi-llm/hosts/capabilities.yaml` — the same data `ins
 | Host | Installable | Command format | Args | *spawn subagents* | *ask the user* | *run detached* | Default runner | Reload |
 |---|---|---|---|---|---|---|---|---|
 | `claude-code` | no (ships with the plugin) | `markdown+frontmatter` | `placeholder` | `native` (`Agent`) — verified | `structured` (`AskUserQuestion`) — verified | `native` (`run_in_background`) — verified | `claude-code:sonnet` | `none` |
-| `codex` | yes | `markdown+frontmatter` | `placeholder` | `executor` (`agent`) — documented | `free-text` — documented | `python` — documented | `codex:gpt-6-astra` | `new-session` |
+| `codex` | yes | `markdown+frontmatter` | `placeholder` | `executor` (`agent`) — documented | `free-text` — documented | `python` — documented | `codex:gpt-6.2-astra` | `new-session` |
 | `opencode` | yes | `markdown+frontmatter` | `placeholder` | `executor` (`task`) — documented | `free-text` — documented | `required` — verified | `opencode:opencode/big-pickle` | `new-session` |
 
 ## Where the shim goes

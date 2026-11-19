@@ -3407,7 +3407,7 @@ SESSION_MODEL = "opencode/nemotron-3-ultra-free"
 SESSION_SPEC = f"opencode:{SESSION_MODEL}"
 #: What `hosts/capabilities.yaml` declares for the two hosts these tests use.
 OPENCODE_FLOOR = "opencode:opencode/big-pickle"
-CODEX_FLOOR = "codex:gpt-6-astra"
+CODEX_FLOOR = "codex:gpt-6.2-astra"
 
 
 def _detected(monkeypatch, available=True):

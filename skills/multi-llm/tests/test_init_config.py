@@ -255,8 +255,8 @@ class TestD2aGuard:
         # provider blocks must stay BARE model ids after D2a.
         cline_catalog = [
             "openrouter/z-ai/glm-5.3",
-            "openrouter/moonshotai/kimi-k3",
-            "openrouter/openai/gpt-6-astra",
+            "openrouter/moonshotai/kimi-k3.1-pro",
+            "openrouter/openai/gpt-6.2-astra",
         ]
         for detected, catalogs in (
             (["cline"], {"cline": cline_catalog}),
@@ -265,6 +265,8 @@ class TestD2aGuard:
                 {
                     "gemini": [
                         "gemini-4-carbon",
+                        "gemini-4-neon",
+                        "gemini-4-hydrogen",
                         "gemini-3.8-flash",
                         "gemini-3.5-flash-lite",
                         "gemini-flash-latest",
@@ -276,6 +278,8 @@ class TestD2aGuard:
                 {
                     "gemini": [
                         "gemini-4-carbon",
+                        "gemini-4-neon",
+                        "gemini-4-hydrogen",
                         "gemini-3.8-flash",
                         "gemini-3.5-flash-lite",
                         "gemini-flash-latest",

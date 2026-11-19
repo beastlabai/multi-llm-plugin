@@ -311,7 +311,7 @@ hosts:
     # one), so this rule buys consistency, not correctness: after it, the pin is
     # wrong only when the roster is. Whoever finds a dead id edits
     # `providers.yaml` and lets this line follow.
-    default_subagent_runner: "codex:gpt-6-astra"
+    default_subagent_runner: "codex:gpt-6.2-astra"
     subagent_tiers: null             # forbidden to carry a map: subagents != native
     runners:
       codex: {bundled: true, needs_auth: false, login_cmd: "",
