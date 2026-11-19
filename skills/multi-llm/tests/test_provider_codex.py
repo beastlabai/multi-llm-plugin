@@ -5,6 +5,7 @@ One of the per-provider test files; helpers that several of them share live in
 """
 
 import json
+import os
 import sys
 import pytest
 from pathlib import Path
@@ -13,6 +14,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.retry_ladder import STATUS_AUTH_FAILED, STATUS_RATE_LIMITED
+from utils.providers.base import PROFILE_AGENT_WRITE
 from utils.providers.codex import CodexProvider
 from tests.provider_test_support import C1_FIXTURES, _c1_adapter, _c1_capture, _c1_without_the_hook
 
@@ -854,3 +856,191 @@ class TestCodexSlotsStartWithoutThePlugins:
         assert tuple(cmd[at:at + 2]) == PLUGINS_OFF_PAIR
         assert at < cmd.index("--ephemeral") < cmd.index("--skip-git-repo-check")
         assert cmd[2:4] == ["--sandbox", cmd[3]], "--sandbox keeps its fixed offset"
+
+
+class TestOnlyCodexWritersStartWithoutSubagentTools:
+    """A codex writer (``agent-write``) never gets codex's subagent tools; the
+    read-only profiles keep them (docs/development/providers.md#codex-subagent-tools,
+    user decision 2026-11-19).
+
+    Measured offline against codex 0.170.0: gpt-5.5 advertises v1
+    (``multi_agent_v1`` behind ``tool_search``), every gpt-6 model advertises v2
+    (the ``collaboration`` namespace), and a v2 spawn leaves no item in the
+    parent's ``--json`` stream. ``features.multi_agent=false`` removes v1 only;
+    ``agents.enabled=false`` removes both, but is a config-load error at 0.144.0,
+    so it is gated on the installed version."""
+
+    def _write_legs(self, provider, tmp_path):
+        from utils.providers.base import (
+            SANDBOX_RUNG_PLUGIN_LANDLOCK,
+            SANDBOX_RUNG_UNSANDBOXED,
+            WritePostureConsent,
+        )
+        from utils.providers.sandbox_rungs import JailContext, JailRequest
+
+        def write_cmd(model="gpt-6.1-sol"):
+            return provider.build_agent_command("p", model, PROFILE_AGENT_WRITE)
+
+        request = JailRequest(
+            str(tmp_path), "apply_suggestions", "plan-file", str(tmp_path / "plan.md"),
+        )
+        return {
+            "agent-write": write_cmd("gpt-6.1-sol:high"),
+            "agent-write/stdin": provider.build_agent_command_for_transport(
+                "p", "gpt-6.1-sol", PROFILE_AGENT_WRITE, "stdin")[0],
+            f"agent-write@{SANDBOX_RUNG_PLUGIN_LANDLOCK}": provider.apply_sandbox_fallback(
+                write_cmd(), PROFILE_AGENT_WRITE, SANDBOX_RUNG_PLUGIN_LANDLOCK,
+                context=JailContext(request, str(tmp_path / "slot")),
+            ),
+            f"agent-write@{SANDBOX_RUNG_UNSANDBOXED}": provider.apply_sandbox_fallback(
+                write_cmd(), PROFILE_AGENT_WRITE, SANDBOX_RUNG_UNSANDBOXED,
+                consent=WritePostureConsent("danger-full-access", write_scope="plan-file"),
+            ),
+        }
+
+    def _read_legs(self, provider):
+        from utils.providers.base import (
+            PROFILE_AGENT_READONLY,
+            SANDBOX_RUNG_LANDLOCK,
+            SANDBOX_RUNG_UNSANDBOXED,
+        )
+
+        legs = {
+            "generate": provider.build_command("p", "gpt-6.1-sol:high"),
+            "generate/stdin": provider.build_command_for_transport(
+                "p", "gpt-6.1-sol", "stdin")[0],
+            "agent-readonly": provider.build_agent_command(
+                "p", "gpt-6.1-sol", PROFILE_AGENT_READONLY),
+        }
+        for rung in (SANDBOX_RUNG_LANDLOCK, SANDBOX_RUNG_UNSANDBOXED):
+            legs[f"generate@{rung}"] = provider.build_command_for_transport(
+                "p", "gpt-6.1-sol", "argv", sandbox_fallback=rung)[0]
+            legs[f"agent-readonly@{rung}"] = provider.apply_sandbox_fallback(
+                provider.build_agent_command("p", "gpt-6.1-sol", PROFILE_AGENT_READONLY),
+                PROFILE_AGENT_READONLY, rung,
+            )
+        return legs
+
+    def test_writers_carry_the_three_pairs_once_before_ephemeral(self, tmp_path):
+        from utils.providers.codex import (
+            AGENTS_OFF_PAIR,
+            SUBAGENT_FEATURES_OFF,
+            CodexProvider,
+        )
+
+        assert SUBAGENT_FEATURES_OFF == (
+            "-c", "features.multi_agent=false",
+            "-c", "features.multi_agent_v2=false",
+        )
+        assert AGENTS_OFF_PAIR == ("-c", "agents.enabled=false")
+        wanted = [*SUBAGENT_FEATURES_OFF, *AGENTS_OFF_PAIR]
+        for leg, cmd in self._write_legs(CodexProvider(), tmp_path).items():
+            ephemeral = cmd.index("--ephemeral")
+            assert cmd[ephemeral - len(wanted):ephemeral] == wanted, leg
+            assert cmd.count("features.multi_agent=false") == 1, leg
+            assert cmd[2] == "--sandbox", leg
+            assert cmd[ephemeral + 1] == "--skip-git-repo-check", leg
+
+    def test_read_only_legs_keep_codex_subagent_tools(self, capsys):
+        from utils.providers.base import LLMProvider
+        from utils.providers.codex import CodexProvider
+
+        for version in ("0.170.0", "0.144.0"):
+            with patch.object(LLMProvider, "gate_version", lambda self, _v=version: _v):
+                for leg, cmd in self._read_legs(CodexProvider()).items():
+                    for key in ("features.multi_agent=false",
+                                "features.multi_agent_v2=false",
+                                "agents.enabled=false"):
+                        assert key not in cmd, (version, leg, key)
+        assert "agents.enabled" not in capsys.readouterr().err, (
+            "a read-only leg never reads the gate, so it never WARNs"
+        )
+
+    def test_the_landlock_pair_still_follows_skip_git_repo_check(self):
+        from utils.providers.codex import LANDLOCK_FEATURE_PAIR, CodexProvider
+
+        cmd = self._read_legs(CodexProvider())["generate@landlock"]
+        splice = cmd.index("--skip-git-repo-check") + 1
+        assert tuple(cmd[splice:splice + 2]) == LANDLOCK_FEATURE_PAIR
+
+    @pytest.mark.parametrize("version,gated", [
+        ("0.146.0", True),
+        ("0.170.0", True),
+        ("0.145.9", False),
+        ("0.144.0", False),
+        ("", False),
+    ])
+    def test_agents_enabled_is_gated_on_the_installed_version(
+        self, monkeypatch, capsys, tmp_path, version, gated
+    ):
+        from utils.providers.base import LLMProvider
+        from utils.providers.codex import (
+            AGENTS_OFF_PAIR,
+            SUBAGENT_FEATURES_OFF,
+            CodexProvider,
+        )
+
+        monkeypatch.setattr(LLMProvider, "gate_version", lambda self: version)
+        provider = CodexProvider()
+        for cmd in self._write_legs(provider, tmp_path).values():
+            ephemeral = cmd.index("--ephemeral")
+            if gated:
+                assert cmd[ephemeral - 2:ephemeral] == list(AGENTS_OFF_PAIR)
+            else:
+                assert AGENTS_OFF_PAIR[1] not in cmd
+                assert cmd[ephemeral - 4:ephemeral] == list(SUBAGENT_FEATURES_OFF)
+        err = capsys.readouterr().err
+        if gated:
+            assert "agents.enabled" not in err
+        else:
+            assert err.count("[WARN] codex:") == 1, "one WARN per process"
+            assert (f"codex {version}" if version else "unread codex version") in err
+            assert "from a writer" in err
+
+
+@pytest.mark.cli_version_read
+class TestTheGateVersionRead:
+    """``LLMProvider.gate_version``: one ``version_cmd`` spawn per binary per
+    process, parsed by the adapter, ``""`` on any failure."""
+
+    def _fake_codex(self, tmp_path, *, body, name="codex"):
+        from tests.mock_launchers import write_launcher
+
+        counter = tmp_path / "calls"
+        bin_dir = tmp_path / "bin"
+        write_launcher(
+            bin_dir, name,
+            "#!/usr/bin/env python3\n"
+            "import sys\n"
+            f"open({str(counter)!r}, 'a').write('x')\n"
+            f"{body}\n",
+        )
+        return bin_dir, counter
+
+    def test_the_version_is_read_once_and_parsed(self, tmp_path, monkeypatch):
+        bin_dir, counter = self._fake_codex(
+            tmp_path, body="print('codex-cli 0.146.0')")
+        monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
+        provider = CodexProvider()
+        assert provider.gate_version() == "0.146.0"
+        assert provider.gate_version() == "0.146.0"
+        assert counter.read_text() == "x", "memoised per process"
+        assert "agents.enabled=false" in provider.build_agent_command(
+            "p", "gpt-6.1-sol", PROFILE_AGENT_WRITE)
+
+    @pytest.mark.parametrize("body", [
+        "sys.exit(2)",
+        "print('')",
+        "print('not a version')",
+    ])
+    def test_a_failed_read_is_unread(self, tmp_path, monkeypatch, body):
+        bin_dir, _counter = self._fake_codex(tmp_path, body=body)
+        monkeypatch.setenv("PATH", str(bin_dir) + os.pathsep + os.environ.get("PATH", ""))
+        provider = CodexProvider()
+        assert provider.gate_version() == ""
+        assert "agents.enabled=false" not in provider.build_agent_command(
+            "p", "gpt-6.1-sol", PROFILE_AGENT_WRITE)
+
+    def test_no_binary_is_unread_and_spawns_nothing(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PATH", str(tmp_path / "empty"))
+        assert CodexProvider().gate_version() == ""

@@ -257,11 +257,14 @@ class TestTimeoutKeywordIsInertWhenUnset:
         with no binary to read, `missing_flags` reports nothing missing and the
         argv is the one the adapter would render. pi's optional `--tools` gate
         (T3.1) reads the same lookup, so its row is the argv WITHOUT the flag;
-        the argv with it is pinned in `TestPiToolAllowlist`. Nothing else in the
-        table consults the gate from `build_command` (claude's two optional-flag
-        reads are on the `schema`/fallback paths this sweep does not take), and
-        both gates are graded on their own, with the help text stubbed rather
-        than the lookup.
+        the argv with it is pinned in `TestPiToolAllowlist`. claude's read-slot
+        flag (`--strict-mcp-config`) reads the same lookup, so its row is the
+        argv without it, which `TestClaudeCodeReadSlots` pins;
+        its other two optional-flag reads are on the `schema`/fallback paths this
+        sweep does not take. codex's `agents.enabled` gate is read only for a
+        writer (`agent-write`), which this sweep does not render. Every gate is
+        graded on its own, with the help text or the version stubbed rather than
+        the lookup.
         """
         with patch.object(LLMProvider, "gate_binary", lambda self, **_kw: None):
             yield

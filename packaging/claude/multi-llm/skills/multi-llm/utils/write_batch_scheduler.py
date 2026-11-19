@@ -100,6 +100,7 @@ from . import write_resume as _write_resume
 from . import write_grant as _write_grant
 from . import write_snapshots as _write_snapshots
 from . import write_dry_run as _write_dry_run
+from . import batch_suppressions as _batch_suppressions
 from .held_folder import write_in_plan_dir
 from .cli_common import EXIT_NEEDS_HUMAN, EXIT_OK
 from .batch_ledger import (
@@ -436,6 +437,7 @@ _MOVED: Dict[str, Tuple[str, ...]] = {
         "CHECK_RESULT_CONTRACT",
         "CODE_WRITE_KINDS",
         "DISPATCHED_PROMPTS_SUBDIR",
+        "IMPLEMENT_NO_WEAKENING",
         "IMPLEMENT_WHICH_CHECKS",
         "OWN_RUN_CONTEXT_PHASES",
         "RESULT_IDS_HEADING",
@@ -2285,8 +2287,65 @@ class WriteBatchScheduler:
             self._sweep.abandon(task_id)
             self._grant.target_identity_before.pop(task_id, None)
             self._commit.watch_before.pop(task_id, None)
+        self._scan_suppressions(outcome, snapshot.directory)
         self._record_batch_effects(task, outcome, batch_index, result)
         return outcome
+
+    def _scan_suppressions(self, outcome: TaskOutcome, snapshot_dir: Optional[str]) -> None:
+        """Put on *outcome* the suppressions a code batch's edits added, and log them.
+
+        Report only: the scan reads the batch's pre-batch snapshot and the
+        files as the batch left them, before a later batch can change them,
+        and never decides the batch's outcome; a file it fails on is listed
+        as not scanned, and a scan that raises as a whole logs one line and
+        lists the batch's files as not scanned
+        (docs/development/write-scheduler.md#suppressions-a-batch-added).
+        """
+        if (self.kind not in _batch_prompt.CODE_WRITE_KINDS
+                or outcome.verification_only or not outcome.bytes_moved):
+            return
+        try:
+            found, unscanned = _batch_suppressions.executor_scan(
+                snapshot_dir, outcome.files_touched, outcome.unrestorable)
+        except Exception as exc:  # noqa: BLE001 - a report must not fail a batch
+            self.log(f"[write-subagents] {outcome.task_id}: suppression scan "
+                     f"did not run ({type(exc).__name__}: {exc})")
+            outcome.suppressions_not_scanned = _batch_suppressions.scan_failed(
+                [*outcome.files_touched, *outcome.unrestorable], exc)
+            return
+        outcome.suppressions = found
+        outcome.suppressions_not_scanned = unscanned
+        for line in _batch_suppressions.marker_lines(outcome.task_id, found):
+            self.log(line)
+
+    def _carry_suppressions(self, outcome: TaskOutcome, result: SchedulerResult) -> None:
+        """Put on a kept batch's *outcome* what the scan found when it stopped.
+
+        Its row replaces the stopped run's (:meth:`SchedulerResult.report_rows`),
+        so that row's hits are carried (``batch_suppressions.kept_scan``), never
+        scanned again: a scan now would read the files as the resume finds
+        them, and list edits made since the stop as the batch's. The stopped
+        row is the earlier run's row for the same items (:func:`_same_batch_row`),
+        since an apply kind's ids are positional.
+        """
+        if self.kind not in _batch_prompt.CODE_WRITE_KINDS:
+            return
+        mine = {"task_id": outcome.task_id, "expected_ids": list(outcome.expected_ids)}
+        try:
+            stopped = next(
+                (row for row in reversed(result.earlier_rows) if _same_batch_row(row, mine)),
+                None,
+            )
+            found, unscanned = _batch_suppressions.kept_scan(stopped, outcome.files_touched)
+            lines = _batch_suppressions.marker_lines(outcome.task_id, found)
+        except Exception as exc:  # noqa: BLE001 - a report must not fail a batch
+            self.log(f"[write-subagents] {outcome.task_id}: the suppressions found when it "
+                     f"stopped could not be read ({type(exc).__name__}: {exc})")
+            found, unscanned = _batch_suppressions.kept_scan(None, outcome.files_touched)
+            lines = []
+        outcome.suppressions, outcome.suppressions_not_scanned = found, unscanned
+        for line in lines:
+            self.log(line)
 
     def _keep_at_request(
         self, task: Dict[str, Any], batch_index: int, result: SchedulerResult,
@@ -2317,6 +2376,9 @@ class WriteBatchScheduler:
             duration_seconds=0.0, reason=outcome.reason, expected_ids=expected,
         )
         self._stamp_verdict(outcome)
+        # Its row replaces the stopped run's, so what the scan found when it
+        # stopped is carried onto it; it is not scanned again.
+        self._carry_suppressions(outcome, result)
         self._record_batch_effects(
             task, outcome, batch_index, result, dispatched=False, kept=True,
         )

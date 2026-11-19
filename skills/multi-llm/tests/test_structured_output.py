@@ -316,9 +316,10 @@ class TestClaudeJsonSchemaGate:
         ):
             cmd = provider.build_command(self.PROMPT, "sonnet", schema=schema)
             provider.build_command(self.PROMPT, "opus", schema=schema)
+            unschemed = provider.build_command(self.PROMPT, "sonnet")
 
         assert JSON_SCHEMA_FLAG not in cmd
-        assert cmd == provider.build_command(self.PROMPT, "sonnet")
+        assert cmd == unschemed
         # One WARN per declined capability per process, not one per dispatch.
         warnings = [
             line

@@ -18,6 +18,7 @@ from utils.consolidation import (
     normalize_reference,
     pre_group_by_section,
     prepare_consolidation_tasks,
+    preview_consolidation_tasks,
     merge_consolidation_results,
     generate_consolidated_json,
     generate_consolidated_report,
@@ -401,6 +402,29 @@ class TestPrepareConsolidationTasks:
         data = json.loads(tasks_path.read_text(encoding="utf-8"))
         assert "batches" in data
         assert "singleton_sections" in data
+
+    def test_the_preview_is_the_written_document_and_writes_nothing(self, tmp_path):
+        """``--consolidate --dry-run-subagents`` builds the batches a real pass
+        writes and writes none of them: no task file, no prompt sidecars, no
+        host index, not even the phase dir
+        (docs/development/workflows.md#a-dry-run-previews-one-step)."""
+        groups = [
+            _make_group(theme=f"A{i}", reference="Task 1") for i in range(3)
+        ] + [_make_group(theme="B", reference="Task 2")]
+        section_groups = {"task 1": [0, 1, 2], "task 2": [3]}
+        previewed_dir = tmp_path / "previewed" / "review-plan"
+        preview = preview_consolidation_tasks(
+            groups, section_groups, str(previewed_dir), "plan.md"
+        )
+        assert not previewed_dir.exists()
+        assert not (tmp_path / "previewed").exists()
+
+        written = prepare_consolidation_tasks(
+            groups, section_groups, str(previewed_dir), "plan.md"
+        )
+        assert (previewed_dir / "consolidation_tasks.json").exists()
+        assert list(previewed_dir.glob("consolidation_batch_*.prompt.txt"))
+        assert preview == written
 
 
 # ===========================================================================

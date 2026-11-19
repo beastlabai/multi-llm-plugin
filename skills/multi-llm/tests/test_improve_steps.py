@@ -989,7 +989,9 @@ def _without_host(argv: List[str]) -> List[str]:
 
 
 class TestParityWithTheExecutor:
-    @pytest.mark.parametrize("cross", [(), CROSS], ids=["plain", "cross-cutting"])
+    @pytest.mark.parametrize("cross", [
+        (), tuple(flag for flag in CROSS if flag != "--dry-run-subagents"), CROSS,
+    ], ids=["plain", "cross-cutting", "cross-cutting-dry-run"])
     @pytest.mark.parametrize("mode", MODES)
     @pytest.mark.parametrize("state", sorted(MATRIX))
     def test_the_planners_argv_is_what_the_driver_forwards(
@@ -1008,9 +1010,15 @@ class TestParityWithTheExecutor:
             step.phase: ("skip" if workflow.skip_reason(step) else "run")
             for step in workflow.steps() if step.phase
         }
-        planned = {mode_table.phase_for(s["step"]): s["decision"]
+        # A dry run passes over every step after the first one it runs
+        # (`iw._dry_run_plan`), a step the hook, which decides a real run,
+        # still runs: read back, the decisions are the hook's.
+        planned = {mode_table.phase_for(s["step"]): (
+            "run" if (s["reason"] or "").startswith("dry run:") else s["decision"])
                    for s in payload["steps"] if s["step"] != iw.CONSOLIDATE}
         assert planned == hook
+        if "--dry-run-subagents" in argv:
+            assert [s["decision"] for s in payload["steps"]].count("run") <= 1, payload
         assert payload["rerun_argv"] == workflow.resume_flags()
 
         calls = stub()
@@ -1028,8 +1036,11 @@ class TestParityWithTheExecutor:
             for token in step["argv"]:
                 assert token not in NEVER_FORWARDED and not token.startswith(
                     "--internal-"), (step, token)
-            if cross:
+            if "--dry-run-subagents" in cross:
                 assert step["argv"][-2:] == ["--exec-subagents", "--dry-run-subagents"]
+            elif cross:
+                assert step["argv"][-1] == "--exec-subagents"
+                assert "--dry-run-subagents" not in step["argv"]
         for token in payload["rerun_argv"]:
             assert token not in NEVER_FORWARDED and token not in (
                 "--yes", "--exec-subagents", "--dry-run-subagents")
@@ -1377,3 +1388,31 @@ class TestTheCodexFileShimLeg:
         out = leg.lookup(PLAN, host="codex")
         assert ("[NEXT_COMMAND] "
                 + _spelled("codex", f"--generate-tasks {leg.plan}")) in out.splitlines()
+
+
+# ---------------------------------------------------------------------------
+# --dry-run-subagents: one step planned, and no cascade hand-off
+# ---------------------------------------------------------------------------
+
+class TestDryRunPlan:
+    """The native leg plans what the executor leg's preview runs: the first
+    ``run`` step alone (docs/development/workflows.md#a-dry-run-previews-one-step)."""
+
+    @pytest.mark.parametrize("mode", MODES)
+    def test_every_step_after_the_first_run_reads_skip(self, repo, capsys, mode):
+        plan = _plan(repo)
+        code, payload, err = _json(capsys, plan, mode, "--dry-run-subagents")
+        assert code == 0, err
+        decisions = [(s["index"], s["decision"], s["reason"]) for s in payload["steps"]]
+        assert decisions[0][:2] == ("1", "run")
+        assert all(decision == "skip" and reason == "dry run: previews step 1 only"
+                   for _index, decision, reason in decisions[1:]), decisions
+        assert payload["steps"][0]["argv"][-1] == "--dry-run-subagents"
+
+    def test_a_cascade_is_never_handed_off(self, repo, capsys):
+        plan = _plan(repo)
+        code, out, err = _run(capsys, plan, PLAN, "--cascade", "--dry-run-subagents")
+        assert code == 0, err
+        assert improve_steps.CASCADE_NEXT_MARKER not in out
+        assert iw.dry_run_cascade_note() in out.splitlines()
+        assert f"{improve_steps.STEP_MARKER} 1 review-plan run" in out

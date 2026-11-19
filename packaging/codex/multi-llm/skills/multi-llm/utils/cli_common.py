@@ -550,7 +550,9 @@ def build_parent_parser(
     )
     # D3l: the recommended first unattended run on a new host, and what CI uses to
     # assert a shim's write path is sane without touching a real repo. Deliberately
-    # NOT implied by anything: it changes a run into a preflight.
+    # NOT implied by anything: it changes a run into a preflight, and a review's
+    # fan-out into its reviewer plan, since a reviewer is a model turn too
+    # (docs/development/review-results.md#a-dry-runs-reviewer-plan).
     group.add_argument(
         "--dry-run-subagents",
         action="store_true",
@@ -558,7 +560,11 @@ def build_parent_parser(
              "runner, render the exact argv, check prompt transport and size, "
              "apply the invocation profile, the write-concurrency admission check "
              "and driver.write_paths — then write "
-             "{phase}/subagent_dry_run.json and exit 0 having changed nothing.",
+             "{phase}/subagent_dry_run.json and exit 0 having changed nothing. "
+             "A review calls no model either: it stops before its reviewers "
+             "and prints each slot as it would be dispatched (provider, model, "
+             "effort, sandbox, argv); an improve composite and full preview "
+             "only the first step that would run.",
     )
     # D6a: consent to run unattended is not consent to stale input, so this is a
     # separate flag and `--yes` never implies it. Defined here rather than per

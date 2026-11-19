@@ -178,6 +178,34 @@ class TestConsolidationBatchesCarryTheirPromptFile:
             with open(path, "r", encoding="utf-8", newline="") as handle:
                 assert handle.read() == batch["prompt"]
 
+    @pytest.mark.parametrize("sections", [
+        ("## Task 1: Auth", "## Task 2: Billing"), ()], ids=["two-batches", "no-batch"])
+    def test_a_dry_run_writes_no_task_file_and_no_prompt_file(
+        self, tmp_path, capsys, sections
+    ):
+        """``--consolidate --dry-run-subagents`` renders the batches it would
+        hand out and writes nothing but its dry-run record: no task file, no
+        prompt file, no host index, and no marker naming a file that is not
+        there (docs/development/workflows.md#a-dry-run-previews-one-step)."""
+        import argparse
+
+        plan, phase_dir = _reviewed(tmp_path, sections=sections)
+        before = sorted(path.name for path in phase_dir.iterdir())
+        rpo.consolidate_mode(
+            str(phase_dir), str(plan), argparse.Namespace(dry_run_subagents=True))
+        new = sorted(set(path.name for path in phase_dir.iterdir()) - set(before))
+        out = capsys.readouterr().out
+        assert "[CONSOLIDATION_" not in out
+        if not sections:
+            assert new == [] and "a real pass dispatches nothing" in out
+            return
+        assert new == ["subagent_dry_run.json"]
+        dry = json.loads((phase_dir / "subagent_dry_run.json").read_text(encoding="utf-8"))
+        assert dry["kind"] == "consolidation"
+        assert [task["task_id"] for task in dry["tasks"]] == [
+            "consolidation-batch-0", "consolidation-batch-1"]
+        assert "every consolidation command rendered, no child started" in out
+
     def test_a_file_that_cannot_be_written_leaves_every_batch_on_its_prompt(
         self, tmp_path, monkeypatch, capsys
     ):

@@ -273,12 +273,16 @@ clis:
     help_sha256: b10f5c36adfe3285f6c5a0d18284f466e6c4486499de56ef62745e13312a7fbc
     help_bytes: 22311
     profiles: [generate, agent-readonly, agent-write]
+    # `--strict-mcp-config` by hand: the read profiles' MCP-off flag
+    # (docs/development/providers.md#claude-code-read-slots), behind the help
+    # gate; documented by 2.1.328's help.
     options:
       - "--allowed-tools"
       - "--disallowed-tools"
       - "--model"
       - "--output-format"
       - "--permission-mode"
+      - "--strict-mcp-config"
       - "-p"
 
   - cli: cline

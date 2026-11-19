@@ -1,5 +1,5 @@
 {
-  "_comment": "Plan citations (section signs, fix-round labels, plans/*.md paths) per file. A count may only go down; see skills/multi-llm/AGENTS.md#comments-and-docstrings. Regenerate with: python skills/multi-llm/tests/test_comment_citations.py --write",
+  "_comment": "Plan citations (section signs, fix-round labels, plans/*.md paths) per file. A count may only go down; see skills/multi-llm/AGENTS.md#comments-and-docstrings. Lower it with: python skills/multi-llm/tests/test_comment_citations.py --write",
   "counts": {
     "packaging/codex/build.py": 3,
     "packaging/codex/mcp_server.py": 34,
@@ -108,7 +108,7 @@
     "skills/multi-llm/utils/subagent_tasks.py": 9,
     "skills/multi-llm/utils/suggestion_batcher.py": 1,
     "skills/multi-llm/utils/task_batch.py": 9,
-    "skills/multi-llm/utils/task_file_runner.py": 4,
+    "skills/multi-llm/utils/task_file_runner.py": 3,
     "skills/multi-llm/utils/task_outcome.py": 19,
     "skills/multi-llm/utils/task_result.py": 5,
     "skills/multi-llm/utils/text_clip.py": 8,

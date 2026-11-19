@@ -340,3 +340,160 @@ class TestTheReviewCodeLaneOnTheUsageCap:
         assert "nothing to salvage, model recorded as failed" in out
         phase_dir = tmp_path / "plan" / "code-review"
         assert not list(phase_dir.glob("salvage_*.json"))
+
+
+# ---------------------------------------------------------------------------
+# claude-code: a 5-hour or weekly limit is the usage cap, and says when it resets
+# ---------------------------------------------------------------------------
+#
+# The sentences, the `api_error` code and the epoch are recorded strings
+# (blocked review slots and host stream-json transcripts); the envelopes around
+# them are built here, so they stay out of tests/fixtures/claude-code/, whose
+# manifest admits only raw captures.
+
+FIVE_HOUR_SENTENCE = "You've hit your 5-hour limit · resets 3:50am (Europe/Zurich)"
+WEEKLY_SENTENCE = "You've hit your weekly limit · resets 6am (Europe/Zurich)"
+CREDITS_SENTENCE = "You're out of usage credits. Switch to another model, or try again later."
+
+#: `1794942000` is the recorded `resetsAt` of a seven-day window, which a
+#: recorded t3code message names as "resets Nov 17, 8pm (Europe/Zurich)".
+RESETS_AT_EPOCH = 1794942000
+RESETS_AT_UTC = "2026-11-17T19:00:00Z"
+
+
+def _blocked_envelope(sentence, **extra):
+    envelope = {
+        "type": "result", "subtype": "success", "is_error": True,
+        "terminal_reason": "api_error", "api_error_status": 429,
+        "num_turns": 1, "permission_denials": [],
+        "usage": {"input_tokens": 0, "output_tokens": 0},
+        "result": sentence, "session_id": "00000000-0000-0000-0000-000000000000",
+    }
+    envelope.update(extra)
+    return json.dumps(envelope)
+
+
+FIVE_HOUR_ENVELOPE = _blocked_envelope(
+    FIVE_HOUR_SENTENCE, api_error_origin="first_party", api_error="usage_limit_reached",
+)
+WEEKLY_ENVELOPE = _blocked_envelope(WEEKLY_SENTENCE)
+
+
+def _rate_limit_event(status, resets_at=RESETS_AT_EPOCH):
+    return {
+        "type": "rate_limit_event",
+        "rate_limit_info": {
+            "status": status, "resetsAt": resets_at, "rateLimitType": "seven_day",
+            "overageStatus": "rejected", "isUsingOverage": False,
+        },
+        "uuid": "<r>", "session_id": "<r>",
+    }
+
+
+class TestClaudeCodeUsageLimitReset:
+    @pytest.fixture
+    def provider(self):
+        return get_provider("claude-code")
+
+    @pytest.mark.parametrize("stdout,sentence,clause", [
+        (FIVE_HOUR_ENVELOPE, FIVE_HOUR_SENTENCE, "resets 3:50am (Europe/Zurich)"),
+        (WEEKLY_ENVELOPE, WEEKLY_SENTENCE, "resets 6am (Europe/Zurich)"),
+    ])
+    def test_a_blocked_slot_is_the_usage_cap_and_keeps_its_clause(
+        self, provider, stdout, sentence, clause
+    ):
+        line = provider.describe_failure(stdout, "")
+        assert line == f"{USAGE_LIMIT_TAG} HTTP 429: {sentence}"
+        assert clause in line
+        assert provider.usage_limit_reset(stdout, "") == {"clause": clause}
+        # The category does not move: the status rung reads the same 429.
+        assert provider.classify_failure(stdout, "", 1) == STATUS_RATE_LIMITED
+
+    def test_the_prose_clause_never_becomes_a_timestamp(self, provider):
+        assert "at" not in provider.usage_limit_reset(WEEKLY_ENVELOPE, "")
+
+    def test_the_envelope_code_alone_names_the_cap(self, provider):
+        stdout = _blocked_envelope("Limit reached.", api_error="usage_limit_reached")
+        assert provider.describe_failure(stdout, "").startswith(USAGE_LIMIT_TAG)
+        assert provider.usage_limit_reset(stdout, "") is None, "no clause, nothing to say"
+
+    def test_out_of_usage_credits_is_the_cap(self, provider):
+        line = provider.describe_failure(_blocked_envelope(CREDITS_SENTENCE), "")
+        assert line == f"{USAGE_LIMIT_TAG} HTTP 429: {CREDITS_SENTENCE}"
+
+    def test_a_cap_without_a_reset_clause_reports_none(self, provider):
+        assert provider.usage_limit_reset(USAGE_CAP_ENVELOPE, "") is None
+
+    def test_a_transient_429_is_neither_tagged_nor_given_a_reset(self, provider):
+        stdout = _capture("rate-limit")
+        assert USAGE_LIMIT_TAG not in provider.describe_failure(stdout, "")
+        assert provider.usage_limit_reset(stdout, "") is None
+
+    def test_a_reset_clause_outside_a_usage_cap_is_not_read(self, provider):
+        stdout = _blocked_envelope("API Error: 500 the counter resets 6am (UTC)",
+                                   api_error_status=500)
+        assert provider.usage_limit_reset(stdout, "") is None
+
+    # -- the exact time, from a rejected rate_limit_event -------------------
+
+    def test_a_rejected_event_in_a_stream_gives_the_exact_utc_time(self, provider):
+        stream = "\n".join([
+            json.dumps(_rate_limit_event("allowed_warning", 1794024000)),
+            json.dumps(_rate_limit_event("rejected")),
+            WEEKLY_ENVELOPE,
+        ])
+        assert provider.usage_limit_reset(stream, "") == {"at": RESETS_AT_UTC}
+        assert provider.describe_failure(stream, "") == (
+            f"{USAGE_LIMIT_TAG} usage limit reached; resets at {RESETS_AT_UTC}"
+        )
+
+    def test_a_verbose_json_array_is_read_too(self, provider):
+        stdout = json.dumps([_rate_limit_event("rejected"), json.loads(WEEKLY_ENVELOPE)])
+        assert provider.usage_limit_reset(stdout, "") == {"at": RESETS_AT_UTC}
+
+    @pytest.mark.parametrize("event", [
+        _rate_limit_event("allowed"),
+        _rate_limit_event("allowed_warning"),
+        _rate_limit_event("rejected", resets_at=True),
+        _rate_limit_event("rejected", resets_at="1794942000"),
+        {"type": "rate_limit_event", "rate_limit_info": "rejected"},
+    ])
+    def test_only_a_rejected_event_with_a_numeric_reset_counts(self, provider, event):
+        assert provider.usage_limit_reset(json.dumps(event), "") is None
+
+    def test_an_event_quoted_in_the_answer_is_not_an_event(self, provider):
+        quoted = json.dumps({"type": "result", "is_error": False, "terminal_reason":
+                             "completed", "result": json.dumps(_rate_limit_event("rejected"))})
+        assert provider.usage_limit_reset(quoted, "") is None
+
+    def test_an_adapter_without_the_hook_says_nothing(self):
+        assert get_provider("codex").usage_limit_reset(WEEKLY_ENVELOPE, "") is None
+
+
+class TestTheFanoutCarriesTheReset:
+    _invoke = TestTheFanoutCarriesWhatAFailedSlotSpent._invoke
+
+    def test_the_weekly_limit_reaches_details_and_the_line(self):
+        result = self._invoke(WEEKLY_ENVELOPE)
+        assert result["error"] == (
+            f"claude-code exited with code 1: {USAGE_LIMIT_TAG} HTTP 429: "
+            f"{WEEKLY_SENTENCE} [rate_limited]"
+        )
+        assert result["details"]["usage_limit_reset"] == {
+            "clause": "resets 6am (Europe/Zurich)"
+        }
+        assert result["details"]["failure_category"] == STATUS_RATE_LIMITED
+
+    def test_no_reset_leaves_the_key_absent(self):
+        result = self._invoke(USAGE_CAP_ENVELOPE)
+        assert "usage_limit_reset" not in result["details"]
+
+    def test_a_raising_hook_leaves_the_key_absent(self, monkeypatch):
+        provider_cls = type(get_provider("claude-code"))
+
+        def boom(self, stdout, stderr):
+            raise RuntimeError("hook failed")
+
+        monkeypatch.setattr(provider_cls, "usage_limit_reset", boom)
+        result = self._invoke(WEEKLY_ENVELOPE)
+        assert "usage_limit_reset" not in result["details"]

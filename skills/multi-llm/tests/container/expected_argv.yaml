@@ -124,6 +124,10 @@ entries:
     prompt: argv
     min_records: 1
 
+  # The read profiles (this row, the schema row below and the generate row) start
+  # without the user's MCP servers: `--strict-mcp-config`, behind the help gate
+  # (docs/development/providers.md#claude-code-read-slots). agent-write keeps
+  # them. No row passes `--settings`: the user's hooks stay on in every slot.
   - provider: claude-code
     profile: agent-readonly
     transport: stdin
@@ -134,6 +138,7 @@ entries:
       "--disallowed-tools": "Edit,MultiEdit,Write,NotebookEdit,Bash,Task,WebFetch,WebSearch"
       "--model": "<model>"
       "--output-format": "json"
+      "--strict-mcp-config": null
       "-p": null
     tail: []
     prompt: stdin
@@ -158,6 +163,7 @@ entries:
       "--json-schema": "<prompt:sha256:b09a37ae:len=2717>"
       "--model": "<model>"
       "--output-format": "json"
+      "--strict-mcp-config": null
       "-p": null
     tail: []
     prompt: stdin
@@ -197,6 +203,7 @@ entries:
       "--model": "<model>"
       "--output-format": "json"
       "--permission-mode": "acceptEdits"
+      "--strict-mcp-config": null
       "-p": null
     tail: ["<prompt>"]
     prompt: argv
@@ -204,7 +211,8 @@ entries:
 
   # The §5.4.1 per-flag capability gate: `base.read_help_tokens` (M14 absorbed
   # the adapter-local copies into it) spawns `claude --help` once per process,
-  # memoised on the resolved binary, and only when a schema is attached.
+  # memoised on the resolved binary, whenever a read profile renders (its
+  # `--strict-mcp-config`) or a schema is attached.
   - provider: claude-code
     profile: probe
     transport: stdin
@@ -250,6 +258,12 @@ entries:
   # shapes match nothing by construction, not because we stopped emitting them;
   # a zero floor keeps them as the explanation a permissive-userns run's records
   # must still match, instead of deleting coverage the table cannot re-observe.
+  #
+  # Only the agent-write rows carry the subagent-off keys after the plugins-off
+  # one (docs/development/providers.md#codex-subagent-tools): the read-only
+  # profiles keep codex's subagent tools. `agents.enabled=false` is gated on the
+  # installed version (accepted from 0.146.0), and the image's pin in
+  # cli-versions.lock is above that, so the in-image adapter renders it.
   - provider: codex
     profile: agent-readonly
     transport: stdin
@@ -267,7 +281,7 @@ entries:
     min_records: 0
 
   - provider: codex
-    profile: agent-write|generate
+    profile: generate
     transport: argv
     binary: codex
     subcommands: ["exec"]
@@ -283,7 +297,27 @@ entries:
     min_records: 0
 
   - provider: codex
-    profile: agent-write|generate
+    profile: agent-write
+    transport: argv
+    binary: codex
+    subcommands: ["exec"]
+    options:
+      "--ephemeral": null
+      "--json": null
+      "--model": "<model>"
+      "--sandbox": "workspace-write"
+      "--skip-git-repo-check": null
+      "-c":
+        - "features.plugins=false"
+        - "features.multi_agent=false"
+        - "features.multi_agent_v2=false"
+        - "agents.enabled=false"
+    tail: ["<prompt>"]
+    prompt: argv
+    min_records: 0
+
+  - provider: codex
+    profile: generate
     transport: stdin
     binary: codex
     subcommands: ["exec"]
@@ -294,6 +328,26 @@ entries:
       "--sandbox": "workspace-write"
       "--skip-git-repo-check": null
       "-c": "features.plugins=false"
+    tail: []
+    prompt: stdin
+    min_records: 0
+
+  - provider: codex
+    profile: agent-write
+    transport: stdin
+    binary: codex
+    subcommands: ["exec"]
+    options:
+      "--ephemeral": null
+      "--json": null
+      "--model": "<model>"
+      "--sandbox": "workspace-write"
+      "--skip-git-repo-check": null
+      "-c":
+        - "features.plugins=false"
+        - "features.multi_agent=false"
+        - "features.multi_agent_v2=false"
+        - "agents.enabled=false"
     tail: []
     prompt: stdin
     min_records: 0

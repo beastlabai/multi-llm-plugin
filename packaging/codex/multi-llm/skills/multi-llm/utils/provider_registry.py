@@ -1074,6 +1074,12 @@ DRIVER_POSITIVE_INT_KEYS = (
     "verify_timeout_s",
 )
 DRIVER_OPTIONAL_INT_KEYS = ("subagent_timeout_s",)
+#: Seconds an executor-leg write subagent may print nothing, with no tool call
+#: in flight, before it is stopped and what it printed is read (the report
+#: re-ask follows an unreadable one). ``0`` turns the clock off; a blank value
+#: keeps the base default, as for every key here
+#: (docs/development/delegation.md#an-idle-writer).
+DRIVER_NONNEGATIVE_INT_KEYS = ("subagent_idle_timeout_s",)
 #: F4: the repository's OWN post-write check, run once by the write scheduler
 #: after a code-editing phase applied at least one batch. Optional because no
 #: command is right for every repo — and because "unset" has to be distinguishable
@@ -1097,6 +1103,7 @@ DRIVER_KEYS = (
     DRIVER_RUNNER_KEYS
     + DRIVER_POSITIVE_INT_KEYS
     + DRIVER_OPTIONAL_INT_KEYS
+    + DRIVER_NONNEGATIVE_INT_KEYS
     + DRIVER_OPTIONAL_STR_KEYS
     + tuple(DRIVER_CHOICE_KEYS)
     + DRIVER_PATH_POLICY_KEYS
@@ -1132,6 +1139,7 @@ DRIVER_FALLBACKS: Dict[str, object] = {
     "max_concurrent_subagents": 4,
     "max_concurrent_write_subagents": 1,
     "subagent_timeout_s": None,
+    "subagent_idle_timeout_s": 900,
     "subagent_retries": 1,
     "verify_command": None,
     "verify_timeout_s": 600,
@@ -1240,6 +1248,18 @@ def validate_driver_block(driver: object) -> None:
                 f"multi-llm config error: driver.{key} is {value!r} — expected a "
                 f"positive integer or null (null = the runner provider's "
                 f"default_timeout)."
+            )
+
+    for key in DRIVER_NONNEGATIVE_INT_KEYS:
+        if key not in driver:
+            continue
+        value = driver[key]
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ConfigError(
+                f"multi-llm config error: driver.{key} is {value!r} — expected "
+                f"a whole number of seconds, or 0 to turn the idle timeout off."
             )
 
     for key in DRIVER_OPTIONAL_STR_KEYS:
@@ -2322,6 +2342,16 @@ def get_subagent_timeout(
     # Base ships `subagent_timeout_s: null`, so THIS is the default-on path:
     # dropping the anchor here would leak the whole Lane B half to CWD (§9.3.c).
     return get_provider_timeout(provider_name, anchor=anchor)
+
+
+def get_subagent_idle_timeout(anchor: Optional[Union[str, Path]] = None) -> Optional[int]:
+    """``driver.subagent_idle_timeout_s`` in seconds, or ``None`` when it is
+    ``0`` (the clock is off). Read for executor-leg write dispatches only
+    (docs/development/delegation.md#an-idle-writer)."""
+    configured = get_driver_config(anchor=anchor)["subagent_idle_timeout_s"]
+    if isinstance(configured, int) and not isinstance(configured, bool) and configured > 0:
+        return configured
+    return None
 
 
 def get_provider_max_concurrent(

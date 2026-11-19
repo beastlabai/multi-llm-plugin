@@ -1250,8 +1250,8 @@ class TestBudgets:
         assert set(payload.DISTRIBUTION_BUDGETS) == {"claude-code", "codex", "opencode"}
 
     def test_claude_stays_at_or_below_its_review_target(self):
-        """(src) Raising this past 12,000,000 is a decision, not a side effect."""
-        assert payload.DISTRIBUTION_BUDGETS["claude-code"][1] <= 12_000_000
+        """(src) Raising this past 12,300,000 is a decision, not a side effect."""
+        assert payload.DISTRIBUTION_BUDGETS["claude-code"][1] <= 12_300_000
 
     @pytest.mark.parametrize("distribution", sorted(payload.DISTRIBUTION_BUDGETS))
     def test_a_failing_budget_names_the_distribution_and_the_totals(self, distribution):

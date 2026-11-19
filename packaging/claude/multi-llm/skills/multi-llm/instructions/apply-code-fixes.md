@@ -284,6 +284,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
    When the reply's `declined` lists fixes (each `{"id", "reason"}`), add `--declined "{id}={reason}"` for each, with `--status completed`: each prints a `[BATCH_DECLINED]` line — list that fix in the summary under `## Declined by their batch (not applied)`, with its id and reason (never under `## Applied Fixes`, not even marked "Not applied"), and name it in your report; it is never counted as applied. `--skipped {id}` records a fix the user chose to skip (above) the same way, as `[BATCH_SKIPPED]`, listed under `## Skipped at your request (not applied)`.
    When the batch's reply carries a `check` object — naming in `ran` the checks its subagent ran on its own edits (a test, a build, a syntax check) — record it with the `--own-check` flags the rules in `references/own-check.md` give for that object, the reading the `--exec-subagents` leg applies to the same reply, with `--status completed`: `--own-check passed`, `--own-check findings` and one `--finding "{finding}"` per entry they list, or `--own-check none` (it ran no check, which is not a pass); never `--check`, which records only an implement check task's verdict (`batch-done` refuses it here). A recorded `--own-check findings` prints a `[BATCH_CHECK_FAILED]` line: the fixes stay applied and the loop goes on, but the phase is not a clean success — list the batch in the summary's `## Check Findings` (step 8) and say in your report that its check fails.
    When that `check` also carries `listed` (the repository's known checks the prompt asked it to run, each mapped to `passed`, `failed` or `not run`), add `--listed-check "{command}={outcome}"` for each entry, the command exactly as the reply wrote it: the next batch's prompt and the tests line in step 7 read it. A command it lists as `failed` is a failing check like a `--finding`.
+   A `completed` record also scans what the batch's edits added, against the files as `util write-prompt` found them when it bound the batch: it prints one `[SUPPRESSION_ADDED] {task.task_id}: {file}:{line} {marker} — reason: {its reason} (or `no reason given`): {the line}` line per suppression or skip marker the batch added (`# noqa`, `# type: ignore`, `# pragma: no cover`, `eslint-disable`, `@ts-ignore`, `@ts-expect-error`, `//nolint`, a skipped or xfailed test) and per lint, type-checker or test configuration entry it changed, then one sentence saying where they go. They change nothing about the batch's record and never stop the loop: list each one in the summary's `## Check these: suppressions added` (step 8), with the batch that added it, and name them in your report, so the user reads each one.
 
 7. **Append to prior changes (only after verification)** — This step runs **only** after step 4 has confirmed success or clean failure. It must **never** run for partially-applied batches. Pass the summary via stdin:
    ```bash
@@ -460,6 +461,17 @@ step 6. Its batch heading above ends "applied, its check fails".)
 
 ### apply-fix-batch-1: a check it ran fails
 - node tests/race.test.mjs: AssertionError: …
+
+## Check these: suppressions added
+
+(Only when `util batch-done` printed a `[SUPPRESSION_ADDED]` line in step 6, or said
+a changed file was not scanned. One bullet per line, in batch order: its file and
+line, the marker, its reason or **no reason given**, the batch, and the line itself.
+None of them failed the run; the user reads each one.)
+
+The batches added these suppression or skip markers, or changed this lint, type-checker or test configuration. None of them failed the run. Read each one: keep it only where the code is right as written and the reason holds. A line number is where the line was when its batch finished.
+
+- `src/depot/pickups.py:36` `# noqa: PLR0913` — **no reason given** — apply-fix-batch-4 — `def schedule_pickup(  # noqa: PLR0913`
 
 ## Decided by the judge agent (N)
 
