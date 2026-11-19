@@ -203,17 +203,21 @@ class TestStepArgv:
         assert _argv_of(calls, review) == ["--yes", *review_gets]
         assert _argv_of(calls, apply) == APPLY_FLAGS
 
+    @pytest.mark.parametrize("tail", [TAIL, TAIL[:-1]], ids=["dry-run", "real"])
     @pytest.mark.parametrize("mode", MODES)
     def test_the_cross_cutting_tail_is_the_literal_list(
-        self, repo, stub, capsys, mode
+        self, repo, stub, capsys, mode, tail
     ):
         calls = stub()
         plan = _plan(repo)
-        assert _main(mode, plan, "--host", "codex", "--exec-subagents",
-                     "--dry-run-subagents", "--yes", "--skip-prerequisites") == 0
-        assert calls
+        assert _main(mode, plan, *tail, "--yes", "--skip-prerequisites") == 0
+        # A dry run previews its first step alone; a real run reaches the apply,
+        # so the tail is checked on both steps there.
+        review, apply = mode_table.resolve(mode).sequence
+        expected = [review] if "--dry-run-subagents" in tail else [review, apply]
+        assert [word for word, _argv, _held in calls] == expected
         for word, argv, _held in calls:
-            assert argv[-len(TAIL):] == TAIL, (word, argv)
+            assert argv[-len(tail):] == tail, (word, argv)
             assert argv.count("--yes") == 1, (word, argv)
             assert "--skip-prerequisites" not in argv
             assert "--interactive" not in argv and "--detach" not in argv
@@ -1654,3 +1658,109 @@ class TestOneRule:
         assert iw.cross_cutting_flags(args, include_host=False) == ["--exec-subagents"]
         with pytest.raises(ValueError):
             workflow.step_argv("implement")
+
+
+# ---------------------------------------------------------------------------
+# --dry-run-subagents: one step previews, nothing after it, nothing recorded
+# ---------------------------------------------------------------------------
+
+class TestDryRunSubagents:
+    """A composite's dry run runs the first step that would run, with the flag,
+    and stops: no later step, no composite record, no detach boundary (a
+    preview never detaches) (docs/development/workflows.md#a-dry-run-previews-one-step)."""
+
+    @pytest.mark.parametrize("mode", MODES)
+    def test_only_the_first_step_runs_and_nothing_is_recorded(
+        self, repo, stub, capsys, no_boundary, mode
+    ):
+        review, apply = mode_table.resolve(mode).sequence
+        # A previewing phase records nothing, so the stub records nothing either.
+        calls = stub(silent={review, apply})
+        plan = _plan(repo)
+        assert _main(mode, plan, "--dry-run-subagents", "--detach") == 0
+        assert [word for word, _argv, _held in calls] == [review]
+        assert calls[0][1][-1] == "--dry-run-subagents"
+
+        state = _out(plan) / "state.json"
+        recorded = json.loads(state.read_text(encoding="utf-8")) if state.exists() else {}
+        assert mode.replace("-", "_") not in recorded, "no composite record"
+        out = capsys.readouterr().out
+        assert f"[dry-run-subagents] {mode}: preview only." in out
+        assert f"Step 2: {apply} skip (dry run: previews step 1 only)" in out
+        assert f"previewed step 1 ({review})" in out
+
+    @pytest.mark.parametrize("mode", MODES)
+    def test_a_step_that_refuses_its_preview_ends_with_its_exit(
+        self, repo, stub, capsys, mode
+    ):
+        review, _apply = mode_table.resolve(mode).sequence
+        calls = stub(fail={review: 3})
+        plan = _plan(repo)
+        assert _main(mode, plan, "--dry-run-subagents") == 3
+        assert [word for word, _argv, _held in calls] == [review]
+        assert "preview stopped with exit 3" in capsys.readouterr().err
+
+    def test_a_consolidation_pass_previewed_first_writes_nothing(
+        self, repo, capsys, no_boundary
+    ):
+        """The review is on record and recommends the pass, so step 1b is the
+        first step that runs. Its preview (the real ``review-plan --consolidate
+        --dry-run-subagents``) builds the batches and writes none of them: no
+        ``consolidation_tasks.json``, no prompt files, no host index, no
+        state; only the dry-run record and the step lock appear."""
+        from utils.consolidation import CONSOLIDATION_RECOMMENDED_THRESHOLD
+        from utils.state_manager import save_groups_payload, stamp_stable_ids
+
+        plan = _plan(repo)
+        _write_state(plan, completed={"review-plan": T(0)})
+        phase_dir = _out(plan) / "review-plan"
+        phase_dir.mkdir(parents=True)
+        count = CONSOLIDATION_RECOMMENDED_THRESHOLD
+        groups = [{
+            "theme": f"Theme {chr(65 + i)} {i}", "reference": "## Step 1",
+            "category": "modification", "importance": "MEDIUM", "models": ["m"],
+            "suggestions": [{"title": f"Suggestion {i}", "desc": f"d{i}",
+                             "type": "modification", "importance": "MEDIUM"}],
+        } for i in range(count)]
+        stamp_stable_ids(groups)
+        (phase_dir / "grouped.json").write_text(
+            json.dumps(save_groups_payload(groups)), encoding="utf-8")
+        (phase_dir / "validation.json").write_text(json.dumps({"groups": [
+            {"group_index": i, "status": "valid", "reason": ""} for i in range(count)
+        ]}), encoding="utf-8")
+        plans = iw.plan_steps(PLAN, _args(PLAN, plan, "--dry-run-subagents"),
+                              _records(PLAN, plan, "--dry-run-subagents"))
+        assert [(p.index, p.decision) for p in plans] == [
+            ("1", iw.SKIP), ("1b", iw.RUN), ("2", iw.SKIP)]
+
+        def snapshot():
+            return {str(path.relative_to(_out(plan))): path.read_bytes()
+                    for path in _out(plan).rglob("*") if path.is_file()}
+
+        before = snapshot()
+        assert _main(PLAN, plan, "--dry-run-subagents") == 0
+        after = snapshot()
+        lock = str(Path(detach.lock_path(str(phase_dir))).relative_to(_out(plan)))
+        assert {path for path in after if path not in before} <= {
+            lock, "review-plan/subagent_dry_run.json"}
+        assert {path: data for path, data in after.items() if path in before} == before
+        dry = json.loads((phase_dir / "subagent_dry_run.json").read_text(encoding="utf-8"))
+        assert dry["kind"] == "consolidation" and dry["tasks"]
+
+        out = capsys.readouterr().out
+        assert "Step 2: apply-suggestions skip (dry run: previews step 1b only)" in out
+        assert "every consolidation command rendered, no child started" in out
+        assert "[CONSOLIDATION_PENDING]" not in out
+        assert "[CONSOLIDATION_BATCHES_PENDING]" not in out
+        assert ("previewed step 1b (consolidation); no later step was previewed or "
+                "run, and nothing was recorded") in out
+
+    def test_the_planner_passes_over_every_step_after_the_first_run(self, tmp_path):
+        plan = _plan(tmp_path)
+        args = _args(PLAN, plan, "--dry-run-subagents")
+        plans = iw.plan_steps(PLAN, args, iw.read_records(PLAN, plan, args))
+        assert [(p.index, p.decision, p.reason) for p in plans] == [
+            ("1", iw.RUN, "not reviewed yet"),
+            ("1b", iw.SKIP, "dry run: previews step 1 only"),
+            ("2", iw.SKIP, "dry run: previews step 1 only"),
+        ]

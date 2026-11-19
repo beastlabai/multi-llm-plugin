@@ -5442,3 +5442,113 @@ def process_control_interval() -> float:
     from utils import process_control
 
     return process_control.live_cli_registry.interval_s
+
+
+# ---------------------------------------------------------------------------
+# preview_dispatch: the spawn's own command, unspawned
+# ---------------------------------------------------------------------------
+
+class TestPreviewDispatch:
+    """A dry run's reviewer plan shows the command the fan-out would spawn:
+    ``preview_dispatch`` shares ``prepare_dispatch``'s head and build, so the
+    two cannot drift (docs/development/review-results.md#a-dry-runs-reviewer-plan)."""
+
+    @pytest.mark.parametrize("rung", [None, "unsandboxed"], ids=["standard", "uncontained-rung"])
+    @pytest.mark.parametrize("spec", ["codex:gpt-5.5:high", "codex:gpt-5.5", "cursor-agent:auto"])
+    def test_the_preview_is_the_command_the_spawn_builds(self, tmp_path, spec, rung):
+        binary = spec.split(":", 1)[0]
+        kwargs = {"sandbox_fallback": rung} if rung else {}
+        with patch("shutil.which", return_value=f"/usr/bin/{binary}"):
+            prepared = llm_client.prepare_dispatch(
+                "THE PROMPT", spec, cwd=str(tmp_path), anchor=str(tmp_path), **kwargs)
+            try:
+                preview = llm_client.preview_dispatch(
+                    "THE PROMPT", spec, cwd=str(tmp_path), anchor=str(tmp_path), **kwargs)
+            finally:
+                prepared.cleanup.close()
+        assert isinstance(prepared, llm_client.PreparedDispatch), prepared
+        assert preview.refusal is None
+        assert preview.argv == prepared.cmd
+        assert preview.executable == prepared.cmd[0] == f"/usr/bin/{binary}"
+        assert preview.timeout == prepared.timeout
+        assert preview.transport == prepared.provider.prompt_transport
+
+    def test_the_effort_is_split_by_the_adapters_own_ladder(self, tmp_path):
+        with patch("shutil.which", return_value="/usr/bin/codex"):
+            high = llm_client.preview_dispatch(
+                "P", "codex:gpt-5.5:high", cwd=str(tmp_path), anchor=str(tmp_path))
+            bare = llm_client.preview_dispatch(
+                "P", "codex:gpt-5.5", cwd=str(tmp_path), anchor=str(tmp_path))
+        assert (high.model, high.base_model, high.effort) == ("gpt-5.5:high", "gpt-5.5", "high")
+        assert (bare.base_model, bare.effort) == ("gpt-5.5", None)
+        assert "model_reasoning_effort=high" in " ".join(high.argv)
+
+    def test_a_refused_spec_is_a_reason_not_a_command(self, tmp_path):
+        unknown = llm_client.preview_dispatch("P", "nosuch:auto", anchor=str(tmp_path))
+        assert unknown.argv is None and "Unknown provider: nosuch" in unknown.refusal
+        with patch("shutil.which", return_value=None):
+            missing = llm_client.preview_dispatch("P", "codex:gpt-5.5", anchor=str(tmp_path))
+        assert missing.argv is None and "codex CLI not found in PATH" in missing.refusal
+
+    def test_the_jail_rung_is_rendered_with_placeholders_and_creates_nothing(self, tmp_path):
+        from utils import landlock_dispatch
+
+        before = sorted(tmp_path.rglob("*"))
+        with patch("shutil.which", return_value="/usr/bin/codex"):
+            preview = llm_client.preview_dispatch(
+                "P", "codex:gpt-5.5", cwd=str(tmp_path), anchor=str(tmp_path),
+                sandbox_fallback="plugin-landlock")
+        assert preview.refusal is None
+        assert preview.argv[0] == sys.executable
+        assert preview.executable == "/usr/bin/codex"
+        assert any(landlock_dispatch.PLACEHOLDER_TMPDIR in arg for arg in preview.argv)
+        assert preview.argv[preview.argv.index("--") + 1] == "/usr/bin/codex"
+        assert sorted(tmp_path.rglob("*")) == before
+
+    def test_a_codex_preview_arms_no_trust_restore_and_leaves_its_config_alone(
+        self, tmp_path, monkeypatch
+    ):
+        """A dry run never writes ``$CODEX_HOME/config.toml``, even at the
+        run's close-out: the preview never arms the trust bookkeeping, so
+        ``codex_trust.restore_all`` finds nothing of its to remove, and a
+        trust entry another codex run added meanwhile stays where it is."""
+        from utils import codex_trust
+
+        monkeypatch.setattr(codex_trust, "ENABLED", True)
+        codex_trust.reset()
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        home = tmp_path / "codex-home"
+        home.mkdir()
+        config = home / "config.toml"
+        config.write_bytes(b"# mine\n[tui]\nnotifications = false\n")
+        monkeypatch.setenv("CODEX_HOME", str(home))
+        try:
+            with patch("shutil.which", return_value="/usr/bin/codex"):
+                preview = llm_client.preview_dispatch(
+                    "P", "codex:gpt-5.5", cwd=str(repo), anchor=str(repo))
+            assert preview.refusal is None and preview.argv
+            assert codex_trust._RECORDS == {}
+            # Another codex run trusts the repo while this process is alive.
+            entry = f'\n[projects."{os.path.realpath(repo)}"]\ntrust_level = "trusted"\n'
+            config.write_bytes(config.read_bytes() + entry.encode())
+            before = config.read_bytes()
+            assert codex_trust.restore_all() == []
+            assert config.read_bytes() == before
+            assert sorted(p.name for p in home.iterdir()) == ["config.toml"]
+        finally:
+            codex_trust.reset()
+
+    def test_no_preview_enters_the_dispatch_context(self, tmp_path, monkeypatch):
+        """``preview_dispatch`` renders through the context's argv half
+        (``preview_dispatch_context``), never ``provider_dispatch_context``,
+        whose ``note_dispatch`` and config homes are a dispatch's side effects."""
+        def _refuse(*_args, **_kwargs):  # pragma: no cover - the point
+            raise AssertionError("a preview entered the dispatch context")
+
+        monkeypatch.setattr(llm_client, "provider_dispatch_context", _refuse)
+        with patch("shutil.which", return_value="/usr/bin/codex"):
+            preview = llm_client.preview_dispatch(
+                "P", "codex:gpt-5.5:high", cwd=str(tmp_path), anchor=str(tmp_path))
+        assert preview.refusal is None and preview.argv

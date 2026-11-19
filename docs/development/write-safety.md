@@ -175,7 +175,9 @@ storage, a larger design (plans/apply-phase-throughput.md; Codex review 2 of U31
 - With a repository holding the phase dir that git cannot pin, or with an artifact it cannot
   read, the call refuses (exit 3).
   apply-code-fixes and implement take no native snapshot: their instructions send a human to undo
-  a native batch by hand.
+  a native batch by hand. The scan base `util write-prompt` records for their batches
+  (`prompts/<task id>.scan.json`) holds marker counts (a check configuration's text too) for the
+  report-only suppression scan, never a file to restore ([write-scheduler.md](write-scheduler.md#suppressions-a-batch-added)).
 
 `driver.max_concurrent_write_subagents` and `driver.write_paths` are `driver.*` keys like any other:
 closed set, fail-fast validation, typed accessors (`get_max_concurrent_write_subagents`, `get_write_paths`,

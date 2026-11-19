@@ -1315,3 +1315,225 @@ class TestEachStepsResultIsKept:
 
         assert ctx.notice == "Nothing ran this repository's tests."
         assert "step_results" not in status_file.read_status(str(workflow.run_dir))
+
+
+# ---------------------------------------------------------------------------
+# --dry-run-subagents: the first phase that would run previews, nothing after
+# ---------------------------------------------------------------------------
+
+def _state_on_disk(plan: Path) -> dict:
+    path = plan.parent / plan.stem / "state.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+
+class TestDryRunPreview:
+    """``full --dry-run-subagents`` previews one phase, as improve-* does: the
+    first that would run, with the flag, and no phase after it; nothing is
+    recorded and it never detaches
+    (docs/development/workflows.md#a-dry-run-previews-one-step)."""
+
+    @pytest.fixture
+    def no_boundary(self, monkeypatch):
+        from utils import review_orchestrator_base as rob
+
+        monkeypatch.setattr(rob, "maybe_detach",
+                            lambda **kwargs: pytest.fail("the preview reached the boundary"))
+
+    def test_only_the_first_phase_previews_and_nothing_is_recorded(
+        self, tmp_path, stub_phases, capsys, no_boundary
+    ):
+        calls = stub_phases(silent=set(mode_table.mode_names()))
+        plan = _plan(tmp_path)
+        code = multi_llm.main(
+            ["full", str(plan), "--yes", "--dry-run-subagents", "--detach"])
+        out = capsys.readouterr().out
+        assert code == 0, out
+        # `--detach` implies `--exec-subagents`, and the preview keeps it.
+        assert calls == [("review-plan",
+                          ["--yes", "--exec-subagents", "--dry-run-subagents"])]
+        assert fwo.FullWorkflow.STATE_KEY not in _state_on_disk(plan)
+        assert not _phase_dir(plan, "full").exists(), "no run dir, no resolution record"
+        assert "[dry-run-subagents] full: preview only." in out
+        assert "  Phase 1: Review Plan: run" in out
+        assert ("  Phase 6: Apply Code Fixes: skip (dry run: previews Phase 1: "
+                "Review Plan only)") in out
+        assert "previewed Phase 1: Review Plan; no later phase was previewed" in out
+        assert "did not complete" not in out
+        result = parse_result_line(out)
+        assert result["exit"] == 0 and result["next"] is None, result
+
+    def test_a_resumed_preview_runs_the_first_phase_a_real_run_would(
+        self, tmp_path, stub_phases, capsys
+    ):
+        """Attended, review-tasks would be recorded skipped and the apply of
+        its findings with it; the preview passes over both, writes neither
+        skip, and previews implement."""
+        calls = stub_phases(silent=set(mode_table.mode_names()))
+        plan = _plan(tmp_path)
+        _complete(plan, "review-plan", "apply-suggestions", "generate-tasks")
+        before = _state_on_disk(plan)
+        assert multi_llm.main(["full", str(plan), "--dry-run-subagents", "--resume"]) == 0
+        out = capsys.readouterr().out
+        assert calls == [("implement", ["--dry-run-subagents", "--resume"])]
+        assert _state_on_disk(plan) == before, "no skip was written"
+        assert "  Phase 1b: Consolidation: skip (not requested (--consolidate))" in out
+        assert ("  Phase 3b: Review Tasks: skip (not requested (--review-tasks not "
+                "passed))") in out
+        assert ("  Phase 3c: Apply Task Suggestions: skip (Skipped: review-tasks was "
+                "not executed)") in out
+        assert "  Phase 4: Implement: run" in out
+
+    def test_a_recommended_consolidation_pass_is_the_phase_previewed(
+        self, tmp_path, stub_phases, capsys
+    ):
+        from utils.consolidation import CONSOLIDATION_RECOMMENDED_THRESHOLD
+
+        calls = stub_phases(silent=set(mode_table.mode_names()))
+        plan = _plan(tmp_path)
+        _complete(plan, "review-plan")
+        _review_plan_dir(plan, actionable=CONSOLIDATION_RECOMMENDED_THRESHOLD,
+                         consolidated=False)
+        assert multi_llm.main(["full", str(plan), "--yes", "--dry-run-subagents"]) == 0
+        assert calls == [("review-plan", ["--consolidate", "--yes", "--dry-run-subagents"])]
+        assert not _phase_dir(plan, "full").exists(), "row 4's resolution is not recorded"
+        assert "previewed Phase 1b: Consolidation" in capsys.readouterr().out
+
+    def test_a_phase_that_refuses_its_preview_ends_with_its_exit(
+        self, tmp_path, stub_phases, capsys
+    ):
+        calls = stub_phases(fail={"review-plan": 3})
+        plan = _plan(tmp_path)
+        assert multi_llm.main(["full", str(plan), "--yes", "--dry-run-subagents"]) == 3
+        captured = capsys.readouterr()
+        assert _modes_called(calls) == ["review-plan"]
+        assert "Phase 1: Review Plan's preview stopped with exit 3" in captured.err
+        assert "did not complete" not in captured.err, "no row-14 stop"
+        assert fwo.FullWorkflow.STATE_KEY not in _state_on_disk(plan)
+
+    def test_a_finished_workflow_previews_nothing(self, tmp_path, stub_phases, capsys):
+        calls = stub_phases()
+        plan = _plan(tmp_path)
+        _complete(plan, *EXPECTED_ORDER)
+        assert multi_llm.main(["full", str(plan), "--yes", "--dry-run-subagents"]) == 0
+        assert calls == []
+        assert "every phase is already on record or passed over" in capsys.readouterr().out
+
+    def test_a_phase_with_nothing_to_do_hands_the_preview_to_the_next_step(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Fable review 2 of 2026-11-19, N3: `full --force` reaches a
+        completed review-plan, which answers exit 2 (`--force` is not
+        forwarded). A real run reads that as done and goes on; so does the
+        preview, which previews the phase after it and drops review-plan's
+        "already completed" notice."""
+        from utils.cli_common import add_notice
+
+        calls = []
+
+        def run_mode(self, mode_word, extra):
+            calls.append((mode_word, list(extra)))
+            if mode_word == "review-plan":
+                add_notice("review-plan has already been completed for this plan; "
+                           "to run it again from the start, add --force.")
+                return 2
+            return 0
+
+        monkeypatch.setattr(fwo.FullWorkflow, "run_mode", run_mode)
+        plan = _plan(tmp_path)
+        _complete(plan, "review-plan")
+        before = _state_on_disk(plan)
+        code = multi_llm.main(["full", str(plan), "--force", "--yes", "--dry-run-subagents"])
+        out = capsys.readouterr().out
+        assert code == 0, out
+        assert _modes_called(calls) == ["review-plan", "apply-suggestions"]
+        assert _state_on_disk(plan) == before, "nothing was recorded"
+        assert ("  Phase 1: Review Plan: nothing to do (exit 2); a real run reads it "
+                "as done and goes on to the next step") in out
+        assert "  Phase 2: Apply Suggestions: run" in out
+        assert ("  Phase 3: Generate Tasks: skip (dry run: previews Phase 2: Apply "
+                "Suggestions only)") in out
+        assert ("previewed Phase 2: Apply Suggestions (Phase 1: Review Plan had "
+                "nothing to do); no later phase") in out
+        result = parse_result_line(out)
+        assert result["exit"] == 0 and result["next"] is None, result
+        assert result["notice"] == (
+            "full previewed Phase 2: Apply Suggestions only; no later phase ran.")
+
+    def test_two_phases_in_a_row_with_nothing_to_do_are_both_walked_past(
+        self, tmp_path, stub_phases, capsys
+    ):
+        calls = stub_phases(fail={"review-plan": 2, "apply-suggestions": 2},
+                            silent=set(mode_table.mode_names()))
+        plan = _plan(tmp_path)
+        _complete(plan, "review-plan", "apply-suggestions")
+        assert multi_llm.main(
+            ["full", str(plan), "--force", "--yes", "--dry-run-subagents"]) == 0
+        out = capsys.readouterr().out
+        assert _modes_called(calls) == ["review-plan", "apply-suggestions", "generate-tasks"]
+        assert ("previewed Phase 3: Generate Tasks (Phase 1: Review Plan and Phase 2: "
+                "Apply Suggestions had nothing to do)") in out
+        assert ("  Phase 3b: Review Tasks: skip (dry run: previews Phase 3: Generate "
+                "Tasks only)") in out
+
+    def test_nothing_to_do_on_the_last_step_that_would_run_previews_nothing(
+        self, tmp_path, stub_phases, capsys
+    ):
+        """Every step a real `full --force` would run answers exit 2: there is
+        nothing to preview, and the preview exits 0 as that run would."""
+        calls = stub_phases(fail={mode: 2 for mode in mode_table.mode_names()})
+        plan = _plan(tmp_path)
+        _complete(plan, *EXPECTED_ORDER)
+        before = _state_on_disk(plan)
+        assert multi_llm.main(
+            ["full", str(plan), "--force", "--yes", "--dry-run-subagents"]) == 0
+        out = capsys.readouterr().out
+        modes = _modes_called(calls)
+        assert modes[0] == "review-plan" and modes[-1] == "review-code", modes
+        assert ("every phase is already on record or passed over or had nothing to "
+                "do; a real run would dispatch none") in out
+        assert "previewed Phase" not in out
+        assert _state_on_disk(plan) == before
+
+    def test_nothing_to_do_that_nothing_records_stops_as_a_real_run_would(
+        self, tmp_path, stub_phases, capsys
+    ):
+        """An exit 2 with no completion on record is a failed phase to a real
+        run (`_verify`), so the preview never walks past it."""
+        calls = stub_phases(fail={"review-plan": 2})
+        plan = _plan(tmp_path)
+        assert multi_llm.main(["full", str(plan), "--yes", "--dry-run-subagents"]) == 3
+        captured = capsys.readouterr()
+        assert _modes_called(calls) == ["review-plan"]
+        assert ("Phase 1: Review Plan's preview exited 2, but state.json records no "
+                "completion for 'review-plan', so a real run would stop at this "
+                "phase") in captured.err
+        assert "did not complete" not in captured.err, "no row-14 stop"
+        assert fwo.FullWorkflow.STATE_KEY not in _state_on_disk(plan)
+
+    def test_each_steps_preview_command_is_what_its_run_dispatches(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """A preview runs the phase as the real step would: the same mode word
+        and the same flags, for every step."""
+        plan = _plan(tmp_path)
+        workflow = _workflow(plan, "--yes", "--models", "a:b", "--resume",
+                             "--exec-subagents", "--host", "codex", "--force")
+        workflow.args.consolidate = True
+        workflow.gate = lambda *a, **k: None  # type: ignore[assignment]
+        workflow.apply_task_suggestions_pass_over = lambda: None  # type: ignore[assignment]
+        workflow.apply_code_fixes_pass_over = lambda: None  # type: ignore[assignment]
+        workflow._verify = lambda *a, **k: ("ok", "stub", None)  # type: ignore[assignment]
+        monkeypatch.setattr(gto, "run_generate_tasks", lambda child, **kwargs: 0)
+        for step in workflow.steps():
+            calls = []
+            workflow.run_mode = (  # type: ignore[assignment]
+                lambda mode, extra, calls=calls: calls.append((mode, list(extra))) or 0)
+            capsys.readouterr()
+            step.run()
+            mode, argv = step.command()
+            if step.phase == "generate-tasks":
+                printed = capsys.readouterr().out
+                assert fwo.dispatcher_command(mode, plan, *argv) in printed
+                assert "--force" in argv, "force travels to an unrecorded generation"
+                continue
+            assert calls == [(mode, argv)], step.label

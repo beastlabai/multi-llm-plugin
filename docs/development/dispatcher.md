@@ -270,7 +270,9 @@ It also owns skill-dir resolution — `os.path.abspath`, **symlinks preserved, n
 resolving would move `uv run --project` off the `pyproject.toml` the host loaded) — plus
 the printed-command builders, the `MULTI_LLM_RESULT` emitter and the per-invocation record (mode
 word + normalized argv) a detached child re-executes. It also owns `--dry-run-subagents` (D3l:
-render every command, start no child). `--exec-subagents` is implemented for the read/analyze
+render every command, start no child; a review fan-out prints its reviewer plan instead of calling
+its reviewers, [review results](review-results.md#a-dry-runs-reviewer-plan), and an improve composite
+or `full` previews one step, [workflows](workflows.md#a-dry-run-previews-one-step)). `--exec-subagents` is implemented for the read/analyze
 phases **and** the four write phases (see [write scheduling](write-scheduler.md)); `--detach` covers
 every long-running mode (see [runtime](runtime.md#detach-boundary-and-worker-lifecycle)).
 

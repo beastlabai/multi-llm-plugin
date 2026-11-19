@@ -632,7 +632,10 @@ def known_checks_section(
         "- Report a listed check that fails even when your fixes did not cause "
         "it. If it fails because of a change you made, put it right as part of "
         "your fixes. Never make a check pass by weakening it (deleting or "
-        "loosening an assertion, skipping a test); if a fix deliberately "
+        "loosening an assertion, skipping a test), and never add a lint, "
+        "type-checker or coverage suppression (`# noqa`, `# type: ignore`, a "
+        "config ignore entry) to make a check pass, unless the code is right "
+        "as written and you add a comment saying why; if a fix deliberately "
         "changes what a check tests, update the check to test the new "
         "behaviour and say so in `summary`.",
     ]

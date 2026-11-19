@@ -1980,7 +1980,12 @@ def _takes_over(args: Any) -> bool:
     """Whether this launch's ``--force`` takes a live run over. A commit front
     door's restart adds ``--force --rerun-all`` to restart the round; only a
     ``--force`` the user typed takes a live run over (plans/review-commits.md
-    §2.1), and the stage records which it was."""
+    §2.1), and the stage records which it was. A preview
+    (``--dry-run-subagents``) never does: stopping a live run is a change, and
+    a preview makes none, so it is refused like any launch without ``--force``
+    (docs/development/review-results.md#a-dry-runs-reviewer-plan)."""
+    if getattr(args, "dry_run_subagents", False):
+        return False
     force = bool(getattr(args, "force", False))
     if force and getattr(args, "commit_stage", None):
         # Imported here to keep run_status, which loads this module, light.

@@ -335,6 +335,13 @@ driver:
   max_concurrent_write_subagents: 1
   # null = the runner provider's `default_timeout`. A positive integer overrides it.
   subagent_timeout_s: null
+  # Seconds a WRITE subagent may print nothing, with no tool call running, before
+  # it is stopped and what it printed is read: an unreadable closing report after
+  # edits gets the one report re-ask, as for any runner that died. Not a cap on
+  # how long it works: a long test suite in its shell keeps the clock off. Only
+  # for runners that print events as they work (codex); claude-code prints its
+  # answer at exit, so it never has this timer. 0 turns it off.
+  subagent_idle_timeout_s: 900
   # Re-dispatches for TRANSPORT-shaped failures only (timeout, no parsed text,
   # parse_output failure). A result that parsed but failed schema validation is
   # never retried — that is a deterministic disagreement a retry would launder.

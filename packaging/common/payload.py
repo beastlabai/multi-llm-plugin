@@ -971,7 +971,7 @@ def target_module_paths(base: Optional[Path] = None) -> Tuple[str, ...]:
 #: Sized from those artifacts as measured 2026-11-06, with about 10% headroom, so a
 #: real addition passes and an accidental test tree or duplicated payload does not.
 #: A deliberate growth past one of these is a reviewed edit here, not a silent side
-#: effect. Claude Code's limit also stays under its 12,000,000-byte review target.
+#: effect. Claude Code's limit also stays under its 12,300,000-byte review target.
 DISTRIBUTION_BUDGETS: Dict[str, Tuple[int, int]] = {
     # Raised 2026-11-08 for the code-health split (about 26 new runtime modules,
     # references and schemas, none of them development files); measured then:
@@ -990,9 +990,14 @@ DISTRIBUTION_BUDGETS: Dict[str, Tuple[int, int]] = {
     # (`driver.batch_checks`: one runtime module, the state merge rule and the
     # scheduler hooks, none of them development files); measured then: codex
     # 334 files / 12,014,104 bytes, claude-code 334 / 11,878,592.
-    "claude-code": (340, 12_000_000),     # the review target: past it is a decision
-    "codex": (345, 12_100_000),
-    "opencode": (345, 12_100_000),     # unpacked; tracks the codex tree
+    # Byte budgets raised 2026-11-19 for the t3code follow-ups (the suppression
+    # scan's two runtime modules, the writer idle clock, tolerant reviewer JSON
+    # and the reviewer dry-run preview; none of them development files);
+    # measured then: claude-code 12,062,599 bytes, codex tree 337 files /
+    # 12,198,111.
+    "claude-code": (340, 12_300_000),     # the review target: past it is a decision
+    "codex": (345, 12_400_000),
+    "opencode": (345, 12_400_000),     # unpacked; tracks the codex tree
 }
 
 

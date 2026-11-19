@@ -9,6 +9,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [Task generation](#task-generation)
 - [Full workflow state machine](#full-workflow-state-machine)
 - [Improve-plan and improve-code](#improve-plan-and-improve-code)
+  - [A dry run previews one step](#a-dry-run-previews-one-step)
 - [A cascade (`--cascade`)](#a-cascade---cascade)
 - [Commit reviews](#commit-reviews)
 - [Ask mode](#ask-mode)
@@ -350,6 +351,61 @@ with its status and abort commands, never joined, `--force` included, and
 `ImproveWorkflow.run_mode` holds each step's phase-dir `.lock` while it runs
 (`full` gets neither). `--interactive` is exit 3 before
 `--yes` is implied.
+
+### A dry run previews one step
+
+**Under `--dry-run-subagents` a composite, and `full`, runs the first step that would run, with the
+flag, and no step after it.** Each later step needs the real output of the one before (an apply needs
+its review's verdicts, which need its findings), so a preview of it would describe nothing. `plan_steps`
+passes over every step after its first `run` one (`skip (dry run: previews step <i> only)`,
+`_dry_run_plan`), and both legs follow it: `ImproveWorkflow.run_preview` runs that one step in this
+process (a review prints its reviewer plan and calls no model,
+[review results](review-results.md#a-dry-runs-reviewer-plan); an apply renders its batches), and
+`util improve-steps` plans the same single step for the native leg. The entry point runs the preview
+before its detach boundary, so it never detaches (`cli_common.FOREGROUND_PREVIEW_FLAGS`), and it
+records nothing: no progress record, no scope-policy choice, no row-14 stop. Exit 0 once the step
+previewed, or the step's own exit when it refused. A cascade is never planned (planning a stage
+records it): both legs print `dry_run_cascade_note` and preview one plain round instead.
+
+**`full` plans from its own step decisions, read and never written** (`FullWorkflow.run_preview`). A
+phase on record is passed over (`skip_reason`); so is a step that would record a skip or not run at all,
+which each step answers through its `Step.pass_over` (row 4's consolidation pass, row 12's
+review-tasks, and the two conditional applies; the real steps record the same reasons through the same
+helpers). A skip the preview passes over counts as recorded for the steps after it (`_recorded` reads
+`_preview_skipped`), so an attended preview that passes review-tasks over also passes its apply over,
+as the real run would. The first step left runs its phase through `Step.command`, the mode word and
+flags the real step hands it; the steps after it read `skip (dry run: previews <label> only)`. A
+phase that answers exit 2 (nothing to do) is read as the real run reads it (`_preview_stop_on_exit_2`,
+`_verify`'s reading without its words or recorded follow-up): with the phase recorded completed or
+skipped and no batch of it left unexecuted, or for the advisory consolidation pass, the walk goes on
+to the next step (`nothing to do (exit 2); a real run reads it as done and goes on`), the phase's
+notice is dropped from the result line, and the closing line names it beside the phase that
+previewed; with nothing recorded, or a batch left unexecuted, where a real run stops on row 14,
+the preview says why and stops with exit 3.
+The common case is `full --force` over a completed review: `--force` is not forwarded to the
+phases, so review-plan answers "already completed" and a real run goes on to the next phase
+(Fable review 2 of 2026-11-19, N3). Only one phase that dispatches is ever previewed. The
+prerequisite gates' auto-run never fires (implement's gate is the phase's own, standalone), nor does
+any row's recorded resolution. A workflow with every phase on record, passed over or with nothing to
+do previews nothing and exits 0, as a real run of it does. `full`'s entry point, like the
+composites', runs the preview before its detach boundary.
+
+**A consolidation pass previews its batches without writing them.** When improve-plan's step 1b (or
+`full`'s Phase 1b) is the step previewed, it runs review-plan's `--consolidate --dry-run-subagents`,
+whose handler builds the batches as a real pass does (`consolidation.preview_consolidation_tasks`),
+renders each command through `task_file_runner.dry_run_report`, and writes nothing but
+`subagent_dry_run.json`: no `consolidation_tasks.json`, no prompt files, no host index, and no
+`[CONSOLIDATION_*]` marker naming a file that is not there
+(`review_plan_orchestrator.consolidation_preview`). `--consolidate-dry-run`, the stats-only preview,
+builds the same document unwritten.
+
+Until 2026-11-19 the flag was forwarded to every step and the review ran for real; its unrecorded
+phase then failed `_verify`, so the composite ended at exit 3 ("did not complete") after a paid
+review and a preview of its validation only. `full` kept forwarding it phase by phase a little longer,
+so its review previewed and `full` then stopped at exit 3 on the unrecorded phase; and a preview whose
+step was the consolidation pass wrote the pass's task file and prompt files while its closing line said
+nothing was recorded. `tests/test_full_workflow_orchestrator.py` (`TestDryRunPreview`),
+`tests/test_improve_orchestrator.py` and `tests/test_native_prompt_files.py` hold both.
 
 ## A cascade (`--cascade`)
 

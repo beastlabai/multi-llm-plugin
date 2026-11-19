@@ -188,6 +188,14 @@ Read its exit code here; section 3's rule covers only the phase steps:
   commands, for `state.json` the file to repair, for a scope the path to fix. There
   is no `[IMPROVE_RERUN]` to give, because nothing ran.
 
+**`--dry-run-subagents` in the flags lines makes the run a preview.** Section 1 then
+plans one `run` step, and every step after it reads `skip (dry run: previews step <i>
+only)`. Run that one step as its core words it, with its flags line as printed: the
+phase previews what it would dispatch, calls no model and records nothing (a review
+returns in its one foreground call with its reviewer plan). Then report what it
+printed and stop: no later step runs, and section 3's done check and section 4's file
+reads do not apply.
+
 ### 2. Run each `run` step, in order
 
 For step 1 and step 2, when its `[IMPROVE_STEP]` line reads `run`: load that phase's

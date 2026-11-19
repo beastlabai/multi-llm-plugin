@@ -703,6 +703,63 @@ class TestAnInProcessSalvageMovesTheMapWithTheReport:
         # not a second run of it.
         assert entry["ended_at"] and "elapsed_s" in entry
 
+    def test_a_single_reviewer_salvaged_in_process_completes_the_run(self, tmp_path):
+        """The 2026-11-18 shape (tests/test_malformed_reviewer_json.py): the
+        only reviewer failed with a salvage request written. The salvage runs
+        and is adopted before the all-failed check, so the run completes
+        instead of exiting 3 "All models failed"."""
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# plan\n", encoding="utf-8")
+        only = "codex:gpt-6-luna:high"
+        issues = [{"title": "Bug", "desc": "d", "importance": "high",
+                   "file": "src/a.py", "type": "bug"}]
+        phase_dir = cro.get_phase_dir(plan_path, "code-review")
+
+        fake_state = MagicMock()
+        fake_state.get = MagicMock(
+            side_effect=lambda k, default=None: {
+                "tracked_files": [{"path": "src/a.py"}],
+                "head_before_implement": "abc123",
+                "head_at_start": "abc123",
+                "pre_existing_changes": [],
+            }.get(k, default)
+        )
+        fake_state.is_phase_completed = MagicMock(return_value=False)
+        fake_state.state = {"phases_completed": {}}
+
+        args = _make_args(plan_path, models=[only], exec_subagents=True)
+
+        async def fake_run_all_reviews(*_a, **kw):
+            phase_dir.mkdir(parents=True, exist_ok=True)
+            tracker = progress_tracker.FanoutProgress(
+                str(phase_dir), [only], anchor=str(plan_path), interval_s=0
+            )
+            kw["tracker_out"].append(tracker)
+            tracker.seed()
+            error = "JSON parsing failed from both file and stdout"
+            tracker.failed(only, error=error, source="stdout_fallback")
+            return {only: (False, None, error)}
+
+        def fake_salvage(_args, *, phase_dir, phase, plan_path=None):
+            recovered = Path(phase_dir) / f"{cro.sanitize_model_name(only)}.json"
+            recovered.write_text(json.dumps(issues), encoding="utf-8")
+            return [str(recovered)]
+
+        with patch.object(cro, "parse_args", return_value=args), \
+             patch.object(cro, "get_or_create_state", return_value=fake_state), \
+             patch("utils.interactive.resolve_models", return_value=[only]), \
+             patch("utils.interactive.is_model_valid", return_value=True), \
+             patch.object(cro, "validate_git_ref",
+                          side_effect=lambda r: r or "HEAD~1"), \
+             patch.object(cro, "dispatch_salvage_tasks", new=fake_salvage), \
+             patch.object(cro, "run_all_reviews", new=fake_run_all_reviews):
+            assert asyncio.run(cro.main()) == 0
+
+        status = status_file.read_status(str(phase_dir))
+        assert status["models_failed"] == {}
+        assert status["models_completed"] == [only]
+        assert status["progress"]["models"][only]["source"] == "salvage"
+
 
 class TestReaggregateRecordsArtifacts:
     """F2/F3: `reaggregate_from_existing_files` never called `record_artifacts`

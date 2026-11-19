@@ -20,6 +20,30 @@ from tests.mock_launchers import write_launcher
 from tests.provider_test_support import C1_FIXTURES, _c1_adapter
 
 
+#: A help that documents `--strict-mcp-config`, as every claude since the flag
+#: shipped does (docs/development/providers.md#claude-code-read-slots). It
+#: documents `--settings` too, on purpose: a read slot must not pass it even
+#: when the CLI would accept it, because the user's hooks stay on.
+READ_SLOT_TOKENS = frozenset({"--strict-mcp-config", "--settings"})
+
+#: The MCP-off flag as a read slot renders it.
+READ_SLOT_ARGV = ["--strict-mcp-config"]
+
+
+def _pin_help(monkeypatch, tokens):
+    """Answer the shared help gate with ``tokens``, whatever is installed.
+
+    The binary is pinned too: with no ``claude`` on PATH the gate never reaches
+    the help read. A test that patches ``read_help_tokens`` itself still wins."""
+    from utils.providers import version_gate
+
+    monkeypatch.setattr(
+        LLMProvider, "gate_binary",
+        lambda self, **_kw: f"/pinned/bin/{self.gate_binary_name()}",
+    )
+    monkeypatch.setattr(version_gate, "read_help_tokens", lambda _b, **_kw: tokens)
+
+
 class TestClaudeCodeProvider:
     """Tests for the ClaudeCodeProvider class."""
 
@@ -27,6 +51,11 @@ class TestClaudeCodeProvider:
     def provider(self):
         """Create a ClaudeCodeProvider instance."""
         return ClaudeCodeProvider()
+
+    @pytest.fixture(autouse=True)
+    def _help_documents_the_read_slot_flags(self, monkeypatch):
+        """The argv below is a current claude's, not the developer's install."""
+        _pin_help(monkeypatch, READ_SLOT_TOKENS)
 
     def test_name_property(self, provider):
         """Test that name property returns correct identifier."""
@@ -165,6 +194,7 @@ This concludes the review."""
             "json",
             "--model",
             "sonnet",
+            *READ_SLOT_ARGV,
             "--permission-mode",
             "acceptEdits",
             "Review this code",
@@ -232,6 +262,7 @@ This concludes the review."""
             "fable",
             "--effort",
             "max",
+            *READ_SLOT_ARGV,
             "--permission-mode",
             "acceptEdits",
             "Review this code",
@@ -251,6 +282,7 @@ This concludes the review."""
                 "fable",
                 "--effort",
                 effort,
+                *READ_SLOT_ARGV,
                 "--permission-mode",
                 "acceptEdits",
                 "Review this code",
@@ -268,6 +300,7 @@ This concludes the review."""
                 "json",
                 "--model",
                 model,
+                *READ_SLOT_ARGV,
                 "--permission-mode",
                 "acceptEdits",
                 "Review this code",
@@ -548,13 +581,15 @@ class TestClaudeCodeFallbackModel:
         )
 
     # ── the off switch ────────────────────────────────────────────────────
-    def test_the_shipped_config_emits_no_flag_at_all(self, provider):
+    def test_the_shipped_config_emits_no_flag_at_all(self, provider, monkeypatch):
         """Nothing configured ⇒ today's argv, byte-for-byte.
 
         `--permission-mode acceptEdits` is the generate path's own write grant
         (see `claude_code._render_argv`), not a fallback artefact: it is present
         here precisely because nothing about `--fallback-model` is configured.
+        The help is pinned empty so the read slot's optional flags stay out.
         """
+        _pin_help(monkeypatch, frozenset())
         cmd = provider.build_command(self.PROMPT, "sonnet")
 
         assert cmd == [
@@ -1101,6 +1136,12 @@ class TestClaudeCodeProviderIntegration:
         with patch("shutil.which", return_value="/usr/local/bin/claude"):
             yield
 
+    @pytest.fixture(autouse=True)
+    def _no_help_spawn(self, monkeypatch):
+        """The help gate would spawn through the patched ``subprocess.run`` and
+        count as a dispatch; answer it without a spawn."""
+        _pin_help(monkeypatch, frozenset())
+
     def test_claude_code_successful_invocation(self, mock_subprocess, mock_claude_available):
         """Test successful Claude Code invocation returns parsed data."""
         from utils.llm_client import invoke_with_provider
@@ -1421,3 +1462,82 @@ class TestClaudeCodeCleanEnvelopeProseIsNotAVerdict:
         from utils.providers.result_envelope import is_clean_envelope
 
         assert is_clean_envelope(stdout) is clean
+
+
+class TestClaudeCodeReadSlots:
+    """Read slots start without the user's MCP servers; the user's hooks stay on
+    in every slot (docs/development/providers.md#claude-code-read-slots).
+
+    Measured offline against claude 2.1.328 with a marker-writing hook and MCP
+    server planted in a throwaway HOME: the ``generate`` and ``agent-readonly``
+    argv start no MCP server and run every hook, the ``agent-write`` argv starts
+    the server too. Hooks stay on because neither read profile shuts out every
+    write: ``generate`` runs acceptEdits with no tool list, and
+    ``agent-readonly``'s deny-list leaves ``EnterWorktree`` and ``CronCreate``
+    (both write files without a prompt) in reach."""
+
+    PROMPT = "Review this code"
+
+    @pytest.fixture
+    def provider(self):
+        return ClaudeCodeProvider()
+
+    def _legs(self, provider):
+        from utils.providers.base import PROFILE_AGENT_READONLY, PROFILE_AGENT_WRITE
+
+        return {
+            "generate": provider.build_command(self.PROMPT, "sonnet"),
+            "generate/stdin": provider.build_command_for_transport(
+                self.PROMPT, "sonnet", "stdin")[0],
+            "agent-readonly": provider.build_agent_command(
+                self.PROMPT, "sonnet:high", PROFILE_AGENT_READONLY),
+            "agent-readonly/stdin": provider.build_agent_command_for_transport(
+                self.PROMPT, "sonnet", PROFILE_AGENT_READONLY, "stdin")[0],
+            "agent-write": provider.build_agent_command(
+                self.PROMPT, "sonnet", PROFILE_AGENT_WRITE),
+            "agent-write/stdin": provider.build_agent_command_for_transport(
+                self.PROMPT, "sonnet", PROFILE_AGENT_WRITE, "stdin")[0],
+        }
+
+    def test_read_profiles_drop_mcp_and_no_profile_drops_hooks(
+        self, provider, monkeypatch
+    ):
+        _pin_help(monkeypatch, READ_SLOT_TOKENS)
+        for leg, cmd in self._legs(provider).items():
+            # The user's guard hooks run in every slot, whatever the help says.
+            assert "--settings" not in cmd, leg
+            assert not any("disableAllHooks" in arg for arg in cmd), leg
+            if leg.startswith("agent-write"):
+                assert "--strict-mcp-config" not in cmd, leg
+                continue
+            at = cmd.index("--strict-mcp-config")
+            assert cmd.count("--strict-mcp-config") == 1, leg
+            # After the model and effort, ahead of every permission and tool flag.
+            assert cmd.index("--model") < at, leg
+            for later in ("--permission-mode", "--allowed-tools"):
+                if later in cmd:
+                    assert cmd.index(later) == at + 1, leg
+            if not leg.endswith("/stdin"):
+                assert cmd[-1] == self.PROMPT, leg
+
+    @pytest.mark.parametrize("tokens,wanted", [
+        (READ_SLOT_TOKENS, ["--strict-mcp-config"]),
+        (frozenset({"--strict-mcp-config"}), ["--strict-mcp-config"]),
+        (frozenset({"--settings"}), []),
+        (frozenset(), []),
+    ])
+    def test_the_flag_follows_its_own_help_line_and_never_warns(
+        self, provider, monkeypatch, capsys, tokens, wanted
+    ):
+        from utils.providers.base import PROFILE_AGENT_READONLY
+
+        _pin_help(monkeypatch, tokens)
+        cmd = provider.build_command(self.PROMPT, "sonnet")
+        assert cmd == [
+            "claude", "-p", "--output-format", "json", "--model", "sonnet",
+            *wanted, "--permission-mode", "acceptEdits", self.PROMPT,
+        ]
+        cmd = provider.build_agent_command(
+            self.PROMPT, "sonnet", PROFILE_AGENT_READONLY)
+        assert cmd[cmd.index("sonnet") + 1:cmd.index("--allowed-tools")] == wanted
+        assert capsys.readouterr().err == ""

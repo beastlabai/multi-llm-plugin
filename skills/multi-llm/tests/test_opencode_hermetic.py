@@ -1175,6 +1175,103 @@ class TestHermeticScopeAndHatch:
 
 
 # --------------------------------------------------------------------------- #
+# A dry run renders the hermetic argv and makes nothing
+# (llm_client.preview_dispatch_context,
+# docs/development/review-results.md#a-dry-runs-reviewer-plan)
+# --------------------------------------------------------------------------- #
+
+class TestHermeticPreview:
+    """``--dry-run-subagents`` enters the context's argv half: the same
+    refusal and ``--pure`` as a dispatch, and no config home on disk."""
+
+    MODEL = "opencode/sonnet"
+
+    def _argv(self, provider, model: str = MODEL, profile: str = PROFILE_GENERATE):
+        """The fan-out's build for ``generate``, the executor's for a read kind."""
+        if profile == PROFILE_GENERATE:
+            return provider.build_command_for_transport("P", model, "argv")[0]
+        return provider.build_agent_command_for_transport("P", model, profile, "argv")[0]
+
+    @pytest.mark.parametrize("profile", [PROFILE_GENERATE, PROFILE_AGENT_READONLY])
+    def test_the_preview_renders_the_dispatch_argv_and_makes_no_home(
+        self, provider, user_xdg, new_hermetic_dirs, monkeypatch, profile
+    ):
+        _pure_help(monkeypatch)
+        with provider.hermetic_dispatch(profile, self.MODEL, runner_version="0.0.1") as refusal:
+            assert refusal is None
+            dispatched = self._argv(provider, profile=profile)
+        assert new_hermetic_dirs() == []
+        with llm_client.preview_dispatch_context(provider, self.MODEL, profile) as context:
+            assert context.refusal is None
+            assert new_hermetic_dirs() == [] and oc._CONFIG_HOME is None
+            previewed = self._argv(provider, profile=profile)
+        assert previewed == dispatched and oc.PURE_FLAG in previewed
+        assert new_hermetic_dirs() == [] and oc._ACTIVE.get() is None
+
+    def test_a_provider_only_in_the_users_config_is_refused_in_the_preview(
+        self, provider, user_xdg, new_hermetic_dirs
+    ):
+        with llm_client.preview_dispatch_context(
+            provider, "only-in-user-config/private-model", PROFILE_GENERATE
+        ) as context:
+            assert "only-in-user-config" in (context.refusal or "")
+        assert oc._CONFIG_HOME is None and new_hermetic_dirs() == []
+
+    def test_a_non_hermetic_preview_renders_no_pure(
+        self, provider, user_xdg, tmp_path, monkeypatch
+    ):
+        _pure_help(monkeypatch)
+        _use_config(tmp_path, monkeypatch, "providers:\n  opencode:\n    hermetic: 'off'\n")
+        with llm_client.preview_dispatch_context(provider, self.MODEL, PROFILE_GENERATE) as context:
+            assert context.refusal is None and oc._ACTIVE.get() is None
+            assert oc.PURE_FLAG not in self._argv(provider)
+
+    def test_preview_dispatch_spawns_no_version_read_and_makes_no_home(
+        self, provider, user_xdg, new_hermetic_dirs, tmp_path, monkeypatch
+    ):
+        """The reviewer plan's own call: ``--pure`` shown, nothing made, and
+        no ``opencode --version`` read for the content a preview never builds."""
+        _pure_help(monkeypatch)
+        monkeypatch.setattr(oc, "_lane_a_runner_version",
+                            lambda _provider: pytest.fail("read the version"))
+        monkeypatch.setattr(oc, "acquire_config_home",
+                            lambda: pytest.fail("made a config home"))
+        preview = llm_client.preview_dispatch(
+            "P", f"opencode:{self.MODEL}", cwd=str(tmp_path), anchor=str(tmp_path))
+        assert preview.refusal is None, preview
+        assert oc.PURE_FLAG in preview.argv
+        assert new_hermetic_dirs() == []
+
+    def test_the_subagent_dry_run_renderer_makes_no_home_either(
+        self, provider, user_xdg, new_hermetic_dirs, monkeypatch
+    ):
+        """The read half's ``--dry-run-subagents`` (``_preview_argv``) takes the
+        same argv half as the reviewer plan."""
+        _pure_help(monkeypatch)
+        monkeypatch.setattr(oc, "acquire_config_home",
+                            lambda: pytest.fail("made a config home"))
+        argv, refusal = executor._preview_argv(
+            provider, prompt="P", model=self.MODEL, profile=PROFILE_AGENT_READONLY,
+            schema=None)
+        assert refusal is None and oc.PURE_FLAG in argv
+        assert new_hermetic_dirs() == []
+
+    def test_only_an_adapter_whose_argv_reads_its_context_declares_a_preview(self):
+        """fx's context scopes its environment alone (its argv is the same
+        inside and outside it, tests/test_fx_provider.py), so a preview renders
+        it with no context; opencode's ``--pure`` needs the preview half."""
+        from utils.provider_registry import _PROVIDERS
+
+        for name in sorted(_PROVIDERS):
+            adapter = registry.get_provider(name)
+            if not callable(getattr(adapter, "hermetic_dispatch", None)):
+                assert not callable(getattr(adapter, "hermetic_preview", None)), name
+                continue
+            assert callable(getattr(adapter, "hermetic_preview", None)) == (
+                name == "opencode"), name
+
+
+# --------------------------------------------------------------------------- #
 # D3 step 4 — `describe_unlisted_model` reads the listing in the dispatch's own
 # configuration, and an unreadable listing is unknown, never a refusal
 # --------------------------------------------------------------------------- #

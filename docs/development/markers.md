@@ -50,9 +50,9 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 
 ## Counts
 
-- Emitted markers: 198
-- Cited by an instruction, reference, `SKILL.md` or shim template: 121
-- Declared not-for-the-host: 77
+- Emitted markers: 200
+- Cited by an instruction, reference, `SKILL.md` or shim template: 122
+- Declared not-for-the-host: 78
 - Neither (must be zero): 0
 
 ## Registry
@@ -132,6 +132,7 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 | `[INSTALL_CHECK_FAILED]` | `utils/host_install.py` | not for the host: operator-cli | — |
 | `[INTERRUPT_SWEEP]` | `multi_llm.py` `sweep_live_clis()`<br>`utils/detach.py` `sweep_live_clis()`<br>`utils/process_control.py` `sweep_live_clis()` | not for the host: runner-diagnostic | — |
 | `[JAIL_DENIED]` | `utils/providers/sandbox_rungs.py` `JAIL_DENIED_MARKER` | not for the host: runner-diagnostic | — |
+| `[JSON_REPAIRED]` | `utils/result_files.py` | not for the host: run-notice | — |
 | `[LEGACY_INSTRUCTIONS]` | `multi_llm.py` | not for the host: operator-cli | — |
 | `[MANUAL_GATE]` | `implement_orchestrator.py` | `instructions/implement.md` | — |
 | `[MANUAL_TASK]` | `utils/next_phase.py` `MANUAL_TASK_MARKER` | `instructions/implement.md`<br>`references/summary-format.md` | One line per deferred implement task under `[WORKFLOW_COMPLETE]`: the id, then the title when `state.json` recorded one |
@@ -227,6 +228,7 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 | `[STATE_REPLACED]` | `utils/commit_front_door.py` `STATE_REPLACED` | not for the host: run-notice | Step 6 replaced a `state.json` that did not parse |
 | `[STREAM_CAP]` | `utils/process_capture.py` | not for the host: runner-diagnostic | — |
 | `[STREAM_STOP]` | `utils/process_capture.py` | not for the host: runner-diagnostic | — |
+| `[SUPPRESSION_ADDED]` | `utils/batch_suppressions.py` `SUPPRESSION_MARKER` | `instructions/apply-code-fixes.md`<br>`instructions/implement.md` | One line per hit, on the executor's log and `util batch-done`'s stdout |
 | `[TASKS_GRAPH_OK]` | `utils/tasks_graph_check.py` | `instructions/apply-task-suggestions.md` | — |
 | `[TASKS_GRAPH_WARNING]` | `utils/tasks_graph_check.py` `WARNING_PREFIX` | `instructions/apply-task-suggestions.md` | — |
 | `[TASKS_MISSING]` | `implement_orchestrator.py` | `instructions/implement.md`<br>`references/implement-prerequisites.md` | — |
@@ -244,7 +246,7 @@ it to `NOT_FOR_HOST` with a reason, then re-render this page.
 | `[VALIDATION_PENDING]` | `utils/review_lane.py` | `instructions/review-code.md`<br>`instructions/review-plan.md`<br>`instructions/review-tasks.md` | — |
 | `[VALIDATION_RETIRED]` | `utils/review_orchestrator_base.py` | not for the host: run-notice | — |
 | `[VALIDATION_TASKS_OVERSIZE]` | `utils/validation.py` | not for the host: run-notice | — |
-| `[WARN]` | `ask_orchestrator.py`<br>`utils/attempt_classifier.py`<br>`utils/provider_outcome.py`<br>`utils/providers/claude_code.py` `warn_gate_once()`<br>+2 more | `instructions/ask.md`<br>`references/summary-format.md` | — |
+| `[WARN]` | `ask_orchestrator.py`<br>`utils/attempt_classifier.py`<br>`utils/provider_outcome.py`<br>`utils/providers/claude_code.py` `warn_gate_once()`<br>+3 more | `instructions/ask.md`<br>`references/summary-format.md` | — |
 | `[WITHHOLD_NOT_RECORDED]` | `utils/review_lane.py` `UNRECORDED_REASON` | not for the host: run-notice | The error of a slot failed before its dispatch because its `models_unchecked` record could not be written or read back |
 | `[WORKFLOW_COMPLETE]` | `utils/next_phase.py` `WORKFLOW_COMPLETE_MARKER` | `SKILL.md`<br>`references/summary-format.md` | — |
 | `[WRITE_ARTIFACT]` | `utils/write_prompt.py` `MARKER_ARTIFACT` | `instructions/apply-suggestions.md`<br>`instructions/apply-task-suggestions.md` | — |

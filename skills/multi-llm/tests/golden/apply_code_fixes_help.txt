@@ -44,7 +44,10 @@ options:
   --no-batch            Disable smart batching (process each suggestion
                         separately)
   --max-batch-size MAX_BATCH_SIZE
-                        Maximum suggestions per batch (default: 4)
+                        Items per batch. Only the phase's default is accepted
+                        for now (4; 3 for apply-code-fixes): any other value
+                        is refused, see
+                        cli_common.refuse_unsupported_batch_size
   --approve-all-low     Auto-approve all LOW importance items with needs-
                         human-decision status
   --approve-all         Auto-approve ALL needs-human-decision items (use with
@@ -171,7 +174,11 @@ cross-cutting options:
                         profile, the write-concurrency admission check and
                         driver.write_paths — then write
                         {phase}/subagent_dry_run.json and exit 0 having
-                        changed nothing.
+                        changed nothing. A review calls no model either: it
+                        stops before its reviewers and prints each slot as it
+                        would be dispatched (provider, model, effort, sandbox,
+                        argv); an improve composite and full preview only the
+                        first step that would run.
   --skip-prerequisites  Proceed even though a prerequisite phase's output was
                         never applied. Loud and recorded (the skip lands in
                         state.json and in every later report); never implied

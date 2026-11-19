@@ -101,9 +101,19 @@ FALLTHROUGH_SHAPES = [
         },
     ),
     (
+        # The piece is still served, and says it is one: the array never
+        # closes, so `{"id": 3}` is not the answer (the fan-out's reader
+        # refuses it; docs/development/review-results.md, "Malformed result
+        # entries").
         "result-truncated-array",
         json.dumps({"type": "result", "result": '[{"id": 3}'}),
-        {"success": True, "data": {"id": 3}},
+        {"success": True, "data": {"id": 3}, "enclosing_syntax_error": {
+            "message": (
+                "Expecting ',' delimiter "
+                "(the document is never closed: the reply ends inside it)"
+            ),
+            "line": 1, "column": 11, "excerpt": '[{"id": 3}<<HERE>>',
+        }},
     ),
 ]
 

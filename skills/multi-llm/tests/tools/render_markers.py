@@ -218,6 +218,7 @@ NOT_FOR_HOST: Dict[str, str] = {
     "[CONTEXT_PLAN_SNAPSHOT_CHANGED]": "run-notice",
     "[GIT_CONFIG_CHANGED]": "run-notice",
     "[HEAD_REF_MISMATCH]": "run-notice",
+    "[JSON_REPAIRED]": "run-notice",
     "[PROMPT_SIDECAR_REWRITTEN]": "run-notice",
     "[PROMPT_SIDECAR_SKIPPED]": "run-notice",
     "[RESULT_NOT_READ]": "run-notice",

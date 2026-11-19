@@ -20,9 +20,10 @@ import hashlib
 import io
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Sequence, Tuple
 from unittest.mock import patch
 
 import pytest
@@ -1537,3 +1538,154 @@ class TestSlotResult:
         assert slots[MODELS[0]].payload == "[]"
         assert slots[MODELS[1]].error == "timed out"
         assert review_lane.SlotResult.coerce(MODELS[0], slots[MODELS[0]]) is slots[MODELS[0]]
+
+
+# ---------------------------------------------------------------------------
+# --dry-run-subagents: the reviewer plan, and no reviewer (both lanes alike)
+# ---------------------------------------------------------------------------
+
+#: Where the stand-in CLIs of a dry run "live": the plan resolves each slot's
+#: executable through ``shutil.which``, and the test must not depend on which
+#: provider CLIs the machine running it has installed.
+FAKE_CLI_DIR = "/opt/fake-cli"
+
+
+def _dry_run(lane: Lane, *flags: str, verdicts: Dict[str, Any] = None) -> Tuple[int, List]:
+    """The lane's fan-out under ``--dry-run-subagents``, every slot dispatch a
+    recorded failure; the sandbox gate answers ``verdicts`` per provider (the
+    adapter's own sandbox otherwise) without a probe."""
+    dispatched: List = []
+
+    def dispatch(*args, **kwargs):
+        dispatched.append((args, kwargs))
+        raise AssertionError("a dry run dispatched a reviewer")
+
+    real_which = shutil.which
+
+    def which(name, *args, **kwargs):
+        if name in ("codex", "cursor-agent"):
+            return f"{FAKE_CLI_DIR}/{name}"
+        return real_which(name, *args, **kwargs)
+
+    def gate(provider_name, _cwd):
+        return (verdicts or {}).get(provider_name) or rob.SandboxVerdict(
+            rob.SANDBOX_DISPATCH, None)
+
+    target = (rob, "run_all_models") if lane.phase == "review-plan" else (
+        cro, "run_all_reviews")
+    code = lane.run(
+        "--models", *MODELS, "--timeout", "120", "--dry-run-subagents", *flags,
+        patches=(
+            patch("utils.interactive.resolve_models", return_value=list(MODELS)),
+            patch("utils.interactive.is_model_valid", return_value=True),
+            patch.object(*target, new=dispatch),
+            patch.object(rob, "sandbox_refusal", side_effect=gate),
+            patch("shutil.which", side_effect=which),
+        ),
+    )
+    return code, dispatched
+
+
+def _lane_files(lane: Lane) -> set:
+    return {path.name for path in lane.phase_dir.iterdir()}
+
+
+class TestDryRunReviewerPlan:
+    """``--dry-run-subagents`` stops both lanes before their reviewers, after
+    printing each slot as the fan-out would dispatch it, and records nothing
+    (docs/development/review-results.md#a-dry-runs-reviewer-plan)."""
+
+    def test_the_plan_is_printed_and_no_reviewer_runs(self, lane, capsys):
+        state_before = lane.state_path.read_bytes()
+        code, dispatched = _dry_run(lane, "--host", "codex")
+        assert code == 0 and dispatched == []
+
+        out = capsys.readouterr().out
+        assert (f"[dry-run-subagents] {lane.mode}: reviewer plan, 2 slot(s); "
+                f"host: codex") in out
+        assert "no reviewer was called and nothing was recorded" in out
+        assert lane.state_path.read_bytes() == state_before
+        lock = Path(detach.lock_path(str(lane.phase_dir))).name
+        assert _lane_files(lane) <= {lock, "subagent_dry_run.json"}
+
+        dry = lane.json("subagent_dry_run.json")
+        assert dry["kind"] == review_lane.REVIEWER_PLAN_KIND and dry["tasks"] == []
+        assert [slot["spec"] for slot in dry["reviewers"]] == MODELS
+        codex = dry["reviewers"][1]
+        assert (codex["provider"], codex["model"], codex["effort"]) == (
+            "codex", "gpt-5.5", None)
+        assert codex["executable"] == codex["argv"][0] == f"{FAKE_CLI_DIR}/codex"
+        assert codex["argv"][-1] == review_lane.REVIEWER_PROMPT_PLACEHOLDER
+        assert codex["timeout_s"] == 120 and codex["would_dispatch"] is True
+        assert codex["sandbox"]["words"] == "the adapter's own (no fallback rung)"
+        assert f"argv: {' '.join(codex['argv'])}" in out
+
+    def test_a_dry_run_arms_no_codex_trust_restore(self, lane, tmp_path, monkeypatch):
+        """The codex slot's command is rendered outside the dispatch context,
+        so the run's close-out has nothing to restore in ``$CODEX_HOME``
+        (``llm_client.preview_dispatch_context``)."""
+        from utils import codex_trust
+
+        monkeypatch.setattr(codex_trust, "ENABLED", True)
+        codex_trust.reset()
+        home = tmp_path / "codex-home"
+        home.mkdir()
+        (home / "config.toml").write_bytes(b"[tui]\nnotifications = false\n")
+        monkeypatch.setenv("CODEX_HOME", str(home))
+        try:
+            code, dispatched = _dry_run(lane)
+            assert code == 0 and dispatched == []
+            assert codex_trust._RECORDS == {}
+        finally:
+            codex_trust.reset()
+        assert (home / "config.toml").read_bytes() == b"[tui]\nnotifications = false\n"
+        assert [p.name for p in home.iterdir()] == ["config.toml"]
+
+    def test_a_forced_dry_run_keeps_the_completion_on_record(self, lane, capsys):
+        """``--force`` clears a completed phase's record before a real fan-out;
+        a dry run of it clears nothing, and says so instead of "Cleared"."""
+        state = get_or_create_state(lane.plan)
+        state.mark_phase_completed(lane.phase)
+        state.save()
+        code, dispatched = _dry_run(lane, "--force")
+        assert code == 0 and dispatched == []
+        assert lane.phase_completed()
+        out = capsys.readouterr().out
+        assert "--force would clear the previous phase completion (dry run" in out
+        assert "Cleared previous phase completion" not in out
+
+    def test_a_refused_slot_and_a_jailed_slot_are_said_in_words(self, lane, capsys):
+        jail = rob.SandboxVerdict(
+            rob.SANDBOX_DISPATCH_UNSANDBOXED, "[SANDBOX_INCIDENTAL] notice",
+            "plugin-landlock", (), incidental=True)
+        refused = rob.SandboxVerdict(
+            rob.SANDBOX_REFUSE, "[SANDBOX_UNAVAILABLE] cursor-agent's sandbox cannot start")
+        code, dispatched = _dry_run(
+            lane, verdicts={"codex": jail, "cursor-agent": refused})
+        assert code == 0 and dispatched == []
+
+        out = capsys.readouterr().out
+        cursor, codex = lane.json("subagent_dry_run.json")["reviewers"]
+        assert cursor["would_dispatch"] is False
+        assert cursor["reason"] == refused.reason
+        assert "would not dispatch: [SANDBOX_UNAVAILABLE]" in out
+        # The jail rung's command is the wrapped one, and the slot's notice
+        # marker is never printed: no slot ran.
+        assert codex["would_dispatch"] is True and codex["argv"][0] == sys.executable
+        assert codex["executable"] == f"{FAKE_CLI_DIR}/codex"
+        assert codex["sandbox"]["words"].endswith("the plugin's own Landlock jail")
+        assert "[SANDBOX_INCIDENTAL]" not in out
+
+    def test_review_codes_heal_of_a_finished_round_records_nothing(self, code_lane, capsys):
+        """A round whose verdicts and report are whole but whose completion is
+        missing is healed by a real run; a dry run only says so."""
+        _validated(code_lane)
+        state = get_or_create_state(code_lane.plan)
+        state.state["phases_completed"].pop(code_lane.phase)
+        state.save()
+        capsys.readouterr()
+        code, dispatched = _dry_run(code_lane)
+        assert code == 0 and dispatched == []
+        assert "a real run records the completion and calls no reviewer" in (
+            capsys.readouterr().out)
+        assert not code_lane.phase_completed()

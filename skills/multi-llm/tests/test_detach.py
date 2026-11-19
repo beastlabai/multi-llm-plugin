@@ -7689,3 +7689,12 @@ class TestStatusExitZero:
             [str(tmp_path / "missing.md"), "--exit-zero"], capsys
         )
         assert code not in (0, 2)
+
+
+def test_a_dry_run_launch_never_takes_a_live_run_over():
+    """A launch's ``--force`` stops a live run and takes its lock; a preview's
+    never does, since a preview changes nothing: it is refused like any launch
+    without ``--force`` (docs/development/review-results.md#a-dry-runs-reviewer-plan)."""
+    assert detach._takes_over(argparse.Namespace(force=True)) is True
+    assert detach._takes_over(
+        argparse.Namespace(force=True, dry_run_subagents=True)) is False

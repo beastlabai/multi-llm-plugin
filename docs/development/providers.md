@@ -18,6 +18,9 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [Reading a capture](#reading-a-capture)
   - [Launch diagnostics](#launch-diagnostics)
 - [Usage reporting](#usage-reporting)
+  - [Usage-limit resets](#usage-limit-resets)
+- [Codex subagent tools](#codex-subagent-tools)
+- [Claude Code read slots](#claude-code-read-slots)
 - [Child Python environments](#child-python-environments)
 - [Private config roots](#private-config-roots)
 - [Provider outcome logs](#provider-outcome-logs)
@@ -97,7 +100,7 @@ imports `base` at run time.
 | `failure_classifier.py` | The marker tables, `classify_streams` and `match_streams`, `exit_zero_failure_category`, and `LLMProvider`'s two default pattern sets (`AUTH_ERROR_PATTERNS`, `RATE_LIMIT_PATTERNS`). |
 | `stdout_shape.py` | `envelope_signature`, `read_stdout`, `structural_stdout` and `diagnostic_streams` ([reading a capture](#reading-a-capture)). |
 | `child_env.py` | Git's non-interactive environment, the strip and backend policies, the env allowlist and its matrix, and `build_child_env`. |
-| `version_gate.py` | `version_tuple`, `version_verdict` and the help-token gate (`read_help_tokens`). |
+| `version_gate.py` | `version_tuple`, `version_verdict`, the help-token gate (`read_help_tokens`) and the once-per-process version read behind a gated config key (`read_cli_version`). |
 | `sandbox_rungs.py` | The sandbox fallback's policies and rungs, the write posture, and the `[SANDBOX_*]` notices. |
 
 The classifier is pure: it imports no provider module, and no `utils` module but
@@ -170,9 +173,11 @@ Scaffold via `init_config.py` (`--init`, auto-detects installed CLIs).
 
 **`driver:` is the fourth top-level block** (`subagent_runner`,
 `subagent_runner_cheap`, `max_concurrent_subagents`, `max_concurrent_write_subagents`, `subagent_timeout_s`,
-`subagent_retries`, `verify_command`, `verify_timeout_s`, `write_paths`),
+`subagent_idle_timeout_s`, `subagent_retries`, `verify_command`, `verify_timeout_s`, `batch_checks`,
+`write_paths`),
 fully populated in base so nothing has to guess, read only through the typed accessors
-(`get_driver_config`, `get_subagent_runner`, `get_subagent_timeout`, `get_max_concurrent_subagents`,
+(`get_driver_config`, `get_subagent_runner`, `get_subagent_timeout`, `get_subagent_idle_timeout`,
+`get_max_concurrent_subagents`,
 `get_max_concurrent_write_subagents`, `get_verify_command`, `get_verify_timeout_s`, `get_write_paths`,
 `get_subagent_retries`, `get_driver_provenance`) and never by indexing `config["driver"]`.
 
@@ -999,7 +1004,136 @@ So they are read only from text that a model or a tool cannot write:
 `turn.completed` event, opencode the **sum** of every `step_finish` part (reading the
 last step alone under-reports a multi-step run). Every other adapter declares `usage: none`
 and records duration only; a batch mixing the two reports the partial sum plus
-`tasks_without_usage`.
+`tasks_without_usage`. A task counts there until one of its attempts reports a token figure: a
+tool count alone (`{"tool_uses": N}`, a codex stream cut short before `turn.completed`) is kept
+and summed, but it is no measurement of what the task spent
+([tool-use counts](delegation.md#tool-use-counts-on-the-executor-leg)).
+
+### Usage-limit resets
+
+**A slot stopped by the account's usage limit says when the limit resets, in the CLI's own words
+or as an exact time, never as a time computed from prose.** `LLMProvider.usage_limit_reset`
+(`None` by default) returns `clause`, the CLI's sentence fragment verbatim, and `at`, an ISO 8601
+UTC time the CLI gave as a timestamp. `provider_outcome` puts it, redacted, on
+`details["usage_limit_reset"]` for a non-zero exit and for an exit 0 that left no answer; absent
+when the CLI said nothing. Diagnostics only: the category stays whatever `classify_failure` read.
+
+claude-code is the one adapter that overrides it. Its blocked slots answer `api_error_status: 429`
+with one of these sentences, recorded from real runs:
+
+- `You've hit your 5-hour limit · resets 3:50am (Europe/Zurich)`, beside
+  `"api_error": "usage_limit_reached"` and `"api_error_origin": "first_party"`;
+- `You've hit your weekly limit · resets 6am (Europe/Zurich)`;
+- `You've reached your Fable limit. Switch to another model, or manage usage credits at …` and
+  `You're out of usage credits. …`, with no reset clause.
+
+`describe_failure` tags all four `[USAGE_LIMIT]` (the `api_error` code first, then
+`USAGE_LIMIT_MARKERS`), so the fan-out's line reads, for example, `claude-code exited with code 1:
+[USAGE_LIMIT] HTTP 429: You've hit your weekly limit · resets 6am (Europe/Zurich) [rate_limited]`.
+Before the "hit your … limit" marker the two clause-carrying sentences read as a transient 429.
+The category stays `rate_limited`, and claude-code's declared internal retries already stop an
+identical re-dispatch (rule 6(b)), so no retry is spent on a limit that does not clear. The reset
+clause is a local clock time with no date: "6am" can be today, tomorrow or, for a weekly limit,
+six days away, so `clause` is kept as text and `at` is never derived from it.
+
+`at` comes only from a `rate_limit_event` whose `rate_limit_info.status` is `rejected`; its
+`resetsAt` is epoch seconds and exact (a recorded `1794942000` matched a recorded "resets Nov 17,
+8pm (Europe/Zurich)" to the minute). The event is printed by `--output-format stream-json` (and the
+verbose JSON array), not by the `--output-format json` the slots run, and the statuses recorded so
+far are `allowed` and `allowed_warning`; so `at` is read where a capture carries one and is
+otherwise absent. The executor lane builds its rate-limit line from the stream tail, which carries
+the sentence and its clause; it records no structured field.
+
+## Codex subagent tools
+
+**A codex writer starts without codex's subagent tools; reviewers keep them.** A writer
+(`agent-write`) is already the plugin's subagent, and an agent it spawns runs outside the writer's
+timeout, its concurrency caps and its write audit. The read-only profiles (`generate` for
+reviewers, ask and salvage; `agent-readonly` for executor validators) keep the tools, so a reviewer
+can hand exploration to a child agent and get back a summary instead of holding every file it read
+in its own context (user decision, 2026-11-19). The cost is on the audit side: a read-only slot's
+`codex_stream_audit` cannot see a v2 child's writes either (below), which matters where the slot
+runs on the `unsandboxed` fallback rung, with no write boundary of its own.
+Measured offline against codex 0.170.0 (the capture rig's stub, a throwaway `CODEX_HOME`, the
+adapter's own argv):
+
+- gpt-5.5 advertises multi-agent v1: `tool_search` in `tools[]`, which returns the deferred
+  `multi_agent_v1` namespace (`spawn_agent`, `send_input`, `wait_agent`, `close_agent`,
+  `resume_agent`). A spawn is a `collab_tool_call` item in the parent's stream.
+- Every gpt-6 model (gpt-6.1-sol, gpt-6-astra, gpt-6.1-terra, gpt-6-luna) sends no `tools[]`;
+  its request carries an additional-tools developer item whose `collaboration` namespace holds
+  six tools, spawn_agent, wait_agent, send_message, followup_task, interrupt_agent and
+  list_agents (multi-agent v2, selected by the model's metadata). A scripted direct
+  `collaboration.spawn_agent` call ran a sub-agent that wrote a file into the tree, and **the
+  parent's `--json` stream had no item for the spawn at all**, so `codex_stream_audit` cannot see
+  what such a child does.
+
+What turns each off, per codex's own text ("`[features].multi_agent` is deprecated. It still
+controls the V1 fallback. `[agents].enabled = false` disables subagent tools even when the model
+selects a subagent version, unless `[features].multi_agent_v2` is enabled."), confirmed on the wire:
+
+| Key | v1 (gpt-5.5) | v2 (gpt-6) | v2 enabled in the user's config |
+| --- | --- | --- | --- |
+| `features.multi_agent=false` | off | **still on** | on |
+| `agents.enabled=false` | off | off | **still on** |
+| `features.multi_agent_v2=false` | on | on | off |
+
+So every codex writer carries `SUBAGENT_FEATURES_OFF` (`-c features.multi_agent=false -c
+features.multi_agent_v2=false`) and, where the build takes it, `AGENTS_OFF_PAIR` (`-c
+agents.enabled=false`), all spliced by `CodexProvider._writer_subagents_off` right before
+`--ephemeral`, from `build_agent_command` for `agent-write` only. Every write sandbox rung starts
+from that argv, so all of them carry the keys; `generate` and `agent-readonly` (`_BASE_ARGV`)
+carry none on any rung, and never read the version gate. A config key is not in `--help`, so the gate is
+the installed version: `LLMProvider.gate_version` reads `version_cmd` once per process
+(`version_gate.read_cli_version`). At 0.144.0, the adapter's floor, `[agents]` is a map of roles
+and `agents.enabled=false` is `Error loading config.toml: invalid type: boolean false, expected
+struct AgentRoleToml` (exit 1, zero requests); 0.146.0 through 0.170.0 accept it. 0.145.x was not
+measured, so the gate starts at 0.146.0. An unread or older version omits the pair with one WARN:
+gpt-6 writers on that build can still spawn. The two feature keys were accepted by every build
+measured from 0.144.0 to 0.170.0 with no notice on stderr or in the stream (an unknown `features.*`
+key at 0.170.0 gives an in-stream `error` item, "Codex is ignoring 1 unrecognized configuration
+setting"; these give none). A user config holding `[features.multi_agent_v2]` or `[agents]` as a
+table still loads under the overrides.
+
+The suite answers `gate_version` with each adapter's `verified_version` (conftest
+`_pin_gate_version`; opt out with `@pytest.mark.cli_version_read`), so a rendered argv does not
+depend on the codex installed on the machine running it. The row-capture kit
+(`tests/fixtures/row_capture/make_argv.py`) answers it with the image's pin from
+`cli-versions.lock`.
+
+claude-code's agent profiles already deny the subagent tool: `--disallowed-tools Task` still
+removes the tool, which 2.1.328 names `Agent`, from the request (measured both spellings). The
+`generate` profile has no tool policy and advertises `Agent`. So on claude-code, reviewers can
+spawn and writers cannot, as on codex, but executor validators (`agent-readonly`) cannot either:
+that profile's tool list predates this decision and was left as it was.
+
+## Claude Code read slots
+
+**claude-code's read profiles start without the user's MCP servers; every profile keeps the
+user's hooks.** `generate` and `agent-readonly` render `--strict-mcp-config` (with no
+`--mcp-config`, no MCP server starts) after `--model`/`--effort` and ahead of the permission and
+tool flags (`_render_argv`'s `read_slot`); `agent-write` keeps the user's MCP servers because an
+implement batch may need a tool the user configured. Dropping a server only takes tools away,
+never a guard. Measured on claude 2.1.327, the flag saves about 0.9 s of slot start-up. Offline,
+with a marker-writing hook and MCP server planted in a throwaway `HOME` (claude 2.1.328), both
+read argv started no MCP server and ran every hook; the write argv started the server too.
+
+**No slot passes `--settings {"disableAllHooks":true}`**, though it would save about another
+0.9 s. A user's PreToolUse hook may be the one guard they put on a write, and neither read
+profile shuts out every write. `generate` runs `--permission-mode acceptEdits` with no tool
+list. `agent-readonly` denies Bash and the edit tools, but a deny-list cannot prove a tool set
+closed while each release ships new tools: on 2.1.328 the `agent-readonly` argv let a scripted
+model run `EnterWorktree` (a worktree and a branch created) and a durable `CronCreate`
+(`.claude/scheduled_tasks.json` written) with no permission prompt, hooks on or off. A hook-off
+switch derived from the tool lists would therefore rest on a list nobody can keep complete. So
+multi-llm's own hooks (the SessionStart doctor, the Stop report check, the PreToolUse wakeup check)
+run in every slot too, as they always did before the switch was tried: they cost that start-up
+time, and the doctor's summary enters the slot's context.
+
+The flag goes through the shared help gate (`supports_flag`): a CLI whose help lacks it gets the
+argv without it and no warning, since nothing the run relies on is lost. Every read dispatch
+therefore reads `claude --help` once per process. The suite's mock claude
+(`tests/mocks/mock_llm.py`) documents and accepts it, as it does every gated flag.
 
 ## Child Python environments
 
@@ -1034,7 +1168,9 @@ concurrent slots never share one writable root. A root the user pinned through t
 used as it is and never removed.
 
 - **A root lives as long as its dispatch, and its CLI.** Both spawn sites enter
-  `llm_client.provider_dispatch_context`, which is also a `private_home.dispatch_homes` scope:
+  `llm_client.provider_dispatch_context`, which is also a `private_home.dispatch_homes` scope (a
+  `--dry-run-subagents` render enters only its argv half, `preview_dispatch_context`, which makes no
+  root and no config home, [review results](review-results.md#a-dry-runs-reviewer-plan)):
   closing it removes the roots the adapter's `get_env` made inside it, once every child the
   dispatch started has ended. The scope holds a `process_control.child_ledger`, which
   `popen_tree` adds each child to. A child has ended when it was seen to exit, or when its spawner

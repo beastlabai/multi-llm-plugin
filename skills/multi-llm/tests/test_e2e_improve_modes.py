@@ -1574,6 +1574,147 @@ class TestImproveCommits:
         assert tokens[tokens.index("--base-ref") + 1] == world.empty_tree
 
 
+
+# --------------------------------------------------------------------------- #
+# 12. --dry-run-subagents: step 1 previews its reviewers, no model is called
+# --------------------------------------------------------------------------- #
+
+#: A reviewer whose spec carries an effort, so the preview has one to show.
+EFFORT_MODEL = "codex:gpt-5.5:high"
+
+
+def _dry_run_files(phase_dir: Path) -> set:
+    """What a dry run may leave in a phase dir: the run's lock and its record."""
+    from utils import detach
+
+    return {Path(detach.lock_path(str(phase_dir))).name, "subagent_dry_run.json"}
+
+
+class TestDryRunSubagents:
+    """``--dry-run-subagents`` on a composite: the first step that would run
+    previews its own dispatches (the review: its reviewer plan), no later step
+    runs and no model is called (docs/development/workflows.md#a-dry-run-previews-one-step)."""
+
+    @pytest.mark.parametrize("mode", ["improve-plan", "improve-code"])
+    def test_step_one_prints_its_reviewer_plan_and_nothing_runs(self, tmp_path, mode):
+        world = World(tmp_path, working_diff=mode == "improve-code")
+        review, review_dir, apply = {
+            "improve-plan": ("review-plan", "review-plan", "apply-suggestions"),
+            "improve-code": ("review-code", "code-review", "apply-code-fixes"),
+        }[mode]
+        run = world.composite(mode, "--dry-run-subagents")
+        assert run.exit_code == 0, run.explain()
+
+        # -- nothing ran, nothing was recorded ----------------------------------
+        assert world.calls() == [], "a dry run calls no model"
+        assert not (world.out / "state.json").exists()
+        assert not (world.out / mode).exists(), "no composite run dir"
+        assert {p.name for p in (world.out / review_dir).iterdir()} <= _dry_run_files(
+            world.out / review_dir)
+        assert world.plan_bytes == world.original_plan
+        assert {rel: (world.repo / rel).read_bytes() for rel in WORKING_DIFF} == (
+            world.sources_before)
+
+        # -- step 1 alone ran, with the flag, and said what it would dispatch ---
+        assert list(run.step_flags()) == [review], run.stdout
+        assert run.step_flags()[review][-1] == "--dry-run-subagents"
+        assert f"Step 2: {apply} skip (dry run: previews step 1 only)" in run.stdout
+        dry = json.loads((world.out / review_dir / "subagent_dry_run.json").read_text())
+        assert dry["kind"] == "review_fanout" and dry["tasks"] == []
+        [slot] = dry["reviewers"]
+        assert (slot["spec"], slot["provider"], slot["model"]) == (MODEL, "cursor-agent", "auto")
+        assert slot["would_dispatch"] is True
+        assert slot["argv"][-1] == "<reviewer prompt>"
+        assert dry["subagent_runner"]["spec"] == RUNNER
+        assert f"  1. {MODEL}" in run.stdout
+        assert "no reviewer was called and nothing was recorded" in run.stdout
+        assert run.result["exit"] == 0 and run.result["next"] is None, run.result
+
+        # -- what the preview left does not stand in a real run's way ------------
+        real = world.composite(mode)
+        assert real.exit_code == 0, real.explain()
+        assert len(world.calls_of("review")) == 1
+        assert set(world.state()["phases_completed"]) == {review_dir, apply}
+
+    def test_full_previews_its_review_and_nothing_runs(self, world):
+        """``full`` previews one phase as the composites do: its review prints
+        the reviewer plan, no model is called, no later phase runs and nothing
+        is recorded; before, the unrecorded review stopped ``full`` at exit 3."""
+        run = world.run("full", "--models", MODEL, "--yes", "--exec-subagents",
+                        "--dry-run-subagents", "--detach")
+        assert run.exit_code == 0, run.explain()
+        assert world.calls() == [], "a dry run calls no model"
+        assert not (world.out / "state.json").exists()
+        assert not (world.out / "full").exists(), "no run dir"
+        assert {p.name for p in (world.out / "review-plan").iterdir()} <= _dry_run_files(
+            world.out / "review-plan")
+        assert world.plan_bytes == world.original_plan
+        assert list(run.step_flags()) == ["review-plan"], run.stdout
+        assert run.step_flags()["review-plan"][-1] == "--dry-run-subagents"
+        assert "Phase 2: Apply Suggestions: skip (dry run: previews Phase 1" in run.stdout
+        assert "no reviewer was called and nothing was recorded" in run.stdout
+        assert "did not complete" not in run.stdout + run.stderr
+        assert run.result["exit"] == 0 and run.result["next"] is None, run.result
+
+    def test_the_previewed_command_is_the_one_a_real_review_spawns(self, world):
+        """The reviewer plan goes through the spawn's own resolution and build
+        (``llm_client.preview_dispatch``), so the real run spawns exactly the
+        argv the dry run showed, effort included, the prompt aside."""
+        preview = world.run("review-plan", "--models", EFFORT_MODEL, "--yes",
+                            "--exec-subagents", "--dry-run-subagents")
+        assert preview.exit_code == 0, preview.explain()
+        assert world.calls() == []
+        dry = json.loads((world.out / "review-plan" / "subagent_dry_run.json").read_text())
+        [slot] = dry["reviewers"]
+        assert (slot["provider"], slot["model"], slot["effort"]) == ("codex", "gpt-5.5", "high")
+        assert "effort: high" in preview.stdout
+
+        real = world.run("review-plan", "--models", EFFORT_MODEL, "--yes", "--exec-subagents")
+        assert real.exit_code == 0, real.explain()
+        [review] = world.calls_of("review")
+        # The mock logs the arguments after its program; the launcher in front of
+        # them is one path on POSIX and `node <cli.js>` behind a Windows shim.
+        spawned = review["args"]
+        assert spawned[-1] == review["prompt"]
+        assert slot["argv"][-len(spawned):-1] == spawned[:-1]
+        assert "model_reasoning_effort=high" in spawned
+
+    def test_validation_previews_after_a_real_review_left_it_pending(self, world):
+        """The way to preview validation tasks the dry run names: a real review
+        that leaves validation pending (no ``--exec-subagents``), then
+        ``--reaggregate --dry-run-subagents``, which renders every validation
+        task and dispatches none."""
+        review = world.run("review-plan", "--models", MODEL, "--yes")
+        assert review.exit_code == 0, review.explain()
+        assert len(world.calls_of("review")) == 1 and not world.calls_of("validate")
+
+        preview = world.run("review-plan", "--reaggregate", "--dry-run-subagents")
+        assert preview.exit_code == 0, preview.explain()
+        assert not world.calls_of("validate") and len(world.calls()) == 1
+        dry = json.loads((world.out / "review-plan" / "subagent_dry_run.json").read_text())
+        assert dry["kind"] == "validation" and dry["tasks"], dry
+        assert {task["runner"] for task in dry["tasks"]} == {RUNNER}
+
+    def test_a_reviewed_plan_previews_its_apply_instead(self, world):
+        """With the review on record, the first step that runs is the apply,
+        which previews its write batches as that phase alone does; still no
+        model is called and nothing is recorded."""
+        assert world.composite("improve-plan", "--force").exit_code == 0
+        # The apply ran too; make it owed again by forgetting its completion.
+        state = world.state()
+        state["phases_completed"].pop("apply-suggestions", None)
+        (world.out / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        before = (world.out / "state.json").read_bytes()
+        calls_before = len(world.calls())
+
+        run = world.composite("improve-plan", "--dry-run-subagents")
+        assert run.exit_code == 0, run.explain()
+        assert list(run.step_flags()) == ["apply-suggestions"], run.stdout
+        assert "Step 1: review-plan skip" in run.stdout
+        assert len(world.calls()) == calls_before, "a dry run calls no model"
+        assert (world.out / "state.json").read_bytes() == before
+
+
 def improvement_continuation(improve_workflow, run: dict) -> List[str]:
     """``improve_workflow.recorded_continuation`` of a run record's ``replay_flags``."""
     return improve_workflow.recorded_continuation("improve-commits", run.get("replay_flags"))

@@ -15,6 +15,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [Grouping and section references](#grouping-and-section-references)
 - [Consolidation batches](#consolidation-batches)
 - [The shared review lane](#the-shared-review-lane)
+- [A dry run's reviewer plan](#a-dry-runs-reviewer-plan)
 - [Reaggregation and result identity](#reaggregation-and-result-identity)
 - [Withheld slot answers](#withheld-slot-answers)
 - [Round identity](#round-identity)
@@ -483,6 +484,66 @@ the pair, its drift list and the context plan (the base ref and the paths are ke
 `intent_to_add_untracked`, and the last stops its phase ticker only after the terminal
 `progress.step`. `--reaggregate` is `_reaggregate_entry`: its own pre-flight, the same
 boundary, and the phase-scoped ticker around `reaggregate_from_existing_files`.
+
+## A dry run's reviewer plan
+
+**`--dry-run-subagents` on a review fan-out calls no model: it prints each reviewer slot as the
+fan-out would dispatch it, and stops.** The flag's contract is a preflight that starts no child,
+records nothing and exits 0 (its help in `cli_common`; D3l, [write safety](write-safety.md)), and a
+reviewer is a model turn, as a subagent is. Until 2026-11-19 the fan-out ran for real under the flag
+and only the validation round built from its findings was previewed, so a run that pinned its
+reviewer (`--models codex:gpt-6-luna:high`, a project `defaults.models`) could prove the pin only from
+the reviewer's log header, after a paid call.
+
+Both lanes call `review_lane.preview_fanout` after model selection and the read-only pre-flight (the
+completed-phase guard, review-tasks' tasks-file check, the scope-round policy, the plan read, and
+review-code's base ref and scope), before the backup, the detach boundary and the round's claim, so
+a `--detach` launch previews in the foreground (`cli_common.FOREGROUND_PREVIEW_FLAGS`). Per slot, in
+roster order, it takes the slot's own steps (`plan_reviewer_slots`):
+
+- the spawn's head, `llm_client.resolve_dispatch_target` (provider, model, timeout, prompt transport,
+  an unknown or missing CLI refused), which `prepare_dispatch` starts with too;
+- the slot guard's sandbox gate, `SlotGuard.gate` through the lane's `SlotSteps`, which may run the
+  adapter's model-free sandbox self-test, as a subagent dry run's preflight does, so the rung shown is
+  the rung a slot would get;
+- the spawn's own build, `llm_client.preview_dispatch`: the argv half of the adapter's dispatch
+  context and `render_dispatch_command`, the one `build_command_for_transport` call
+  `prepare_dispatch` makes as well, with a placeholder prompt (`<reviewer prompt>`) on the gate's
+  rung. It composes no child environment, and the plugin's jail is rendered with placeholder paths
+  and nothing created. The effort is the model string split by the adapter's own accepted
+  `:effort` names.
+
+**The preview never enters the dispatch context itself** (`llm_client.preview_dispatch_context`, which
+the subagent dry run's `task_file_runner._preview_argv` takes too). That context has side effects a
+dry run may not have: codex's `note_dispatch` arms the trust bookkeeping, whose close-out
+(`codex_trust.restore_all`) rewrites `$CODEX_HOME/config.toml` when an entry appeared after arm time,
+another run's included; opencode and fx make a config home; and it opens the private-home scope. The
+argv half yields the same refusal and renders the same argv with none of that. An adapter whose argv
+reads its context declares `hermetic_preview`: opencode's yields the same refusal for a provider
+defined only in the user's own config and renders `--pure`, with a placeholder in place of the config
+home (`opencode.PREVIEW_CONFIG_HOME`, an environment value a preview never composes) and no
+`opencode --version` read. fx's managed `HOME` is environment alone, so fx declares none. Until
+2026-11-19 the preview entered the real context, so a dry run that rendered a codex slot armed the
+restore of the user's codex config. `tests/test_llm_client.py`, `tests/test_review_lane_parity.py`,
+`tests/test_opencode_hermetic.py` (`TestHermeticPreview`) and `tests/test_fx_provider.py` hold it.
+
+It also prints the host id, the runner the round's subagent tasks would take under `--exec-subagents`
+(`runner_selection.resolve_task_runner_source` for a `full`-tier task that names no model, with its
+key and layer), and what ran and what did not, and writes the same as `{phase}/subagent_dry_run.json`
+(kind `review_fanout`: `reviewers`, `subagent_runner`, an empty `tasks`). The sandbox is said in
+words, never with a `[SANDBOX_*]` marker, which names a slot that ran.
+
+Nothing else is written: `state.json` is not materialized, `--force` clears no completion,
+review-code's partial-completion heal records nothing, and the phase dir keeps only the run's lock
+and the dry-run record. Nor does a preview stop anything: a `--detach --force` launch takes a live
+run over, but never under the flag (`detach._takes_over`), so a preview over a live run is refused
+like any launch without `--force`. Validation tasks are built from findings, so a dry run of a new round cannot
+list them; after a real review that left validation pending (a run without `--exec-subagents`),
+`--reaggregate --dry-run-subagents` previews them, as `--consolidate --dry-run-subagents` previews
+consolidation (writing nothing but its record, [workflows](workflows.md#a-dry-run-previews-one-step)). `ask` takes the flag from the shared parser and has no subagent stage: its fan-out is
+not previewed. `tests/test_review_lane_parity.py` (`TestDryRunReviewerPlan`) holds both lanes to this,
+`tests/test_llm_client.py` (`TestPreviewDispatch`) holds the preview to `prepare_dispatch`'s command,
+and `tests/test_e2e_improve_modes.py` compares a previewed argv with the one a real review spawned.
 
 ## Reaggregation and result identity
 
@@ -1080,6 +1141,102 @@ bracketed index in prose can never outrank the `[]` a reviewer that found nothin
 really wrote. Candidates parse with `strict=False` (`_loads_reply`, 2026-10-05): a
 raw control character inside a string no longer fails the document and serves a fragment from inside
 it.
+
+**A piece of a broken document is never a reviewer's answer.** Measured 2026-11-18, codex
+`gpt-6-luna`, 2 of about 70 single-reviewer runs: the reply was a whole, useful review on stdout
+whose findings array did not parse (an empty key with no value, `"…",\n ""\n }`, in one; three
+trailing commas, `"…",\n }`, in the other). The extractor's clause 1 served the last finding object
+inside it, with `enclosing_syntax_error`; `invoke_with_file_output` passed that object on as the
+answer, review-code failed its only model with "Expected JSON array, got dict" and wrote no salvage
+request, and the run stopped "All models failed", exit 3, under `--exec-subagents` too. review-plan
+fared worse: `save_model_result` re-read the object's text, found its `[..]` and saved an empty
+review. Now:
+
+- **The extractor offers a mended reading.** When it serves a piece of a broken document it also
+  tries `json_extractor.repair_document` on the document around it, which mends only two breaks,
+  each with one reading that drops nothing the model wrote: a comma after a value before `}` or `]`,
+  and an empty key with no value before `}` (with the comma before it). A named key with no value
+  (`"severity" }`) is not mended: it may be a field whose value was lost. Repaired characters become
+  spaces, so the mended reply is read again by the same rules, and its result rides on the
+  extractor's result as `repaired` (`data` and one `repairs` line per change). `data` is still the
+  piece, so the executor lane and every other caller read what they read before. A reply in which
+  nothing parses at all (a trailing comma in every finding that holds no nested array, or a single
+  finding) gets the same offer once: the first outermost document `repair_document` changes is
+  mended and the reply read again, and the result stays a failure (`data: None`) carrying
+  `repaired`, so the executor lane still retries it.
+  Neither path offers the mended reading while another outermost document in the reply, one that
+  opens like a started structure and names an answer field (`"title":`, `"desc":`, … the keys of
+  `_ANSWER_FIELD_NAMES`), still fails to parse (`_another_broken_document`; Fable review 2 N5). A reply of two arrays, each with a trailing
+  comma, served the last one mended and dropped the first unsaid. Mending both would leave last-wins
+  to pick between two documents the model wrote broken, and the repair notes' line and column are
+  per document, so the reading is refused and the attempt ends as a reply nothing mends: retried,
+  then salvaged with the whole reply. Prose brackets are no such document (`[see above]` and
+  `lines [12-15]` open like no structure, `[[:alpha:]]` and a code literal such as `{"error": err}`
+  name no answer field), so one broken document among them is still mended, and so is one followed
+  by a cut-off trailer, which is no balanced span.
+- **A document that never closes is a broken document** (Fable review 2026-11-19). A truncated reply,
+  `[{A}, {B}, {"title": "C", "descr`, has no candidate around B, so B was served as if it stood
+  alone: review-code salvaged from B and lost A and C, and review-plan salvaged from the one
+  suggestion it held. Now an opener before the served value that opens like a started structure
+  (`[{`, `{"`, `[[`, the openings `has_salvageable_json`'s clause 2 reads), starts no balanced run
+  and lies outside every balanced span is the enclosing document, running to the end of the reply
+  (`_never_closed_opener`); the piece carries `enclosing_syntax_error` with "(the document is never
+  closed: the reply ends inside it)", and such a document is never mended. A whole document followed
+  by a cut-off trailer is served clean, and an ANSI `[0m` or a `[docs]` is no opener.
+  The opener must also be followed by nothing but JSON up to the served value
+  (`_first_prose_token`; Fable review 2 N1): `The class "[[a-z]" is wrong.` and then a clean `[]` read
+  the `[[` as a document the reply ends inside, so the `[]` was refused and a lone reviewer with no
+  salvage ended at exit 3. The stretch is read token by token, never by grammar, so a missing comma
+  or a stray closer stays damage; prose is only a bare word that is not a JSON value, or a balanced
+  span that opens like prose (`[a-z]`, `[see above]`). A balanced span that opens like a document is
+  skipped unread, broken or not; a string still open at the served value holds it where a member's
+  value stands, after a colon (a truncation cut through a finding's text), and anywhere else its
+  quote is prose (`The token "{" is unexpected.`, whose closing quote opens a string straight after
+  the opener); and a closing quote with a letter or digit glued to it is a quote the model
+  left unescaped (`"say "hi" there"`), read on to a quote that a separator follows, so a truncated
+  finding with one is still a truncation. A prose opener is passed for the next opener after the
+  prose, which keeps the search linear and still finds the document's own `[`. What is lost: an
+  opener inside a string that the prose reading opened, and a truncation with an unescaped quote
+  between the opener and the served value that a space or punctuation follows (`"a 5" screen"`,
+  `"the "-" sign"`): there the served piece is read clean, as it was before the never-closed rule.
+- **The fan-out's reader takes it or refuses the piece** (`llm_client._channel_answer`, both
+  channels and the misnamed-file adoption): the mended reading when there is one, else the piece
+  only when it is an array of records (every item an object carrying `title`, `desc` and
+  `importance`, which both answer schemas require), else no answer. So one finding, a `line_range`
+  (an array holding no object was otherwise served as the review) and a finding's own nested array
+  are refused: two findings with a missing comma between them, the first carrying
+  `"refs": [{"file": …}, …]`, had that `refs` array saved as the review, "Found 2 issues", with both
+  findings lost. A broken wrapper around a whole findings array is still served. The rule reads the
+  items, not where the piece sat: a single finding broken by a quote looks like a wrapper whose
+  direct value is its `refs`. A refused piece fails the attempt as unparseable with where the
+  document breaks on its error and, on stdout, the reply's text attached
+  (`provider_outcome.attach_rejected_answer_text`: `stdout_excerpt`, `salvage_text`). The ladder
+  retries it as any unparseable answer (`driver.subagent_retries`), and each lane's salvage gate
+  then writes a request over the whole reply.
+- **A broken result file reaches salvage.** When both channels fail and the requested file held a
+  document nothing could read (an unescaped quote nothing mends, a truncation: `file_extraction_failed`),
+  its text becomes `salvage_text`, redacted and bounded like any salvage text, whenever it holds an
+  answer to repair (`provider_outcome.attach_broken_file_text`). The stdout of a model that wrote its
+  review to the file is usually prose about it, so the gate used to find nothing and the review on
+  disk was never read. The file wins over stdout whatever stdout holds, as it does when both parse:
+  a stdout that seems to hold an answer may be a clean claude-code or cursor-agent result envelope,
+  whose `permission_denials: []` passes `has_salvageable_json` around a prose `result`. The broken
+  file stays at `{model}.json`, the salvage task's own output path, which a repair replaces; a
+  `--reaggregate` before that drops it as unreadable.
+- **A repair is said, never silent.** The reader returns `json_repairs`; the log's `Result source:`
+  reads `… (JSON repaired: …)`; and both lanes print `[JSON_REPAIRED]` and add the sentence to
+  `result_notes` (`result_files.report_json_repairs`, beside `report_misnamed_result`), so it reaches
+  `status`, a terminal poll's notice and the report's `**Result files:**` line.
+- **review-code salvages a whole answer of the wrong shape**, as the base does: an object (one
+  finding, or a wrapper) with an answer's shape gets a salvage request instead of a bare failure.
+  Both lanes write that request over the reply's text, never over the object re-encoded: the reader
+  attaches the text to an answer that is not an array as `salvage_text`
+  (`provider_outcome.attach_reply_salvage_text`: the file's text, or the adapter's answer text of
+  stdout), review-code reads it through `salvage_source`, and the base lane's record carries it to
+  `save_model_result` as `failure_output`. A reply of two objects and no array serves the second,
+  and the request carries both.
+- A duplicated key parses (the last one wins) and a non-object element in an array is the
+  aggregation guard's above, so neither is repaired here.
 
 **Saving a model's result never ends the round's save loop.** On the plan and tasks lane,
 `validate_suggestion` treats an entry that is not an object, or a `type` that is not a string, as an

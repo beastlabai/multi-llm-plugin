@@ -124,6 +124,22 @@ prints the path), so you can port any custom settings into the regenerated file.
   it: set `verify_command` back and resume. Run one apply of a phase at a
   time: a foreground apply holds no phase lock, so two processes applying the
   same phase are not detected and can leave the owed check's record wrong.
+- **`driver.subagent_idle_timeout_s` stops a write subagent that went quiet
+  (default 900 s; `0` turns it off).** Under `--exec-subagents`, a Codex runner
+  editing a plan or code is stopped once it has printed nothing for that long
+  with no tool call running. If its last word was a message after its edits,
+  what it printed is read as if it had exited: a closing report that does not
+  parse gets the usual one request to restate it, and the snapshot comparison
+  still decides what was applied. If it went quiet in mid-turn (after a tool
+  call, or having only said what it would do), it is treated as if it had run
+  out of time, only sooner: a batch that changed files stops there with its
+  edits kept, and resuming the phase sends it again. It is not a
+  cap on how long a runner works: a test suite running in its shell keeps the
+  clock stopped, and `driver.subagent_timeout_s` stays the overall limit. A
+  blank value keeps the default, so `0` is the way to turn it off. Claude Code
+  runners print their answer only when they finish, so they never get this
+  timer; neither do read-only subagents, nor the host's own subagents when the
+  host runs the batches itself, which the plugin cannot stop.
 - **`progress.interval_s` / `progress.poll_s` price two different cadences.**
   `interval_s` (default 30 s) is how often a running fan-out prints a
   `[PROGRESS]` ticker line — a stdout cadence only, so `interval_s: 0` is the

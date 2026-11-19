@@ -13,6 +13,8 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [Where the executor's helpers live](#where-the-executors-helpers-live)
 - [Read and analyze executor](#read-and-analyze-executor)
 - [In-process continuations](#in-process-continuations)
+- [An idle writer](#an-idle-writer)
+- [Tool-use counts on the executor leg](#tool-use-counts-on-the-executor-leg)
 - [Validation model capability](#validation-model-capability)
 - [Runner pinning after failures](#runner-pinning-after-failures)
 
@@ -434,7 +436,7 @@ it.** Lowest first, each imports only the ones before it, and none imports the e
 | `utils/runner_selection.py` | `profile_for_kind` and the jail grant's kind table beside it (`WRITE_SCOPE_BY_KIND`), `resolve_task_runner` and its source, the roster check (`eligible_runners`) and the refusal text a preflight leg raises. |
 | `utils/probe_state.py` | What the process learned about its runners: the preflight caches, the sandbox decisions and the shared sandbox probe cache with their locks, the jail summary lines, the `reset_*` functions, and `sandbox_rung`. |
 | `utils/sandbox_walk.py` | The sandbox gate: `sandbox_verdict` and `cached_sandbox_verdict`, the fallback ladder walk, the policy, the preflight's sandbox leg (`_detect_sandbox`, `repo_wide_write_refusal`) and the lines it prints. |
-| `utils/dispatch_spawn.py` | One attempt's spawn (`_spawn`, returning a `_Capture`): the schema leg, the child environment (`dispatch_child_env`, which the auth probe reads too) and cached version, the process tree, the jail and what it reported (its `[JAIL_DENIED]` line from `landlock_dispatch.jail_denied_text`), the argv an audit record shows (`render_audit_argv`, `audit_argv`), the timeout kill (`_kill_timed_out`, which words its verdict by `process_control.unconfirmed_kill`), and the grant a write dispatch gets (`_dispatch_grant`). |
+| `utils/dispatch_spawn.py` | One attempt's spawn (`_spawn`, returning a `_Capture`): the schema leg, the child environment (`dispatch_child_env`, which the auth probe reads too) and cached version, the process tree, the jail and what it reported (its `[JAIL_DENIED]` line from `landlock_dispatch.jail_denied_text`), the argv an audit record shows (`render_audit_argv`, `audit_argv`), the timeout kill (`_kill_timed_out`, which words its verdict by `process_control.unconfirmed_kill`), the idle stop and how it is read (`_idle_turn_finished`, `idle_stopped`, `idle_stop_case`, `runner_exit_code`, `idle_stop_note`), and the grant a write dispatch gets (`_dispatch_grant`). |
 | `utils/attempt_classifier.py` | Which D3k rung an attempt lands on: `_classify_pre_parse` (rungs 1 and 2), `_parse_and_validate` and `_parse_with_schema_policy` (rungs 3 to 6), and `_classify_failed_run` with its redacted quote (`_quote_verdict`). Not `providers/failure_classifier.py`, the adapter-free stream rule it applies. |
 | `utils/runner_preflight.py` | `preflight_runner` and its version, auth, model and nested-exec legs (`_probe_nested_exec` spawns one dispatch and classifies it), and `probe_setup_metadata`. |
 | `utils/task_dispatch.py` | `dispatch_task` and its typed steps (below): the attempt loop, the state it carries (`AttemptState`), each hook's context (`hook_context`, `HOOK_CONTEXT_KEYS`), the re-asks and write hooks, the prompt budget, each attempt's record, the kind tables it reads (`SCHEMA_PHASE_BY_KIND`, `SCHEMA_REPAIRS_BY_KIND`, `RESENDS_BY_KIND`, `RECLASSIFIABLE_STATUSES`) and the D3g verification statuses (`STATUS_PARTIAL`, `STATUS_POLICY_VIOLATION`, `STATUS_BATCH_FAILED`). |
@@ -503,7 +505,9 @@ fully applied batch stopped at exit 3), and touches no file, a file that moves d
 decides what was applied; a reply whose JSON did not parse is told the parser's line and column (the
 `enclosing_syntax_error` that `json_extractor.extract_json_from_text` returns beside a piece of a broken document it
 served — read off the extraction that served it, never by searching the reply again; a stray bracket
-in prose is not a document, fix round 8), never the errors of a fragment salvaged from inside it;
+in prose is not a document, fix round 8; a document that never closes is one when nothing but JSON
+lies between its opener and the piece, and the error says so), never the errors of a fragment
+salvaged from inside it;
 charged to the same deadline, spending neither counter, recorded as its own attempt with
 `repair: schema_invalid` in `failed/` and the batch report; a CLI's own exhausted
 structured-output budget is not re-asked, nor a valid document `persist_result` refuses over
@@ -776,6 +780,170 @@ with stderr empty, so the gate was deciding on an empty string and reaching the 
 the wrong reason. That excerpt is also what a salvage request's `raw_output` carries,
 which is why `references/salvage-handling.md` tells its invoker to judge the content and never the channel,
 and to read an elision in it as the harness's bound rather than the model's truncation.
+
+## An idle writer
+
+**An executor-leg write subagent that prints nothing for `driver.subagent_idle_timeout_s`
+seconds (default 900) with no tool call in flight is stopped. What it printed is read as after an
+exit only when it had finished speaking; a writer that went quiet in mid-turn is the timeout it
+would have been at the deadline, only sooner.** The incident: an improve-plan batch on
+`codex:gpt-6-luna:high` edited the plan, printed an `agent_message` in prose, and then printed
+nothing for 25 minutes, with no `turn.completed` and no exit. Killing the codex process by hand
+ended the attempt with exit -15; the prose did not parse (`unparseable_result`, rung 5), the
+pre-retry check saw the moved bytes, and the report re-ask restated the report in 17 s. The run
+finished normally. Without that kill the 1800 s slot deadline would have ended it as `timeout`,
+and a timed-out batch that moved bytes is a partial application: a run stop.
+
+- **The stop is the timeout's own; where the runner stopped decides the reading.**
+  `process_capture.PipeCapture` keeps an idle clock (`idle_s`, `in_flight`): the time of the last
+  byte on either pipe, and the adapter's tracker's word on whether a tool call is running. Once it
+  expires, `communicate` raises `IdleStopped`, a `TimeoutExpired` but never a `StreamStopped`, and
+  `dispatch_spawn._spawn_in_context` stops the tree through `_kill_timed_out` and drains it. With
+  the kill confirmed, the adapter's `LLMProvider.turn_finished` reads the captured stdout
+  (`dispatch_spawn._idle_turn_finished`, which fails closed: a capped stdout, an adapter with no
+  answer and a raise all read as mid-turn), told whether the attempt was a report re-ask
+  (`reask`, which `task_dispatch.spawn_attempt` sets from `AttemptState.repair`: rule 7's two
+  re-asks, never rule 9's re-send, which is the batch again). codex's (`codex.finished_speaking`)
+  reads its events only: finished when the last event is `turn.completed`, or an `item.completed`
+  of an `agent_message` with a tool item before it; on a report re-ask, an `agent_message` last is
+  finished with no tool item before it, since a re-ask runs no tool by design.
+  - *Finished speaking:* the capture is not `timed_out`, `exit_code` is the signal's, `idle_stop`
+    carries the reason, and `read_attempt` parses the stream like any other exit. That is the
+    manual kill's path, so:
+    - edits, then prose, then silence (the incident): rung 5, moved bytes, the report re-ask
+      (rule 7), then the snapshot comparison decides;
+    - edits, then a schema-valid report, then silence: accepted. The write lane judges the reply
+      with `dispatch_spawn.runner_exit_code`, which is `None` after this stop, so
+      `WriteFacts.crashed` does not send it to the verdict table's row 5. The runner was silent
+      for the whole timeout with no tool running and its reply as its last word, so no edit was
+      under way, and its whole tree was gone before the snapshot comparison, which sees every
+      byte it moved. The attempt's row keeps the real exit code, and its reason names the stop;
+    - silence with nothing moved: the ordinary transport retry (`driver.subagent_retries`).
+  - *In mid-turn:* a tool item last, a message with no tool item before it on a dispatch of the
+    batch (only the opening preamble: gpt-6-luna says what it will do before its first tool
+    call), a `reasoning` item, an `error` event or a `turn.failed` after the message, or no event
+    at all. The capture stays `timed_out` with no exit code, and `_classify_pre_parse` records
+    `timeout` ("… in mid-turn: …"): nothing it printed is parsed, and it is never re-asked. The
+    pre-retry check then makes a batch that moved bytes a partial application
+    (`ran_out_of_time`: its edits are kept, and the resume sends it again on top of them), and
+    one that moved nothing gets the rung-2 retry. The stop's words name the idle timeout and suggest another model, not a longer
+    `subagent_timeout_s` (`StopAccount.stalled`, `stop["idle_stalled"]`). Before this rule a
+    re-ask after such a stall quoted the preamble, and a runner that attested every id was
+    `applied` with the edits after the stall missing (Fable review 2026-11-19, finding 3).
+  - Each attempt's row in the batch report says which case applied: `idle_stop` is
+    `finished_turn`, `mid_turn` or `unconfirmed` (`task_outcome.IDLE_STOP_*`,
+    `dispatch_spawn.idle_stop_case`), and the run's log line says so too.
+- **The limits.**
+  - *Commentary between tool calls reads as finished.* gpt-6-luna also speaks between tool
+    calls, and the event stream marks no message as the last one before `turn.completed`. A
+    writer that stalls right after an intermediate `agent_message` that follows a tool call is
+    read as an exit: its prose draws the report re-ask, and a runner that attests every id is
+    applied on the moved bytes, with any edit it meant to make after that message missing. The
+    incident was of this kind: its last message ended "I'm checking the resulting sections now".
+    Reading that shape as mid-turn would have stopped the incident's run at the deadline instead
+    of recovering it.
+  - *A lone message on a dispatch of the batch reads as mid-turn.* A writer whose only output
+    is one message with no tool call before it (a report that declines everything, then
+    silence) is retried as the batch, as at the deadline. Rule 9's re-send, which is the batch
+    again, is read the same way.
+  - *A report re-ask's lone message reads as finished.* The re-ask asks for the report alone and
+    runs no tool, so its report is one message with nothing before it. A re-ask that prints its
+    report and then hangs is read as an exit, and its report is judged like any other: applied
+    when it is schema-valid and the re-ask left the files as the guard found them
+    (`repair_baseline`; a re-ask that moves a file is failed). Until Fable review 2 of
+    2026-11-19 (N4) it was read as mid-turn: it waited out the idle timeout on every re-send (up
+    to 900 s each) and then stopped the batch as a partial application with a valid report in
+    its capture. The cost: a re-ask that prints only a preamble and then hangs is read as
+    finished too. The preamble is no report, so the re-ask ends as one that gave no readable
+    answer does (`task_dispatch.close_outcome`): the schema-repair re-ask's unparseable reading
+    stands, and an incomplete-report re-ask leaves the first report to be classified as it
+    stands. The preamble is never read as the report.
+  - *A late hang still meets the deadline.* A writer that goes quiet less than the idle timeout
+    before its slot deadline (after about 900 s of codex's 1800 s) reaches the deadline first, and a
+    timed-out batch that moved bytes is a partial application, as before.
+- **An unconfirmed kill fails closed.** A survivor may still write, so the attempt stays
+  `timed_out` and is recorded `runner_error` with the kill verdict (`_classify_pre_parse`): never
+  parsed, never re-asked, a partial application if bytes moved. It is not rung 2, because it did not
+  run out of time. Its row's `idle_stop` is `unconfirmed`.
+- **Only a live event stream has a clock.** `LLMProvider.idle_watch()` returns a fresh in-flight
+  tracker, or `None` (the default). codex declares one (`codex.ToolsInFlight`): an `item.started`
+  of any type but `agent_message`, `reasoning`, `todo_list` and `error` opens a call, its
+  `item.completed` closes it, and `turn.completed` or `turn.failed` closes all. A test suite run
+  in codex's shell prints nothing between its `item.started` and `item.completed`, so the clock
+  waits for it, and an exec session still running at its yield time keeps the clock off until it
+  ends (the deadline then decides). A line the tracker cannot read changes nothing, so a missed
+  completion keeps the clock off rather than a missed start letting it run under a working tool;
+  a tracker that raises turns the clock off. claude-code prints its answer at exit
+  (`--output-format json`), so a timer on its stdout would kill every healthy writer that works
+  longer than the timeout: it declares none, and has no idle timeout. Giving it one needs
+  `--output-format stream-json --verbose` and a tracker over its `tool_use` and `tool_result`
+  blocks.
+- **Write kinds only, executor leg only.** `plan_dispatch` reads the key for an `agent-write`
+  profile (the report re-ask included) and hands it down; read kinds, the preflight probe and the
+  review fan-out never arm it. On the native leg the host's own Agent subagents write, and the
+  plugin cannot stop them: the key does nothing there.
+- **Why 900 s.** The clock only has to outlast the model's own silences, because a running tool
+  stops it. In 1,848 healthy codex write attempts (apply-suggestions and apply-code-fixes on
+  `gpt-6-luna:high`, from the improve-mode benchmark and test runs), the longest whole attempt
+  took 463 s, so no silence in them was longer. codex's session rollouts stamp every item with
+  its start and end times; rebuilding what `exec --json` prints from 3,185 finished turns on one
+  developer machine, the longest silence with no tool in flight was 130 s in 159 `codex exec`
+  turns on `gpt-6-luna`, 228 s over all 288 `gpt-6-luna` turns, and 554 s over every model on the
+  app-server sessions (`gpt-6.1-sol` at `xhigh`, writing a large patch). Only the interactive
+  TUI's sessions went longer, in gaps with no model activity inside them: a person's wait.
+  Counting a running tool as silence instead, a flat 900 s timer would have stopped 12 of those
+  healthy turns (a single tool ran 880 s in a `codex exec` turn), which is why the clock waits for
+  tools. A model stream codex itself gives up on is no silence either: each reconnect prints an
+  `error` event (`Reconnecting... 1/5`, `tests/fixtures/codex/rows/error-envelope.stdout.txt`),
+  which restarts the clock. 900 s is 1.6 times the longest silence seen, and it still stops a hang
+  like the incident's well before the 1800 s slot deadline, on the path that recovers.
+- **Configuration.** `0` turns the clock off. A blank value keeps the base default, as for every
+  `driver.*` key (`_deep_merge` skips a null), so `0` is the one way to disable it. Validated as a
+  whole number of seconds (`DRIVER_NONNEGATIVE_INT_KEYS`).
+
+Tests: `tests/test_idle_writer.py` (the capture's clock against real child processes, the codex
+tracker over every committed codex stream, `finished_speaking` over the incident's event shape and
+every committed stream with its `turn.completed` cut, the stop through the executor's real kill
+path against stand-in CLIs, the scheduler's outcomes against the mock codex's
+`MOCK_LLM_HANG_AFTER_REPLY` with `MOCK_LLM_CODEX_TOOL_ITEMS` (the incident's shape re-asked and
+applied; a mid-turn stall and a lone message stopped as partials with no re-ask, a re-ask that
+would attest every id included; a re-ask that hangs after its report, with
+`MOCK_LLM_HANG_AFTER_REASK`, applied on that report), the `reask` reading of a lone message at
+each layer, and the key's validation).
+
+## Tool-use counts on the executor leg
+
+**A codex writer's tool calls are counted from its stream and recorded where the native leg
+records the host's count.** The native leg passes the host's per-subagent tool count to
+`util metrics record --tool-uses`, which lands in `state.json` as `metrics[<phase>][].tool_uses`
+and in the metrics report's Tool Uses column. The executor records the same field through
+`WriteEta.record`, from `usage["tool_uses"]`, and the batch reports (`write_batch_report.json`,
+`subagent_batch_report.json`) carry it in each task's and each attempt's `usage` and in the
+totals. codex's usage held only tokens, so the field was missing on the codex executor leg.
+
+`CodexProvider.parse_usage` now counts the distinct ids of `command_execution`, `file_change`,
+`mcp_tool_call`, `web_search` and `collab_tool_call` items the stream started or completed
+(`codex.CODEX_TOOL_ITEM_TYPES`), so each call counts once, one a stop cut short included. A
+code-mode `exec` cell is no item of its own; the tools it calls are. `todo_list` is left out:
+codex folds every plan update into one item, so those calls cannot be counted one by one, while
+the host's count includes its plan tool's calls. Writer streams run `--ephemeral` and leave no
+rollout, so the stream is the only record; the executor's drain captures it line by line, and
+`parse_usage` reads that same capture on every attempt, so the count is the live one.
+`_accumulate_usage` sums it over a batch's attempts, the report re-ask included. A stream a stop
+cut short (no `turn.completed`, so no tokens) still reports its count, a finished turn with no tool
+call reports `0`, and a stream with neither reports nothing (absent, never a made-up zero). A count
+is no token figure: `_accumulate_usage` marks a task's usage reported only once an attempt reports a
+`*_tokens` figure, so a task whose attempts left only a tool count keeps it in its `usage` beside
+`usage_reported: false`, and the batch report's totals sum the count while still counting the task
+under `tasks_without_usage` (the bench ledger reads that as "tokens incomplete"). The
+review fan-out's codex slots gain the same count, which their usage records already carry for
+opencode and pi. Tested end to end, to `state.json` and the batch report, in
+`tests/test_idle_writer.py` with the mock codex's `MOCK_LLM_CODEX_TOOL_ITEMS`.
+
+claude-code's `--output-format json` envelope holds no tool blocks (`num_turns` counts model
+turns, several tool calls can share one, so it is not substituted), so a claude-code writer on
+the executor leg still records no `tool_uses`; counting them needs the same `stream-json` argv
+change as its idle clock.
 
 ## Validation model capability
 

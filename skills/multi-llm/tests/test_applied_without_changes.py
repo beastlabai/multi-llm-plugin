@@ -142,9 +142,11 @@ class TestTheReSend:
         )
         real = executor._spawn
         prompts = []
+        reasks = []
 
         def spawn(**kwargs):
             prompts.append(kwargs.get("prompt") or "")
+            reasks.append(kwargs.get("reask"))
             if HEADING in prompts[-1]:
                 env.monkeypatch.setenv("MOCK_LLM_WRITE_RESULT", json.dumps({
                     "status": "no-op", "ids": ["s0"], "files_touched": [],
@@ -159,6 +161,9 @@ class TestTheReSend:
         assert outcome.write_outcome == executor.WRITE_NO_OP
         assert not outcome.applied_without_changes
         assert result.exit_code == 0
+        # Rule 9's re-send is the batch again, never a report re-ask: an idle
+        # stop reads it by the first dispatch's rule.
+        assert reasks == [False, False]
 
     def test_a_second_unchanged_claim_stops_the_loop_and_is_recorded_failed(self, env):
         from tests.test_write_executor import FakeState

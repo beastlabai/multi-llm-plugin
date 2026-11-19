@@ -19,6 +19,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [Write reply extraction](#write-reply-extraction)
 - [Scope policy at the write seam](#scope-policy-at-the-write-seam)
 - [The host summary](#the-host-summary)
+- [Suppressions a batch added](#suppressions-a-batch-added)
 
 ## Where the scheduler's helpers live
 
@@ -60,7 +61,9 @@ helper modules read a moved name through its owner at each call (`_check_records
 never a copy, so one patch of the owner reaches them all. Patch the owner:
 `tests/test_write_batch_scheduler_moved_names.py` fails a test that patches a moved name on the
 scheduler, and holds the layering. `tests/test_import_layers.py` puts all of them at L3, and
-`utils/batch_ledger.py` beside them ([A batch's records](#a-batchs-records)).
+`utils/batch_ledger.py` beside them ([A batch's records](#a-batchs-records)), and
+`utils/batch_suppressions.py`, which reads both legs' record of a batch for the suppression scan
+([Suppressions a batch added](#suppressions-a-batch-added)).
 
 **The scheduler composes its collaborators; it does not share `self` with them** (WRITE-5). It
 builds one `RunContext` in `__init__` and hands it to each collaborator it owns: `self._verify`
@@ -844,7 +847,12 @@ reply, a 429), `dispatch_task` asks the scheduler's `changed_files` hook whether
 attempt moved bytes (T4.8, which asked only for a denied turn). One that did is a partial
 application (loop stops, snapshot kept, exit 3, `util restore-batch` named), except a write kind's
 prose reply (implement's too since fix round 14), which gets the rule-7 report re-ask instead; the
-ladder's side is rule 8, `RetryLadder.record(..., repeatable=False)`.
+ladder's side is rule 8, `RetryLadder.record(..., repeatable=False)`. A writer the idle timeout
+stopped (`driver.subagent_idle_timeout_s`, kill confirmed) after it had finished speaking (its turn
+ended, or its last word was a message after a tool call, or on a report re-ask any finished
+message) is read as an exit, not a timeout, so its
+prose after edits takes that re-ask too; one stopped in mid-turn stays a timeout, never re-asked,
+and a partial application if it moved bytes ([an idle writer](delegation.md#an-idle-writer)).
 
 Its converse is rule 9 (fix round 14): an `applied` reply that moved nothing is sent
 once more, told so (`record_resend`); for a plan or task-list batch "nothing" means its
@@ -1105,7 +1113,7 @@ section, `IMPLEMENT_WHICH_CHECKS`); a `---` rule; the bound batch prompt with it
 last `## Result ids`, the `ids` line spelling out `expected_ids` in prompt order (with
 `declined` for the apply kinds). Before, the batch prompt came first, so batches of one run
 shared about 20 characters of prefix; now they share the whole contract (about 2.1K characters for
-apply-suggestions, 4.6K for apply-code-fixes, 4.9K for an implement code task), which a provider
+apply-suggestions, 4.6K for apply-code-fixes, 5.1K for an implement code task), which a provider
 can serve as a cached prefix. The known-checks section stays with the contract: its command list
 is the run's, and only an earlier batch's failing check makes it differ. The prompt still ends with
 what the reply must contain, so a runner reading the batch's own prose `Return Format` last is
@@ -1215,3 +1223,108 @@ record, `to_apply` repeats those records, and `util write-prompt`, `util batch-d
 the paths of the two files, never the batches: at 76 groups the old per-batch listing was 33 KB of
 output the host received as its command's result, and `util decisions` already shows the user every
 item (`detail_pointer_lines`).
+
+## Suppressions a batch added
+
+**After each code batch, both legs list the suppression and skip markers its edits added, report
+only.** Under a lint gate unattended writers satisfy it with a `# noqa` far more often than they say
+so in their summary, so nothing a person read named them. `utils/suppression_scan.py` (L0, pure)
+finds them; `utils/batch_suppressions.py` hands it each leg's record of the batch's own changes;
+neither a working-tree diff nor `git diff HEAD` is read, since those also hold the user's
+uncommitted edits and the earlier batches'.
+
+- **What counts.** Python comment markers (`# noqa`, `# type: ignore`, `# pyright: ignore`,
+  `# pragma: no cover`, `# pylint: disable`, `# fmt: off`, `# nosec`, a file-wide `# ruff: noqa`)
+  read with `tokenize`, and only where a `#` segment of a real comment starts with the marker, so a
+  string or prose that mentions one never matches; C-like comment markers (`eslint-disable`,
+  `@ts-ignore`, `@ts-expect-error`, `@ts-nocheck`, `istanbul`/`c8 ignore`, `//nolint`) right after a
+  comment opener outside a string; skip and xfail markers (Python through `ast`, with the call's
+  `reason` as the reason; JavaScript `it.skip(`, `xit(` and the like outside strings and comments);
+  and a changed lint, type-checker or test configuration (`ruff.toml`, `pyproject.toml`'s
+  `[tool.ruff]`, `[tool.pytest]`, `[tool.mypy]` and the like compared key by key, a raised
+  threshold, a new ignore entry or a rule dropped from `select` named; `setup.cfg`, `mypy.ini`,
+  ESLint, `tsconfig*.json` and `.golangci.*` line by line; a value JSON has no form for, such as a
+  TOML date, is quoted as its text). A marker is keyed by its kind, its text and the code on its
+  line (a skip by its name and enclosing function, a JavaScript skip by its line) and netted
+  against the before side: per file on that key, so a moved line is not reported; for a comment
+  marker only, per file on the kind and text alone, so a marker the file already held is not
+  reported because the batch edited its line (`import os  # noqa: F401` becoming
+  `import os, sys  # noqa: F401`; each marker the file lost cancels the added one whose code is
+  most alike, counted in words with punctuation left out, and only when the two share more than
+  half their words, `suppression_scan.PAIRING_MIN_ALIKE`; past `PAIRING_MAX` pairs for one
+  marker in one file it nets by count alone, with no floor, since a recorded before side has no
+  line to pair by), while a second copy still is; and
+  across the batch's files on the whole key, so a line moved from one file to another is not
+  reported. The floor sits where typical edits of a marked line (0.67 to 0.94) part from
+  different lines (`import os` and `import json` 0.5, `self.x = x` and `self.y = y` 0.33); a tie
+  is listed, since a doubtful pair costs a person one line to read and a wrong cancellation
+  hides a suppression. What the nettings miss or over-report: a batch that drops a comment marker
+  from one line and adds the same marker on a line more than half alike in the same file is not
+  listed; a two-word line edited in its second word (`x = 1` becoming `x = 2`) is listed. Skip
+  markers are netted on the whole key alone (a Python skip's place is its function, which editing
+  its line does not change, so netting on the name alone would buy little and hide a skip moved
+  between tests): a batch that un-skips or deletes one test and skips another in the same file is
+  listed, and so are a renamed skipped test and an edited JavaScript skip line. The reason is
+  never part of a key, since neither before side records it. A marker-free dodge (a parameter
+  renamed `_name`) is not detected: there is no marker, and a heuristic for it was not reliable. The reason is the rest of the comment or a comment line directly above; the hit says
+  "no reason given" otherwise. A Python file the batch left unparseable is one `unparseable` hit,
+  since its skips could not be read. On seventeen apply-code-fixes runs under a ruff gate the Python
+  detection listed every suppression, with no false positive and every reason tag as a person
+  graded it; the C-like markers and JavaScript skips are covered by unit tests only.
+- **Executor leg.** `WriteBatchScheduler._scan_suppressions` runs after a dispatch is classified
+  and before `_record_batch_effects`, for a code kind's batch that moved bytes (partial applications
+  included, check tasks never): `executor_scan` reads the pre-batch snapshot's manifest from disk
+  (the declared files and the undeclared writes the sweep adopted), trusts a payload only while it
+  hashes to `sha256_before`, and compares it with the file as the batch left it, read below the
+  pinned root without following a link. A file in `unrestorable`, or with no payload, is listed as
+  not scanned. The hits go on the outcome (`TaskOutcome.suppressions`,
+  `suppressions_not_scanned`), into its `write_batch_report.json` row (only when there is
+  something to list), and onto the log as `[SUPPRESSION_ADDED]` lines. A resume skip leaves them on
+  the earlier run's row, which stands in for it; they are never stamped on a verdict
+  (`batch_ledger.VERDICT_FIELDS`). A batch kept at the user's request (`--human-task <batch>=skip`)
+  is not scanned again: its row replaces the stopped run's, so `_carry_suppressions` carries that
+  row's hits and not-scanned files (`batch_suppressions.kept_scan`, the row found by
+  `_same_batch_row`), which the scan took when the batch stopped. A scan at the resume would read
+  the files as they are then and list edits made since the stop as the batch's (the keep is refused
+  when a file the batch moved changed, but that check runs before the dispatch loop). With no such
+  row on record (the report unreadable, or of an earlier review cycle) or one whose fields are not
+  as written, its files are listed as not scanned.
+- **Native leg.** It takes no snapshot of a code batch, so `util write-prompt` records a scan base
+  as it binds a code batch (`prompts/<task id>.scan.json`, written through the pinned prompt folder):
+  the commit `HEAD` names (`head_or_empty_tree`), the files git sees with size and mtime (the
+  check guard's reading and exclusions; `null` past `SWEEP_MAX_FILES`), and
+  `suppression_scan.before_side`'s marker counts of every declared file and every file that
+  already differed from that commit (configuration files keep their text). `util batch-done`
+  scans a `completed` or `--partial` record of a code task, before it takes the state lock: each
+  file whose size or mtime moved, against its recorded counts, or against the commit's copy for a
+  file that matched it at bind time; a file absent then is one the batch created. A file another
+  task of the phase declares is left out, since the host may run a batch's tasks side by side (the
+  check guard's reading, `changed_since_bound`); a sibling's undeclared write can still be listed
+  under both. With no tree (too many files, git unreadable) only the declared files are scanned. It prints one
+  `[SUPPRESSION_ADDED]` line per hit and a sentence telling the host to list them under the
+  summary's heading. The base is kept, so a batch recorded again prints the same hits; the next
+  bind of the task replaces it. No base (a prompt bound by an older version) lists nothing.
+- **Where a person reads them.** `summary.md`'s `## Check these: suppressions added`
+  (`suppression_scan.CHECK_THESE_HEADING`): `ApplyPhaseReport.write_apply_summary_report` for
+  apply-code-fixes (so apply-commit-fixes and improve-code too), `WriteReports.write_summary` for
+  implement, and the native host from the printed lines. Each bullet quotes the line (redacted,
+  clipped), since a later batch can move it. `check_records.write_result_notice` adds a clause to
+  the result's `notice` naming the first three; a detached run's poll builds the same clause from
+  the write mirror's rows, which carry the hits (`status_text._write_result_notice_parts`).
+  improve-code's result carries its apply's clause. Under `--cascade` each stage's archived
+  `stage-<n>/artifacts/apply-fixes/summary.md` keeps that stage's section, while the live summary and
+  the result's clause hold the last stage's only: each stage is a new review cycle, so its report
+  drops the earlier stages' rows. The plan-editing modes (apply-suggestions,
+  apply-task-suggestions) are never scanned.
+- **Never a gate.** A file the scan fails on is listed as not scanned and the batch's other files
+  still report (`scan_changes`' `not_scanned`); a scan that raises as a whole lists the batch's files
+  as not scanned (`batch_suppressions.scan_failed`: the touched files on the executor leg, which also
+  logs one line, the declared files on the native leg). Nothing it finds changes a verdict, a batch's
+  status, the loop or the exit code.
+- **The prompts.** An apply-code-fixes batch's known-checks section says not to add a lint,
+  type-checker or coverage suppression to make a check pass unless the code is right as written,
+  with a comment saying why (`known_checks.known_checks_section`; with it, reasonless markers went
+  from six of nine runs to none of eight). An implement task is never sent that section, so its
+  result contract carries the same rule (`batch_prompt.IMPLEMENT_NO_WEAKENING`). The known-checks
+  section is empty when the repository has no known check command, so an apply batch there is not
+  told the rule; the scan lists its suppressions all the same.

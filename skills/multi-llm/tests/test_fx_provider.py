@@ -297,6 +297,20 @@ def test_bare_env_and_command_build_allocate_no_home(provider, monkeypatch):
     provider.build_command("hello", "test/model")
 
 
+def test_the_argv_is_the_same_inside_its_dispatch_context(provider, monkeypatch):
+    """The managed HOME is environment only, so a dry run's preview renders
+    fx with no context and makes no HOME (llm_client.preview_dispatch_context)."""
+    from utils import llm_client
+
+    monkeypatch.setattr(provider, "missing_flags", lambda flags: ())
+    with provider.hermetic_dispatch("generate", "test/model"):
+        dispatched = provider.build_command("hello", "test/model")
+    monkeypatch.setattr(fx.tempfile, "mkdtemp", lambda **kw: pytest.fail("allocated a HOME"))
+    with llm_client.preview_dispatch_context(provider, "test/model", "generate") as context:
+        assert context.refusal is None and fx._ACTIVE_HOME.get() is None
+        assert provider.build_command("hello", "test/model") == dispatched
+
+
 def test_concurrent_dispatches_share_private_home_then_remove_it(provider):
     barrier = Barrier(3)
 

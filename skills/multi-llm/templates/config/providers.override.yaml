@@ -338,12 +338,16 @@
 ## `batch_checks: scoped` (default `full`) has apply-code-fixes batches under
 ## --exec-subagents run a pytest `verify_command` narrowed to their own tests,
 ## then the full command once before the phase completes: for a slow suite.
+## `subagent_idle_timeout_s` stops a write subagent that printed nothing for
+## that long with no tool call running (codex only; 0 turns it off; a blank
+## value keeps the base 900).
 # driver:
 #   subagent_runner: claude-code:sonnet
 #   subagent_runner_cheap: claude-code:haiku
 #   max_concurrent_subagents: 4
 #   max_concurrent_write_subagents: 1
 #   subagent_timeout_s: null
+#   subagent_idle_timeout_s: 900
 #   subagent_retries: 1
 #   verify_command: null
 #   verify_timeout_s: 600

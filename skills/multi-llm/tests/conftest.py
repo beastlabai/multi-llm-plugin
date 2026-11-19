@@ -515,6 +515,33 @@ def _pin_opencode_debug_config(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _pin_gate_version(request, monkeypatch):
+    """Keep the default suite from spawning a CLI's ``--version`` for a gated
+    config key (codex's ``agents.enabled``, ``LLMProvider.gate_version``).
+
+    The real read depends on what is installed on the machine running the
+    suite, so a rendered argv would differ between a developer's checkout and
+    CI, and a test that counts or captures spawns would see the probe first.
+    Pinned to the adapter's own ``verified_version`` (the build its fixtures
+    were captured from) for every test that does not opt out with
+    ``@pytest.mark.cli_version_read``.
+    """
+    if "cli_version_read" in request.keywords:
+        yield
+        return
+    try:
+        from utils.providers.base import LLMProvider
+    except Exception:
+        yield
+        return
+    monkeypatch.setattr(
+        LLMProvider, "gate_version",
+        lambda self: str(getattr(self, "verified_version", "") or ""),
+    )
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _no_real_codex_trust_bookkeeping(monkeypatch):
     """Keep the suite from arming the developer's real ``~/.codex`` for the
     I12 trust-entry restore (plan codex-sandbox-unavailable §5, option B):

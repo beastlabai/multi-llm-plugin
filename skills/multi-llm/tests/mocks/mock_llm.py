@@ -140,6 +140,20 @@ Environment Variables (New - for scenario-based testing):
         quote, so whatever the quote cut is missing from the restatement. An
         item the quote names by position ("Suggestion 1") is restated as the
         id the re-ask lists beside that number, when it lists any.
+    MOCK_LLM_CODEX_TOOL_ITEMS: codex only, the write path: a number N of
+        ``command_execution`` tool items, each an ``item.started`` /
+        ``item.completed`` pair, printed before the closing ``agent_message``
+        (the tool-use count, docs/development/delegation.md#tool-use-counts-on-the-executor-leg).
+    MOCK_LLM_HANG_AFTER_REPLY: codex only, the write path (never the report
+        re-ask): when "1", the stream stops after the closing ``agent_message``
+        with no ``turn.completed``, and the mock then sleeps (60 s at most)
+        instead of exiting: the hang the executor's idle timeout stops
+        (docs/development/delegation.md#an-idle-writer). When "midwork", the
+        only ``agent_message`` is an opening preamble before the tool items
+        (one at least) and no closing one follows: a stall in mid-turn.
+    MOCK_LLM_HANG_AFTER_REASK: codex only, the write path's report re-ask:
+        when "1", the restated report is printed with no ``turn.completed``
+        and the mock then sleeps (60 s at most) instead of exiting.
 
 Precedence:
     1. Legacy variables take precedence when set (backward compatibility)
@@ -158,7 +172,7 @@ import sys
 import time
 import types
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 def bootstrap_streams() -> None:
@@ -1146,7 +1160,8 @@ def format_opencode_output(content: str) -> str:
     return "\n".join(json.dumps(event) for event in events)
 
 
-def format_codex_output(content: str) -> str:
+def format_codex_output(content: str, tool_items: int = 0, finished: bool = True,
+                        midwork: bool = False) -> str:
     """Format output for codex provider.
 
     Format: NDJSON event stream, mirroring real `codex exec --json` output
@@ -1158,10 +1173,30 @@ def format_codex_output(content: str) -> str:
     The assistant reply lives in the nested item, NOT in a top-level "text"
     event. Keep this in step with the real CLI: a mock shaped to match the
     parser instead of the CLI is what let issue #2 ship unnoticed.
+
+    *tool_items* ``command_execution`` pairs come before the message, shaped
+    as ``tests/fixtures/codex/0.163.0`` records them; *finished* false leaves
+    out ``turn.completed``, as a codex that never ended its turn. *midwork*
+    prints an opening preamble in place of *content*, before the tool items,
+    and nothing after them.
     """
-    events = [
+    events: List[Dict[str, Any]] = [
         {"type": "thread.started", "thread_id": "mock-thread-1"},
         {"type": "turn.started"},
+    ]
+    if midwork:
+        events.append({"type": "item.completed", "item": {
+            "id": "item_0", "type": "agent_message",
+            "text": "I'll read the plan first, then update the sections the batch names."}})
+    for index in range(tool_items):
+        command = f"/bin/bash -lc 'sed -n 1,{index + 1}p plans/p.md'"
+        events.append({"type": "item.started", "item": {
+            "id": f"tool_{index}", "type": "command_execution", "command": command,
+            "aggregated_output": "", "exit_code": None, "status": "in_progress"}})
+        events.append({"type": "item.completed", "item": {
+            "id": f"tool_{index}", "type": "command_execution", "command": command,
+            "aggregated_output": "", "exit_code": 0, "status": "completed"}})
+    events += [
         {
             "type": "item.completed",
             "item": {
@@ -1181,7 +1216,36 @@ def format_codex_output(content: str) -> str:
             },
         },
     ]
+    if midwork:
+        del events[-2:]
+    elif not finished:
+        events.pop()
     return "\n".join(json.dumps(event) for event in events)
+
+
+def codex_write_extras() -> Optional[Tuple[int, str]]:
+    """``(tool items, hang)`` from ``MOCK_LLM_CODEX_TOOL_ITEMS`` and
+    ``MOCK_LLM_HANG_AFTER_REPLY`` (``""``, ``"1"`` or ``"midwork"``), or
+    ``None`` when neither is set."""
+    raw = os.environ.get("MOCK_LLM_CODEX_TOOL_ITEMS")
+    hang = os.environ.get("MOCK_LLM_HANG_AFTER_REPLY") or ""
+    if not raw and not hang:
+        return None
+    return (int(raw) if raw else 0), hang
+
+
+def print_codex_write_reply(content: str, extras: Tuple[int, str]) -> int:
+    """The codex write path's reply under :func:`codex_write_extras`: its tool
+    items, then, when it hangs, no ``turn.completed`` and a bounded sleep."""
+    tool_items, hang = extras
+    if hang == "midwork":
+        text = format_codex_output(content, tool_items=max(tool_items, 1), midwork=True)
+    else:
+        text = format_codex_output(content, tool_items=tool_items, finished=not hang)
+    print(text, flush=True)
+    if hang:
+        time.sleep(60)
+    return 0
 
 
 def configured_failure() -> Optional[tuple]:
@@ -1496,6 +1560,16 @@ def parse_provider_args(provider: str) -> tuple[argparse.Namespace, str]:
             dest="json_schema",
             default=None,
             help="JSON Schema for structured output (only works with --print)",
+        )
+        # The read slots' MCP-off flag
+        # (docs/development/providers.md#claude-code-read-slots), behind the
+        # same help gate: the same two-places rule as the two flags above.
+        parser.add_argument(
+            "--strict-mcp-config",
+            dest="strict_mcp_config",
+            action="store_true",
+            help="Only use MCP servers from --mcp-config, ignoring all other "
+                 "MCP configurations",
         )
         parser.add_argument("prompt", nargs="?", default="")
         args = parser.parse_args()
@@ -2106,6 +2180,10 @@ def main() -> int:
             if os.environ.get("MOCK_LLM_REPAIR_RESTATE") == "1"
             else write_batch_result(applied)
         )
+        if provider == "codex" and os.environ.get("MOCK_LLM_HANG_AFTER_REASK") == "1":
+            print(format_codex_output(content, finished=False), flush=True)
+            time.sleep(60)
+            return 0
         print(format_output(provider, content))
         return 0
 
@@ -2130,6 +2208,9 @@ def main() -> int:
             )
         else:
             content = write_batch_result(applied_edits, prompt)
+        extras = codex_write_extras() if provider == "codex" else None
+        if extras is not None:
+            return print_codex_write_reply(content, extras)
         print(format_output(provider, content))
         return 0
 
