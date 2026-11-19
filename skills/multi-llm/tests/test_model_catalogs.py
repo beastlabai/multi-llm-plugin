@@ -112,15 +112,15 @@ UNCHECKED: Dict[str, str] = {
 #: (provider, model id with its effort split off) -> why that one id is not
 #: checked although its provider is.
 UNCHECKED_MODELS: Dict[Tuple[str, str], str] = {
-    ("kilocode", "openai/gpt-6-astra"):
+    ("kilocode", "openai/gpt-6.2-astra"):
         "native openai backend, not enabled on the capture host",
     ("kilocode", "google/gemini-4-carbon"):
         "native google backend, not enabled on the capture host",
     ("opencode", "google/gemini-4-carbon"):
         "native google provider, not logged in on the capture host",
-    ("opencode", "openai/gpt-6.1-sol"):
+    ("opencode", "openai/gpt-6.2-sol"):
         "native openai provider, not logged in on the capture host",
-    ("opencode", "openai/gpt-6-astra"):
+    ("opencode", "openai/gpt-6.2-astra"):
         "native openai provider, not logged in on the capture host",
 }
 

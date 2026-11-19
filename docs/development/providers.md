@@ -628,7 +628,10 @@ which check opencode, omp, cline, goose, aider, pi, kimi, qwen-code, copilot and
 `opencode models` lists only the providers logged in on the capture host (Zen and OpenRouter),
 so opencode's native `google/` and `openai/` ids are in `UNCHECKED_MODELS`. cursor-agent, agy
 and grok still need a logged-in capture plus a parser, and `muse model-profile show` is no
-check: it accepts any id.
+check: it accepts any id. In the 2026-11-19 refresh, omp 19 listed 372 selectors where omp 18
+listed 616. Most of the missing ids are models OpenRouter no longer serves; the rest are
+older `:batch` and `:free` entries. Every id omp 19 lists is in the OpenRouter snapshot, and a
+repeat run returns the same list, so the listing is not truncated.
 
 ## Provider output channels
 

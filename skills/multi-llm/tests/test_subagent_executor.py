@@ -4765,7 +4765,7 @@ class TestModelCatalogPreflight:
             1].strip() == "codex:gpt-5.5  (supplied by session)"
         monkeypatch.delenv("MULTI_LLM_HOST", raising=False)
         assert run_status.render_runner_text(plan, views=[view])[1].strip() == (
-            "codex:gpt-6-astra  (supplied by host capabilities)"
+            "codex:gpt-6.2-astra  (supplied by host capabilities)"
         )
 
     def test_the_runner_a_run_really_dispatched_to_beats_a_fresh_resolution(
@@ -5516,12 +5516,12 @@ class TestSandboxUnavailable:
                 jail_request=request,
             )
         assert excinfo.value.reason_code == "sandbox_unavailable"
-        assert excinfo.value.spec == "codex:gpt-6-astra"
+        assert excinfo.value.spec == "codex:gpt-6.2-astra"
         assert excinfo.value.message.startswith(self.F6_LEAD)
         assert self.WRITE_LEGS[leg] in excinfo.value.message
         assert (
             "[exec-subagents] session model codex:gpt-5.5 failed preflight "
-            "(sandbox_unavailable); falling back to codex:gpt-6-astra "
+            "(sandbox_unavailable); falling back to codex:gpt-6.2-astra "
             f"({registry.HOST_DEFAULT_LAYER})"
         ) in capsys.readouterr().out
         assert "unsandboxed" not in executor._SANDBOX_DECISIONS.values()

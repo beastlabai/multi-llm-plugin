@@ -1,6 +1,6 @@
 {
   "_provenance": {
-    "captured": "2026-11-12",
+    "captured": "2026-11-19",
     "cli_version": "kilocode 7.8.27",
     "commands": [
       "kilocode models openrouter --refresh --verbose",
@@ -8,8 +8,8 @@
     ],
     "credential_free": true,
     "coverage": {
-      "openrouter": "202/368",
-      "kilo": "242/322"
+      "openrouter": "211/373",
+      "kilo": "314/410"
     },
     "scope": "OpenRouter and Kilo backend model ids named in base providers.yaml (defaults.models and providers.kilocode.models). Native openai/google entries have no variant suffix; those backends are not enabled on the capture host.",
     "note": "`variants` is the per-model list `kilocode run --variant <name>` accepts. An unsupported variant is SILENTLY IGNORED by the CLI, which is why this capture exists: nothing at run time reports the mistake."
@@ -50,6 +50,12 @@
       "low",
       "medium"
     ],
+    "openrouter/google/gemini-4-neon": [
+      "high",
+      "low",
+      "medium",
+      "xhigh"
+    ],
     "openrouter/meta/muse-wonder": [
       "high",
       "low",
@@ -80,18 +86,17 @@
       "medium",
       "none"
     ],
-    "openrouter/openai/gpt-6-astra-pro": [
+    "openrouter/openai/gpt-6.2-astra-pro": [
       "high",
       "low",
       "max",
       "medium",
       "xhigh"
     ],
-    "openrouter/qwen/qwen3.8-max-0902": [
+    "openrouter/qwen/qwen4-max": [
       "high",
       "low",
-      "medium",
-      "minimal",
+      "none",
       "xhigh"
     ],
     "openrouter/stepfun/step-5-preview": [
