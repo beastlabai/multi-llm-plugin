@@ -122,6 +122,15 @@ def _codex_exit_zero(stdout: str):
     return invoke
 
 
+def _write_exactly(path: Path, text: str) -> None:
+    """Write *text* as the model's result file, byte for byte.
+
+    ``newline=""``: the salvage text is the file's text as read, untranslated
+    (``result_files.read_regular_text``), and the tests compare it with *text*
+    exactly; text mode would write CRLF on Windows."""
+    path.write_text(text, encoding="utf-8", newline="")
+
+
 def _invoke(tmp_path: Path, stdout: str, *, writes: str | None = None):
     """One ``invoke_with_file_output`` call over a codex exit 0; *writes* is
     what the model wrote to the requested file during the run."""
@@ -130,7 +139,7 @@ def _invoke(tmp_path: Path, stdout: str, *, writes: str | None = None):
 
     def run(*args, **kwargs):
         if writes is not None:
-            (phase_dir / f"{STEM}.json").write_text(writes, encoding="utf-8")
+            _write_exactly(phase_dir / f"{STEM}.json", writes)
         return provider(*args, **kwargs)
 
     log = tmp_path / "log.txt"
@@ -333,7 +342,7 @@ def _writing(stdout: str, result_file: Path, writes: str | None):
 
     def run(*args, **kwargs):
         if writes is not None:
-            result_file.write_text(writes, encoding="utf-8")
+            _write_exactly(result_file, writes)
         return provider(*args, **kwargs)
     return run
 
@@ -752,7 +761,7 @@ class TestABrokenResultFileReachesSalvage:
         phase_dir = tmp_path / "code-review"
 
         def run(_prompt, _model_spec, timeout=None, _log_file=None, **kwargs):
-            (phase_dir / f"{stem}.json").write_text(UNESCAPED, encoding="utf-8")
+            _write_exactly(phase_dir / f"{stem}.json", UNESCAPED)
             return outcome_from_capture(
                 ClaudeCodeProvider(), Capture(stdout=envelope, stderr="", exit_code=0),
                 provider_name="claude-code", model="claude-sonnet-5", timeout=timeout,

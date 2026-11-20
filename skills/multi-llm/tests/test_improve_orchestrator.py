@@ -1733,14 +1733,15 @@ class TestDryRunSubagents:
         assert [(p.index, p.decision) for p in plans] == [
             ("1", iw.SKIP), ("1b", iw.RUN), ("2", iw.SKIP)]
 
+        # Keys in slash form on every OS, as the expected names are written.
         def snapshot():
-            return {str(path.relative_to(_out(plan))): path.read_bytes()
+            return {path.relative_to(_out(plan)).as_posix(): path.read_bytes()
                     for path in _out(plan).rglob("*") if path.is_file()}
 
         before = snapshot()
         assert _main(PLAN, plan, "--dry-run-subagents") == 0
         after = snapshot()
-        lock = str(Path(detach.lock_path(str(phase_dir))).relative_to(_out(plan)))
+        lock = Path(detach.lock_path(str(phase_dir))).relative_to(_out(plan)).as_posix()
         assert {path for path in after if path not in before} <= {
             lock, "review-plan/subagent_dry_run.json"}
         assert {path: data for path, data in after.items() if path in before} == before
