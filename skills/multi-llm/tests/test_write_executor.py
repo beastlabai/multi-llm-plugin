@@ -72,6 +72,7 @@ from utils.write_batch_scheduler import (  # noqa: E402
     resolve_human_task_plan,
 )
 from tests.harness.native_invoker import native_dispatcher  # noqa: E402
+from tests.support.gitrepo import git as hermetic_git  # noqa: E402
 from utils.task_ledger import mirror_ids  # noqa: E402
 from tests.mock_launchers import (  # noqa: E402
     MOCK_LLM,
@@ -201,15 +202,20 @@ class WriteEnv:
 
     A **real** repo (not a bare tmp dir) because the pinned root is
     ``git rev-parse --show-toplevel`` and half of D3h is that every snapshotted or
-    observed path resolves beneath it.
+    observed path resolves beneath it. The repo is unborn, on ``master``.
     """
 
     def __init__(self, tmp_path: Path, monkeypatch) -> None:
-        import subprocess
-
         self.root = tmp_path / "repo"
         self.root.mkdir()
-        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        # The initial branch is named and the developer's global config is not
+        # read (tests/support/gitrepo.py). A new state records the branch as
+        # `branch_name`, and git's default differs between installs: here the
+        # git first on the session PATH makes the `env` fixture's repo, while a
+        # WriteEnv built inside a test runs on the mock PATH set below, whose
+        # git can be another binary with another default. Two worlds in one
+        # test must still start on the same branch.
+        hermetic_git(self.root, "init", "--quiet", "-b", "master")
         (self.root / "plans").mkdir()
         self.plan = self.root / "plans" / "p.md"
         self.plan.write_text("# Plan\n\n## Step 1\nbody\n", encoding="utf-8")
@@ -351,6 +357,26 @@ def env(tmp_path, monkeypatch):
     e = WriteEnv(tmp_path, monkeypatch)
     yield e
     registry._config = None
+
+
+class TestTheWriteEnvRepository:
+
+    def test_every_world_starts_on_master_whatever_git_s_default(self, tmp_path, monkeypatch):
+        """Neither a global ``init.defaultBranch`` nor the git a later world
+        finds on the mock PATH names the branch: a state's ``branch_name``
+        must not differ between two worlds of one test."""
+        config = tmp_path / "gitconfig"
+        config.write_text("[init]\n\tdefaultBranch = trunk\n", encoding="utf-8")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+        roots = []
+        try:
+            for name in ("first", "second"):  # the second on the first's mock PATH
+                (tmp_path / name).mkdir()
+                roots.append(WriteEnv(tmp_path / name, monkeypatch).root)
+        finally:
+            registry._config = None
+        for root in roots:
+            assert hermetic_git(root, "symbolic-ref", "--short", "HEAD").strip() == "master"
 
 
 class FakeState:
