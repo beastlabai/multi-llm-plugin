@@ -3144,13 +3144,38 @@ class TestAFailedRunIsNeverAnAnswer:
         assert partial_of(d, KILO_SPEC).read_bytes() == content.encode("utf-8")
         assert failed_line(d, KILO_SPEC) == reason + partial_note(KILO_SPEC)
 
+    @staticmethod
+    def _hold_the_fan_out_deadline_until(monkeypatch, ready):
+        """Start the fan-out's deadline only once *ready* is set.
+
+        ``--timeout 0`` plus a 1 s stagger allowance makes the deadline 1 s.
+        Before slot 0 reaches the point a test is about, it still has to get
+        through ``ask_one``'s threaded preflight and onto an executor worker,
+        and on a loaded machine that alone can outlast 1 s. The deadline then
+        cuts a slot that never dispatched, which rightly writes nothing, and the
+        test fails for a reason that is not a regression. The hold is bounded,
+        so a slot that never gets there still meets the deadline and fails.
+        """
+        from utils import review_orchestrator_base as base
+
+        class HoldsTheDeadline:
+            def __getattr__(self, name):
+                return getattr(asyncio, name)
+
+            async def wait_for(self, aw, timeout):
+                hold_until = time.monotonic() + 15
+                while not ready.is_set() and time.monotonic() < hold_until:
+                    await asyncio.sleep(0.01)
+                return await asyncio.wait_for(aw, timeout)
+
+        monkeypatch.setattr(base, "asyncio", HoldsTheDeadline())
+
     def test_a_slot_cut_at_the_fan_out_deadline_keeps_its_file_as_a_partial(
         self, plan, monkeypatch
     ):
         import threading
 
         from utils import progress_tracker
-        from utils import review_orchestrator_base as base
 
         d = qdir(plan, "Q")
         spec = self.SPEC
@@ -3175,24 +3200,8 @@ class TestAFailedRunIsNeverAnAnswer:
                 return {"success": True, "data": "late",
                         "details": {"answer_text": "late"}}
 
-        # `--timeout 0` plus a 1 s stagger allowance: the fan-out's deadline is
-        # 1 s. That second is only started once the slot has written its file:
-        # before it, slot 0 still has to get through `ask_one`'s threaded
-        # preflight, and on a loaded machine that alone can outlast 1 s, which
-        # would cut a slot that never wrote anything and fail this test for a
-        # reason that is not a regression. The hold is bounded, so a slot that
-        # is never dispatched still meets the deadline and fails on the partial.
-        class HoldsTheDeadlineUntilWritten:
-            def __getattr__(self, name):
-                return getattr(asyncio, name)
-
-            async def wait_for(self, aw, timeout):
-                hold_until = time.monotonic() + 15
-                while not written.is_set() and time.monotonic() < hold_until:
-                    await asyncio.sleep(0.01)
-                return await asyncio.wait_for(aw, timeout)
-
-        monkeypatch.setattr(base, "asyncio", HoldsTheDeadlineUntilWritten())
+        # The deadline's second starts once the slot has written its file.
+        self._hold_the_fan_out_deadline_until(monkeypatch, written)
         monkeypatch.setattr("utils.concurrency.PROVIDER_STAGGER_DELAY", 1.0)
         rc = run_ask(ask_argv(plan, spec, extra=("--timeout", "0")), WritesThenHangs())
         assert written.is_set()
@@ -3211,15 +3220,18 @@ class TestAFailedRunIsNeverAnAnswer:
         """The deadline cancels ``ask_one``, never its provider thread: a file
         written only after the fan-out gave up on the slot is joined before the
         move, so it never survives at the canonical path for a resume to skip."""
+        import threading
+
         from utils import progress_tracker
-        from utils import review_orchestrator_base as base
 
         d = qdir(plan, "Q")
         spec = self.SPEC
+        entered = threading.Event()
 
         class HangsThenWrites(FakeInvoker):
             def __call__(self, prompt, model_spec, timeout=None, log_file=None,
                          cwd=None, anchor=None, **kwargs):
+                entered.set()
                 deadline = time.monotonic() + 15
                 while time.monotonic() < deadline:
                     try:
@@ -3237,8 +3249,12 @@ class TestAFailedRunIsNeverAnAnswer:
                 return {"success": True, "data": "late",
                         "details": {"answer_text": "late"}}
 
+        # The deadline's second starts once the provider call is running, so the
+        # cut slot has a call the closing report must join.
+        self._hold_the_fan_out_deadline_until(monkeypatch, entered)
         monkeypatch.setattr("utils.concurrency.PROVIDER_STAGGER_DELAY", 1.0)
         rc = run_ask(ask_argv(plan, spec, extra=("--timeout", "0")), HangsThenWrites())
+        assert entered.is_set()
         assert rc == 3
         status = read_status(d)
         assert status["models_failed"][spec] == progress_tracker.DEADLINE_ERROR
@@ -3250,10 +3266,21 @@ class TestAFailedRunIsNeverAnAnswer:
     def test_a_cut_slot_s_cli_is_stopped_rather_than_waited_out(
         self, plan, monkeypatch
     ):
-        from utils import review_orchestrator_base as base
+        import threading
+
+        from utils import process_control
 
         d = qdir(plan, "Q")
         spec = self.SPEC
+        registered = threading.Event()
+        real_register = process_control.live_cli_registry.register
+
+        def register(proc, job=None):
+            entry = real_register(proc, job)
+            registered.set()
+            return entry
+
+        monkeypatch.setattr(process_control.live_cli_registry, "register", register)
 
         class RunsALongCli(FakeInvoker):
             def __call__(self, prompt, model_spec, timeout=None, log_file=None,
@@ -3267,9 +3294,14 @@ class TestAFailedRunIsNeverAnAnswer:
                     "Written as the CLI was stopped.", encoding="utf-8")
                 return {"success": False, "error": "stopped", "details": {}}
 
+        # The deadline's second starts once the CLI is in the live registry, not
+        # when the call starts: a CLI registered after the closing report's
+        # sweep is not stopped, and its own timeout ends it.
+        self._hold_the_fan_out_deadline_until(monkeypatch, registered)
         monkeypatch.setattr("utils.concurrency.PROVIDER_STAGGER_DELAY", 1.0)
         started = time.monotonic()
         rc = run_ask(ask_argv(plan, spec, extra=("--timeout", "0")), RunsALongCli())
+        assert registered.is_set()
         assert time.monotonic() - started < 30
         assert rc == 3
         assert not answer_of(d, spec).exists()
