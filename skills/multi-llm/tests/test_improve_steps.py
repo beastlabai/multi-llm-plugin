@@ -1409,9 +1409,17 @@ class TestDryRunPlan:
                    for _index, decision, reason in decisions[1:]), decisions
         assert payload["steps"][0]["argv"][-1] == "--dry-run-subagents"
 
+    #: The cascade's stages, named. Preflight resolves a cascade's stage list
+    #: (``improve_cascade.resolve_stage_models``), and with no model flag that
+    #: is ``defaults.models`` filtered by the provider CLIs on PATH, which is
+    #: exit 3 on a machine that has none of them. Prefixed specs, so the list
+    #: reads no configuration either.
+    STAGES = ("--models", "codex:gpt-a", "codex:gpt-b")
+
     def test_a_cascade_is_never_handed_off(self, repo, capsys):
         plan = _plan(repo)
-        code, out, err = _run(capsys, plan, PLAN, "--cascade", "--dry-run-subagents")
+        code, out, err = _run(capsys, plan, PLAN, "--cascade", *self.STAGES,
+                              "--dry-run-subagents")
         assert code == 0, err
         assert improve_steps.CASCADE_NEXT_MARKER not in out
         assert iw.dry_run_cascade_note() in out.splitlines()
