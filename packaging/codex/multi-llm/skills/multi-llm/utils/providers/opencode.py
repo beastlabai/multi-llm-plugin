@@ -1932,8 +1932,8 @@ class OpenCodeProvider(LLMProvider):
     # `auth_list.<v>.json`, `debug_config.<v>.json`), and the tests then grade
     # the parser on the new captures. `make opencode-latest-check` says when
     # npm has a newer release than this one.
-    min_version = "1.19.5"
-    verified_version = "1.19.5"
+    min_version = "1.19.6"
+    verified_version = "1.19.6"
     #: What the below-floor refusal tells the user to run (never executed).
     upgrade_hint = "opencode upgrade {version}"
     #: T4.2 — the inclusive (floor, ceiling) opencode range in which
@@ -1990,7 +1990,7 @@ class OpenCodeProvider(LLMProvider):
     #: :attr:`~.base.LLMProvider.LAUNCH_DIAGNOSTICS`, from the captures: ``run`` prints each
     #: auto-rejected permission on stderr with the model's own tool argument inside it (``!
     #: permission requested: external_directory (/rig/outside/*); auto-rejecting``,
-    #: tests/fixtures/opencode/capture/1.19.5), and that argument can carry a newline or the
+    #: tests/fixtures/opencode/capture/<pin>/), and that argument can carry a newline or the
     #: line's own closing words, so none of stderr is read for a batch-fatal verdict.
     LAUNCH_DIAGNOSTICS = LAUNCH_DIAGNOSTICS_NONE
 

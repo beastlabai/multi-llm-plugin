@@ -13,6 +13,6 @@
     "@openai/codex": "0.167.0",
     "@qwen-code/qwen-code": "0.26.8",
     "cline": "3.0.74",
-    "opencode-ai": "1.19.5"
+    "opencode-ai": "1.19.6"
   }
 }
