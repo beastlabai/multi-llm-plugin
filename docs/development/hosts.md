@@ -13,6 +13,7 @@ Back to the [development guide](../../skills/multi-llm/AGENTS.md). These notes r
 - [Package distribution](#package-distribution)
 - [Detecting the active route](#detecting-the-active-route)
 - [Generated host documentation](#generated-host-documentation)
+- [Codex ingestion provenance](#codex-ingestion-provenance)
 - [OpenCode version updates](#opencode-version-updates)
 
 ## Claude Code entry shim
@@ -637,6 +638,15 @@ promoted note would roll back an install on any machine carrying a package route
 `references/host-capabilities.md` — per-host quickstarts, the capability matrix, the install-path matrix and
 the after-a-plugin-update line. `python hosts/render_capabilities.py` writes both files; `--check`
 byte-compares both and is the CI staleness guard, so a hand-maintained copy of either is a failure.
+
+## Codex ingestion provenance
+
+The ingestion-rule stamp follows the container's Codex pin after inspecting the system
+skills in a fresh `CODEX_HOME`. The 2026-11-23 offline initialization of codex 0.171.0
+unpacked `imagegen`, `openai-docs`, `review-agent`, `skill-creator`, `skill-installer`, and
+`create-statusline`. Neither `plugin-creator` nor its retired Python validator was present.
+`SOURCE_CODEX_VERSION` and `SOURCE_READ_DATE` record this absence check; the source hash
+remains the last known validator hash, rather than claiming a fresh read of missing bytes.
 
 ## OpenCode version updates
 

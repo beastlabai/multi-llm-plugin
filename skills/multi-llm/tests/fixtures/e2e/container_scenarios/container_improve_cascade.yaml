@@ -41,6 +41,11 @@ description: "The chain's turns, with a later cascade stage's ledger-bearing rev
 on_unmatched: fail
 
 prompts:
+  # Vendor-owned capability query, distinct from every workflow prompt.
+  - pattern: "^What is 17 times 23\\? Answer with only the number\\.\\s*$"
+    fixture: "../responses/omp_probe/thinking.txt"
+    description: "omp thinking capability probe"
+
   # ------------------------------------------------- review-plan, a later stage
   # The reviewer prompt of cascade stage 2 or later: the plan review's opening
   # line, then the ledger heading the earlier stages' archive renders.

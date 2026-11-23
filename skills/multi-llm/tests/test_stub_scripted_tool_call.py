@@ -225,9 +225,11 @@ class TestTheScenarioFile:
             path.name for path in SCENARIOS.glob("*.yaml")
             if "scripted_tool_call" in (yaml.safe_load(
                 path.read_text(encoding="utf-8")) or {}))
-        assert carriers == sorted([SCRIPTED.name, DENY.name]), (
+        assert carriers == sorted([
+            SCRIPTED.name, DENY.name, "scripted_vibe_write_deny.yaml",
+        ]), (
             f"{carriers}: the scripted shape is reached only through these "
-            f"named scenarios (codex's plugin call; T4.9's opencode deny rows), "
+            f"named scenarios (plugin calls and explicit permission-denial probes), "
             f"so no existing row can start seeing tool calls")
 
 
@@ -779,6 +781,48 @@ class TestTheDenyScenario:
         assert entry["scripted"]["phase"] == "output-to-text"
         assert entry["fixture"].endswith("nested_exec/probe_not_measured.txt")
         assert answer and not entry["unmatched"]
+
+
+class TestExplicitCompletion:
+    """Cline's one-shot loop stops only after its advertised completion call."""
+
+    @pytest.mark.parametrize("stream", [False, True])
+    @pytest.mark.parametrize("advertised", [False, True])
+    def test_the_fixture_uses_the_completion_tool_only_when_advertised(
+        self, stub, tmp_path, stream, advertised
+    ):
+        tool = {"type": "function", "function": {
+            "name": "submit_and_exit", "parameters": {
+                "type": "object", "properties": {
+                    "summary": {"type": "string", "minLength": 10},
+                    "verified": {"type": "boolean"},
+                }, "required": ["summary", "verified"],
+            },
+        }}
+        server = stub(_chat_scenario(tmp_path))
+        status, text = server.post(
+            "/v1/chat/completions",
+            _chat_request(tools=[tool] if advertised else []), stream,
+        )
+        assert status == 200
+        if stream:
+            content, calls, finish = _chat_stream_result(text)
+        else:
+            choice = json.loads(text)["choices"][0]
+            content = choice["message"]["content"]
+            calls = choice["message"].get("tool_calls", [])
+            finish = choice["finish_reason"]
+        if advertised:
+            assert finish == "tool_calls"
+            assert len(calls) == 1
+            assert calls[0]["function"]["name"] == "submit_and_exit"
+            arguments = json.loads(calls[0]["function"]["arguments"])
+            assert arguments == {"summary": "OK".ljust(10), "verified": True}
+        else:
+            assert content == "OK"
+            assert not calls
+        entry = _last_entry(server, "chat")
+        assert bool(entry.get("completion_tool")) == advertised
 
 
 class TestPortFile:

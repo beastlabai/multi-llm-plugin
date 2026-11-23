@@ -1,3 +1,7 @@
+# Re-seeded 2026-11-23 after reviewing the updated CLI help. Required options
+# remain present; Grok's hidden --no-auto-update keeps its acceptance probe.
+# Runtime fixes: docs/development/release-gates.md and providers.md.
+#
 # Per-CLI surface contract — the ONE upstream-facing drift signal (C8 part two).
 #
 # WHY THE ARGV GOLDEN IS NOT THIS. Both sides of `expected_argv.yaml` originate in
@@ -184,11 +188,11 @@ clis:
   # Captured from the checksummed Vercel 0.0.14 binary, 2026-10-22.
   - cli: fx
     binary: fx
-    version: "0.0.14"
+    version: "0.0.17"
     probe: ok
     help_invocation: "fx ask --help"
-    help_sha256: 25db350082aa92b568843273c3ff59883d9cbf24446edc6d584bb46e89183448
-    help_bytes: 3099
+    help_sha256: 10264937efa81eda00b8b6bfbac62f6358d32dcd3ddae994cdaed6337d9fa486
+    help_bytes: 3468
     profiles: [generate]
     subcommands: [ask]
     options: ["--auto", "--json", "--model", "--no-save"]
@@ -217,11 +221,11 @@ clis:
   # not a deprecation. Read the help before moving the digest anyway.
   - cli: agy
     binary: agy
-    version: "1.4.5"
+    version: "1.5.15"
     probe: ok
     help_invocation: "agy --help"
-    help_sha256: a12355e8fc064b330eeb25ba52de596406582752442e293083bcda6388a63b78
-    help_bytes: 2907
+    help_sha256: e92946f85cec63eca61f93014ca49f53b1e84277eac7954e7fac7d8d712940fd
+    help_bytes: 3319
     profiles: [generate]
     subcommands: []
     options:
@@ -272,11 +276,11 @@ clis:
 
   - cli: claude-code
     binary: claude
-    version: "2.1.308 (Claude Code)"
+    version: "2.1.330 (Claude Code)"
     probe: ok
     help_invocation: "claude --help"
-    help_sha256: b10f5c36adfe3285f6c5a0d18284f466e6c4486499de56ef62745e13312a7fbc
-    help_bytes: 22311
+    help_sha256: b296ad20ed563e8c57033bd8570724d63a508dd5a7c1de126e95edcbc73461f3
+    help_bytes: 22339
     profiles: [generate, agent-readonly, agent-write]
     # `--strict-mcp-config` by hand: the read profiles' MCP-off flag
     # (docs/development/providers.md#claude-code-read-slots), behind the help
@@ -292,11 +296,11 @@ clis:
 
   - cli: cline
     binary: cline
-    version: "3.0.73"
+    version: "3.0.75"
     probe: ok
     help_invocation: "cline --help"
-    help_sha256: 04d834c4ae0cc8ea0bf304351a54a4d534acfb52f92c40fa6e28bd290ddef651
-    help_bytes: 3993
+    help_sha256: ce7f3b9607bdb3221d61e096e550b8da98478e6b36c3182f1b19f63f38e67e5a
+    help_bytes: 4143
     profiles: [generate]
     options:
       - "--json"
@@ -305,11 +309,11 @@ clis:
 
   - cli: codex
     binary: codex
-    version: "codex-cli 0.163.0"
+    version: "codex-cli 0.171.0"
     probe: ok
     help_invocation: "codex exec --help"
-    help_sha256: df0d864ca2076f7654288c6a1e3394e3eaa2ea8f15021df2524efdd90c70986c
-    help_bytes: 4331
+    help_sha256: 34ddfe0641ace4caaad89106468d9121bfa81978990eba230dc810985d00310d
+    help_bytes: 4722
     profiles: [generate, agent-readonly, agent-write]
     subcommands: [exec]
     options:
@@ -352,11 +356,11 @@ clis:
   # `probe: none` that would have been a false statement.
   - cli: copilot
     binary: copilot
-    version: "GitHub Copilot CLI 1.0.102."
+    version: "GitHub Copilot CLI 1.0.114."
     probe: ok
     help_invocation: "copilot --help"
-    help_sha256: d3eb12c9c2bf565ad101ea0e89664638e7707bb6361e4ab24b45d39dea01ccf3
-    help_bytes: 14753
+    help_sha256: a8ac12edb5b7fd14efb544cd0932535c519772f79b4b70fe4bcc110b5fd44de0
+    help_bytes: 15788
     profiles: [generate]
     subcommands: []
     options:
@@ -372,10 +376,10 @@ clis:
 
   - cli: cursor-agent
     binary: cursor-agent
-    version: "2026.10.19-6bbf2c4"
+    version: "2026.11.22-e9042b2"
     probe: ok
     help_invocation: "cursor-agent --help"
-    help_sha256: c24026e17118188478fcb47ed8113fa842f93df2043da5116660a368d3dc64b0
+    help_sha256: cebac62724b962cbf61c8109aa99ee55aac30177a838d32cd32d983d401b9553
     help_bytes: 5991
     profiles: [generate]
     subcommands: []
@@ -388,11 +392,11 @@ clis:
 
   - cli: gemini
     binary: gemini
-    version: "0.65.0"
+    version: "0.70.0"
     probe: ok
     help_invocation: "gemini --help"
-    help_sha256: b5c6e1af180f48adb3700982e7b06e905f29d2965f047eaeebd0b5c4f676b632
-    help_bytes: 3989
+    help_sha256: bb8573089b86c54dfb5fb38f701910f446988998df8f49f797a6f5ccc19f1807
+    help_bytes: 4134
     profiles: [generate]
     options:
       - "--model"
@@ -400,7 +404,7 @@ clis:
 
   - cli: goose
     binary: goose
-    version: "1.55.0"
+    version: "1.60.2"
     probe: ok
     help_invocation: "goose run --help"
     help_sha256: c6c76cbcf38ba3839df9e36b66bee049c435bb9ec9ba320404fa87ca5b353583
@@ -420,11 +424,11 @@ clis:
 
   - cli: grok
     binary: grok
-    version: "grok 1.0.67 (2fe064390d07)"
+    version: "grok 1.0.92 (b06756fd6256)"
     probe: ok
     help_invocation: "grok --help"
-    help_sha256: 5f1fce5a2c6bed62f49a503ba3770e02dd5832f1fac1c7f8ea96a8c72dd85219
-    help_bytes: 5148
+    help_sha256: ee0e7c30d34a7b90a7760e0b0c9e9d9149efb88279557337fec17c6e8beb11f0
+    help_bytes: 5455
     profiles: [generate]
     options:
       - "--always-approve"
@@ -454,11 +458,11 @@ clis:
 
   - cli: kimi
     binary: kimi
-    version: "2.3.0"
+    version: "2.7.2"
     probe: ok
     help_invocation: "kimi --help"
-    help_sha256: f5a0ed1d6b6ab479f0f6b3a931cc7cb1cab72d7499199c372ac8658f788ee624
-    help_bytes: 3506
+    help_sha256: 7dd53f5884409733b4b39ee5eff98e9bd175f72a88b07a5120b718e2732c4990
+    help_bytes: 3586
     profiles: [generate]
     subcommands: []
     options:
@@ -467,7 +471,7 @@ clis:
 
   - cli: qwen-code
     binary: qwen
-    version: "0.26.0"
+    version: "0.28.4"
     probe: ok
     # NOT `qwen --help`: five of the options this adapter emits are HIDDEN and
     # absent from the visible help, and qwen returns 0 for a bogus flag whenever
@@ -476,8 +480,8 @@ clis:
     # complete option list deterministically, so that is the surface probed.
     # See the redirect.yaml row for the full reasoning.
     help_invocation: "qwen --mllm-force-full-help"
-    help_sha256: d999156ce62198709ad79aafb752897f3ce5b1733e535fbe328a1347cbeb279c
-    help_bytes: 11979
+    help_sha256: 55be550ae726cd7f42b6ef776e2de27ab62b2f453c9bd3e0e239cce38d60788f
+    help_bytes: 12294
     profiles: [generate]
     subcommands: []
     options:
@@ -496,7 +500,7 @@ clis:
 
   - cli: kilocode
     binary: kilocode
-    version: "7.8.15"
+    version: "7.8.32"
     probe: ok
     help_invocation: "kilocode run --help"
     help_sha256: 4fff43529130e190fee0b7336c8187fe31298d364ffbaf25d50caa237e2a3300
@@ -509,11 +513,11 @@ clis:
 
   - cli: muse
     binary: muse
-    version: "Muse Code 1.4.11 (1.4.11-R6667.1)"
+    version: "Muse Code 1.4.25 (1.4.25-R9361.1)"
     probe: ok
     help_invocation: "muse exec --help"
-    help_sha256: d7398a8f9cda096a090bd07c244aef309588065859be86d1ed99c1b41e7ebf81
-    help_bytes: 4335
+    help_sha256: 401fc25907716c1da3b4c6609bec9608bc3edae0d50df1f0c9f70bd5f8c659fb
+    help_bytes: 4488
     profiles: [generate]
     subcommands: [exec]
     options:
@@ -546,11 +550,11 @@ clis:
 
   - cli: pi
     binary: pi
-    version: "1.4.0"
+    version: "1.6.0"
     probe: ok
     help_invocation: "pi --help"
-    help_sha256: 7e4c9e558ae8e1b64f6ebeb5a28d9f7dee8a99fcf99197cc4610f642861a3dba
-    help_bytes: 10705
+    help_sha256: 4a678da3ea41515286e8d279b54436a29f30f8b4d67cd7893a3e2512bc253a04
+    help_bytes: 11328
     profiles: [generate]
     # `--mode` since plan §7 (T7.9, hand edit): `pi --help` at 0.87.1 documents
     # it ("Output mode: text (default), json, or rpc"); the help sha was
@@ -587,11 +591,11 @@ clis:
   # `--model` flag at all, and the alias travels in VIBE_ACTIVE_MODEL.
   - cli: vibe
     binary: vibe
-    version: "vibe 3.0.1"
+    version: "vibe 3.1.4"
     probe: ok
     help_invocation: "vibe --help"
-    help_sha256: 76a08c570eb8774826396c205fc8d01f9c5ca057e6f12013266d07959c79ab93
-    help_bytes: 3086
+    help_sha256: f6a949cc1b16ac5eb0d088c5a03e633bc1173de2873104294281d6e0ec968f08
+    help_bytes: 4171
     profiles: [generate]
     options:
       - "--agent"
@@ -619,11 +623,11 @@ clis:
   # the eight below.
   - cli: omp
     binary: omp
-    version: "omp/18.12.6"
+    version: "omp/19.1.1"
     probe: ok
     help_invocation: "omp --help"
-    help_sha256: 02b2d737374f07bdd127e3bfc53851cb09fbeded50a0f2b36f71a970cf2685a9
-    help_bytes: 16269
+    help_sha256: b4f9b413d56901993fe5f54d9133eaa8f2f23b93050f45634d6647d229aa2dc8
+    help_bytes: 19562
     profiles: [generate]
     options:
       - "--approval-mode"

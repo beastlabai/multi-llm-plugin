@@ -633,6 +633,16 @@ listed 616. Most of the missing ids are models OpenRouter no longer serves; the 
 older `:batch` and `:free` entries. Every id omp 19 lists is in the OpenRouter snapshot, and a
 repeat run returns the same list, so the listing is not truncated.
 
+### Vibe agent compatibility
+
+Vibe 3 removes the `plan` agent. The adapter selects `--agent ask` and
+`VIBE_DEFAULT_AGENT=ask` on 3.x, retaining `plan` on 2.x or an unread version.
+The shared cached version probe controls both values, so neither can silently fall
+back to a mode that approves writes. The 3.1.4 offline probe explicitly advertised
+`write_file`, received `tool_denied` with “Tool execution denied by approval callback”,
+completed the review, and left the workspace canary absent. The version-selection
+tests retain coverage of 2.x as well as the new spelling.
+
 ## Provider output channels
 
 **The fan-out asks each adapter for the channel it actually has** (`supports_file_output`). The

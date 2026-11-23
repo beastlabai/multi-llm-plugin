@@ -52,6 +52,11 @@ scripted_tool_call:
 on_unmatched: fail
 
 prompts:
+  # Vendor-owned capability query, distinct from every workflow prompt.
+  - pattern: "^What is 17 times 23\\? Answer with only the number\\.\\s*$"
+    fixture: "../responses/omp_probe/thinking.txt"
+    description: "omp thinking capability probe"
+
   - pattern: "Generate a concise, sentence-case title|You are a title generator\\. You output ONLY a thread title|Generate a short title \\(four words or less\\)|You are tasked with generating the session title"
     fixture: "../responses/session_title/plain_title.txt"
     description: "session-title generator (claude-code, opencode, kilocode, goose, grok)"

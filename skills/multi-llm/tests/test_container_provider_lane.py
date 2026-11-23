@@ -90,6 +90,31 @@ def row_result(request, posture, utc):
     return harness.run_row(row, posture=posture, utc=utc)
 
 
+def test_vibe_headless_approval_refuses_a_workspace_write(posture, utc):
+    """Exercise the real write tool so a renamed safe mode cannot widen access."""
+    import json
+
+    entry = next(row for row in VERIFIED if row["cli"] == "vibe")
+    spec = f"vibe:{entry['model_arg']}"
+    result = harness.run_row(harness.Row(
+        row_id="provider-vibe-write-denial", lane="provider", cli="vibe",
+        spec=spec, runner=spec,
+        command="review-plan plans/auth-feature.md --yes --quick",
+        scenario="/opt/mllm/skill/tests/fixtures/e2e/scenarios/scripted_vibe_write_deny.yaml",
+        row_timeout_s=90,
+    ), posture=posture, utc=utc)
+    assert not result.timed_out
+    assert result.exit_code == 0, result.stderr
+    scripts = [row.get("scripted", {}) for row in result.stub_log]
+    assert any(row.get("phase") == "call"
+               and row.get("tool", {}).get("name") == "write_file" for row in scripts)
+    outputs = [json.loads(row["output"]) for row in scripts if row.get("output")]
+    assert any(row.get("result", {}).get("error", {}).get("name") == "tool_denied"
+               for row in outputs), outputs
+    census = (result.out_dir / "workspace-census-after.json").read_text(encoding="utf-8")
+    assert "vibe-write-canary.txt" not in census
+
+
 class TestTheRowReachedTheStub:
     """The assertions that make 'redirection worked' evidence, not inference."""
 

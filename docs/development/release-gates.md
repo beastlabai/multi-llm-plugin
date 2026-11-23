@@ -51,6 +51,32 @@ The whole-lane wall-clock cap (`MLLM_E2E_MATRIX_TIMEOUT_S`, default 3600) is exp
 
 `opencode-stage` stages the OpenCode plugin payload for the image's COPY. It is staging only (no `npm pack`, no secret sweep, no stamp) so that building a test image can never look like a step toward publishing one, and it is a prerequisite of the image targets because `dist/` and `skills/` under the package are gitignored build output that a fresh clone lacks. It passes `--allow-dirty` by default (`OPENCODE_STAGE_DIRTY`), because a test image must match the working tree it is built from. The full gate overrides that: row 8 grades the package inside the image, an image staged from a dirty tree is not the candidate, and a clean `git status` cannot see ignored files, so the gate also reads the payload digest back out of the image id (`release_gate.py image`). `MULTI_LLM_ALLOW_DIRTY` is blanked on that line so the exported opt-in cannot re-enable what the flag left off.
 
+### oh-my-pi native cache
+
+The image warms `omp config list` without a model or credential and copies the complete
+`~/.omp/natives` cache into `/opt/mllm/omp-natives`. Keep its directory structure intact:
+oh-my-pi 19.1.1 stores an addon under `<version>/embedded-<content-hash>/`, where older
+releases used `<version>/` directly. The build checks recursively for the native addon
+and warms the baseline CPU variant too. It also links the addons beside the unmodified
+`omp` binary: 19.1.1 updates the cache directory's timestamp before opening its hashed
+addon, so that lookup fails on a read-only root. The loader's executable-directory
+fallback loads those links without writing to the cache or extracting a large binary
+into each tmpfs home. `PI_NATIVES_DIR` and the home link still name the cache root.
+
+The strict scenarios also answer omp's built-in thinking-capability query, “What is
+17 times 23? Answer with only the number.”, with `391`. Its recorded wire prompt is
+part of the non-overlap corpus. This keeps the auxiliary requests explicit while
+every other unmatched prompt remains a failure.
+
+### Cline completion protocol
+
+Cline 3.0.75 defaults one-shot prompts to a mode that requires `submit_and_exit`.
+A plain assistant message causes another turn. After resolving the scenario, the stub
+wraps that fixture in `summary` with `verified: true` only when the request advertises
+the completion tool. Other requests retain their text response, and unmatched prompts
+still fail before rendering. The summary is padded to the tool's ten-character minimum
+when necessary. Both JSON and SSE responses are covered by the loopback stub tests.
+
 ## The OpenCode package gate
 
 **Build and pack are separate, and every recipe runs the build explicitly.** `packaging/opencode/build.py` stages deterministic artifacts and never invokes npm; packing and publishing are owned by the Makefile, so exactly one place each happens and a build cannot quietly produce a second tarball nobody publishes. The tarball secret sweep is a function `build.py` exposes, called after `npm pack` because what npm writes is what ships and a `prepack` hook runs too early to see a tarball. The manifest's `prepack` hook is only a backstop for a hand-typed `npm pack` and does not fire under `--ignore-scripts`; `test_package_is_built_before_every_pack` asserts the ordering.

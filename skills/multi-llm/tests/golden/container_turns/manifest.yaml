@@ -35,6 +35,9 @@ scenario: ../../fixtures/e2e/scenarios/container_full_chain.yaml
 # scenario response that must answer this prompt — every rule names a distinct
 # one, so the fixture identifies the rule.
 turns:
+  omp-thinking-probe:
+    fixture: ../responses/omp_probe/thinking.txt
+    note: "omp 19.1.1 thinking-capability query; wire SHA-256 72064859102fd0b7c504e0407b4b6e00ed82b4051e284594d02c68d9c8651d76"
   nested-exec-probe:
     fixture: ../responses/nested_exec/probe_not_measured.txt
     note: >-

@@ -1128,6 +1128,21 @@ class Handler(BaseHTTPRequestHandler):
             matched, answer = self._resolve_or_422(prompt, turn, entry)
             if not matched:
                 return None
+            # Cline's one-shot mode requires its completion tool, even for a
+            # text-only answer. Keep scenario selection authoritative and put
+            # that same fixture in the tool's summary.
+            # docs/development/release-gates.md#cline-completion-protocol
+            if surface == "chat" and "submit_and_exit" in _tool_names(body):
+                submission = ScriptedToolCall({
+                    "name": "submit_and_exit", "surfaces": ["chat"],
+                    "arguments": {"summary": answer.ljust(10), "verified": True},
+                    "call_id": "call_stub_submit",
+                })
+                entry["completion_tool"] = "submit_and_exit"
+                if streamed:
+                    include_usage = bool((body.get("stream_options") or {}).get("include_usage"))
+                    return self._send_sse(chat_call_stream(model, submission, include_usage))
+                return self._send_json(chat_call_body(model, submission))
             renderers = {
                 "chat": (chat_body, chat_stream),
                 "responses": (responses_body, responses_stream),

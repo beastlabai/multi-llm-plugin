@@ -133,6 +133,7 @@ def run_script_publishing_once_it_waits(script: Path, tmp_path: Path, payload: D
         assert proc.stdin is not None
         proc.stdin.write(json.dumps(payload))
         proc.stdin.close()
+        proc.stdin = None  # communicate() must not flush the closed input pipe.
         # 30 s only bounds a script that never sleeps nor exits; the normal wait is
         # the script's own start-up. A script that exits instead skips the publish.
         give_up = time.monotonic() + 30.0

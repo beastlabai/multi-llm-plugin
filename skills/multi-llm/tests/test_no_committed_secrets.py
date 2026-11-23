@@ -188,12 +188,11 @@ def _tracked_files(root=REPO_ROOT):
     return [p for p in out.split("\0") if p]
 
 
-def _tracked_payload_report(tracked):
-    """The members of *tracked* that are the local install-payload report or evidence."""
-    report = "coding_planning/plugin-install-payload-verification"
+def _tracked_local_notes(tracked):
+    """Root working notes and engineering evidence must never be published."""
     return sorted(
         path for path in tracked
-        if path == f"{report}.md" or path.startswith(f"{report}/")
+        if path.startswith(("plans/", "coding_planning/"))
     )
 
 
@@ -1128,99 +1127,46 @@ class TestGitignoreDirections:
             f"{rel_path} is ignored by {location}:{pattern}, not by the records/ rule"
         )
 
-    def test_the_repo_plans_scratch_is_ignored_and_never_tracked(self, ignore_repo):
-        """`plans/` at the root is this repo's local working notes: they name
-        local paths and in-progress decisions, and are never published.
-
-        The ignore rule alone did not keep them out — four commits force-added
-        plan files past it (found and scrubbed from the unpushed history on
-        2026-10-23, before the first push of that history), and c5e682bf did it
-        again on 2026-10-31 with an allowlist that this test then permitted
-        (273 files, ~100 lines naming a local home directory, pushed to master).
-        The user's standing rule is that NOTHING under root `plans/` is
-        published, so there is no allowlist: the tracked set is asserted empty,
-        and `git add -f` turns this red."""
-        ignored, location, pattern = _check_ignore(ignore_repo, "plans/some-note.md")
-        assert ignored and pattern == "/plans/", (location, pattern)
-        tracked = [path for path in _tracked_files() if path.startswith("plans/")]
+    @pytest.mark.parametrize("directory", ["plans", "coding_planning"])
+    def test_root_working_notes_are_ignored_and_never_tracked(self, ignore_repo, directory):
+        """Ignore rules prevent ordinary adds; the tracked-set guard catches forced adds."""
+        ignored, location, pattern = _check_ignore(ignore_repo, f"{directory}/some-note.md")
+        assert ignored and pattern == f"/{directory}/", (location, pattern)
+        tracked = _tracked_local_notes(_tracked_files())
         assert tracked == [], (
-            f"tracked root plans/ files would be published: {tracked}. They are "
-            "local notes; `git rm --cached` them.")
-
-    @pytest.mark.parametrize(
-        "rel_path, rule",
-        [
-            (
-                "coding_planning/plugin-install-payload-verification.md",
-                "/coding_planning/plugin-install-payload-verification.md",
-            ),
-            (
-                "coding_planning/plugin-install-payload-verification/",
-                "/coding_planning/plugin-install-payload-verification/",
-            ),
-            (
-                "coding_planning/plugin-install-payload-verification/inventory.txt",
-                "/coding_planning/plugin-install-payload-verification/",
-            ),
-            (
-                "coding_planning/plugin-install-payload-verification/cache/listing.txt",
-                "/coding_planning/plugin-install-payload-verification/",
-            ),
-        ],
-    )
-    def test_the_payload_report_is_ignored_by_its_own_rule(self, ignore_repo, rel_path, rule):
-        """The install-payload report and its evidence hold inventories of a real
-        machine: cache listings, marketplace state, Git configuration. They stay local."""
-        ignored, location, pattern = _check_ignore(ignore_repo, rel_path)
-        assert ignored and pattern == rule, (rel_path, location, pattern)
+            f"tracked local notes would be published: {tracked}. "
+            "Use git rm --cached to keep them local."
+        )
 
     @pytest.mark.parametrize(
         "rel_path",
         [
-            # Named exactly, so the rest of that directory is not silently hidden.
-            "coding_planning/some-other-report.md",
-            "coding_planning/plugin-install-payload-verification-notes.md",
-            # Anchored at the root, so the same name elsewhere is not hidden either.
+            "docs/plans/some-note.md",
             "docs/coding_planning/plugin-install-payload-verification.md",
             "docs/coding_planning/plugin-install-payload-verification/inventory.txt",
         ],
     )
-    def test_the_payload_report_rules_hide_nothing_else(self, ignore_repo, rel_path):
+    def test_root_note_rules_do_not_hide_nested_directories(self, ignore_repo, rel_path):
         ignored, location, pattern = _check_ignore(ignore_repo, rel_path)
         assert not ignored, (rel_path, location, pattern)
 
-    def test_the_payload_report_is_never_tracked(self):
-        """The ignore rule stops `git add .`; it does nothing against `git add -f`.
-
-        Root `plans/` learned that the hard way, so this reads the tracked set
-        rather than trusting the rule. Nothing here may be published, so there is
-        no allowlist to consult: the answer is empty or the row is red.
-        """
-        tracked = _tracked_payload_report(_tracked_files())
-        assert tracked == [], (
-            f"tracked payload-verification files would be published: {tracked}. They "
-            "are local evidence; `git rm --cached` them."
-        )
-
-    def test_a_forced_add_of_the_payload_report_turns_the_guard_red(self, tmp_path):
-        """Proves the row above can fail: a forced add lands in `git ls-files` while
-        the rule still matches, so the guard must not depend on the rule at all."""
+    @pytest.mark.parametrize("directory", ["plans", "coding_planning"])
+    def test_a_forced_add_of_local_notes_turns_the_guard_red(self, tmp_path, directory):
+        """A forced add must be detected even while the ignore rule still matches."""
         repo = _scratch_repo(tmp_path, name="forced")
-        report = "coding_planning/plugin-install-payload-verification.md"
-        evidence = "coding_planning/plugin-install-payload-verification/inventory.txt"
-        bystander = "coding_planning/some-other-report.md"
+        report = f"{directory}/some-report.md"
+        evidence = f"{directory}/some-report/inventory.txt"
+        bystander = "docs/published-report.md"
         for rel_path in (report, evidence, bystander):
             (repo / rel_path).parent.mkdir(parents=True, exist_ok=True)
             (repo / rel_path).write_text("evidence\n", encoding="utf-8")
 
-        # An ordinary add honours the rules, and the guard sees nothing to report.
         _git(["add", "-A"], cwd=repo)
-        assert _tracked_payload_report(_tracked_files(repo)) == []
+        assert _tracked_local_notes(_tracked_files(repo)) == []
         assert bystander in _tracked_files(repo)
 
-        # A forced add does not.
         _git(["add", "-f", "--", report, evidence], cwd=repo)
-        assert _tracked_payload_report(_tracked_files(repo)) == [report, evidence]
+        assert _tracked_local_notes(_tracked_files(repo)) == [report, evidence]
         for rel_path in (report, evidence):
             assert _check_ignore(repo, rel_path)[0], (
                 f"{rel_path}: the forced add was meant to beat a rule that still matches"

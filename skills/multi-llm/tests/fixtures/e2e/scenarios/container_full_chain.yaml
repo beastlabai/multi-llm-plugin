@@ -142,6 +142,11 @@ description: "Every turn of `full --quick --yes --exec-subagents`, one fixture e
 on_unmatched: fail
 
 prompts:
+  # Vendor-owned capability query, distinct from every workflow prompt.
+  - pattern: "^What is 17 times 23\\? Answer with only the number\\.\\s*$"
+    fixture: "../responses/omp_probe/thinking.txt"
+    description: "omp thinking capability probe"
+
   # ---------------------------------------------------------------- side turns
   # Not product turns: the CLI's own session-title generator. Answered with a
   # plain title so the CLI proceeds to the turn we are actually testing.

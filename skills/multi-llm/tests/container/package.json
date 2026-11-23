@@ -4,15 +4,15 @@
   "private": true,
   "description": "Pinned coding-agent CLI set for the containerized E2E harness image.",
   "dependencies": {
-    "@anthropic-ai/claude-code": "2.1.318",
-    "@earendil-works/pi-coding-agent": "1.5.0",
-    "@github/copilot": "1.0.106",
-    "@google/gemini-cli": "0.67.0",
-    "@kilocode/cli": "7.8.27",
-    "@moonshot-ai/kimi-code": "2.5.2",
-    "@openai/codex": "0.167.0",
-    "@qwen-code/qwen-code": "0.26.8",
-    "cline": "3.0.74",
+    "@anthropic-ai/claude-code": "2.1.330",
+    "@earendil-works/pi-coding-agent": "1.6.0",
+    "@github/copilot": "1.0.114",
+    "@google/gemini-cli": "0.70.0",
+    "@kilocode/cli": "7.8.32",
+    "@moonshot-ai/kimi-code": "2.7.2",
+    "@openai/codex": "0.171.0",
+    "@qwen-code/qwen-code": "0.28.4",
+    "cline": "3.0.75",
     "opencode-ai": "1.19.6"
   }
 }

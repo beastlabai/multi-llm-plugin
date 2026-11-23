@@ -1,0 +1,14 @@
+name: vibe_headless_write_denial
+description: Vibe's headless ask mode must refuse a model-requested workspace write.
+scripted_tool_call:
+  name: write_file
+  surfaces: [chat]
+  arguments:
+    path: /work/sample-project/vibe-write-canary.txt
+    content: unexpected write
+  terminal: "[]"
+prompts:
+  - pattern: "You are reviewing an implementation plan"
+    content: "[]"
+fallback:
+  content: "[]"

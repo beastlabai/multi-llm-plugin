@@ -1326,9 +1326,8 @@ clis:
       # over ~305 s on a fail-forever row). Pinned beside the timeout for the
       # same reason; the declared `max_wall_s` is computed from both.
       VIBE_API_RETRY_MAX_ELAPSED_TIME: "150"
-      # §6.5's rung, pinned in env as well as argv: `default_agent` is
-      # `accept-edits`, whose AgentSafety is DESTRUCTIVE.
-      VIBE_DEFAULT_AGENT: "plan"
+      # Pin the same headless approval mode as the adapter's Vibe 3 argv.
+      VIBE_DEFAULT_AGENT: "ask"
       VIBE_THINKING: "off"
       VIBE_ENABLE_TELEMETRY: "false"
       VIBE_ENABLE_UPDATE_CHECKS: "false"
@@ -1419,6 +1418,8 @@ clis:
       ".omp/natives": "/opt/mllm/omp-natives"
     http_log:
       - {method: POST, path: /v1/chat/completions, stream: true, has_tools: true}
+      - {method: POST, path: /v1/chat/completions, stream: true, has_tools: false,
+         note: "thinking capability probes before the first model turn"}
     turns: 1
     terminates_on_text: true
     # MEASURED on the first green provider-lane run (2026-09-17, image-local,

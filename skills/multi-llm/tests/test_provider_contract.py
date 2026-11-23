@@ -418,7 +418,7 @@ class TestPromptTransport:
         ids=[cls.__name__ for cls, _, _ in TRANSPORT_CASES],
     )
     def test_declared_transport_matches_build_command(
-        self, provider_cls, transport, model
+        self, provider_cls, transport, model, monkeypatch
     ):
         """prompt_transport is declared as decided AND matches the built argv.
 
@@ -432,6 +432,8 @@ class TestPromptTransport:
         argv" is the assertion and not a tidiness preference.
         """
         provider = provider_cls()
+        # Transport is a command contract; the flag-gate tests own CLI discovery.
+        monkeypatch.setattr(provider, "missing_flags", lambda flags: ())
 
         assert provider.prompt_transport == transport
 

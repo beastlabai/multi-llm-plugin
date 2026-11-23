@@ -87,6 +87,18 @@ class TestVibeProvider:
         for wide in ("--auto-approve", "--yolo", "--trust", "--dangerously-skip"):
             assert wide not in argv
 
+    @pytest.mark.parametrize("version,agent", [
+        ("", "plan"), ("2.26.1", "plan"), ("3.0.0", "ask"), ("3.1.4", "ask"),
+    ])
+    def test_the_safe_agent_matches_the_installed_version(
+        self, provider, monkeypatch, version, agent
+    ):
+        monkeypatch.setattr(provider, "gate_version", lambda: version)
+        argv = provider.build_command(self.PROMPT, self.MODEL)
+        assert argv[argv.index("--agent") + 1] == agent
+        assert provider.get_env(self.MODEL)["VIBE_DEFAULT_AGENT"] == agent
+        assert not {"--auto-approve", "--yolo", "--trust"}.intersection(argv)
+
     def test_the_spend_and_turn_caps_are_policy_constants(self, provider):
         """Both are verbatim in the pinned argv table, never placeholders.
 

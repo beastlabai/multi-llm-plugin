@@ -23,10 +23,8 @@ skills/multi-llm/plans/
 # plans/*.md design doc is citing a local-only note that a fresh clone will not have.
 /plans/
 
-# The plugin-payload engineering report and its evidence: local only, like plans/.
-# Named exactly, so the rest of a coding_planning/ directory is not silently hidden.
-/coding_planning/plugin-install-payload-verification.md
-/coding_planning/plugin-install-payload-verification/
+# Engineering reports and their evidence are local scratch, like root plans/.
+/coding_planning/
 
 # Multi-LLM local config & workspace temp dir (this repo dogfoods its own skill;
 # .multi-llm/tmp/ is additionally self-ignored via its own .gitignore in consuming repos)

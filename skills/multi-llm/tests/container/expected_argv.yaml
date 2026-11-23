@@ -595,10 +595,20 @@ entries:
       "--output": "json"
       "--max-price": "0.25"
       "--max-turns": "4"
-      "--agent": "plan"
+      "--agent": "ask"
       "-p": "<prompt>"
     tail: []
     prompt: argv
+    min_records: 1
+  - provider: vibe
+    profile: probe
+    transport: stdin
+    binary: vibe
+    subcommands: []
+    options:
+      "--version": null
+    tail: []
+    prompt: stdin
     min_records: 1
   - provider: muse
     profile: generate

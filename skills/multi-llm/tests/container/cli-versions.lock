@@ -61,9 +61,9 @@ base_image:
 # script would otherwise be a live remote input running as root.
 artifacts:
   fx:
-    version: "0.0.16"
-    url: "https://github.com/vercel-labs/fx/releases/download/v0.0.16/fx-linux-x86_64.tar.gz"
-    sha256: "f0fb822c7be546c80bcc89d50521bc1454435e0c6f586e8420c4e2b84fa80599"
+    version: "0.0.17"
+    url: "https://github.com/vercel-labs/fx/releases/download/v0.0.17/fx-linux-x86_64.tar.gz"
+    sha256: "78c155d59fa59e42fd56d93037fd75041868c9c67865e8c7f0ca6dcdfac23e75"
     releases_url: "https://api.github.com/repos/vercel-labs/fx/releases/latest"
     member: "fx"
   uv:
@@ -71,15 +71,15 @@ artifacts:
     url: "https://github.com/astral-sh/uv/releases/download/0.13.5/uv-x86_64-unknown-linux-gnu.tar.gz"
     sha256: "f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f"
   goose:
-    version: "1.57.0"
-    url: "https://github.com/aaif-goose/goose/releases/download/v1.57.0/goose-x86_64-unknown-linux-gnu.tar.bz2"
-    sha256: "e54036f3b7f95d3b0d7854c09465af5ef52a28c7fa03d2497d0ea68a6382282d"
+    version: "1.60.2"
+    url: "https://github.com/aaif-goose/goose/releases/download/v1.60.2/goose-x86_64-unknown-linux-gnu.tar.bz2"
+    sha256: "83fef08e07c63c8cd41f9702e5e840487463f3b4e1290711a94ade5beab2d082"
   grok:
-    version: "1.0.77"
-    url: "https://storage.googleapis.com/grok-build-public-artifacts/cli/grok-1.0.77-linux-x86_64"
-    sha256: "b702950aa5827d855e493278ab6215a4e0f5bceb5bba6c6243a9f55cdd143b0a"
+    version: "1.0.92"
+    url: "https://storage.googleapis.com/grok-build-public-artifacts/cli/grok-1.0.92-linux-x86_64"
+    sha256: "add4d201dbf2c0bd6077a36feb55a76939de30bae48dbb06f16b2307d38ceacb"
   muse:
-    version: "1.4.14-R7309.1"
+    version: "1.4.25-R9361.1"
     # The `muse` on a developer's PATH is a bash LAUNCHER that phones
     # api.meta.ai on every invocation and updates itself synchronously and
     # fatally. The image installs the artifact the launcher would have
@@ -87,12 +87,12 @@ artifacts:
     # -- which is what makes `muse --version` answer under --network none.
     # Meta publishes the sha256 in the channel manifest; this is that value,
     # confirmed byte-for-byte against a fetched artifact.
-    url: "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.14-R7309.1&file=muse-x86-linux"
-    sha256: "0809aac7cb58d18f5022b6d05e02aa1974683c0ec430e5f04d25b60ed17de2da"
-    manifest_url: "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.14-R7309.1&file=manifest.json"
+    url: "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.25-R9361.1&file=muse-x86-linux"
+    sha256: "c1b728fb9732503c5e1869e3ad2f2c9bdb5b2638fb4cf398d6e2c46aa6d8f94a"
+    manifest_url: "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.25-R9361.1&file=manifest.json"
     channel_url: "https://api.meta.ai/muse-code/channels/muse-stable"
   cursor-agent:
-    version: "2026.11.05-86047df"
+    version: "2026.11.22-e9042b2"
     # The documented install is `curl https://cursor.com/install | bash` -- a
     # live remote input executing as root, which is the one shape this file
     # exists to refuse. And the refusal is not merely stylistic: that script is
@@ -109,13 +109,13 @@ artifacts:
     # One tarball, one root directory (`dist-package/`), hence
     # `--strip-components=1`. 555 MiB unpacked, of which 129 MB is a second
     # bundled node -- see the Dockerfile's §7 block for what that buys.
-    url: "https://downloads.cursor.com/lab/2026.11.05-86047df/linux/x64/agent-cli-package.tar.gz"
-    sha256: "170b77786cbf4c93064d64fff12b71a178b968730561c64afc2e8e752535442e"
+    url: "https://downloads.cursor.com/lab/2026.11.22-e9042b2/linux/x64/agent-cli-package.tar.gz"
+    sha256: "7663b1c5d1b56e095ef8e23bef38d66df6cfd665c4873470214e0e411f0f97b3"
     # Where `latest` mode re-reads the version, the way muse re-reads its
     # channel: the URL above is grepped back out of this script's body.
     installer_url: "https://cursor.com/install"
   agy:
-    version: "1.5.2"
+    version: "1.5.15"
     # Google's Antigravity CLI. Like muse's and unlike cursor-agent's, this
     # sha256 is UPSTREAM'S OWN: the GitHub release API publishes a `digest` per
     # asset, so the value below is what Google says the bytes are, not what we
@@ -141,8 +141,8 @@ artifacts:
     # lands, the way kimi's and qwen-code's notes already say of theirs, and it
     # is the reason the auto-update opt-out below is load-bearing rather than
     # tidy: a self-updating binary on a daily channel unpins itself within a day.
-    url: "https://github.com/google-antigravity/antigravity-cli/releases/download/1.5.2/agy_cli_linux_x64.tar.gz"
-    sha256: "da696a8dc6122a63d5ffbdd21b02c8a62d5361fba0ed7d3bc2d2619889e62711"
+    url: "https://github.com/google-antigravity/antigravity-cli/releases/download/1.5.15/agy_cli_linux_x64.tar.gz"
+    sha256: "8d9913298602049ef29e9669f35252b6b79571979ce1bd0fb27753c7bac84114"
     # The single tarball member, named here rather than discovered by the RUN:
     # `tar -xzf` into /tmp and then `install /tmp/<member>` is only correct while
     # the member is what this file says it is, and a renamed member would
@@ -153,7 +153,7 @@ artifacts:
     # `tag_name`. It is also where the `digest` above comes from.
     releases_url: "https://api.github.com/repos/google-antigravity/antigravity-cli/releases/latest"
   omp:
-    version: "18.17.0"
+    version: "19.1.1"
     # oh-my-pi's release asset. Like agy's and muse's and unlike cursor-agent's,
     # this sha256 is UPSTREAM'S OWN: the release page publishes a
     # SHA256SUMS.txt naming this value against `omp-linux-x64`. Confirmed on
@@ -182,8 +182,8 @@ artifacts:
     # `make e2e-image-latest`; `install: download` then keeps the fetched file
     # unchanged, so `plan_artifacts` recovers the new digest by hashing
     # /opt/mllm/real/omp out of the @latest image.
-    url: "https://github.com/can1357/oh-my-pi/releases/download/v18.17.0/omp-linux-x64"
-    sha256: "a4ce6001ab1012ca835f4184d675437531bd1ac477a7ba8424ed0b5476e9e4cb"
+    url: "https://github.com/can1357/oh-my-pi/releases/download/v19.1.1/omp-linux-x64"
+    sha256: "04e9490f9394da6d6804474cc2e41eb3d18f8e26215df4b34bdd4ad4c0d8a401"
     # Where `latest` mode re-reads the version: the release API's `tag_name`,
     # which carries a leading `v` this row's version does not.
     releases_url: "https://api.github.com/repos/can1357/oh-my-pi/releases/latest"
@@ -307,7 +307,7 @@ clis:
     binary: fx
     install: archive
     artifact: fx
-    version: "0.0.16"
+    version: "0.0.17"
     verify:
       command: ["fx", "--version"]
       pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+)$"
@@ -320,7 +320,7 @@ clis:
     binary: codex
     install: npm
     package: "@openai/codex"
-    version: "0.167.0"
+    version: "0.171.0"
     verify:
       command: ["codex", "--version"]
       pattern: "^codex-cli (?P<version>\\S+)$"
@@ -332,7 +332,7 @@ clis:
     binary: claude
     install: npm
     package: "@anthropic-ai/claude-code"
-    version: "2.1.318"
+    version: "2.1.330"
     verify:
       command: ["claude", "--version"]
       pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+) \\(Claude Code\\)$"
@@ -341,7 +341,7 @@ clis:
     binary: gemini
     install: npm
     package: "@google/gemini-cli"
-    version: "0.67.0"
+    version: "0.70.0"
     verify:
       command: ["gemini", "--version"]
       pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+)$"
@@ -359,7 +359,7 @@ clis:
     binary: cline
     install: npm
     package: "cline"
-    version: "3.0.74"
+    version: "3.0.75"
     verify:
       command: ["cline", "--version"]
       pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+)$"
@@ -375,7 +375,7 @@ clis:
     binary: kilocode
     install: npm
     package: "@kilocode/cli"
-    version: "7.8.27"
+    version: "7.8.32"
     verify:
       command: ["kilocode", "--version"]
       pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+)$"
@@ -387,7 +387,7 @@ clis:
     binary: kimi
     install: npm
     package: "@moonshot-ai/kimi-code"
-    version: "2.5.2"
+    version: "2.7.2"
     verify:
       command: ["kimi", "--version"]
       pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+)$"
@@ -401,7 +401,7 @@ clis:
     binary: copilot
     install: npm
     package: "@github/copilot"
-    version: "1.0.106"
+    version: "1.0.114"
     verify:
       command: ["copilot", "--version"]
       # MEASURED, and the anchoring is the whole point: `copilot --version`
@@ -431,7 +431,7 @@ clis:
     binary: qwen
     install: npm
     package: "@qwen-code/qwen-code"
-    version: "0.26.8"
+    version: "0.28.4"
     verify:
       command: ["qwen", "--version"]
       # MEASURED, not guessed: `qwen --version` prints a BARE semver with no
@@ -451,7 +451,7 @@ clis:
     binary: pi
     install: npm
     package: "@earendil-works/pi-coding-agent"
-    version: "1.5.0"
+    version: "1.6.0"
     verify:
       command: ["pi", "--version"]
       pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+)$"
@@ -479,7 +479,7 @@ clis:
     binary: vibe
     install: pypi
     package: "mistral-vibe"
-    version: "3.1.0"
+    version: "3.1.4"
     # A `--generate-hashes` lock of the WHOLE transitive tree (96 packages),
     # installed with --require-hashes, on the pinned CPython 3.12 above rather
     # than the base image's 3.11.2.
@@ -492,7 +492,7 @@ clis:
     binary: goose
     install: archive
     artifact: goose
-    version: "1.57.0"
+    version: "1.60.2"
     verify:
       command: ["goose", "--version"]
       pattern: "^\\s*(?P<version>\\d+\\.\\d+\\.\\d+)\\s*$"
@@ -502,7 +502,7 @@ clis:
     binary: grok
     install: download
     artifact: grok
-    version: "1.0.77"
+    version: "1.0.92"
     verify:
       command: ["grok", "--version"]
       pattern: "^grok (?P<version>\\S+)"
@@ -516,7 +516,7 @@ clis:
     binary: muse
     install: download
     artifact: muse
-    version: "1.4.14-R7309.1"
+    version: "1.4.25-R9361.1"
     verify:
       command: ["muse", "--version"]
       pattern: "^Muse Code \\S+ \\((?P<version>[^)]+)\\)$"
@@ -530,7 +530,7 @@ clis:
     binary: cursor-agent
     install: archive
     artifact: cursor-agent
-    version: "2026.11.05-86047df"
+    version: "2026.11.22-e9042b2"
     verify:
       # MEASURED: `cursor-agent --version` prints a BARE calendar version and
       # nothing else -- no product-name prefix, no second line. The date part is
@@ -562,7 +562,7 @@ clis:
     binary: agy
     install: archive
     artifact: agy
-    version: "1.5.2"
+    version: "1.5.15"
     verify:
       # MEASURED: `agy --version` prints a BARE dotted version and nothing else
       # -- no product-name prefix, no second line, no leading whitespace -- and
@@ -603,7 +603,7 @@ clis:
     binary: omp
     install: download
     artifact: omp
-    version: "18.17.0"
+    version: "19.1.1"
     verify:
       # MEASURED: `omp --version` prints a bare `omp/18.2.2` on stdout with
       # stderr EMPTY and exit 0, offline, with no credential -- and, unlike the

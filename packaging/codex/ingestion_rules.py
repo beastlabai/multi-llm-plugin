@@ -106,7 +106,7 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 #: container pin (``tests/container/package.json``), asserted. As of this
 #: value the file at SOURCE_PATH is confirmed ABSENT (see the module
 #: docstring's 2026-09-30 note) -- the version records the check, not a read.
-SOURCE_CODEX_VERSION = "0.167.0"
+SOURCE_CODEX_VERSION = "0.171.0"
 
 #: Where that file used to live, relative to ``$CODEX_HOME``. The container
 #: drift row looks here; off the image, or on any codex build that no longer
@@ -117,10 +117,9 @@ SOURCE_PATH = "skills/.system/plugin-creator/scripts/validate_plugin.py"
 #: since no later build ships the file to re-hash (module docstring).
 SOURCE_SHA256 = "f4eeadb733b28b0c3e714de263a76d6542866a672f3e99bdffcf4dbcdf85e944"
 
-#: The day this stamp was last checked, ISO 8601 (an absence re-confirmation
-#: most recently on 2026-11-06, not a fresh read -- the file has had no bytes to read since
-#: at least 0.156.1's successor).
-SOURCE_READ_DATE = "2026-11-06"
+#: ISO date of the absence check, not a fresh read of the retired checker.
+#: docs/development/hosts.md#codex-ingestion-provenance
+SOURCE_READ_DATE = "2026-11-23"
 
 # ---------------------------------------------------------------------------
 # The server's own interpreter floor
