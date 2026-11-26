@@ -513,6 +513,20 @@ clis:
       tests/test_dockerfile_pins.py's UNHASHED_BY_UPSTREAM is empty. A new
       unhashed entry fails that test.
 
+  - id: dsh
+    binary: dsh
+    install: npm
+    package: "@deepseek-ai/dsh"
+    version: "0.2.2-rc.5"
+    verify:
+      command: ["dsh", "--version"]
+      pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+(?:-[0-9A-Za-z.]+)?)$"
+    note: >-
+      DeepSeek Harness. The pin is a prerelease (`latest` and `next` both name
+      0.2.2-rc.5 on the registry), so the verify pattern keeps the tag. It
+      declares node >=24.9 and runs on this image's node 22 (npm ci warns only).
+      Not Debian's `dsh`, an unrelated distributed shell.
+
   - id: aider
     binary: aider
     install: pypi

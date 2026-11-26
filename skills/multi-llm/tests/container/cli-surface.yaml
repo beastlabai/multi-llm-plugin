@@ -222,6 +222,25 @@ clis:
       - "-m"
       - "-q"
 
+  # Captured from the pinned npm 0.2.2-rc.5 in the e2e image. The help is the
+  # headless app's own (it boots the profile); NARB_DISABLE_NATIVE_CACHE is the
+  # row's env_extra, without which the native addon cannot load from the noexec
+  # tmpfs and the "help" is a boot failure.
+  - cli: dsh
+    binary: dsh
+    version: "0.2.2-rc.5"
+    probe: ok
+    help_invocation: "dsh --profile headless --help"
+    help_sha256: a5f9cf88ac874517880438c6b30c76de56b7977b513a42ac804240a5ac9dc7c0
+    help_bytes: 1539
+    profiles: [generate]
+    subcommands: []
+    options:
+      - "--approval-policy"
+      - "--json"
+      - "--permission-mode"
+      - "--profile"
+
   # Captured from the checksummed JetBrains 26.11.3 (4171.6) launcher. The help
   # runs with the row's JAVA_TOOL_OPTIONS (`{home}` is the probe's $HOME): the JVM
   # ignores $HOME, so without it Junie would write its log under the real home.

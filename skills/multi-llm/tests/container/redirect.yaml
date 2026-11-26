@@ -1596,6 +1596,79 @@ clis:
   # about mock_llm.py (C5): cursor-agent is already one of its six identities;
   # `agy` is the only provider in this matrix that still needs the five mock parts.
   # -------------------------------------------------------------------------
+  - cli: dsh
+    provenance: verified
+    lane: provider
+    chain_write_runner: opencode
+    surface: chat
+    mechanism: "$DSH_HOME/profiles/headless/cordis.patch.yml llm-pi-ai route, baseURL"
+    model_arg: "stub-model"
+    session_prefix: true
+    credential_vars: [OPENROUTER_API_KEY]
+    config_roots:
+      DSH_HOME: ".dsh"
+    # DSH_PROFILE_PATCH (utils/providers/dsh.py) byte for byte except baseURL;
+    # tests/test_wrapper_env_contract.py holds the two together.
+    config_files:
+      ".dsh/profiles/headless/cordis.patch.yml": |
+        # Written by multi-llm for one dispatch; removed with this directory.
+        - id: session-title-llm
+          disabled: true
+        - id: session-log-deepseek
+          disabled: true
+        - id: session-telemetry-otel
+          disabled: true
+        - id: agent-default-model
+          config:
+            provider: openrouter
+            model: !!js process.env.DSH_MULTI_LLM_MODEL
+        - id: llm-pi-ai
+          config:
+            providers:
+              openrouter:
+                apiKeyEnv: OPENROUTER_API_KEY
+                api: openai-completions
+                baseURL: {base_url}
+                reasoning: !!js process.env.DSH_MULTI_LLM_REASONING || undefined
+                streamIdleTimeoutMs: 120000
+                retryPolicy:
+                  mode: normal
+                  maxRetries: 2
+                models:
+                  - id: !!js process.env.DSH_MULTI_LLM_MODEL
+                    maxTokens: 65536
+    env_extra:
+      # dsh's native addons load through node-addon-native-custom-loader, which
+      # first copies each prebuilt `.node` into a cache under os.tmpdir() and
+      # dlopens the copy. Here TMPDIR is the per-invocation tmpfs, mounted
+      # noexec, so every dsh boot died with `failed to map segment from shared
+      # object` before its first request (measured in this image). With the
+      # cache off the loader dlopens the package's own file under the
+      # read-only root. Not a production setting: a normal TMPDIR is exec.
+      NARB_DISABLE_NATIVE_CACHE: "1"
+    http_log:
+      - {method: POST, path: /v1/chat/completions, stream: true, has_tools: true}
+    turns: 1
+    terminates_on_text: true
+    row_timeout_s: 300
+    chain_row_timeout_s: 600
+    version_measured: "0.2.2-rc.5"
+    help_invocation: "dsh --profile headless --help"
+    version_offline: true
+    notes: >-
+      DeepSeek Harness (npm @deepseek-ai/dsh), not Debian's distributed shell.
+      dsh has no model flag: the adapter's argv is static and the profile patch
+      in DSH_HOME is the whole redirect. The product's own DSH_HOME, model and
+      reasoning variables are carried over by name (wrapper ENV_CARRY_EXACT) and
+      this row's config_roots then replaces the home with one whose patch points
+      baseURL at the stub. Prompt on stdin (`-`). One streamed chat request per
+      dispatch: the patch unmounts the session-title request, so there is no
+      second one. Read-only is dsh's own `--permission-mode read-only` preset.
+      The help invocation is the headless app's own, which boots the profile
+      (writing under the probe's $HOME/.dsh); top-level `dsh --help` lists only
+      the launcher flags.
+
+  # -------------------------------------------------------------------------
   - cli: cursor-agent
     provenance: none
     lane: fake

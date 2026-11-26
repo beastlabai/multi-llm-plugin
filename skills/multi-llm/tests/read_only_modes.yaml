@@ -155,6 +155,20 @@ read_only_modes:
     # probe of the mode question would settle, so the row stays null.
     mechanism: null
     probed: null
+  dsh:
+    # `--permission-mode read-only --approval-policy never`: dsh's own sandbox
+    # preset, with its escalation prompt answered "no" headlessly.
+    mechanism: ["--permission-mode", "read-only", "--approval-policy", "never"]
+    probed: >-
+      2026-11-25/26, dsh 0.2.2-rc.5 against a localhost chat-completions stub
+      that forces one tool call per run (plans/2026-11-25-new-cli-probes-junie-
+      hermes-dsh-kiro.md, rows write / writeout / bash / escalate). An in-tree
+      and an out-of-tree `write` came back FS_SANDBOX_DENIED, a `bash` command
+      ran with both writes denied (Permission denied, Landlock on the host), and
+      a `sandbox_permissions: danger-full-access` retry was rejected
+      (SANDBOX_ESCALATION_REJECTED); the tree and the outside directory were
+      unchanged in every row. The same rows under `workspace-write` wrote both
+      files. The shell itself is recorded as DshProvider.runs_shell_in_generate.
   fx:
     # fx 0.0.14 has no measured general read-only mode for this dispatch.
     # `--auto` still invokes its shell reviewer and does not block web fetch;

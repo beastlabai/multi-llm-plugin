@@ -1,0 +1,3 @@
+Could not parse message into JSON:
+From chunk:
+dsh: PI_AI_ERROR: Error reading response: malformed server-sent event JSON.

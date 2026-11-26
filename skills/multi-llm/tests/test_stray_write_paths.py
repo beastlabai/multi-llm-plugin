@@ -847,15 +847,16 @@ class TestTheCredentialReceiptIsFalsifiable:
         assert harness.live_credential_leaks([record]) == [
             ("fx", "ANTHROPIC_AUTH_TOKEN")]
 
-    def test_only_fx_and_junie_declare_a_live_name_as_their_stub_credential(self):
+    def test_only_fx_junie_and_dsh_declare_a_live_name_as_their_stub_credential(self):
         """A row joining them widens the grader; make that a reviewed edit.
 
         junie's custom model profile names its key as `${OPENROUTER_API_KEY}`,
-        so its row sets that name to the stub key exactly as fx's does.
+        so its row sets that name to the stub key exactly as fx's does; dsh's
+        profile patch reads it through `apiKeyEnv: OPENROUTER_API_KEY`.
         """
         declaring = {cli for cli, names in harness.stub_credential_vars().items()
                      if names & set(harness.LIVE_CREDENTIAL_NAMES)}
-        assert declaring == {"fx", "junie"}
+        assert declaring == {"fx", "junie", "dsh"}
         for cli in declaring:
             assert "OPENROUTER_API_KEY" in harness.stub_credential_vars()[cli]
 

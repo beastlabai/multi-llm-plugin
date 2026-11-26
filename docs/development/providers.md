@@ -606,7 +606,7 @@ catalog. It reads committed files only, so it runs in CI with no credentials.
   the same check through `tests/model_catalogs.load_snapshot`.
 - **Routes** (`ROUTES` in the test) map a provider to its source and an id into that catalog:
   verbatim for codex and opencode, `openrouter/<slug>` to `<slug>` for cline, goose, aider and pi,
-  plain slugs for kimi, qwen-code, copilot and fx, omp's selectors for omp.
+  plain slugs for kimi, qwen-code, copilot, fx and dsh, omp's selectors for omp.
 - **Gaps are named, never silent.** `UNCHECKED = {provider: reason}` holds every adapter without
   a committed snapshot, and `UNCHECKED_MODELS` every id outside a checked source's coverage
   (kilocode's native `openai/` and `google/` backends). Both directions are tested: an adapter in
@@ -650,11 +650,15 @@ three JSON review prompts end in a `{output_location}` block rendered by `prompt
 from the adapter's own declaration, never from a provider name branched on in an orchestrator:
 `True` (the default) renders the byte-identical "write your JSON output to this
 file: …" block, `False` asks for the raw array on stdout. The `False`
-roster is pinned to exactly seven: **five of them are one shape, the sixth is another, and the
-seventh is a third**.
+roster is pinned to exactly ten: **six of them are one shape, the seventh is another, the
+eighth is a third**, `junie`, the ninth, is offered no write tool at all (its `--allowed-tools`
+names the read tools and `submit` only), and `hermes`, the tenth, runs with zero toolsets
+(`--toolsets ""`), so a forced `write_file` comes back "Tool 'write_file' does not exist".
 
-Five run their CLI in a mode that cannot write and refuse in words: `cursor-agent`
-`--mode ask`, `aider` `/ask`, `qwen-code`
+Six run their CLI in a mode that cannot write and refuse in words: `cursor-agent`
+`--mode ask`, `aider` `/ask`, `dsh` `--permission-mode read-only` (its own sandbox preset: the file
+tools return `FS_SANDBOX_DENIED`, a shell command's writes are denied and an escalation is rejected),
+`qwen-code`
 `--max-tool-calls 0` (a **zero** tool budget — the abort is `FatalBudgetExceededError`, exit 55, and
 zero bytes on stdout, so there is not even a fallback left), `vibe`
 `--agent plan` (upstream's read-only profile, `write_file`/`edit`
@@ -666,14 +670,14 @@ on.
 
 A measured `cursor-agent` slot is the archetype: `is_error: false` carrying only "I
 can't write the requested file while Ask mode is active", then a failure on `JSON parsing failed from both file and stdout`.
-**`gemini` is the sixth and it is worse**: under this adapter's argv (no
+**`gemini` is the seventh and it is worse**: under this adapter's argv (no
 `--yolo`, no `--approval-mode`) gemini-cli ships **no `write_file` tool
 at all** — nine tools, none of them a write — so handed one it errors internally
 (`Tool "write_file" not found in registry`), writes nothing, and **exits 0 printing the model's own "JSON written to …"
 confirmation as its answer**. A refusal fails loudly; this reports success for a write that never
 happened, so the slot would record the confirmation sentence as the review.
 
-**`codex` is the seventh (D6, 2026-09-11) and its reason is the machine, not a
+**`codex` is the eighth (D6, 2026-09-11) and its reason is the machine, not a
 mode**: `codex exec` writes through bubblewrap, and on a stock Ubuntu 24.04
 (`kernel.apparmor_restrict_unprivileged_userns=1`) bwrap cannot start (`bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`), so a review asked for a file
 spent seven minutes twice, failed three writes and returned no JSON — while the array was its final
@@ -996,8 +1000,8 @@ So they are read only from text that a model or a tool cannot write:
   row reads it (`LLMProvider.launch_diagnostics` hands `classify_streams` an empty
   `launch_stderr`). Exit 127 stays `spawn_failed` everywhere. Today `none` is kilocode (its tool
   trace), fx (its shell tool's command and output), gemini (`Error executing tool …`), opencode
-  (an auto-rejected permission quoting the model's tool argument) and pi (its SDK's dump of an
-  unparsed chunk). `tests/test_launch_diagnostics.py` checks that every adapter declares it.
+  (an auto-rejected permission quoting the model's tool argument), pi (its SDK's dump of an
+  unparsed chunk) and dsh (the same pi-ai dump, and a malformed tool call's arguments). `tests/test_launch_diagnostics.py` checks that every adapter declares it.
 - **stdout is never read for them.** No provider run merges stderr into stdout: Lane A captures
   the two pipes apart, the executor and the sandbox probes give each its own pipe, and the
   `2>&1` in the code is the orchestrator's own detach log. The write lane's verify command merges
@@ -1015,7 +1019,8 @@ So they are read only from text that a model or a tool cannot write:
 **Usage is reported or absent, never zero** (`parse_usage`, D3j): claude-code reads the
 `result` envelope `parse_output` discards, codex the terminal
 `turn.completed` event, opencode the **sum** of every `step_finish` part (reading the
-last step alone under-reports a multi-step run). Every other adapter declares `usage: none`
+last step alone under-reports a multi-step run), and dsh the sum of every `step_end` record's
+`usage`, its `cacheReadTokens` as `cached_input_tokens`. Every other adapter declares `usage: none`
 and records duration only; a batch mixing the two reports the partial sum plus
 `tasks_without_usage`. A task counts there until one of its attempts reports a token figure: a
 tool count alone (`{"tool_uses": N}`, a codex stream cut short before `turn.completed`) is kept
@@ -1182,6 +1187,12 @@ that variable is used as it is and never removed, except junie's: its root also 
 per-spawn model profile, so the adapter always makes its own, replaces an inherited `JUNIE_HOME`
 and strips every other `JUNIE_*` setting. The JVM resolves its home from `user.home`, not `$HOME`, so
 junie's root is also passed as `JAVA_TOOL_OPTIONS=-Duser.home=<root>`.
+
+dsh gets the same kind of root through `DSH_HOME`, and, like junie's, it is never the user's: it
+also carries the profile patch that selects the route and model (dsh has no model flag), so a pinned
+`DSH_HOME` is replaced, never used, and a root that cannot be made becomes a path under the null
+device, failing the slot rather than letting dsh answer from the user's own `~/.dsh` on its default
+route.
 
 hermes takes the same kind of root, with two differences. It is made by the adapter's
 `hermetic_dispatch` (one per spawn, `HERMES_HOME` plus a private `HOME`, since two slots sharing

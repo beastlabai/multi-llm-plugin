@@ -187,6 +187,11 @@
 #       - openai/gpt-6-luna
 #       - deepseek/deepseek-v4.1-flash
 
+#   dsh:
+#     default_timeout: 1200
+#     models:
+#       - deepseek/deepseek-v4.1-flash-1017:high
+
 #   opencode:
 #     default_timeout: 1200
 #     max_version_exclusive: 

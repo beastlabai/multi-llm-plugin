@@ -28,7 +28,7 @@ from utils.providers.base import (  # noqa: E402
 
 #: The adapters whose stderr relays a model's or a tool's words on lines that
 #: cannot be told apart from the CLI's own; each declaration names its capture.
-RELAYED = {"fx", "gemini", "kilocode", "opencode", "pi"}
+RELAYED = {"dsh", "fx", "gemini", "kilocode", "opencode", "pi"}
 
 BWRAP = "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted\n"
 

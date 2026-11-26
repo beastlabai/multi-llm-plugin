@@ -524,3 +524,45 @@ class TestHermesRowSharesOneRootWithItsGatewayStop:
                                         hold_while="gateway.pid")
         assert code == 0
         assert root.exists() is leaves_pid
+
+
+class TestDshRowRendersTheAdapterPatch:
+    """dsh has no model flag: the profile patch is the whole redirect, so the
+    row's copy must be the adapter's own with only the endpoint moved."""
+
+    def test_patch_is_the_adapters_with_only_the_base_url_moved(
+            self, monkeypatch, tmp_path):
+        from utils.providers.dsh import (
+            DSH_CREDENTIAL_ENV, DSH_PROFILE_PATCH, HOME_ENV, MODEL_ENV,
+            REASONING_ENV, DshProvider, cleanup_home_dirs)
+
+        monkeypatch.setattr(wrapper_module, "REDIRECT_YAML", REDIRECT_YAML)
+        homes = tmp_path / "homes"
+        homes.mkdir()
+        monkeypatch.setattr(wrapper_module, "HOMES_ROOT", homes)
+        url = "http://127.0.0.1:18881/s/abc123/v1"
+        monkeypatch.setenv("MLLM_STUB_BASE_URL", url)
+        # What the product's own dispatch hands the wrapper: its private home
+        # (with the production patch) and the model variables.
+        monkeypatch.setenv(HOME_ENV, "/product/private/dsh-home")
+        monkeypatch.setenv(MODEL_ENV, "stub-model")
+        monkeypatch.setenv(REASONING_ENV, "high")
+        row = wrapper_module.load_row("dsh")
+        root = tmp_path / "invocation"
+        env = wrapper_module.build_child_env("dsh", "abc123", row, root)
+        assert env[HOME_ENV] == str(root / ".dsh")
+        assert env[MODEL_ENV] == "stub-model"
+        assert env[REASONING_ENV] == "high"
+        assert env[DSH_CREDENTIAL_ENV] == "mllm-stub-abc123"
+        wrapper_module.seed_invocation_root("dsh", root, row)
+        patch = (root / ".dsh" / "profiles" / "headless" / "cordis.patch.yml").read_text()
+        production = "https://openrouter.ai/api/v1"
+        assert DSH_PROFILE_PATCH.count(production) == 1
+        assert patch == DSH_PROFILE_PATCH.replace(production, url)
+        provider_env = DshProvider().get_env("stub-model")
+        try:
+            # Every variable the adapter sets reaches the child by name or is
+            # replaced by the row.
+            assert set(provider_env) <= set(ENV_CARRY_EXACT) | {DSH_CREDENTIAL_ENV}
+        finally:
+            cleanup_home_dirs()

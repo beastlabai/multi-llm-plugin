@@ -1,0 +1,4 @@
+{"type":"session","sessionId":"session-8f57c34e-f588-4eab-9049-23f9a5e51f99","cwd":"/work/sample-project"}
+{"type":"status","phase":"turn_start","turn":1}
+{"type":"status","phase":"step_start","turn":1,"step":1}
+{"type":"error","message":"session \"session-8f57c34e-f588-4eab-9049-23f9a5e51f99\": flush on a closed handle"}

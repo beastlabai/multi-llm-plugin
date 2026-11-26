@@ -148,6 +148,13 @@ ENV_CARRY_EXACT = (
     # `carried_config_violation` fails the invocation before anything is
     # logged or executed if the carried JSON has an `apiKey` anywhere.
     "OPENCODE_CONFIG_CONTENT",
+    # DshProvider.get_env: dsh has no model flag, so the model and its effort
+    # ride in these two (read by the profile patch), plus the telemetry opt-out
+    # and the private DSH_HOME holding that patch. None carries a credential
+    # (the key is OPENROUTER_API_KEY, which a row would list as a
+    # credential_var), and the dsh row's `config_roots: {DSH_HOME: …}`
+    # replaces the carried home after this step.
+    "DSH_MULTI_LLM_MODEL", "DSH_MULTI_LLM_REASONING", "DSH_TELEMETRY_MODE", "DSH_HOME",
 )
 ENV_CARRY_PREFIX = ("MLLM_",)
 

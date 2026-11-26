@@ -61,6 +61,7 @@ MODELS = {
     "fx": "openai/gpt-5.6-luna",
     "junie": "openai/gpt-6-luna",
     "hermes": "openai/gpt-6-luna",
+    "dsh": "deepseek/deepseek-v4.1-flash-1017:high",
     "cursor-agent": "auto",
     "gemini": "gemini-2.5-pro",
     "goose": "openrouter/z-ai/glm-5.2",
@@ -417,6 +418,14 @@ ZERO_BUDGET_FLAG_RE = re.compile(r"(tool|call|write|edit|turn|step)", re.IGNOREC
 #: Atoms that STOP the CLI writing files. Membership here is what forces
 #: `supports_file_output = False`; each value is the measurement behind it.
 STOPS_FILE_WRITES = {
+    ("dsh", "--permission-mode read-only"): (
+        "dsh's own read-only sandbox preset. Measured 2026-11-25/26 on dsh "
+        "0.2.2-rc.5 against a localhost stub forcing one tool call: an in-tree "
+        "and an out-of-tree `write` returned `FS_SANDBOX_DENIED`, a `bash` "
+        "command ran with its writes denied (Landlock), and an escalation retry "
+        "was rejected `SANDBOX_ESCALATION_REJECTED`; the tree was unchanged. "
+        "The same rows under `workspace-write` wrote both files."
+    ),
     ("aider", "--message /ask"): (
         "aider's `/ask` is its read-only chat mode: it answers and edits "
         "nothing, so stdout is the only output path it has. The atom is the "
@@ -849,6 +858,13 @@ class ShellEvidence(NamedTuple):
 #: by a named measurement, AND its argv must grant no shell tool — so a later
 #: tool-list edit that grants one turns this red.
 SHELL_EVIDENCE = {
+    "dsh": ShellEvidence(
+        True,
+        "MEASURED 2026-11-25/26 with dsh 0.2.2-rc.5 against a localhost stub "
+        "forcing one `bash` call under the read-only preset (`--permission-mode "
+        "read-only --approval-policy never`): the command ran (`id` printed) with "
+        "its writes denied under Landlock.",
+    ),
     "fx": ShellEvidence(
         True,
         "MEASURED with production fx 0.0.14 in --auto: two concurrent runs, "

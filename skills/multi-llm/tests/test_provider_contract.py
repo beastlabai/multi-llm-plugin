@@ -22,6 +22,7 @@ from utils.providers.claude_code import ClaudeCodeProvider
 from utils.providers.cline import ClineProvider
 from utils.providers.codex import CodexProvider
 from utils.providers.copilot import CopilotProvider
+from utils.providers.dsh import DshProvider
 from utils.providers.fx import FxProvider
 from utils.providers.hermes import HermesProvider
 from utils.providers.cursor_agent import CursorAgentProvider
@@ -175,7 +176,7 @@ class TestInternalRetryEnvelopeDeclarations:
             n for n in _envelope_sweep_names()
             if n not in ("claude-code", "cline", "codex", "copilot", "gemini",
                          "goose", "grok", "junie", "kilocode", "kimi",
-                         "muse", "omp", "pi", "qwen-code", "vibe", "fx", "hermes")
+                         "muse", "omp", "pi", "qwen-code", "vibe", "fx", "hermes", "dsh")
         ],
     )
     def test_every_unmeasured_adapter_declares_none(self, registry, name):
@@ -195,6 +196,17 @@ class TestInternalRetryEnvelopeDeclarations:
         assert envelope is not None
         assert envelope.max_requests is None
         assert envelope.max_wall_s is None
+        assert envelope.retries_rate_limit is True
+
+    def test_dsh_declares_the_measured_retry_envelope(self, registry):
+        """MEASURED against dsh 0.2.2-rc.5 and a localhost failure stub, with
+        `maxRetries: 2`: a 429, a 500 and an empty answer each made 3 requests
+        in 2.8-3.8 s; a stall made 3 requests over 62.85 s at a 20 s idle
+        window. Production's idle window is 120 s, so 3 * 120 s plus backoff."""
+        envelope = registry["dsh"].internal_retries
+        assert envelope is not None
+        assert envelope.max_requests == 3
+        assert envelope.max_wall_s == 385.0
         assert envelope.retries_rate_limit is True
 
     def _with_timeout(self, monkeypatch, seconds):
@@ -382,6 +394,8 @@ TRANSPORT_CASES = [
     (CopilotProvider, "argv", "openai/gpt-4.1-mini"),
     (FxProvider, "stdin", "openai/gpt-5.6-luna"),
     (HermesProvider, "stdin", "openai/gpt-6-luna"),
+    # dsh reads the task from stdin (`-`); `argv` stays supported behind `--`.
+    (DshProvider, "stdin", "deepseek/deepseek-v4.1-flash-1017:high"),
     (CursorAgentProvider, "argv", "auto"),
     (GeminiProvider, "argv", "gemini-2.5-pro"),
     # kimi is argv-only by MEASUREMENT, not by default: `-p -` delivers the
@@ -690,12 +704,21 @@ class TestDeclaredOutputChannel:
     #: `supports_file_edits` stays True (the agent-write profile really edits,
     #: and the sandbox probe that gates it is D6 step 3).
     #:
+    #:   dsh         `--permission-mode read-only`  the file tools refuse in-process
+    #:
+    #: dsh's read-only sandbox preset (`--permission-mode read-only
+    #: --approval-policy never`) denies every file write: `FS_SANDBOX_DENIED`
+    #: for the `write` tool in and out of the tree, a `bash` command's writes
+    #: denied under Landlock, an escalation retry rejected
+    #: (`SANDBOX_ESCALATION_REJECTED`). Its adjudication is the
+    #: `STOPS_FILE_WRITES` row under that atom.
+    #:
     #: THE EIGHTH IS AN ARGV ATOM TOO: hermes `--toolsets ""` selects zero
     #: toolsets, so the request carries no `tools` and a forced `write_file`
     #: comes back "Tool 'write_file' does not exist" (measured 2026-11-26,
     #: tests/fixtures/hermes/write-refused).
-    CANNOT_WRITE_FILES = {"aider", "codex", "copilot", "cursor-agent", "gemini",
-                          "hermes", "junie", "qwen-code", "vibe"}
+    CANNOT_WRITE_FILES = {"aider", "codex", "copilot", "cursor-agent", "dsh",
+                          "gemini", "hermes", "junie", "qwen-code", "vibe"}
 
     @pytest.mark.parametrize("name", sorted(_registered_provider_names()))
     def test_every_adapter_declares_a_bool(self, name):
@@ -853,6 +876,7 @@ class TestDeclaredGenerateShellAndReadScope:
     #:   fx           True   production 0.0.14 --auto probe; shell-reviewed fixtures
     #:   junie        False  `--allowed-tools` omits `bash`; a forced call was refused
     #:   hermes       False  `--toolsets ""`: a forced `terminal` "does not exist"
+    #:   dsh          True   stub-driven `bash` ran (`id` printed), writes denied
     SHELL_IN_GENERATE = {
         "pi": True,
         "omp": True,
@@ -864,6 +888,7 @@ class TestDeclaredGenerateShellAndReadScope:
         "fx": True,
         "junie": False,
         "hermes": False,
+        "dsh": True,
     }
     #: The adapters whose read scope is measured away from the `"cwd"` default.
     #: cursor-agent declares `"cwd"` explicitly (measured, and equal to the

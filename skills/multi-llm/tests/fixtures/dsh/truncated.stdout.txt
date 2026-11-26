@@ -1,0 +1,6 @@
+{"type":"session","sessionId":"session-6eefb85a-7b5b-422a-b252-95276332bb47","cwd":"/work/sample-project"}
+{"type":"status","phase":"turn_start","turn":1}
+{"type":"status","phase":"step_start","turn":1,"step":1}
+{"type":"status","phase":"step_end","turn":1,"step":1,"usage":{"inputTokens":0,"outputTokens":0,"totalTokens":0}}
+{"type":"status","phase":"turn_end","turn":1,"reason":{"kind":"error","error":{"message":"Error reading response: malformed server-sent event JSON.","code":"PI_AI_ERROR"}}}
+{"type":"final","sessionId":"session-6eefb85a-7b5b-422a-b252-95276332bb47","reason":{"kind":"error","error":{"message":"Error reading response: malformed server-sent event JSON.","code":"PI_AI_ERROR"}},"text":""}

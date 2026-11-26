@@ -207,6 +207,10 @@ _DESCRIBE_FAILURE_CHANNELS = {
     # `use_legacy_landlock` causes on every workspace-write dispatch (landlock
     # rung, constraint 2) — and a Rust panic is printed on stderr.
     "codex": "stderr",
+    # dsh writes every in-stream failure as its `final` record on stdout (its
+    # stderr line repeats it), while a pre-flight refusal (a bad model, a
+    # missing key, a project .env it refuses) has no `final` and only stderr.
+    "dsh": STDOUT_ELSE_STDERR,
 }
 
 

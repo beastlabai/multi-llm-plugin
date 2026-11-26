@@ -112,6 +112,15 @@ providers:
       - openai/gpt-6-luna
       - deepseek/deepseek-v4.1-flash
 
+  dsh:
+    default_timeout: 1200
+    # DeepSeek Harness (npm @deepseek-ai/dsh; not Debian's distributed shell).
+    # OpenRouter slugs; ":effort" -> the route's reasoning level: off, minimal,
+    # low, medium, high, xhigh, max (dsh refuses a level the model's catalog
+    # entry lacks, e.g. xhigh on deepseek-v4.1-flash).
+    models:
+      - deepseek/deepseek-v4.1-flash-1017:high
+
   opencode:
     default_timeout: 1200
     # First opencode version to refuse, e.g. "2.0.0"; "" = no ceiling. Write the

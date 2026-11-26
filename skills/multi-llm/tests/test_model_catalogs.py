@@ -93,6 +93,7 @@ ROUTES: Dict[str, Route] = {
     # The profile's `id` is an OpenRouter slug, the same ids fx sends.
     "junie": Route("openrouter", _verbatim),
     "hermes": Route("openrouter", _verbatim),
+    "dsh": Route("openrouter", _verbatim),
 }
 
 _LOGGED_IN = "needs a logged-in capture"

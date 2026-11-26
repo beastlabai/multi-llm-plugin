@@ -141,6 +141,7 @@ the HTTP footprint):
 | `fx` | wrapper-owned `~/.fx/settings.json` OpenRouter connection + fake `OPENROUTER_API_KEY`; stdin prompt | chat | 1 | not timed |
 | `junie` | `$JUNIE_MODEL_LOCATIONS/multi-llm.json` custom profile + fake `OPENROUTER_API_KEY`; the JVM needs `-Duser.home` as well as `$JUNIE_HOME`; stdin prompt | chat (**non-streaming**, answered through its `submit` tool) | 2 | not timed |
 | `hermes` | seeded `$HERMES_HOME/.env` (stub base URL + fake key) and `config.yaml` retry pins, in a root shared by `chat` and the adapter's `gateway stop`; stdin prompt | chat (from a gateway daemon) | 1 | not timed |
+| `dsh` | `$DSH_HOME/profiles/headless/cordis.patch.yml`, the adapter's own profile patch with `baseURL` moved to the stub (no model flag exists) + fake `OPENROUTER_API_KEY`; stdin prompt | chat | 1 | not timed |
 
 **The last five rows are later arrivals, and the table says so in one column.**
 Their mechanism, surface and turn count are measured like the others,
@@ -158,6 +159,17 @@ pinned `mllm-e2e:fx-verified` build (32 passed, 3 inapplicable checks skipped).
 All seven live-provider checks also passed on that image with
 `fx:openai/gpt-5.6-luna`; the observed DNS destination was `openrouter.ai`.
 The assigned host fan-out has not been executed.
+
+dsh 0.2.2-rc.5 (DeepSeek Harness) is an npm package in the image's lockfile
+layer. It has no model flag, so its row's redirect is the adapter's own profile
+patch with only `baseURL` moved to the stub (`tests/test_wrapper_env_contract.py`
+holds the two together). Its native addons load through a loader that copies each
+prebuilt `.node` into `os.tmpdir()` before `dlopen`; the rig's TMPDIR is a noexec
+tmpfs, so the row sets `NARB_DISABLE_NATIVE_CACHE=1`, without which dsh died at
+boot with `failed to map segment from shared object` and no request. One streamed
+chat request per dispatch. Its isolated provider row, all eight chain phases and
+the seeded golden passed offline on 2026-11-26; the host fan-out assignment has
+not been executed.
 
 Junie 26.11.3 (4171.6) is a proprietary JetBrains jpackage app installed from its
 checksummed release zip. Junie accepts an answer only through its `submit` tool, so

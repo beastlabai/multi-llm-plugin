@@ -1,0 +1,6 @@
+{"type":"session","sessionId":"session-b8e4d6df-a790-458f-beb9-e066706056bf","cwd":"/work/sample-project"}
+{"type":"status","phase":"turn_start","turn":1}
+{"type":"status","phase":"step_start","turn":1,"step":1}
+{"type":"status","phase":"step_end","turn":1,"step":1,"usage":{"inputTokens":0,"outputTokens":0,"totalTokens":0}}
+{"type":"status","phase":"turn_end","turn":1,"reason":{"kind":"error","error":{"message":"Connection error.: other side closed (UND_ERR_SOCKET)","code":"TRANSPORT"}}}
+{"type":"final","sessionId":"session-b8e4d6df-a790-458f-beb9-e066706056bf","reason":{"kind":"error","error":{"message":"Connection error.: other side closed (UND_ERR_SOCKET)","code":"TRANSPORT"}},"text":""}

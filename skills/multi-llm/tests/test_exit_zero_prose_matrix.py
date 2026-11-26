@@ -202,6 +202,7 @@ COMPLETE = {
     "codex": _codex,
     "copilot": lambda p: _swap_answer("copilot", _success("copilot"), p),
     "cursor-agent": lambda p: _envelope("cursor-agent", "success.stdout.txt", ["result"], p),
+    "dsh": lambda p: _swap_answer("dsh", _success("dsh"), p),
     "fx": lambda p: _envelope("fx", "success.stdout.txt", ["output", "final_output"], p),
     "gemini": lambda p: _envelope("gemini", "success.stdout.txt", ["response"], p),
     "goose": lambda p: _swap_answer("goose", _success("goose"), p),

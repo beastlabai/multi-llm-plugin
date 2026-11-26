@@ -74,6 +74,34 @@ entries:
     prompt: stdin
     min_records: 1
 
+  # Hand-added: dsh's default transport. No model token (the model rides the
+  # profile patch's env); a trailing `-` reads the prompt from stdin.
+  - provider: dsh
+    profile: generate
+    transport: stdin
+    binary: dsh
+    subcommands: []
+    options:
+      "--approval-policy": "never"
+      "--json": null
+      "--permission-mode": "read-only"
+      "--profile": "headless"
+    tail: ["-"]
+    prompt: stdin
+    min_records: 1
+
+  # dsh's launcher-flag gate: top-level `dsh --help`, once per process.
+  - provider: dsh
+    profile: probe
+    transport: stdin
+    binary: dsh
+    subcommands: []
+    options:
+      "--help": null
+    tail: []
+    prompt: stdin
+    min_records: 1
+
   # Hand-added: junie's default transport. The slug travels in the model profile,
   # so `--model` carries the profile id; the prompt is on stdin.
   - provider: junie
@@ -98,9 +126,22 @@ entries:
     prompt: stdin
     min_records: 1
 
+  # junie's flag gate: top-level `junie --help`, once per process.
+  - provider: junie
+    profile: probe
+    transport: stdin
+    binary: junie
+    subcommands: []
+    options:
+      "--help": null
+    tail: []
+    prompt: stdin
+    min_records: 1
+
   # Hand-added: hermes's default transport, then the gateway stop the adapter
   # runs when every dispatch ends (the turn ran in a daemon `chat` started).
-  # normalize_argv reads `--query-file -` as a bare flag and a bare `-`.
+  # normalize_argv reads `--query-file -` as a bare flag and the stdin `-`
+  # positional (the tail).
   - provider: hermes
     profile: generate
     transport: stdin
@@ -115,8 +156,7 @@ entries:
       "--max-turns": "4"
       "-m": "<model>"
       "--query-file": null
-      "-": null
-    tail: []
+    tail: ["-"]
     prompt: stdin
     min_records: 1
 

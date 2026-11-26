@@ -5,6 +5,7 @@
   "description": "Pinned coding-agent CLI set for the containerized E2E harness image.",
   "dependencies": {
     "@anthropic-ai/claude-code": "2.1.330",
+    "@deepseek-ai/dsh": "0.2.2-rc.5",
     "@earendil-works/pi-coding-agent": "1.6.0",
     "@github/copilot": "1.0.114",
     "@google/gemini-cli": "0.70.0",

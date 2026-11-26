@@ -265,7 +265,12 @@ RUN /opt/mllm/real/uv pip install \
  && /usr/bin/python3 -c "import yaml; print('rig pyyaml', yaml.__version__)"
 
 # --------------------------------------------------------------------------- #
-# 5. The npm CLI layer -- codex, claude-code, gemini, opencode, cline, kilocode, pi.
+# 5. The npm CLI layer -- codex, claude-code, gemini, opencode, cline, kilocode, pi, dsh.
+#
+# dsh (DeepSeek Harness) declares `engines: node >=24.9` and runs on this
+# image's node 22: `npm ci` only warns about the engine (engine-strict is off),
+# and every dsh row runs the real binary, so a node it cannot run on is a red
+# row rather than a silent one.
 #
 # `npm ci` against a COMMITTED package-lock.json, never `npm i -g pkg@1.2.3`:
 # the bare form re-resolves the entire transitive tree on every build and accepts
@@ -323,7 +328,7 @@ RUN cd /opt/mllm/npm \
         npm ci --no-audit --no-fund; \
     fi \
  && node /opt/mllm/npm/link_cli_bins.mjs /opt/mllm/npm /opt/mllm/real \
-        codex claude gemini opencode cline kilocode kimi pi qwen copilot \
+        codex claude gemini opencode cline kilocode kimi pi qwen copilot dsh \
  && rm -rf /opt/mllm/npm/node_modules/@github/copilot-linuxmusl-x64 \
  && qwen_rg=/opt/mllm/npm/node_modules/@qwen-code/qwen-code/vendor/ripgrep/x64-linux/rg \
  && if [ -f "$qwen_rg" ]; then chmod 0755 "$qwen_rg"; fi \
@@ -815,7 +820,7 @@ COPY skills/multi-llm/tests/container/*.yaml            /opt/mllm/rig/
 COPY skills/multi-llm/tests/container/home_seed         /opt/mllm/rig/home_seed
 
 RUN chmod 0755 /opt/mllm/rig/*.py \
- && for b in codex claude gemini opencode cline kilocode kimi pi qwen copilot aider vibe goose grok muse cursor-agent agy omp fx junie hermes uv; do \
+ && for b in codex claude gemini opencode cline kilocode kimi pi qwen copilot aider vibe goose grok muse cursor-agent agy omp fx junie hermes dsh uv; do \
         ln -sf /opt/mllm/rig/wrapper.py "/opt/mllm/bin/$b"; \
     done \
  && /usr/bin/python3 -m compileall -q /opt/mllm/rig >/dev/null

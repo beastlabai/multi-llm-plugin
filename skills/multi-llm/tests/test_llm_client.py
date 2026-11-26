@@ -1486,6 +1486,7 @@ SPECS = {
     "codex": "codex:gpt-5",
     "copilot": "copilot:gpt-5",
     "cursor-agent": "cursor-agent:gpt-4",
+    "dsh": "dsh:deepseek/deepseek-v4.1-flash-1017",
     "gemini": "gemini:gemini-2.5-flash",
     "goose": "goose:stub-model",
     "grok": "grok:stub-model",

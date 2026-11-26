@@ -535,6 +535,11 @@ class TestTheStatusConsumers:
             # fx mixes shell output into stderr, so an unqualified login
             # notice cannot identify the CLI's auth state. Use its own error.
             stdout, stderr = '{"error":"MissingCredentials"}', ""
+        elif name == "dsh":
+            # dsh's stderr also carries pi-ai's dump of model bytes, so only its
+            # own `dsh: CODE:` line is read (tests/fixtures/dsh).
+            stderr = ('dsh: MISSING_CREDENTIAL: llm-pi-ai: no credential for provider '
+                      'route "openrouter"; its profile resolves OPENROUTER_API_KEY, which is not set')
         elif name == "kilocode":
             # kilocode's own diagnoses open with its bold-red `Error: ` paint;
             # an unpainted line may be a tool's output, so it decides nothing.

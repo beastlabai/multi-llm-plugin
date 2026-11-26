@@ -146,6 +146,9 @@ _ICON_DEFS: Dict[str, tuple] = {
     "muse":       (None, "M", "#7C3AED"),
     # JetBrains' mark is not redistributed here — letter icon only.
     "junie":      (None, "J", "#E11D74"),
+    # DeepSeek Harness: no bundled mark, letter icon. Its own key rather than
+    # "deepseek", because dsh fans out across model families too.
+    "dsh":        (None, "D", "#0891B2"),
 }
 
 
@@ -179,6 +182,7 @@ _PROVIDER_ICON_KEYS: Dict[str, str] = {
     # of them — the same reason "antigravity" above is not "google".
     "omp":          "omp",
     "junie":        "junie",
+    "dsh":          "dsh",
 }
 
 

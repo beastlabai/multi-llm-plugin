@@ -1,0 +1,6 @@
+{"type":"session","sessionId":"session-677ec113-b4fb-42e2-9db6-6aa0bed35568","cwd":"/work/sample-project"}
+{"type":"status","phase":"turn_start","turn":1}
+{"type":"status","phase":"step_start","turn":1,"step":1}
+{"type":"status","phase":"step_end","turn":1,"step":1,"usage":{"inputTokens":0,"outputTokens":0,"totalTokens":0}}
+{"type":"status","phase":"turn_end","turn":1,"reason":{"kind":"error","error":{"message":"400: {\"message\":\"This model's maximum context length is 8192 tokens. However, your messages resulted in 214537 tokens. Please reduce the length of the messages.\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"context_length_exceeded\"}","code":"CONTEXT_WINDOW_EXCEEDED"}}}
+{"type":"final","sessionId":"session-677ec113-b4fb-42e2-9db6-6aa0bed35568","reason":{"kind":"error","error":{"message":"400: {\"message\":\"This model's maximum context length is 8192 tokens. However, your messages resulted in 214537 tokens. Please reduce the length of the messages.\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"context_length_exceeded\"}","code":"CONTEXT_WINDOW_EXCEEDED"}},"text":""}

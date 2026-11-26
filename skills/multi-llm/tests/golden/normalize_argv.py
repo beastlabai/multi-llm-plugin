@@ -199,7 +199,8 @@ def normalize_argv(argv: list[str]) -> dict:
             tail.append("--")
             index += 1
             continue
-        if not token.startswith("-"):
+        if not token.startswith("-") or token == "-":
+            # A bare `-` is the stdin-prompt positional (dsh's trailing `-`), not a flag.
             tail.append(_classify(token))
             index += 1
             continue

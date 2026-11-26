@@ -430,6 +430,9 @@ ENV_ALLOWLIST_PROFILES: Dict[str, RunnerEnvProfile] = {
         ("CURSOR_",),
         ("AGENT_CLI_CREDENTIAL_STORE", "NODE_COMPILE_CACHE"),
     ),
+    # dsh is a Node CLI; its whole writable state is DSH_HOME (sessions,
+    # storages, profiles), which the adapter points at a private root.
+    "dsh": RunnerEnvProfile(CA_FAMILY_NODE, ("DSH_",), ("DSH_HOME",)),
     # Native TLS label only: fx 0.0.14 uses system trust, not SSL_CERT_FILE.
     "fx": RunnerEnvProfile(CA_FAMILY_NATIVE, ("FX_",), ()),
     # Hermes is Python (httpx/certifi). The adapter pins HERMES_HOME, HOME and

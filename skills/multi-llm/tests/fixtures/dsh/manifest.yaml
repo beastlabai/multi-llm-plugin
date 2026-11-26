@@ -1,0 +1,314 @@
+schema_version: 1
+provider: dsh
+cli_version: 0.2.2-rc.5
+captured: '2026-11-26'
+method: 'capture/batch.sh: one container per row from capture/Dockerfile (node:24-bookworm-slim, npm @deepseek-ai/dsh@0.2.2-rc.5),
+  --network none, uid 10001, read-only root, cap-drop ALL, no credential (stub key). capture/render.py
+  renders the production adapter''s stdin argv, get_env and DSH_PROFILE_PATCH with only baseURL pointed
+  at the in-container server (tests/container/stub_server.py with the row_capture scenarios, tests/container/failserver.py,
+  or row_capture/scriptserver.py for the tool rows); the prompt is row_capture/prompt.txt on stdin. Raw
+  bytes, no edits. Per-row exit, wall time, request count and canary state are in captures.json. No paid
+  calls.'
+rows:
+  success:
+    stdout: success.stdout.txt
+    stderr: success.stderr.txt
+    exit_code: 0
+    expect:
+      lane_status:
+        lane_a: ok
+        lane_b: ok
+      success: true
+      classify_failure: null
+      salvage: answer
+      data: &id001
+      - id: S001
+        title: Bound the retry ladder
+        severity: high
+      - id: S002
+        title: Strip the vendor token
+        severity: medium
+    wall_s: 5.38
+    requests: 1
+  truncated:
+    stdout: truncated.stdout.txt
+    stderr: truncated.stderr.txt
+    exit_code: 1
+    expect:
+      lane_status:
+        lane_a: runner_error
+        lane_b: runner_error
+      success: false
+      classify_failure: server_error
+      salvage: none
+      error_contains:
+      - PI_AI_ERROR
+    wall_s: 5.08
+    requests: 1
+    notes: 'failserver trunc: a cut SSE frame. pi-ai reports PI_AI_ERROR, which dsh does not retry (one
+      request).'
+  ephemeral-only:
+    stdout: ephemeral-only.stdout.txt
+    stderr: ephemeral-only.stderr.txt
+    exit_code: 0
+    expect:
+      lane_status:
+        lane_a: runner_error
+        lane_b: runner_error
+      success: false
+      classify_failure: null
+      salvage: none
+      error_contains:
+      - flush on a closed handle
+    wall_s: 6.12
+    requests: 1
+    notes: 'failserver stall; the driver sent SIGTERM at 6 s (killed: true in captures.json). dsh exits
+      0, prints an `error` record and no `final`.'
+  multi-assistant:
+    stdout: multi-assistant.stdout.txt
+    stderr: multi-assistant.stderr.txt
+    exit_code: 0
+    expect:
+      lane_status:
+        lane_a: ok
+        lane_b: ok
+      success: true
+      classify_failure: null
+      salvage: answer
+      data: *id001
+    wall_s: 3.02
+    requests: 2
+    notes: 'row_capture scriptserver: a decoy message plus one `read` call, then the findings. final.text
+      is the last message only.'
+  error-envelope:
+    stdout: error-envelope.stdout.txt
+    stderr: error-envelope.stderr.txt
+    exit_code: 1
+    expect:
+      lane_status:
+        lane_a: runner_error
+        lane_b: runner_error
+      success: false
+      classify_failure: connection_error
+      salvage: none
+      error_contains:
+      - TRANSPORT
+    wall_s: 6.89
+    requests: 3
+    notes: 'failserver errbody: an HTTP 200 carrying an error object. dsh reads it as a stream without
+      finish_reason (TRANSPORT) and retries it twice.'
+  exit-zero-failure:
+    stdout: ephemeral-only.stdout.txt
+    stderr: ephemeral-only.stderr.txt
+    exit_code: 0
+    expect:
+      lane_status:
+        lane_a: runner_error
+        lane_b: runner_error
+      success: false
+      classify_failure: null
+      salvage: none
+      error_contains:
+      - flush on a closed handle
+    wall_s: 6.12
+    requests: 1
+    notes: 'The same capture as ephemeral-only: the one exit-0 failure dsh produced, a SIGTERM during
+      a stall. parse_output fails it on the missing final record.'
+  stdout-error:
+    stdout: server-error.stdout.txt
+    stderr: server-error.stderr.txt
+    exit_code: 1
+    expect:
+      lane_status:
+        lane_a: runner_error
+        lane_b: runner_error
+      success: false
+      classify_failure: server_error
+      salvage: none
+      error_contains:
+      - SERVER
+    wall_s: 4.89
+    requests: 3
+    notes: 'failserver 500. Every dsh failure lands on stdout as the final record, with the same verdict
+      on stderr (`dsh: SERVER: …`); three requests (maxRetries 2).'
+  empty:
+    not_applicable: 'Zero bytes on both channels never happened: dsh prints its `session` record before
+      the first request, and every failure adds a `dsh: CODE:` line on stderr. The failserver `empty`
+      mode (a closed socket) is committed as `zero-body`, a TRANSPORT failure after three requests.'
+  auth-error:
+    stdout: auth-error.stdout.txt
+    stderr: auth-error.stderr.txt
+    exit_code: 1
+    expect:
+      lane_status:
+        lane_a: auth_failed
+        lane_b: auth_failed
+      success: false
+      classify_failure: auth_failed
+      salvage: none
+      error_contains:
+      - AUTH
+    wall_s: 2.88
+    requests: 1
+  rate-limit:
+    stdout: rate-limit.stdout.txt
+    stderr: rate-limit.stderr.txt
+    exit_code: 1
+    expect:
+      lane_status:
+        lane_a: rate_limited
+        lane_b: rate_limited
+      success: false
+      classify_failure: rate_limited
+      salvage: none
+      error_contains:
+      - RATE_LIMIT
+    wall_s: 4.1
+    requests: 3
+    notes: 'Three requests: dsh retried the 429 twice (maxRetries 2).'
+  invalid-model:
+    stdout: invalid-model.stdout.txt
+    stderr: invalid-model.stderr.txt
+    exit_code: 1
+    expect:
+      lane_status:
+        lane_a: invalid_model
+        lane_b: invalid_model
+      success: false
+      classify_failure: invalid_model
+      salvage: none
+      error_contains:
+      - INVALID_REQUEST
+      - does not exist
+    wall_s: 2.53
+    requests: 1
+  context-overflow:
+    stdout: context-overflow.stdout.txt
+    stderr: context-overflow.stderr.txt
+    exit_code: 1
+    expect:
+      lane_status:
+        lane_a: context_length_exceeded
+        lane_b: context_length_exceeded
+      success: false
+      classify_failure: context_length_exceeded
+      salvage: none
+      error_contains:
+      - CONTEXT_WINDOW_EXCEEDED
+    wall_s: 2.22
+    requests: 2
+    notes: 'Two requests: dsh tries once more after the overflow (compaction) before it gives up.'
+  server-error:
+    stdout: server-error.stdout.txt
+    stderr: server-error.stderr.txt
+    exit_code: 1
+    expect:
+      lane_status:
+        lane_a: runner_error
+        lane_b: runner_error
+      success: false
+      classify_failure: server_error
+      salvage: none
+      error_contains:
+      - SERVER
+    wall_s: 4.89
+    requests: 3
+  zero-body:
+    stdout: zero-body.stdout.txt
+    stderr: zero-body.stderr.txt
+    exit_code: 1
+    expect:
+      lane_status:
+        lane_a: runner_error
+        lane_b: runner_error
+      success: false
+      classify_failure: connection_error
+      salvage: none
+      error_contains:
+      - TRANSPORT
+    wall_s: 3.68
+    requests: 3
+    notes: 'failserver empty: the socket closes with zero bytes; three requests.'
+  empty-answer:
+    stdout: empty-answer.stdout.txt
+    stderr: empty-answer.stderr.txt
+    exit_code: 1
+    expect:
+      lane_status:
+        lane_a: runner_error
+        lane_b: runner_error
+      success: false
+      classify_failure: server_error
+      salvage: none
+      error_contains:
+      - EMPTY_RESPONSE
+    wall_s: 6.75
+    requests: 3
+    notes: 'stub empty-answer scenario: dsh refuses an empty completion (EMPTY_RESPONSE) and retries it
+      twice.'
+  write-denied:
+    stdout: write-denied.stdout.txt
+    stderr: write-denied.stderr.txt
+    exit_code: 0
+    expect:
+      lane_status:
+        lane_a: ok
+        lane_b: ok
+      success: true
+      classify_failure: null
+      salvage: answer
+      data: *id001
+    wall_s: 2.82
+    requests: 2
+    notes: scriptserver forces a `write` into the workspace; the tool result is FS_SANDBOX_DENIED and
+      the workspace stayed clean (captures.json workspace_changes).
+  write-outside-denied:
+    stdout: write-outside-denied.stdout.txt
+    stderr: write-outside-denied.stderr.txt
+    exit_code: 0
+    expect:
+      lane_status:
+        lane_a: ok
+        lane_b: ok
+      success: true
+      classify_failure: null
+      salvage: answer
+      data: *id001
+    wall_s: 2.93
+    requests: 2
+    notes: scriptserver forces a `write` outside the workspace; FS_SANDBOX_DENIED, nothing written (captures.json
+      outside_files).
+  bash-denied:
+    stdout: bash-denied.stdout.txt
+    stderr: bash-denied.stderr.txt
+    exit_code: 0
+    expect:
+      lane_status:
+        lane_a: ok
+        lane_b: ok
+      success: true
+      classify_failure: null
+      salvage: answer
+      data: *id001
+    wall_s: 2.97
+    requests: 2
+    notes: 'scriptserver forces a `bash` command writing into and outside the workspace: the command ran
+      (`id`) and both writes got `Permission denied` inside the container. The tmpfs workspace and
+      /work/outside are writable by uid 10001, so the denial is the dsh sandbox itself; nothing written.'
+  unsupported-effort:
+    stdout: unsupported-effort.stdout.txt
+    stderr: unsupported-effort.stderr.txt
+    exit_code: 1
+    expect:
+      lane_status:
+        lane_a: invalid_model
+        lane_b: invalid_model
+      success: false
+      classify_failure: invalid_model
+      salvage: none
+      error_contains:
+      - UNSUPPORTED_REASONING_EFFORT
+    wall_s: 1.97
+    requests: 0
+    notes: 'DSH_MULTI_LLM_REASONING=xhigh on deepseek-v4.1-flash, whose catalog entry has no xhigh: refused
+      before any request.'

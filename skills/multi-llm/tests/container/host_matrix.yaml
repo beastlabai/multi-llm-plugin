@@ -3711,6 +3711,8 @@ hosts:
       - junie        # `chat`, `stub-model`; answers only through its `submit` tool,
                      # which the stub serves; needs the wrapper-owned JAVA_TOOL_OPTIONS.
                      # Assignment unmeasured on this host.
+      - dsh          # `chat`, `stub-model`; the model rides the profile patch the
+                     # row's config_roots/config_files replace. Assignment unmeasured.
     fan_out_provenance: unmeasured   # T3 — authored 2026-09-22, never executed
     fan_out_reason: >
       T3, and the same words as the claude-code host's cell apply: today every

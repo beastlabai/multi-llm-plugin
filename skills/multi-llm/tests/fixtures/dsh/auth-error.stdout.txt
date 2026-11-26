@@ -1,0 +1,6 @@
+{"type":"session","sessionId":"session-243aca83-b5b8-4456-bb97-0ada8a8b25e8","cwd":"/work/sample-project"}
+{"type":"status","phase":"turn_start","turn":1}
+{"type":"status","phase":"step_start","turn":1,"step":1}
+{"type":"status","phase":"step_end","turn":1,"step":1,"usage":{"inputTokens":0,"outputTokens":0,"totalTokens":0}}
+{"type":"status","phase":"turn_end","turn":1,"reason":{"kind":"error","error":{"message":"401: {\"message\":\"Incorrect API key provided: sk-stub***. You can find your API key at https://platform.openai.com/account/api-keys.\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"invalid_api_key\"}","code":"AUTH"}}}
+{"type":"final","sessionId":"session-243aca83-b5b8-4456-bb97-0ada8a8b25e8","reason":{"kind":"error","error":{"message":"401: {\"message\":\"Incorrect API key provided: sk-stub***. You can find your API key at https://platform.openai.com/account/api-keys.\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"invalid_api_key\"}","code":"AUTH"}},"text":""}

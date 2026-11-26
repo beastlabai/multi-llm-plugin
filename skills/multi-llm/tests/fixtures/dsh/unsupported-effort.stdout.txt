@@ -1,0 +1,6 @@
+{"type":"session","sessionId":"session-720a2204-8165-49bd-8bcd-a683e1f5df2a","cwd":"/work/sample-project"}
+{"type":"status","phase":"turn_start","turn":1}
+{"type":"status","phase":"step_start","turn":1,"step":1}
+{"type":"status","phase":"step_end","turn":1,"step":1}
+{"type":"status","phase":"turn_end","turn":1,"reason":{"kind":"error","error":{"message":"pi-ai provider \"openrouter\" model \"deepseek/deepseek-v4.1-flash-1017\" does not support reasoning effort \"xhigh\"","code":"UNSUPPORTED_REASONING_EFFORT"}}}
+{"type":"final","sessionId":"session-720a2204-8165-49bd-8bcd-a683e1f5df2a","reason":{"kind":"error","error":{"message":"pi-ai provider \"openrouter\" model \"deepseek/deepseek-v4.1-flash-1017\" does not support reasoning effort \"xhigh\"","code":"UNSUPPORTED_REASONING_EFFORT"}},"text":""}

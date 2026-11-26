@@ -80,6 +80,7 @@ PRE_L5_ARGV_MODELS = {
     "fx": "openai/gpt-5.6-luna",
     "junie": "openai/gpt-6-luna",
     "hermes": "openai/gpt-6-luna",
+    "dsh": "deepseek/deepseek-v4.1-flash-1017:high",
     "kilocode": "openai-native/gpt-5.5",
     "kimi": "moonshotai/kimi-k2-thinking",
     "muse": "muse-spark-1.2",
@@ -188,6 +189,13 @@ PRE_L5_ARGV = {
         "hermes", "chat", "--format", "stream-json", "--toolsets", "",
         "--ignore-rules", "--source", "tool", "--provider", "openrouter",
         "--max-turns", "4", "-m", "openai/gpt-6-luna", "-q", PRE_L5_ARGV_PROMPT,
+    ],
+    # No model token: dsh has no --model flag, the model and effort travel in
+    # DSH_MULTI_LLM_MODEL / DSH_MULTI_LLM_REASONING (a private profile patch).
+    "dsh": [
+        "dsh", "--profile", "headless", "--json",
+        "--permission-mode", "read-only", "--approval-policy", "never",
+        "--", PRE_L5_ARGV_PROMPT,
     ],
     "kilocode": [
         "kilocode", "run", "--auto", "-m", "openai-native/gpt-5.5",
