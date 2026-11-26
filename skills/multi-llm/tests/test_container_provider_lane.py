@@ -267,6 +267,39 @@ class TestPiAdvertisesExactlyItsAllowList:
         )
 
 
+def assert_hermes_stopped_every_daemon(row_result) -> None:
+    """Every ``hermes chat`` root got the adapter's ``gateway stop`` and is gone.
+
+    Hermes runs each turn in a gateway daemon that outlives ``chat`` and keeps
+    retrying after its client is killed, which is why the adapter stops it when
+    the dispatch ends. The wrapper keys the root on the adapter's HERMES_HOME
+    and holds it while the daemon's ``gateway.pid`` exists (redirect.yaml
+    ``root_hold_while``), so a stop that never came, or reached another root,
+    leaves the root and the daemon in ``leftovers.json``.
+    """
+    import json
+
+    records = [r for r in row_result.call_log if r["cli"] == "hermes"]
+    chats = [r for r in records if r["argv"][1:2] == ["chat"] and "--help" not in r["argv"]]
+    assert chats, "hermes: no `hermes chat` invocation in the call log"
+    for chat in chats:
+        stops = [r for r in records if r["argv"][1:3] == ["gateway", "stop"]
+                 and r["config_root"] == chat["config_root"] and r["t"] >= chat["t"]]
+        assert stops, f"hermes: no `gateway stop` reached the root of {chat['exec_id']}"
+    leftovers = json.loads((row_result.out_dir / "leftovers.json").read_text(encoding="utf-8"))
+    held = [name for name in leftovers["invocation_roots"] if name.startswith("hermes-")]
+    assert not held, f"hermes: roots still held at row end: {held}"
+    daemons = [cmd for cmd in leftovers["processes"] if "gateway run" in cmd]
+    assert not daemons, f"hermes: gateway daemons outlived their dispatch: {daemons}"
+
+
+class TestHermesStopsTheDaemonItStarted:
+    def test_every_chat_root_is_stopped_and_released(self, row_result):
+        if row_result.row.cli != "hermes":
+            pytest.skip("hermes's gateway daemon only")
+        assert_hermes_stopped_every_daemon(row_result)
+
+
 class TestTheEvidenceSurvivedTheContainer:
     def test_artifacts_were_exported(self, row_result):
         """The entrypoint's `finally` export ran.

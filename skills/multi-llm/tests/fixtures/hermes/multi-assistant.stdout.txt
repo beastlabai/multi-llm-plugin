@@ -1,0 +1,4 @@
+{"type": "system", "subtype": "init", "model": "stub-model", "session_id": "", "timestamp": 1795690972659}
+{"type": "text", "text": "FIRST ANSWER (must NOT be selected)\n[\n  {\"id\": \"D999\", \"title\": \"Decoy\", \"severity\": \"low\"}\n]", "timestamp": 1795690987677}
+{"type": "text", "text": "[\n  {\"id\": \"S001\", \"title\": \"Bound the retry ladder\", \"severity\": \"high\"},\n  {\"id\": \"S002\", \"title\": \"Strip the vendor token\", \"severity\": \"medium\"}\n]", "timestamp": 1795690987822}
+{"type": "result", "session_id": "local-7af6b115c8edd5bad1625c1089bf1c40a541bbb83d9dbb3d1808aed36b5be597", "exit_code": 0, "text": "[\n  {\"id\": \"S001\", \"title\": \"Bound the retry ladder\", \"severity\": \"high\"},\n  {\"id\": \"S002\", \"title\": \"Strip the vendor token\", \"severity\": \"medium\"}\n]", "tokens": {"input": 20, "output": 6, "total": 26, "cache_read": 0, "cache_write": 0}, "duration_ms": 15295, "timestamp": 1795690987954}

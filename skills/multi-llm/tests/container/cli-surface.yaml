@@ -197,6 +197,31 @@ clis:
     subcommands: [ask]
     options: ["--auto", "--json", "--model", "--no-save"]
 
+  # Captured from the 0.23.4 tag archive's uv-locked install. The adapter's argv
+  # plus the two flags it adds off the default render: `--query-file` (the stdin
+  # transport) and `--reasoning` (a `:effort` suffix). `chat --help` writes into
+  # $HERMES_HOME, which in the probe is the tmpfs $HOME's ~/.hermes.
+  - cli: hermes
+    binary: hermes
+    version: "Hermes Agent v0.23.4 (2026.9.24) · upstream 8fc03744"
+    probe: ok
+    help_invocation: "hermes chat --help"
+    help_sha256: 52b4b493b1e8fdd58136c926d82a1fd833f0f6f8da17eda33323d147cf3d5f7d
+    help_bytes: 7179
+    profiles: [generate]
+    subcommands: []
+    options:
+      - "--format"
+      - "--ignore-rules"
+      - "--max-turns"
+      - "--provider"
+      - "--query-file"
+      - "--reasoning"
+      - "--source"
+      - "--toolsets"
+      - "-m"
+      - "-q"
+
   # Captured from the checksummed JetBrains 26.11.3 (4171.6) launcher. The help
   # runs with the row's JAVA_TOOL_OPTIONS (`{home}` is the probe's $HOME): the JVM
   # ignores $HOME, so without it Junie would write its log under the real home.

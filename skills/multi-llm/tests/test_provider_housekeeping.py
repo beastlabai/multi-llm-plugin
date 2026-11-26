@@ -60,6 +60,7 @@ MODELS = {
     "copilot": "openai/gpt-5.6-luna",
     "fx": "openai/gpt-5.6-luna",
     "junie": "openai/gpt-6-luna",
+    "hermes": "openai/gpt-6-luna",
     "cursor-agent": "auto",
     "gemini": "gemini-2.5-pro",
     "goose": "openrouter/z-ai/glm-5.2",
@@ -429,6 +430,14 @@ STOPS_FILE_WRITES = {
         "against the real binary after the fix: the stdout block returns the "
         "array in 11.7 s, the file block still fails to parse in 11.7 s."
     ),
+    ("hermes", "--toolsets"): (
+        "`--toolsets \"\"` selects ZERO toolsets. MEASURED 2026-11-26 in the "
+        "offline probe (tests/fixtures/hermes/, Docker, network none): the "
+        "request carried no `tools`, a stub forcing `write_file` came back "
+        "\"Tool 'write_file' does not exist\" and the workspace stayed clean "
+        "(captures write-refused and terminal-refused). The atom renders as the "
+        "bare flag because its value is the empty string."
+    ),
     ("qwen-code", "--max-tool-calls 0"): (
         "A zero tool budget that aborts before the first call: "
         "FatalBudgetExceededError, exit 55, ZERO bytes on stdout — harsher than "
@@ -593,7 +602,10 @@ def restrictive_atoms(name, argv=None):
             and unit[1].strip() == "0"
             and ZERO_BUDGET_FLAG_RE.search(unit[0])
         )
-        if restrictive or zero_budget:
+        # `--toolsets ""` is zero toolsets: the restriction lives in the empty
+        # value, which no word list can see.
+        zero_toolsets = unit == ("--toolsets", "")
+        if restrictive or zero_budget or zero_toolsets:
             atoms.append(" ".join(part.strip() for part in unit).strip())
     return atoms
 
@@ -887,6 +899,13 @@ SHELL_EVIDENCE = {
         "MEASURED 2026-09-25: the review-code envelope carries three `Bash` "
         "`permission_denials`; `--permission-mode acceptEdits` auto-accepts file "
         "edits only and headless `claude -p` denies Bash (plan §2.1).",
+    ),
+    "hermes": ShellEvidence(
+        False,
+        "MEASURED 2026-11-26 (offline probe, tests/fixtures/hermes/terminal-"
+        "refused): `--toolsets \"\"` selects zero toolsets, so a stub forcing a "
+        "`terminal` call got \"Tool 'terminal' does not exist\" back and the "
+        "workspace stayed clean.",
     ),
     "qwen-code": ShellEvidence(
         False,

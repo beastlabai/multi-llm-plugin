@@ -23,6 +23,7 @@ from utils.providers.cline import ClineProvider
 from utils.providers.codex import CodexProvider
 from utils.providers.copilot import CopilotProvider
 from utils.providers.fx import FxProvider
+from utils.providers.hermes import HermesProvider
 from utils.providers.cursor_agent import CursorAgentProvider
 from utils.providers.gemini import GeminiProvider
 from utils.providers.goose import GooseProvider
@@ -174,7 +175,7 @@ class TestInternalRetryEnvelopeDeclarations:
             n for n in _envelope_sweep_names()
             if n not in ("claude-code", "cline", "codex", "copilot", "gemini",
                          "goose", "grok", "junie", "kilocode", "kimi",
-                         "muse", "omp", "pi", "qwen-code", "vibe", "fx")
+                         "muse", "omp", "pi", "qwen-code", "vibe", "fx", "hermes")
         ],
     )
     def test_every_unmeasured_adapter_declares_none(self, registry, name):
@@ -380,6 +381,7 @@ TRANSPORT_CASES = [
     # the `-p` PAIR omitted entirely carried a 30 KB prompt (§6.4, measured).
     (CopilotProvider, "argv", "openai/gpt-4.1-mini"),
     (FxProvider, "stdin", "openai/gpt-5.6-luna"),
+    (HermesProvider, "stdin", "openai/gpt-6-luna"),
     (CursorAgentProvider, "argv", "auto"),
     (GeminiProvider, "argv", "gemini-2.5-pro"),
     # kimi is argv-only by MEASUREMENT, not by default: `-p -` delivers the
@@ -687,8 +689,13 @@ class TestDeclaredOutputChannel:
     #: adjudication is the `STOPS_FILE_WRITES` row under that atom;
     #: `supports_file_edits` stays True (the agent-write profile really edits,
     #: and the sandbox probe that gates it is D6 step 3).
+    #:
+    #: THE EIGHTH IS AN ARGV ATOM TOO: hermes `--toolsets ""` selects zero
+    #: toolsets, so the request carries no `tools` and a forced `write_file`
+    #: comes back "Tool 'write_file' does not exist" (measured 2026-11-26,
+    #: tests/fixtures/hermes/write-refused).
     CANNOT_WRITE_FILES = {"aider", "codex", "copilot", "cursor-agent", "gemini",
-                          "junie", "qwen-code", "vibe"}
+                          "hermes", "junie", "qwen-code", "vibe"}
 
     @pytest.mark.parametrize("name", sorted(_registered_provider_names()))
     def test_every_adapter_declares_a_bool(self, name):
@@ -845,6 +852,7 @@ class TestDeclaredGenerateShellAndReadScope:
     #:   gemini       False  no `run_shell_command` under this argv (0.25.2)
     #:   fx           True   production 0.0.14 --auto probe; shell-reviewed fixtures
     #:   junie        False  `--allowed-tools` omits `bash`; a forced call was refused
+    #:   hermes       False  `--toolsets ""`: a forced `terminal` "does not exist"
     SHELL_IN_GENERATE = {
         "pi": True,
         "omp": True,
@@ -855,13 +863,14 @@ class TestDeclaredGenerateShellAndReadScope:
         "gemini": False,
         "fx": True,
         "junie": False,
+        "hermes": False,
     }
     #: The adapters whose read scope is measured away from the `"cwd"` default.
     #: cursor-agent declares `"cwd"` explicitly (measured, and equal to the
     #: default), so it is not a departure. aider's is read from its argv:
     #: `/ask` has no file tool, and the stdin decline supply refuses the
     #: mention adds that once brought review-code the changed files.
-    READ_SCOPE_DEPARTURES = {"qwen-code": "none", "aider": "none"}
+    READ_SCOPE_DEPARTURES = {"qwen-code": "none", "aider": "none", "hermes": "none"}
 
     def test_the_base_defaults_assert_nothing(self):
         assert LLMProvider.runs_shell_in_generate is None

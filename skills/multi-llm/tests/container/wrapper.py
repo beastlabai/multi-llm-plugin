@@ -770,8 +770,28 @@ def inject_argv(argv: list[str], row: dict, base_url: str) -> list[str]:
     return argv[:index] + extra + argv[index:]
 
 
+def invocation_root_for(cli: str, row: dict, exec_id: str) -> Path:
+    """The per-invocation config root: per exec, or shared by a row's key.
+
+    A row with ``root_key_var`` shares one root among every invocation whose
+    caller set that variable to the same value. Hermes is the case: its turn
+    runs in a gateway daemon that outlives ``hermes chat``, and the adapter
+    stops it with a second invocation, ``hermes gateway stop --yes``, under the
+    same per-dispatch ``HERMES_HOME``. With a root per exec the stop would look
+    for the daemon in a root it never ran in and stop nothing. The name is a
+    digest of the value, so the caller's path never becomes a path here.
+    """
+    base = Path(os.environ.get("MLLM_INVOCATION_ROOT", "/tmp/mllm-inv"))
+    key_var = row.get("root_key_var")
+    value = os.environ.get(key_var) if key_var else None
+    if value:
+        digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
+        return base / f"{cli}-{digest}"
+    return base / f"{cli}-{exec_id}"
+
+
 def run_child(real: Path, binary: str, argv: list[str], env: dict,
-              invocation_root: Path) -> int:
+              invocation_root: Path, hold_while: str | None = None) -> int:
     """Run the real binary as a child, then remove the per-invocation root.
 
     C2 rule 3 makes the per-invocation directory "created before the exec and
@@ -802,6 +822,14 @@ def run_child(real: Path, binary: str, argv: list[str], env: dict,
 
     A SIGKILLed wrapper is the one residual leak, and it is bounded by the
     container's lifetime — the tmpfs dies with it.
+
+    ``hold_while`` (a row's ``root_hold_while``) names a file under the root
+    whose presence after the child exits means something the child started
+    still lives there: Hermes's ``gateway.pid``, written by the daemon and
+    removed when ``gateway stop`` ends it. The root stays until an invocation
+    exits with that file gone, so a stop that never came leaves the root
+    behind as evidence (``leftovers.json``) rather than deleting it under a
+    running daemon.
     """
     sys.stdout.flush()
     sys.stderr.flush()
@@ -829,7 +857,8 @@ def run_child(real: Path, binary: str, argv: list[str], env: dict,
     finally:
         for signum, handler in previous.items():
             signal.signal(signum, handler)
-        shutil.rmtree(invocation_root, ignore_errors=True)
+        if not (hold_while and (invocation_root / hold_while).exists()):
+            shutil.rmtree(invocation_root, ignore_errors=True)
 
     if os.WIFSIGNALED(status):
         return 128 + os.WTERMSIG(status)
@@ -852,11 +881,14 @@ def main(argv: list[str]) -> int:
     cli = resolve_cli_id(binary)
     exec_id = secrets.token_hex(6)
     row = load_row(cli)
-    invocation_root = Path(os.environ.get("MLLM_INVOCATION_ROOT",
-                                          "/tmp/mllm-inv")) / f"{cli}-{exec_id}"
+    invocation_root = invocation_root_for(cli, row, exec_id)
     base_url = stub_base_url(exec_id, row)
     os.environ["MLLM_STUB_BASE_URL"] = base_url
-    seed_invocation_root(cli, invocation_root, row)
+    # A shared root that already exists belongs to a live dispatch (Hermes's
+    # daemon reads it): the invocation that follows `chat` must not rewrite
+    # .env under it. Seeded only when this invocation creates the root.
+    if not (row.get("root_key_var") and invocation_root.is_dir()):
+        seed_invocation_root(cli, invocation_root, row)
     env = build_child_env(cli, exec_id, row, invocation_root)
     argv = inject_argv(argv, row, base_url)
     write_call_record(cli, [str(real), *argv], env, exec_id, invocation_root)
@@ -864,7 +896,8 @@ def main(argv: list[str]) -> int:
     # argv[0] is the BINARY name the caller used, never the provider id: a CLI
     # that inspects its own argv[0] (for usage text, or to pick a mode) must see
     # what it would have seen unwrapped.
-    return run_child(real, binary, argv, env, invocation_root)
+    return run_child(real, binary, argv, env, invocation_root,
+                     hold_while=row.get("root_hold_while"))
 
 
 if __name__ == "__main__":

@@ -146,6 +146,15 @@ read_only_modes:
   grok:
     mechanism: null
     probed: null
+  hermes:
+    # CANDIDATE, same treatment: `--toolsets ""` is a zero-toolset run. Measured
+    # 2026-11-26 (offline probe, tests/fixtures/hermes/): the request carried no
+    # `tools`, a forced `write_file` came back "Tool 'write_file' does not exist"
+    # and a forced `terminal` "Tool 'terminal' does not exist", and the workspace
+    # stayed clean. Whether that is a read-only mode or a toolless run is what a
+    # probe of the mode question would settle, so the row stays null.
+    mechanism: null
+    probed: null
   fx:
     # fx 0.0.14 has no measured general read-only mode for this dispatch.
     # `--auto` still invokes its shell reviewer and does not block web fetch;

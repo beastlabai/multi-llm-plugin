@@ -226,7 +226,8 @@ def test_every_download_verifies_a_checksum(instructions):
 
 @pytest.mark.parametrize(
     "artifact",
-    ["uv", "goose", "grok", "muse", "cursor-agent", "agy", "omp", "fx", "junie", "python312"])
+    ["uv", "goose", "grok", "muse", "cursor-agent", "agy", "omp", "fx", "junie", "hermes", "python312",
+     "python314"])
 def test_artifact_args_match_the_lock(artifact, build_args, lock):
     """Two copies of a checksum that can disagree are worse than one."""
     entry = lock["artifacts"][artifact]
@@ -285,6 +286,24 @@ def test_junie_is_verified_before_the_zip_is_discarded(instructions, lock):
 # --------------------------------------------------------------------------- #
 # 4. The CLI set, in three files that must agree
 # --------------------------------------------------------------------------- #
+
+
+def test_hermes_is_verified_before_its_archive_is_installed(instructions, build_args, lock):
+    [layer] = [line for line in instructions
+               if line.startswith("RUN ") and "/tmp/hermes.tar.gz" in line]
+    assert layer.index("sha256sum --check --strict") < layer.index("tar -xzf /tmp/hermes.tar.gz")
+    assert layer.index("${PYTHON314_SHA256}") < layer.index("tar -xzf /tmp/python314.tar.gz")
+    # The lockfile is the dependency pin, and the interpreter is the pinned one.
+    assert "uv sync --locked --no-dev" in layer
+    assert "--python /opt/mllm/real/python314/bin/python3.14" in layer
+    # `--version` and `chat --help` write into HERMES_HOME and HOME: a scratch root.
+    for call in ("--version", "chat --help"):
+        before = layer[:layer.index(f"/opt/mllm/real/hermes {call}")]
+        assert before.rstrip(" \\").rsplit("&&", 1)[-1].count("HERMES_HOME=/tmp/hermes-state") == 1
+    assert "ln -sf /opt/mllm/venvs/hermes/bin/hermes /opt/mllm/real/hermes" in layer
+    assert build_args["HERMES_COMMIT"] == lock["artifacts"]["hermes"]["commit"]
+    [row] = [row for row in lock["clis"] if row["id"] == "hermes"]
+    assert row["install"] == "archive"
 
 
 def test_every_lock_cli_is_wrapped(dockerfile_text, lock):

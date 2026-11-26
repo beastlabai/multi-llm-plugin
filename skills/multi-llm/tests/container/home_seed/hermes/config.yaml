@@ -1,0 +1,20 @@
+{
+ "agent": {
+  "api_max_retries": 1,
+  "auto_recovery_cycles": 0
+ },
+ "auxiliary": {
+  "title_generation": {
+   "enabled": false
+  }
+ },
+ "gateway": {
+  "unmanaged_idle_exit_seconds": 5
+ },
+ "security": {
+  "allow_lazy_installs": false
+ },
+ "updates": {
+  "check": false
+ }
+}

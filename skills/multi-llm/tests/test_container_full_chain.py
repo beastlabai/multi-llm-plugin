@@ -1004,6 +1004,17 @@ class TestEveryWriteBatchWasANoOp(_ReviewerSandboxPolicy):
         )
 
 
+class TestHermesStopsTheDaemonItStarted(_ReviewerSandboxPolicy):
+    def test_every_chat_root_is_stopped_and_released(self, chain):
+        """Eight phases of dispatches, each with its own daemon and stop."""
+        if chain.row.cli != "hermes":
+            pytest.skip("hermes's gateway daemon only")
+        self._refuse_if_skipped(chain)
+        from .test_container_provider_lane import assert_hermes_stopped_every_daemon
+
+        assert_hermes_stopped_every_daemon(chain)
+
+
 class TestTheRowRanExactlyOneCli(_ReviewerSandboxPolicy):
     def test_the_call_log_names_only_this_row_s_binaries(self, chain):
         self._refuse_if_skipped(chain)

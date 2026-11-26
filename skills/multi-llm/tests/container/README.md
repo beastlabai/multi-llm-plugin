@@ -140,6 +140,7 @@ the HTTP footprint):
 | `omp` | `~/.omp/agent/models.yml` provider block (no env var exists) — and the **prompt arrives on stdin** | chat | 1 | not timed |
 | `fx` | wrapper-owned `~/.fx/settings.json` OpenRouter connection + fake `OPENROUTER_API_KEY`; stdin prompt | chat | 1 | not timed |
 | `junie` | `$JUNIE_MODEL_LOCATIONS/multi-llm.json` custom profile + fake `OPENROUTER_API_KEY`; the JVM needs `-Duser.home` as well as `$JUNIE_HOME`; stdin prompt | chat (**non-streaming**, answered through its `submit` tool) | 2 | not timed |
+| `hermes` | seeded `$HERMES_HOME/.env` (stub base URL + fake key) and `config.yaml` retry pins, in a root shared by `chat` and the adapter's `gateway stop`; stdin prompt | chat (from a gateway daemon) | 1 | not timed |
 
 **The last five rows are later arrivals, and the table says so in one column.**
 Their mechanism, surface and turn count are measured like the others,
@@ -167,6 +168,21 @@ title request and any request carrying the call's result with text. Junie sends
 its `junie-cli` user agent the body decides. Its isolated provider row, all eight
 chain phases and a second run against its seeded golden passed offline; the host
 fan-out assignment (the codex host) has not been executed.
+
+Hermes Agent 0.23.4 is the tag's source archive installed with `uv sync --locked`
+on a checksummed Python 3.14.9. Its turn runs in a gateway daemon that `hermes chat`
+starts, which scrubs its environment, so the redirect is on disk:
+`home_seed/hermes/.env` holds the stub base URL and the fake per-exec key, and
+`config.yaml` the adapter's retry pins (held equal to `hermes.HERMES_CONFIG` in
+plain CI). The daemon outlives `chat`, and the adapter ends it with a second
+invocation, `hermes gateway stop --yes`, so the row keys its root on the adapter's
+per-dispatch `HERMES_HOME` (`root_key_var`) and keeps it while the daemon's
+`gateway.pid` exists (`root_hold_while`). Every row writes `leftovers.json` (the
+invocation roots and processes still present when its work ended), and the Hermes
+rows assert that every `chat` root got its stop, no root is held and no
+`gateway run` process survived. Hermes is not on the credentialed live-provider
+lane's allowlist; the host fan-out assignment (the opencode host) has not been
+executed.
 
 Not one of Phase 1's `documented` guesses turned out to be wrong, and both of its
 surprises went our way: `pi` (the one `unknown` row) and `grok` (predicted

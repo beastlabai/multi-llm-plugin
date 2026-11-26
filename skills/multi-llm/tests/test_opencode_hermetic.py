@@ -1168,9 +1168,11 @@ class TestHermeticScopeAndHatch:
             has_hook = callable(
                 getattr(registry.get_provider(name), "hermetic_dispatch", None)
             )
-            assert has_hook == (name in {"opencode", "fx"}), (
-                f"{name}: only opencode's isolated config and fx's managed HOME "
-                "currently need a dispatch-scoped configuration context"
+            assert has_hook == (name in {"opencode", "fx", "hermes"}), (
+                f"{name}: only opencode's isolated config, fx's managed HOME and "
+                "hermes's private HERMES_HOME (key in its .env, gateway daemon "
+                "stopped on exit) currently need a dispatch-scoped "
+                "configuration context"
             )
 
 

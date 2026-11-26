@@ -180,6 +180,7 @@ _FIXTURE_ANSWER: Dict[str, Callable[[str], str]] = {
     "kimi": lambda s: _last(_lines(s), "role", "assistant")["content"],
     "qwen-code": lambda s: _last(json.loads(s), "type", "result")["result"],
     "junie": lambda s: json.loads(s)["result"],
+    "hermes": lambda s: _last(_lines(s), "type", "result")["text"],
 }
 
 #: provider -> (model spec, committed success capture).
@@ -204,6 +205,7 @@ _CAPTURED: Dict[str, Tuple[str, str]] = {
     "cline": ("cline:stub-model", "cline/success.stdout.txt"),
     "kimi": ("kimi:stub-model", "kimi/success.stdout.txt"),
     "qwen-code": ("qwen-code:stub-model", "qwen-code/success.stdout.json"),
+    "hermes": ("hermes:stub-model", "hermes/success.stdout.txt"),
 }
 
 

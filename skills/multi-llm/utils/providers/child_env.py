@@ -432,6 +432,9 @@ ENV_ALLOWLIST_PROFILES: Dict[str, RunnerEnvProfile] = {
     ),
     # Native TLS label only: fx 0.0.14 uses system trust, not SSL_CERT_FILE.
     "fx": RunnerEnvProfile(CA_FAMILY_NATIVE, ("FX_",), ()),
+    # Hermes is Python (httpx/certifi). The adapter pins HERMES_HOME, HOME and
+    # XDG_* to a private root itself.
+    "hermes": RunnerEnvProfile(CA_FAMILY_NATIVE, ("HERMES_",), ("HERMES_HOME",)),
     "gemini": RunnerEnvProfile(
         CA_FAMILY_NODE, ("GEMINI_",), ("GEMINI_DIR", "GEMINI_CLI_HOME")
     ),

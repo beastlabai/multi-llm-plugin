@@ -179,6 +179,9 @@ _DESCRIBE_FAILURE_CHANNELS = {
     "fx": STDOUT_ELSE_STDERR,
     "opencode": STDOUT_THEN_STDERR,
     "muse": "stdout",
+    # hermes reads the result record on stdout (its `error` field or its own
+    # exit-0 sentence); stderr is only two session-id lines, never a diagnosis.
+    "hermes": "stdout",
     # pi moved from "stderr" with `--mode json` (plan §7, T7.6), to omp's shape
     # and for omp's reason, measured at 0.87.1 (tests/fixtures/pi/manifest.yaml):
     # every in-stream failure is an assistant `message_end` on stdout carrying

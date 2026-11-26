@@ -98,6 +98,52 @@ entries:
     prompt: stdin
     min_records: 1
 
+  # Hand-added: hermes's default transport, then the gateway stop the adapter
+  # runs when every dispatch ends (the turn ran in a daemon `chat` started).
+  # normalize_argv reads `--query-file -` as a bare flag and a bare `-`.
+  - provider: hermes
+    profile: generate
+    transport: stdin
+    binary: hermes
+    subcommands: [chat]
+    options:
+      "--format": "stream-json"
+      "--toolsets": ""
+      "--ignore-rules": null
+      "--source": "tool"
+      "--provider": "<provider>"
+      "--max-turns": "4"
+      "-m": "<model>"
+      "--query-file": null
+      "-": null
+    tail: []
+    prompt: stdin
+    min_records: 1
+
+  # The flag gate: `chat --help`, once per process, under the probe's private
+  # HERMES_HOME (the adapter has no version_cmd to probe instead).
+  - provider: hermes
+    profile: probe
+    transport: stdin
+    binary: hermes
+    subcommands: [chat]
+    options:
+      "--help": null
+    tail: []
+    prompt: stdin
+    min_records: 1
+
+  - provider: hermes
+    profile: stop
+    transport: stdin
+    binary: hermes
+    subcommands: [gateway, stop]
+    options:
+      "--yes": null
+    tail: []
+    prompt: stdin
+    min_records: 1
+
   - provider: aider
     profile: generate
     transport: argv

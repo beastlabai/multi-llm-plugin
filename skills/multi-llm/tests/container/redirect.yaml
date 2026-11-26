@@ -78,6 +78,11 @@
 #                    `{home}` in a value is replaced by the per-invocation root,
 #                    for a variable that must name it (Junie's -Duser.home).
 #   argv_inject      {after_token, args} for a CLI whose ONLY override is argv
+#   root_key_var     a variable whose inherited value keys a SHARED root: every
+#                    invocation the caller gave the same value reuses it (Hermes:
+#                    `chat` and the adapter's `gateway stop` share HERMES_HOME)
+#   root_hold_while  a file under the root whose presence after the child exits
+#                    keeps the root (Hermes's daemon `gateway.pid`)
 #   session_prefix   whether a /s/<exec-id>/v1 base URL still works
 # NO VALUES APPEAR IN THIS FILE. Every credential is a template the wrapper fills
 # with a string that is meaningful on 127.0.0.1 and worthless anywhere else.
@@ -1542,6 +1547,49 @@ clis:
       through Junie's `submit` tool: stub_server answers a request advertising
       `submit` with one `submit` call and the request carrying its result, and
       Junie's tool-less title requests, with plain text.
+
+  # -------------------------------------------------------------------------
+  - cli: hermes
+    provenance: verified
+    lane: provider
+    chain_write_runner: opencode
+    surface: chat
+    mechanism: "$HERMES_HOME/.env OPENROUTER_BASE_URL + key, seeded (the gateway daemon scrubs its env)"
+    model_arg: "stub-model"
+    session_prefix: true
+    credential_vars: []
+    config_roots:
+      HERMES_HOME: "."
+      HOME: "home"
+      XDG_CONFIG_HOME: "home/.config"
+      XDG_CACHE_HOME: "home/.cache"
+      XDG_DATA_HOME: "home/.local/share"
+      XDG_STATE_HOME: "home/.local/state"
+    root_key_var: HERMES_HOME
+    root_hold_while: gateway.pid
+    http_log:
+      - {method: GET, path: /api/v1/models}          # three times
+      - {method: GET, path: /v1/models/stub-model}
+      - {method: GET, path: /v1/models}
+      - {method: POST, path: /api/show}              # Ollama's probe; 404 as on OpenRouter
+      - {method: POST, path: /v1/chat/completions, stream: true, has_tools: false}
+    turns: 1
+    terminates_on_text: true
+    row_timeout_s: 300
+    chain_row_timeout_s: 900
+    version_measured: "0.23.4"
+    help_invocation: "hermes chat --help"
+    version_offline: true
+    notes: >-
+      Nous Research Hermes Agent, a uv-locked Python 3.14 app. `hermes chat`
+      runs its turn in a gateway daemon it starts, which scrubs its environment,
+      so the redirect is on disk: home_seed/hermes/.env carries the stub base URL
+      and the fake per-exec key, and config.yaml the adapter's retry pins
+      (test_container_hermes_row holds it equal to hermes.HERMES_CONFIG). The
+      root is keyed on the adapter's per-dispatch HERMES_HOME and held while the
+      daemon's gateway.pid exists, so the adapter's `hermes gateway stop --yes`
+      reaches the daemon `chat` started and only then is the root removed.
+      `--toolsets ""` sends no tools.
 
   # -------------------------------------------------------------------------
   # Rows that reach no model surface. Both are `lane: fake`, which is a PROMISE

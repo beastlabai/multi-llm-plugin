@@ -1,0 +1,5 @@
+{"type": "system", "subtype": "init", "model": "stub-model", "session_id": "", "timestamp": 1795690972311}
+{"type": "text", "text": "Calling a tool.\n", "timestamp": 1795690987675}
+{"type": "text", "text": "Calling a tool.\n", "timestamp": 1795690987843}
+{"type": "text", "text": "Calling a tool.\n", "timestamp": 1795690987878}
+{"type": "result", "session_id": "local-9856d2e3297005249b00cb66ff7dac8128e672c37f0d8a65a658a4e653c279d0", "exit_code": 1, "text": "Model generated invalid tool call: read_file", "tokens": {"input": 30, "output": 9, "total": 0, "cache_read": 0, "cache_write": 0}, "duration_ms": 15656, "error": "Model generated invalid tool call: read_file", "timestamp": 1795690987967}

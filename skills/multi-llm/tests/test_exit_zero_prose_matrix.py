@@ -174,6 +174,16 @@ def _codex(prose: str) -> str:
     ))
 
 
+def _hermes(prose: str) -> str:
+    """hermes's JSONL: init, a text record, and the result record whose
+    ``text`` repeats the answer."""
+    def rewrite(record):
+        if isinstance(record.get("text"), str):
+            record["text"] = prose
+
+    return _jsonl(_success("hermes"), rewrite)
+
+
 def _opencode(prose: str) -> str:
     return "\n".join(json.dumps(event) for event in (
         {"type": "step_start", "part": {"type": "step-start"}},
@@ -197,6 +207,7 @@ COMPLETE = {
     "goose": lambda p: _swap_answer("goose", _success("goose"), p),
     "grok": lambda p: _envelope("grok", "success.stdout.txt", ["text"], p),
     "junie": lambda p: _envelope("junie", "success.stdout.txt", ["result"], p),
+    "hermes": _hermes,
     "kilocode": lambda p: p,
     "kimi": _kimi,
     "muse": lambda p: _swap_answer("muse", _success("muse"), p),

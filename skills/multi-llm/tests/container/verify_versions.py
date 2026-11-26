@@ -195,6 +195,8 @@ def main(argv: list[str] | None = None) -> int:
         # Junie's JVM ignores $HOME: its state goes to JUNIE_HOME and `user.home`.
         env["JUNIE_HOME"] = str(home / ".junie")
         env["JAVA_TOOL_OPTIONS"] = f"-Duser.home={home}"
+        # Hermes writes into $HERMES_HOME on `--version`.
+        env["HERMES_HOME"] = str(home / ".hermes")
 
     toolchain = list(lock.get("toolchain") or [])
     clis = list(lock.get("clis") or [])

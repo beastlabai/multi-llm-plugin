@@ -92,6 +92,7 @@ ROUTES: Dict[str, Route] = {
     "fx": Route("openrouter", _verbatim),
     # The profile's `id` is an OpenRouter slug, the same ids fx sends.
     "junie": Route("openrouter", _verbatim),
+    "hermes": Route("openrouter", _verbatim),
 }
 
 _LOGGED_IN = "needs a logged-in capture"
@@ -131,7 +132,7 @@ UNCHECKED_MODELS: Dict[Tuple[str, str], str] = {
 #: ``accepted``. ``_split`` uses ``accepted_inbound`` for every adapter, which is
 #: the same set wherever a ladder declares no alias;
 #: ``test_the_split_matches_build_command`` keeps that true.
-INBOUND_SPLITTERS = frozenset({"codex"})
+INBOUND_SPLITTERS = frozenset({"codex", "hermes"})
 
 
 def _ladder(name: str):

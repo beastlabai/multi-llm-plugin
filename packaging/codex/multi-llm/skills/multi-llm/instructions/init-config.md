@@ -10,7 +10,7 @@ it is handled entirely by this instruction file routing to the standalone
 
 `--init` is **fully automatic and zero-prompt**. It scans `PATH` for the
 supported provider CLIs (claude-code→`claude`, cursor-agent→`cursor-agent`,
-gemini→`gemini`, grok→`grok`, fx→`fx`, opencode→`opencode`, codex→`codex`,
+gemini→`gemini`, grok→`grok`, fx→`fx`, hermes→`hermes`, opencode→`opencode`, codex→`codex`,
 kilocode→`kilocode`, kimi→`kimi`, qwen-code→`qwen`, copilot→`copilot`,
 vibe→`vibe`,
 cline→`cline`, goose→`goose`,
@@ -71,7 +71,7 @@ manager is a fail-closed gate, not a question.
 ## What gets written
 
 - **`default_provider`** is set to the **first detected provider in base
-  declaration order** (claude-code, cursor-agent, gemini, grok, fx, opencode,
+  declaration order** (claude-code, cursor-agent, gemini, grok, fx, hermes, opencode,
   codex, kilocode, cline, goose, aider, agy, muse, pi, kimi, qwen-code, copilot,
   vibe, omp, junie). So with both claude-code and cursor-agent installed it becomes
   `claude-code`. When **nothing** is detected it is left commented and inherits

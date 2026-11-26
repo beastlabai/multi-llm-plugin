@@ -135,6 +135,20 @@ ARG FX_SHA256=78c155d59fa59e42fd56d93037fd75041868c9c67865e8c7f0ca6dcdfac23e75
 ARG JUNIE_VERSION=26.11.3
 ARG JUNIE_URL=https://github.com/JetBrains/junie/releases/download/4171.6/junie-release-4171.6-linux-amd64.zip
 ARG JUNIE_SHA256=57b15c990a9f7f350e40ff1d1967fbd3470ea6f966e4296a11eda511c298ea52
+# Nous Research Hermes Agent (MIT): no release assets, so the tag's source
+# archive, installed with `uv sync --locked` against the uv.lock it carries. The
+# commit is the tag's, for the install stamp `hermes --version` reads (without
+# one it prints `vunknown`).
+ARG HERMES_VERSION=0.23.4
+ARG HERMES_URL=https://github.com/NousResearch/hermes-agent/archive/refs/tags/v0.23.4.tar.gz
+ARG HERMES_SHA256=875e633ae5b3c6349c1bcffc18c0476518fbe5dead355e4aa09ad827ebffce0c
+ARG HERMES_COMMIT=8fc0374447313e276f6b9a2764bfc750190c966a
+# Hermes's interpreter: its uv.lock requires Python 3.14, which nothing else here
+# ships, so it is a checksummed standalone build like PYTHON312 below, from the
+# same python-build-standalone release.
+ARG PYTHON314_VERSION=3.14.9
+ARG PYTHON314_URL=https://github.com/astral-sh/python-build-standalone/releases/download/20261021/cpython-3.14.9%2B20261021-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz
+ARG PYTHON314_SHA256=561e91c1cadf30e84aec94d1917384ae3267e5f3e6e135e51fd1578bb19f4064
 # vibe's interpreter, NOT the product's. `mistral-vibe` declares
 # `requires_python >=3.12` and bookworm-slim ships 3.11.2 -- and this file sets
 # `UV_PYTHON_DOWNLOADS=never`, so `uv venv --python 3.12` cannot fetch one
@@ -697,6 +711,60 @@ RUN if [ "${MLLM_PIN_MODE}" = "latest" ]; then \
  && rm -rf /tmp/junie.zip /tmp/junie-unpacked /tmp/junie-state /tmp/junie-version
 
 # --------------------------------------------------------------------------- #
+# Hermes: the tag's source archive and its own uv.lock, on the pinned 3.14. The
+# venv's console script is linked as /opt/mllm/real/hermes. `--version` and
+# `chat --help` write into $HERMES_HOME and $HOME, so both run against a scratch
+# root that is removed after; the help check is the adapter's flag gate.
+RUN curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+         -o /tmp/python314.tar.gz "${PYTHON314_URL}" \
+ && if [ "${MLLM_PIN_MODE}" = "pinned" ]; then \
+        echo "${PYTHON314_SHA256}  /tmp/python314.tar.gz" | sha256sum --check --strict -; \
+    else \
+        echo "unpinned python314 artifact sha256: $(sha256sum /tmp/python314.tar.gz)"; \
+    fi \
+ && mkdir -p /opt/mllm/real/python314 \
+ && tar -xzf /tmp/python314.tar.gz -C /opt/mllm/real/python314 --strip-components=1 \
+ && rm -f /tmp/python314.tar.gz \
+ && /opt/mllm/real/python314/bin/python3.14 --version \
+ && if [ "${MLLM_PIN_MODE}" = "latest" ]; then \
+        hermes_tag="$(curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 https://api.github.com/repos/NousResearch/hermes-agent/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')"; \
+        hermes_version="${hermes_tag#v}"; \
+        hermes_url="https://github.com/NousResearch/hermes-agent/archive/refs/tags/${hermes_tag}.tar.gz"; \
+        hermes_commit="$(curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 "https://api.github.com/repos/NousResearch/hermes-agent/commits/${hermes_tag}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])')"; \
+    else \
+        hermes_version="${HERMES_VERSION}"; hermes_url="${HERMES_URL}"; hermes_commit="${HERMES_COMMIT}"; \
+    fi \
+ && curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+         -o /tmp/hermes.tar.gz "${hermes_url}" \
+ && if [ "${MLLM_PIN_MODE}" = "pinned" ]; then \
+        echo "${HERMES_SHA256}  /tmp/hermes.tar.gz" | sha256sum --check --strict -; \
+    else \
+        echo "unpinned hermes archive sha256: $(sha256sum /tmp/hermes.tar.gz)"; \
+    fi \
+ && mkdir -p /opt/mllm/hermes \
+ && tar -xzf /tmp/hermes.tar.gz -C /opt/mllm/hermes --strip-components=1 \
+ && rm -f /tmp/hermes.tar.gz \
+ && cd /opt/mllm/hermes \
+ && UV_PROJECT_ENVIRONMENT=/opt/mllm/venvs/hermes /opt/mllm/real/uv sync --locked --no-dev \
+        --python /opt/mllm/real/python314/bin/python3.14 \
+ && /opt/mllm/venvs/hermes/bin/python scripts/write_install_stamp.py -o /opt/mllm/hermes/install-stamp.json \
+        --commit "${hermes_commit}" --base-version "${hermes_version}" --display-version "${hermes_version}" \
+        --distance 0 --source build --update-mechanism external \
+ && cd / \
+ && ln -sf /opt/mllm/venvs/hermes/bin/hermes /opt/mllm/real/hermes \
+ && mkdir -p /tmp/hermes-state/home \
+ && HERMES_HOME=/tmp/hermes-state HOME=/tmp/hermes-state/home NO_COLOR=1 \
+        /opt/mllm/real/hermes --version > /tmp/hermes-version \
+ && grep -Fq "Hermes Agent v${hermes_version} " /tmp/hermes-version \
+ && HERMES_HOME=/tmp/hermes-state HOME=/tmp/hermes-state/home NO_COLOR=1 \
+        /opt/mllm/real/hermes chat --help > /tmp/hermes-help \
+ && for flag in --format --query-file --toolsets --ignore-rules --source --provider --max-turns --reasoning; do \
+        grep -Fq -- "$flag" /tmp/hermes-help || exit 1; \
+    done \
+ && rm -rf /tmp/hermes-state /tmp/hermes-version /tmp/hermes-help /tmp/uv-cache \
+ && chmod -R a+rX /opt/mllm/real/python314 /opt/mllm/hermes /opt/mllm/venvs/hermes
+
+# --------------------------------------------------------------------------- #
 # 8. The rig, and the wrapper tree it is the source of (C2).
 #
 #     /opt/mllm/real/<cli>   the genuine binary, untouched
@@ -747,7 +815,7 @@ COPY skills/multi-llm/tests/container/*.yaml            /opt/mllm/rig/
 COPY skills/multi-llm/tests/container/home_seed         /opt/mllm/rig/home_seed
 
 RUN chmod 0755 /opt/mllm/rig/*.py \
- && for b in codex claude gemini opencode cline kilocode kimi pi qwen copilot aider vibe goose grok muse cursor-agent agy omp fx junie uv; do \
+ && for b in codex claude gemini opencode cline kilocode kimi pi qwen copilot aider vibe goose grok muse cursor-agent agy omp fx junie hermes uv; do \
         ln -sf /opt/mllm/rig/wrapper.py "/opt/mllm/bin/$b"; \
     done \
  && /usr/bin/python3 -m compileall -q /opt/mllm/rig >/dev/null

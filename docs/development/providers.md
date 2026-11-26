@@ -1183,6 +1183,16 @@ per-spawn model profile, so the adapter always makes its own, replaces an inheri
 and strips every other `JUNIE_*` setting. The JVM resolves its home from `user.home`, not `$HOME`, so
 junie's root is also passed as `JAVA_TOOL_OPTIONS=-Duser.home=<root>`.
 
+hermes takes the same kind of root, with two differences. It is made by the adapter's
+`hermetic_dispatch` (one per spawn, `HERMES_HOME` plus a private `HOME`, since two slots sharing
+one `HOME` share Hermes's host-level gateway lock), and it holds the slot's `OPENROUTER_API_KEY`
+in `.env` (`0600`), because Hermes runs every turn in a gateway daemon that rebuilds its environment
+and never sees an exported key. That daemon is not a child of the CLI the spawn site starts: it
+runs in a session of its own and keeps retrying after the client is killed. So the context runs
+`hermes gateway stop --yes` against the root on every exit before the root is released, and the
+adapter strips any ambient `HERMES_*` rather than honouring a pinned `HERMES_HOME`: a stop aimed at
+the user's own home would end their gateway.
+
 - **A root lives as long as its dispatch, and its CLI.** Both spawn sites enter
   `llm_client.provider_dispatch_context`, which is also a `private_home.dispatch_homes` scope (a
   `--dry-run-subagents` render enters only its argv half, `preview_dispatch_context`, which makes no
@@ -1272,3 +1282,15 @@ lives in this section, not in the adapter.
   first dotted token without an override. The two shapes the parser depends on (`{"text": …}` for
   an answer, `{"type": "error", …}` for a failure) are vendor-internal envelopes, so the pin is
   one to re-confirm rather than a range to trust.
+
+### hermes
+
+- 0.23.4 (2026-11-26): every row in `tests/fixtures/hermes/` captured on it through the adapter
+  (`capture_probe.py`, the probe image of that directory's README, `--network none`). No floor:
+  the adapter declares no `version_cmd`, because `hermes --version` writes `SOUL.md` and
+  `cache/scratch/.last_prune` into `$HERMES_HOME`, `~/.hermes` when unset, and the version
+  probes run with the caller's environment. `build_command` gates on the flags it renders being
+  listed by `hermes chat --help` (run under a private home), which refuses the stale PyPI 0.19.0
+  and React Native's unrelated `hermes` binary alike. A tarball install without the installer's
+  stamp prints `Hermes Agent vunknown (2026.9.24)`; the base `parse_version` would misread that
+  date as a version.

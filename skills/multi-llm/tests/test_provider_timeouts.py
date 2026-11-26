@@ -79,6 +79,7 @@ PRE_L5_ARGV_MODELS = {
     "grok": "grok-4",
     "fx": "openai/gpt-5.6-luna",
     "junie": "openai/gpt-6-luna",
+    "hermes": "openai/gpt-6-luna",
     "kilocode": "openai-native/gpt-5.5",
     "kimi": "moonshotai/kimi-k2-thinking",
     "muse": "muse-spark-1.2",
@@ -182,6 +183,11 @@ PRE_L5_ARGV = {
         "open,open_entire_file,scroll_down,scroll_up,glob_search,grep_search,submit",
         "--output-format", "json", "--max-steps", "60",
         "--task", PRE_L5_ARGV_PROMPT,
+    ],
+    "hermes": [
+        "hermes", "chat", "--format", "stream-json", "--toolsets", "",
+        "--ignore-rules", "--source", "tool", "--provider", "openrouter",
+        "--max-turns", "4", "-m", "openai/gpt-6-luna", "-q", PRE_L5_ARGV_PROMPT,
     ],
     "kilocode": [
         "kilocode", "run", "--auto", "-m", "openai-native/gpt-5.5",

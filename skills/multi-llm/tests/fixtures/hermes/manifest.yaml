@@ -1,0 +1,300 @@
+schema_version: 1
+provider: hermes
+cli_version: 0.23.4
+captured: '2026-11-26'
+method: Hermes Agent v0.23.4 (tag commit 8fc03744, release tarball sha256 08096c25...) installed by probe.Dockerfile
+  over the mllm-e2e image, network none, uid 10001, read-only root, fake key. capture.sh runs capture_probe.py,
+  which imports the production adapter and changes only hermes.BASE_URL to the in-container server (stub_server.py,
+  failserver.py or toolserver.py); the argv, private HERMES_HOME/HOME, config.yaml and gateway stop are
+  the adapter's. Wall times include the ~10 s daemon cold start on Docker Desktop. exit-zero-failure is
+  the one row from the earlier raw probe (see its notes). No paid calls.
+rows:
+  success:
+    stdout: success.stdout.txt
+    stderr: success.stderr.txt
+    exit_code: 0
+    expect:
+      success: true
+      classify_failure: null
+      salvage: answer
+      lane_status:
+        lane_a: ok
+        lane_b: ok
+      data:
+      - id: S001
+        title: Bound the retry ladder
+        severity: high
+      - id: S002
+        title: Strip the vendor token
+        severity: medium
+    wall_s: 18.34
+    requests: 7
+    notes: stub_server success scenario. One chat request; the five catalog GETs and /api/show precede
+      it.
+  truncated:
+    stdout: truncated.stdout.txt
+    stderr: truncated.stderr.txt
+    exit_code: 1
+    expect:
+      success: false
+      classify_failure: server_error
+      salvage: none
+      lane_status:
+        lane_a: runner_error
+        lane_b: unparseable_result
+    wall_s: 24.06
+    requests: 9
+    notes: 'failserver trunc: a cut SSE stream. Hermes retried it (3 chat requests) and reports ''empty
+      stream with no finish_reason''.'
+  ephemeral-only:
+    stdout: ephemeral-only.stdout.txt
+    stderr: ephemeral-only.stderr.txt
+    exit_code: -15
+    expect:
+      success: false
+      classify_failure: null
+      salvage: none
+      lane_status:
+        lane_a: runner_error
+        lane_b: unparseable_result
+    wall_s: 25.06
+    requests: 7
+    notes: failserver stall; the client got SIGTERM at 25 s. stdout holds only the init record. The daemon
+      was still waiting on the stalled request; the adapter's gateway stop ended it and no request followed.
+  multi-assistant:
+    stdout: multi-assistant.stdout.txt
+    stderr: multi-assistant.stderr.txt
+    exit_code: 0
+    expect:
+      success: true
+      classify_failure: null
+      salvage: answer
+      lane_status:
+        lane_a: ok
+        lane_b: ok
+      data:
+      - id: S001
+        title: Bound the retry ladder
+        severity: high
+      - id: S002
+        title: Strip the vendor token
+        severity: medium
+    wall_s: 20.89
+    requests: 7
+    notes: 'toolserver multi: a decoy document plus a read_file call, then the findings. read_file does
+      not exist in the toolless run, so the model got ''does not exist'' and answered; result.text is
+      the last message only.'
+  error-envelope:
+    stdout: error-envelope.stdout.txt
+    stderr: error-envelope.stderr.txt
+    exit_code: 1
+    expect:
+      success: false
+      classify_failure: server_error
+      salvage: none
+      lane_status:
+        lane_a: runner_error
+        lane_b: unparseable_result
+    wall_s: 23.85
+    requests: 9
+    notes: 'failserver errbody: an error object on an HTTP 200. Read by Hermes as a cut stream (3 chat
+      requests).'
+  exit-zero-failure:
+    stdout: exit-zero-failure.stdout.txt
+    stderr: exit-zero-failure.stderr.txt
+    exit_code: 0
+    expect:
+      success: false
+      salvage: none
+      lane_status:
+        lane_a: runner_error
+        lane_b: unparseable_result
+      classify_failure: null
+    wall_s: 58.01
+    requests: 10
+    notes: 'stub_server empty-answer scenario, captured by the pre-adapter probe whose argv lacked --max-turns
+      (and spelled -t, with --query-file first); same binary, image and config.yaml. Hermes''s own ''No
+      reply'' sentence with exit_code 0, no error field and no text record: the parser fails it on the
+      missing text records. Under the adapter''s argv the same run exits 1 (empty-answer row).'
+  stdout-error:
+    stdout: stdout-error.stdout.txt
+    stderr: stdout-error.stderr.txt
+    exit_code: 1
+    expect:
+      success: false
+      classify_failure: server_error
+      salvage: none
+      lane_status:
+        lane_a: runner_error
+        lane_b: unparseable_result
+    wall_s: 21.32
+    requests: 8
+    notes: failserver 500. Hermes reports every failure on stdout, in the result record's error field;
+      with api_max_retries 1 it made 2 chat requests.
+  empty:
+    stdout: empty.stdout.txt
+    stderr: empty.stderr.txt
+    exit_code: 1
+    expect:
+      success: false
+      classify_failure: connection_error
+      salvage: none
+      lane_status:
+        lane_a: runner_error
+        lane_b: unparseable_result
+    wall_s: 25.11
+    requests: 8
+    notes: 'failserver empty: a zero-byte response. Hermes reports ''Connection error.'' after 2 chat
+      requests.'
+  auth-error:
+    stdout: auth-error.stdout.txt
+    stderr: auth-error.stderr.txt
+    exit_code: 1
+    expect:
+      success: false
+      classify_failure: auth_failed
+      salvage: none
+      lane_status:
+        lane_a: auth_failed
+        lane_b: auth_failed
+    wall_s: 20.95
+    requests: 7
+    notes: failserver 401, one chat request.
+  rate-limit:
+    stdout: rate-limit.stdout.txt
+    stderr: rate-limit.stderr.txt
+    exit_code: 1
+    expect:
+      success: false
+      classify_failure: rate_limited
+      salvage: none
+      lane_status:
+        lane_a: rate_limited
+        lane_b: rate_limited
+    wall_s: 21.06
+    requests: 7
+    notes: 'failserver 429 without Retry-After, one chat request: Hermes does not retry a 429 under the
+      adapter''s config.'
+  invalid-model:
+    stdout: invalid-model.stdout.txt
+    stderr: invalid-model.stderr.txt
+    exit_code: 1
+    expect:
+      success: false
+      classify_failure: invalid_model
+      salvage: none
+      lane_status:
+        lane_a: invalid_model
+        lane_b: invalid_model
+    wall_s: 21.07
+    requests: 7
+    notes: failserver 404 naming the model, one chat request.
+  context-overflow:
+    stdout: context-overflow.stdout.txt
+    stderr: context-overflow.stderr.txt
+    exit_code: 1
+    expect:
+      success: false
+      classify_failure: null
+      salvage: none
+      lane_status:
+        lane_a: runner_error
+        lane_b: unparseable_result
+    wall_s: 20.97
+    requests: 7
+    notes: 'failserver ctx. Hermes answers a context overflow by compressing, and refused its compression
+      model because the stub catalog reports an 8,192-token window (Hermes needs 64K). A stub artifact:
+      the request never reached the overflow path a real OpenRouter model would take. Classified as a
+      runner fault, not a context overflow.'
+  empty-answer:
+    stdout: empty-answer.stdout.txt
+    stderr: empty-answer.stderr.txt
+    exit_code: 1
+    expect:
+      success: false
+      classify_failure: null
+      salvage: none
+      lane_status:
+        lane_a: runner_error
+        lane_b: unparseable_result
+    wall_s: 65.62
+    requests: 10
+    notes: 'stub_server empty-answer scenario through the adapter''s argv: Hermes''s empty-response guard
+      re-sent the request 4 times (55 s) and, with --max-turns set, ended the turn with exit_code 1 and
+      its own ''No reply'' sentence.'
+  rate-limit-retry-after:
+    stdout: rate-limit-retry-after.stdout.txt
+    stderr: rate-limit-retry-after.stderr.txt
+    exit_code: 1
+    expect:
+      success: false
+      classify_failure: rate_limited
+      salvage: none
+      lane_status:
+        lane_a: rate_limited
+        lane_b: rate_limited
+    wall_s: 21.24
+    requests: 7
+    notes: 'failserver 429ra (Retry-After: 1). One chat request, as without the header.'
+  write-refused:
+    stdout: write-refused.stdout.txt
+    stderr: write-refused.stderr.txt
+    exit_code: 0
+    expect:
+      success: true
+      classify_failure: null
+      salvage: answer
+      lane_status:
+        lane_a: ok
+        lane_b: ok
+      data: []
+    wall_s: 21.02
+    requests: 7
+    notes: 'toolserver write: a forced write_file call. The toolless run answered ''Tool write_file does
+      not exist''; no file appeared in the workspace.'
+  terminal-refused:
+    stdout: terminal-refused.stdout.txt
+    stderr: terminal-refused.stderr.txt
+    exit_code: 0
+    expect:
+      success: true
+      classify_failure: null
+      salvage: answer
+      lane_status:
+        lane_a: ok
+        lane_b: ok
+      data: []
+    wall_s: 20.79
+    requests: 7
+    notes: 'toolserver terminal: a forced terminal call, refused the same way; no file appeared.'
+  turn-limit:
+    stdout: turn-limit.stdout.txt
+    stderr: turn-limit.stderr.txt
+    exit_code: 1
+    expect:
+      success: false
+      classify_failure: null
+      salvage: none
+      lane_status:
+        lane_a: runner_error
+        lane_b: unparseable_result
+    wall_s: 20.85
+    requests: 8
+    notes: 'toolserver loop: a tool call on every turn. Hermes ended the run after 3 chat requests with
+      ''Model generated invalid tool call'' (exit 1), before --max-turns 4 was reached.'
+  no-key:
+    stdout: no-key.stdout.txt
+    stderr: no-key.stderr.txt
+    exit_code: 1
+    expect:
+      success: false
+      classify_failure: auth_failed
+      salvage: none
+      lane_status:
+        lane_a: auth_failed
+        lane_b: auth_failed
+    wall_s: 2.17
+    requests: 0
+    notes: 'capture_probe --no-key: OPENROUTER_API_KEY unset, so .env holds only the base URL. Hermes''s
+      first-run guard refused before starting a daemon or sending any request: error ''credentials or
+      agent init failed'', the setup notice on stderr.'

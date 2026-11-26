@@ -180,6 +180,13 @@
 #     models:
 #       - openai/gpt-6-luna
 
+#   hermes:
+#     default_timeout: 1200
+#     max_concurrent: 2
+#     models:
+#       - openai/gpt-6-luna
+#       - deepseek/deepseek-v4.1-flash
+
 #   opencode:
 #     default_timeout: 1200
 #     max_version_exclusive: 

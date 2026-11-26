@@ -1490,6 +1490,7 @@ SPECS = {
     "goose": "goose:stub-model",
     "grok": "grok:stub-model",
     "junie": "junie:openai/gpt-6-luna",
+    "hermes": "hermes:stub-model",
     "kilocode": KILO_SPEC,
     "kimi": "kimi:stub-model",
     "muse": "muse:stub-model",

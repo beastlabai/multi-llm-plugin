@@ -134,6 +134,7 @@ _ICON_DEFS: Dict[str, tuple] = {
     "xiaomi":     (None, "M", "#FF6900"),
     "arcee":      (None, "T", "#3B82F6"),
     "vercel":     (None, "V", "#F45B25"),
+    "hermes":     (None, "H", "#B8860B"),
     "deepseek":   (None, "D", "#4D6BFE"),
     "cline":      (None, "C", "#0EA5A4"),
     "aider":      (None, "A", "#14B8A6"),
@@ -162,6 +163,7 @@ _PROVIDER_ICON_KEYS: Dict[str, str] = {
     "grok":         "xai",
     # Vercel fx is a CLI identity; model-family icons are resolved separately.
     "fx":           "vercel",
+    "hermes":       "hermes",
     "cline":        "cline",
     "goose":        "goose",
     "aider":        "aider",

@@ -103,6 +103,15 @@ providers:
     models:
       - openai/gpt-6-luna
 
+  hermes:
+    default_timeout: 1200
+    # Each slot starts its own Hermes gateway daemon (~10 s cold start, ~600 MB
+    # install), so two at a time. OpenRouter slugs; ":effort" -> --reasoning.
+    max_concurrent: 2
+    models:
+      - openai/gpt-6-luna
+      - deepseek/deepseek-v4.1-flash
+
   opencode:
     default_timeout: 1200
     # First opencode version to refuse, e.g. "2.0.0"; "" = no ceiling. Write the

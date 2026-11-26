@@ -1255,6 +1255,16 @@ class Handler(BaseHTTPRequestHandler):
                 entry["surface"] = f"catalog:{kind}"
                 return self._send_json(catalog(kind))
 
+        # Ollama's model-info probe. Hermes posts it to the configured base
+        # URL's origin before its first chat request, to learn a local model's
+        # context length; OpenRouter has no such route and answers 404, which
+        # Hermes reads as "not Ollama" and moves on. Served as that same 404
+        # so the probe is a declared route, not an unhandled one.
+        if method == "POST" and path.endswith("/api/show"):
+            entry["surface"] = "probe:ollama-show"
+            return self._send_json({"error": {"message": "Not Found", "code": 404}},
+                                   status=404)
+
         # An unknown request fails loudly rather than 404-ing quietly.
         entry["unhandled"] = True
         return self._send_json(

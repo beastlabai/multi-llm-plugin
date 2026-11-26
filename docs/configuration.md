@@ -34,7 +34,7 @@ override: starting from an inert template, it **uncomments** the full `providers
 block, `defaults.models` / `quick_models` entries, and `default_provider` for each
 CLI it detects, leaving the rest commented. `default_provider` is set to the
 **first detected provider** in base order (claude-code, cursor-agent, gemini,
-grok, fx, opencode, codex, kilocode, cline, goose, aider, agy, muse, pi, kimi,
+grok, fx, hermes, opencode, codex, kilocode, cline, goose, aider, agy, muse, pi, kimi,
 qwen-code, copilot, vibe, omp, junie). With **no CLIs installed** it writes the inert
 template (which inherits the built-in defaults) and exits 0 with an install
 notice — it never errors. Pass `--template-only` to skip detection and write the
@@ -675,7 +675,7 @@ deleted.
   API key.
 - **kilocode:** `backend/provider/model`. Prime and ultraspeed SKUs are
   separately priced speed variants, not replacements for the standard ids.
-- **kimi, qwen-code, copilot, fx:** OpenRouter slugs on each CLI's generic
+- **kimi, qwen-code, copilot, fx, hermes:** OpenRouter slugs on each CLI's generic
   bring-your-own-key backend. A Kimi Code subscription, a Qwen first-party plan
   and a Copilot seat each have a different catalog, and their model names do
   not transfer. kimi takes the slug in `KIMI_MODEL_NAME`, never on its command

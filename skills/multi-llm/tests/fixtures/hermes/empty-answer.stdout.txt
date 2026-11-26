@@ -1,0 +1,2 @@
+{"type": "system", "subtype": "init", "model": "stub-model", "session_id": "", "timestamp": 1795690972311}
+{"type": "result", "session_id": "local-cd48fdeabf6ff0238e5e02cbb4587c9488138f493dc65e25e95a5310e8abe06c", "exit_code": 1, "text": "⚠️ No reply: stub-model didn't produce a reply this time, even after retries. Send `continue` to try again, or switch models with /model.", "tokens": {"input": 4, "output": 4, "total": 8, "cache_read": 0, "cache_write": 0}, "duration_ms": 59994, "timestamp": 1795691032306}

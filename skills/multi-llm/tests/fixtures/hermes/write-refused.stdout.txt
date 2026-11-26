@@ -1,0 +1,4 @@
+{"type": "system", "subtype": "init", "model": "stub-model", "session_id": "", "timestamp": 1795690972711}
+{"type": "text", "text": "Calling a tool.\n", "timestamp": 1795690987912}
+{"type": "text", "text": "[]", "timestamp": 1795690987983}
+{"type": "result", "session_id": "local-b164b64fad33dea50c8511b9c225e94207cdc97bdf15c979aed0f11afcdf881b", "exit_code": 0, "text": "[]", "tokens": {"input": 20, "output": 6, "total": 26, "cache_read": 0, "cache_write": 0}, "duration_ms": 15357, "timestamp": 1795690988068}

@@ -447,3 +447,80 @@ class TestJunieRowRendersTheAdapterProfile:
                 "JUNIE_HOME", "JUNIE_MODEL_LOCATIONS", "JAVA_TOOL_OPTIONS"}
         finally:
             cleanup_home_dirs()
+
+
+class TestHermesRowSharesOneRootWithItsGatewayStop:
+    """Hermes's turn runs in a daemon ``chat`` starts; the adapter's
+    ``gateway stop --yes`` must reach it, so the two invocations share a root."""
+
+    SEED = Path(__file__).parent / "container" / "home_seed" / "hermes"
+
+    def _row(self, monkeypatch):
+        monkeypatch.setattr(wrapper_module, "REDIRECT_YAML", REDIRECT_YAML)
+        return wrapper_module.load_row("hermes")
+
+    def test_the_root_is_keyed_on_the_adapter_s_hermes_home(self, monkeypatch, tmp_path):
+        row = self._row(monkeypatch)
+        monkeypatch.setenv("MLLM_INVOCATION_ROOT", str(tmp_path))
+        monkeypatch.setenv("HERMES_HOME", "/tmp/multi-llm-hermes-aaa")
+        chat = wrapper_module.invocation_root_for("hermes", row, "exec1")
+        stop = wrapper_module.invocation_root_for("hermes", row, "exec2")
+        assert chat == stop and chat.parent == tmp_path
+        assert "multi-llm-hermes" not in chat.name
+        monkeypatch.setenv("HERMES_HOME", "/tmp/multi-llm-hermes-bbb")
+        assert wrapper_module.invocation_root_for("hermes", row, "exec1") != chat
+        monkeypatch.delenv("HERMES_HOME")
+        assert wrapper_module.invocation_root_for("hermes", row, "exec3") == tmp_path / "hermes-exec3"
+
+    def test_a_row_without_the_key_keeps_a_root_per_exec(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(wrapper_module, "REDIRECT_YAML", REDIRECT_YAML)
+        monkeypatch.setenv("MLLM_INVOCATION_ROOT", str(tmp_path))
+        monkeypatch.setenv("HERMES_HOME", "/tmp/whatever")
+        row = wrapper_module.load_row("fx")
+        assert wrapper_module.invocation_root_for("fx", row, "e1") == tmp_path / "fx-e1"
+
+    def test_the_layout_and_seed_match_the_adapter(self, monkeypatch, tmp_path):
+        from utils.providers.hermes import HERMES_CONFIG, HermesProvider, _home_env
+
+        row = self._row(monkeypatch)
+        homes = tmp_path / "homes"
+        (homes / "hermes").mkdir(parents=True)
+        for path in self.SEED.iterdir():
+            (homes / "hermes" / path.name).write_bytes(path.read_bytes())
+        monkeypatch.setattr(wrapper_module, "HOMES_ROOT", homes)
+        url = "http://127.0.0.1:18881/s/abc123/v1"
+        monkeypatch.setenv("MLLM_STUB_BASE_URL", url)
+        # What the adapter's own env hands the wrapper; carried by allowlist.
+        monkeypatch.setenv("NO_COLOR", "1")
+        root = tmp_path / "hermes-0123456789ab"
+        wrapper_module.seed_invocation_root("hermes", root, row)
+        env = wrapper_module.build_child_env("hermes", "abc123", row, root)
+        expected = _home_env(str(root))
+        # Every variable the adapter sets: the same path, or carried (NO_COLOR).
+        assert set(expected) == set(HermesProvider().get_env("stub-model"))
+        for key, value in expected.items():
+            assert env[key] == value, key
+        # The daemon scrubs its env, so the redirect and the key are on disk.
+        assert "OPENROUTER_API_KEY" not in env
+        dotenv = dict(line.split("=", 1) for line in
+                      (root / ".env").read_text().splitlines() if line)
+        # The fake key is the wrapper's per-root session key, named by the root.
+        session_key = "mllm-stub-" + root.name.rsplit("-", 1)[-1]
+        assert dotenv == {"OPENROUTER_BASE_URL": url, "OPENROUTER_API_KEY": session_key}
+        # The retry pins are the product's, not a copy that can drift.
+        assert json.loads((root / "config.yaml").read_text()) == HERMES_CONFIG
+
+    @pytest.mark.skipif(os.name == "nt", reason="the wrapper forks; POSIX only")
+    @pytest.mark.parametrize("leaves_pid", [True, False])
+    def test_the_root_is_held_while_the_daemon_s_pid_file_exists(self, tmp_path, leaves_pid):
+        root = tmp_path / "hermes-0123456789ab"
+        root.mkdir()
+        child = tmp_path / "child.sh"
+        action = "touch gateway.pid" if leaves_pid else "rm -f gateway.pid"
+        child.write_text(f"#!/bin/sh\ncd '{root}' && {action}\n")
+        child.chmod(0o755)
+        (root / "gateway.pid").write_text("1\n")
+        code = wrapper_module.run_child(child, "hermes", [], dict(os.environ), root,
+                                        hold_while="gateway.pid")
+        assert code == 0
+        assert root.exists() is leaves_pid

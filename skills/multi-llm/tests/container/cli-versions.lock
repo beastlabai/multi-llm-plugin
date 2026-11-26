@@ -71,6 +71,15 @@ artifacts:
     url: "https://github.com/JetBrains/junie/releases/download/4171.6/junie-release-4171.6-linux-amd64.zip"
     sha256: "57b15c990a9f7f350e40ff1d1967fbd3470ea6f966e4296a11eda511c298ea52"
     releases_url: "https://raw.githubusercontent.com/jetbrains-junie/junie/main/update-info.jsonl"
+  hermes:
+    version: "0.23.4"
+    # The tag's source archive (the release has no assets); `uv sync --locked`
+    # installs it against the uv.lock it carries. `commit` is the tag's, for the
+    # install stamp `hermes --version` reads.
+    url: "https://github.com/NousResearch/hermes-agent/archive/refs/tags/v0.23.4.tar.gz"
+    sha256: "875e633ae5b3c6349c1bcffc18c0476518fbe5dead355e4aa09ad827ebffce0c"
+    commit: "8fc0374447313e276f6b9a2764bfc750190c966a"
+    releases_url: "https://api.github.com/repos/NousResearch/hermes-agent/releases/latest"
   uv:
     version: "0.13.5"
     url: "https://github.com/astral-sh/uv/releases/download/0.13.5/uv-x86_64-unknown-linux-gnu.tar.gz"
@@ -205,6 +214,13 @@ artifacts:
     # venv and answering `vibe --version`.
     url: "https://github.com/astral-sh/python-build-standalone/releases/download/20261021/cpython-3.12.15%2B20261021-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
     sha256: "6d7521138fd33afddc1ccd08abb007d9a2829e38117c2576f9efdc0ec73ce772"
+  python314:
+    version: "3.14.9"
+    # Hermes's interpreter, for the same reason as python312: its uv.lock needs
+    # 3.14 and `UV_PYTHON_DOWNLOADS=never` forbids uv fetching one. Same
+    # python-build-standalone release, same stripped build.
+    url: "https://github.com/astral-sh/python-build-standalone/releases/download/20261021/cpython-3.14.9%2B20261021-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz"
+    sha256: "561e91c1cadf30e84aec94d1917384ae3267e5f3e6e135e51fd1578bb19f4064"
 
 # The runtime under every CLI at once. A base-digest bump moves all of it, which
 # is exactly why these are asserted rather than assumed to follow from the digest.
@@ -335,6 +351,20 @@ clis:
       /opt/mllm/real/junie. Build 4171.6 is marketing version 26.11.3. The JVM
       ignores $HOME, so every call sets JUNIE_HOME and JAVA_TOOL_OPTIONS
       (-Duser.home); verify_versions.py does so for the version call.
+
+  - id: hermes
+    binary: hermes
+    install: archive
+    artifact: hermes
+    version: "0.23.4"
+    verify:
+      command: ["hermes", "--version"]
+      pattern: "^Hermes Agent v(?P<version>\\d+\\.\\d+\\.\\d+) "
+    note: >-
+      Nous Research Hermes Agent, the tag's source archive under /opt/mllm/hermes
+      with a uv-locked venv on the pinned Python 3.14 and its console script
+      linked as /opt/mllm/real/hermes. `--version` writes into $HERMES_HOME, so
+      verify_versions.py points it at the scratch home.
 
   - id: codex
     binary: codex

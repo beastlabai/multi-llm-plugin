@@ -921,3 +921,15 @@ class TestPortFile:
                 for stream in (proc.stdout, proc.stderr):
                     if stream:
                         stream.close()
+
+
+class TestHermesOllamaProbeIsADeclaredRoute:
+    """Hermes posts Ollama's ``/api/show`` before its first chat request. The
+    stub answers it as OpenRouter does, 404, and logs it as served."""
+
+    def test_api_show_is_a_404_not_an_unhandled_route(self, stub):
+        server = stub(None)
+        status, _ = server.post("/s/abc123/api/show", {"name": "stub-model"}, stream=False)
+        assert status == 404
+        entry = _last_entry(server, "probe:ollama-show")
+        assert entry["unhandled"] is False

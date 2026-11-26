@@ -6065,6 +6065,43 @@ def export_artifacts(plan: Path) -> None:
     (OUT / "workspace-census-after.json").write_text(
         json.dumps(_workspace_census(), indent=2, sort_keys=True),
         encoding="utf-8")
+    # Best-effort evidence on the export path: it must never fail the row.
+    try:
+        leftovers = _leftovers()
+    except OSError as exc:
+        leftovers = {"error": f"{type(exc).__name__}: {exc}"}
+    (OUT / "leftovers.json").write_text(
+        json.dumps(leftovers, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _leftovers() -> dict:
+    """What provider invocations left behind when the row's work ended.
+
+    The wrapper removes each per-invocation root when its child exits, except a
+    root a row holds while its daemon runs (`root_hold_while`); a held root
+    still here means the stop that releases it never came. The process list is
+    every other command line in the container, so a daemon that outlived its
+    dispatch is named: its first eight tokens, any token of 24 characters or
+    more replaced by its length, so no key or prompt is exported. Recorded for
+    every row; asserted where a row declares a daemon
+    (test_container_provider_lane's hermes check).
+    """
+    base = Path(os.environ.get("MLLM_INVOCATION_ROOT", "/tmp/mllm-inv"))
+    roots = sorted(p.name for p in base.iterdir()) if base.is_dir() else []
+    mine = {os.getpid(), os.getppid()}
+    processes = []
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit() or int(proc.name) in mine:
+            continue
+        try:
+            cmdline = (proc / "cmdline").read_bytes().replace(b"\0", b" ").strip()
+        except OSError:
+            continue
+        tokens = cmdline.decode("utf-8", "replace").split()[:8]
+        if tokens:
+            processes.append(" ".join(
+                t if len(t) < 24 else f"<{len(t)} chars>" for t in tokens))
+    return {"invocation_roots": roots, "processes": sorted(processes)}
 
 
 def export_receipt_named_plan_files(plan: Path, target: Path) -> None:
