@@ -376,8 +376,10 @@ def build_child_env(cli: str, exec_id: str, row: dict, invocation_root: Path) ->
     # and never the CLI it was set for. Without this the pins C9 verifies at build
     # time are silently un-held at run time, which is the failure mode where a
     # green build is followed by a CLI that updated itself mid-row.
+    # `{home}` is the per-invocation root, for a variable whose value must name
+    # it (Junie's `JAVA_TOOL_OPTIONS=-Duser.home={home}`).
     for var, value in (row.get("env_extra") or {}).items():
-        env[var] = str(value)
+        env[var] = str(value).replace("{home}", str(home))
 
     if cli == "fx":
         # This wrapper runs under system Python, so sys.prefix cannot identify

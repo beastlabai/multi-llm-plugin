@@ -300,6 +300,18 @@ providers:
       - openrouter/moonshotai/kimi-k3.1-pro
       - openrouter/openai/gpt-6.2-astra
 
+  junie:
+    default_timeout: 1200
+    max_concurrent: 2
+    # JetBrains Junie CLI (proprietary). OpenRouter slugs, through a custom model
+    # profile the adapter writes per run (no JetBrains account). ":effort" ->
+    # --effort: none, minimal, low, medium, high, xhigh, max; with no suffix Junie
+    # picks its own default for an id it knows (high for openai/gpt-6-luna).
+    # Junie still contacts resources.jetbrains.com with its opt-outs set.
+    models:
+      - openai/gpt-6-luna
+      - deepseek/deepseek-v4.1-flash
+
 
 # Default provider when model name doesn't include provider prefix
 default_provider: cursor-agent

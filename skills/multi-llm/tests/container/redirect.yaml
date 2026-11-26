@@ -75,6 +75,8 @@
 #                    MLLM_*, so an image-wide CLINE_NO_AUTO_UPDATE=1 reaches the
 #                    build and the entrypoint but never the CLI it was set for —
 #                    leaving C9's verified pins silently un-held at run time.
+#                    `{home}` in a value is replaced by the per-invocation root,
+#                    for a variable that must name it (Junie's -Duser.home).
 #   argv_inject      {after_token, args} for a CLI whose ONLY override is argv
 #   session_prefix   whether a /s/<exec-id>/v1 base URL still works
 # NO VALUES APPEAR IN THIS FILE. Every credential is a template the wrapper fills
@@ -1502,6 +1504,44 @@ clis:
       reviewer requests; they are authorized and excluded from reported usage.
       This offline lane has network none; production permits web access.
       The wrapper owns HOME and tightens .fx/settings.json after substitution.
+
+  # -------------------------------------------------------------------------
+  - cli: junie
+    provenance: verified
+    lane: provider
+    chain_write_runner: opencode
+    surface: chat
+    mechanism: "$JUNIE_MODEL_LOCATIONS/multi-llm.json custom OpenAICompletion profile"
+    model_arg: "stub-model"
+    session_prefix: true
+    credential_vars: [OPENROUTER_API_KEY]
+    config_roots:
+      JUNIE_HOME: ".junie"
+      JUNIE_MODEL_LOCATIONS: "models"
+    config_files:
+      "models/multi-llm.json": |
+        {"baseUrl":"{base_url}/chat/completions","id":"stub-model","apiType":"OpenAICompletion","apiKey":"${OPENROUTER_API_KEY}"}
+    env_extra:
+      JAVA_TOOL_OPTIONS: "-Duser.home={home}"
+    http_log:
+      - {method: POST, path: /v1/chat/completions, stream: true, has_tools: true}
+    turns: 2
+    terminates_on_text: false
+    row_timeout_s: 300
+    chain_row_timeout_s: 600
+    version_measured: "26.11.3"
+    help_invocation: "junie --help"
+    version_offline: true
+    notes: >-
+      JetBrains Junie, a jpackage JVM app. The profile is the whole redirect: the
+      adapter's argv is static (`--model custom:multi-llm`, prompt on stdin) and
+      the wrapper rebuilds the child env, so the row supplies what the adapter's
+      own get_env would: JUNIE_HOME, JUNIE_MODEL_LOCATIONS, and
+      JAVA_TOOL_OPTIONS=-Duser.home (the JVM ignores $HOME). baseUrl is posted
+      to verbatim, hence the explicit /chat/completions. The answer must arrive
+      through Junie's `submit` tool: stub_server answers a request advertising
+      `submit` with one `submit` call and the request carrying its result, and
+      Junie's tool-less title requests, with plain text.
 
   # -------------------------------------------------------------------------
   # Rows that reach no model surface. Both are `lane: fake`, which is a PROMISE

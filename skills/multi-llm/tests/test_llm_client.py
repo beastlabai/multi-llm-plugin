@@ -1489,6 +1489,7 @@ SPECS = {
     "gemini": "gemini:gemini-2.5-flash",
     "goose": "goose:stub-model",
     "grok": "grok:stub-model",
+    "junie": "junie:openai/gpt-6-luna",
     "kilocode": KILO_SPEC,
     "kimi": "kimi:stub-model",
     "muse": "muse:stub-model",

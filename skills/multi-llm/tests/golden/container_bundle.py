@@ -193,6 +193,9 @@ _RESULT_MARKER = "MULTI_LLM_RESULT:"
 #: its keys and tokenizes each value, so the set of keys is still compared.
 ERASED_VALUE_KEYS = frozenset({
     "runner_versions",
+    # A review round's id is 16 random hex characters (utils/review_round.py),
+    # copied into every validation file of the round.
+    "round_id",
 })
 
 #: sha256s of files on disk, compared **by value** since the rig pins

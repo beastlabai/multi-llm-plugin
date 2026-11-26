@@ -59,6 +59,7 @@ MODELS = {
     # not here -- this table only shapes argv.
     "copilot": "openai/gpt-5.6-luna",
     "fx": "openai/gpt-5.6-luna",
+    "junie": "openai/gpt-6-luna",
     "cursor-agent": "auto",
     "gemini": "gemini-2.5-pro",
     "goose": "openrouter/z-ai/glm-5.2",
@@ -606,6 +607,15 @@ def restrictive_atoms(name, argv=None):
 #:
 #: A row here is a MEASUREMENT, not an opinion, and it must name the probe.
 NO_WRITE_TOOL_AT_ALL = {
+    "junie": (
+        "MEASURED on junie 26.11.3 against a localhost stub. `--allowed-tools` "
+        "is an allow-list, not a word RESTRICTIVE_ATOM_RE reads, so no atom "
+        "adjudicates it. With it the chat request advertised only the seven "
+        "READ_ONLY_TOOLS (open, open_entire_file, scroll_down, scroll_up, "
+        "glob_search, grep_search, submit), and stub-forced `create`, "
+        "`search_replace` and `spawn_subagent` calls each came back `ERROR: "
+        "Tool \"<name>\" is not available` with the working tree unchanged."
+    ),
     "gemini": (
         "MEASURED 2026-08-19 (plans/harness-expansion/probe-out/gemini/"
         "gap5_probe.py, two offline runs). Under this adapter's exact argv — no "
@@ -858,6 +868,13 @@ SHELL_EVIDENCE = {
         "`--sandbox workspace-write` (plan §7.3; codex_stream_audit's "
         "ANY_FLAG_VERBS). The argv names a sandbox policy, not a tool list, so "
         "no argv token can show it.",
+    ),
+    "junie": ShellEvidence(
+        False,
+        "MEASURED on junie 26.11.3 against a localhost stub: with "
+        "`--allowed-tools` (READ_ONLY_TOOLS) the request advertised seven tools "
+        "and a stub-forced `bash` call came back `ERROR: Tool \"bash\" is not "
+        "available`, working tree unchanged.",
     ),
     "cursor-agent": ShellEvidence(
         False,

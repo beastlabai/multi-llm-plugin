@@ -35,7 +35,7 @@ block, `defaults.models` / `quick_models` entries, and `default_provider` for ea
 CLI it detects, leaving the rest commented. `default_provider` is set to the
 **first detected provider** in base order (claude-code, cursor-agent, gemini,
 grok, fx, opencode, codex, kilocode, cline, goose, aider, agy, muse, pi, kimi,
-qwen-code, copilot, vibe, omp). With **no CLIs installed** it writes the inert
+qwen-code, copilot, vibe, omp, junie). With **no CLIs installed** it writes the inert
 template (which inherits the built-in defaults) and exits 0 with an install
 notice — it never errors. Pass `--template-only` to skip detection and write the
 pristine commented stub for hand-editing. Add `--gitignore` to keep the file

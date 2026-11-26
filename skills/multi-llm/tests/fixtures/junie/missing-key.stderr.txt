@@ -1,0 +1,3 @@
+Picked up JAVA_TOOL_OPTIONS: -Duser.home=/tmp/multi-llm-junie-1-proc.5806521-4026533260-o9lxtw8r
+Junie 26.11.3 (4171.6) (pid=322): log file: /tmp/multi-llm-junie-1-proc.5806521-4026533260-o9lxtw8r/.junie/logs/log-2026-11-26_104828-pid-322.log
+Junie failed with the message: Failed to load custom model profile 'custom:multi-llm': Environment variable 'OPENROUTER_API_KEY' referenced in the model profile is not set. Set it before starting Junie, or replace the ${OPENROUTER_API_KEY} reference with a literal value.

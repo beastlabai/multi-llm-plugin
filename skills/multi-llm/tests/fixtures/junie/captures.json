@@ -1,0 +1,1201 @@
+[
+ {
+  "row": "success",
+  "server": "script",
+  "exit_code": 0,
+  "wall_s": 13.543,
+  "killed": false,
+  "requests": 3,
+  "root": "/tmp/multi-llm-junie-1-proc.5806521-4026533260-000oph3j",
+  "workspace_writes": [],
+  "usage": {
+   "input_tokens": 360,
+   "output_tokens": 90,
+   "cached_input_tokens": 0,
+   "total_tokens": 450
+  },
+  "argv": [
+   "junie",
+   "--skip-update-check",
+   "--share-anonymous-statistics",
+   "false",
+   "--mcp-default-locations",
+   "false",
+   "--skill-default-locations",
+   "false",
+   "--command-default-location",
+   "false",
+   "--agent-default-location",
+   "false",
+   "--config-default-locations",
+   "false",
+   "--model-default-locations",
+   "false",
+   "--model",
+   "custom:multi-llm",
+   "--allowed-tools",
+   "open,open_entire_file,scroll_down,scroll_up,glob_search,grep_search,submit",
+   "--output-format",
+   "json",
+   "--max-steps",
+   "60"
+  ],
+  "log_summary": [
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "tools": [],
+    "tool_results": 0,
+    "reasoning_effort": "high"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "tools": [
+     "open",
+     "open_entire_file",
+     "scroll_down",
+     "scroll_up",
+     "glob_search",
+     "grep_search",
+     "submit"
+    ],
+    "tool_results": 0,
+    "reasoning_effort": "high"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "tools": [],
+    "tool_results": 0,
+    "reasoning_effort": "high"
+   }
+  ]
+ },
+ {
+  "row": "multi-assistant",
+  "server": "script",
+  "exit_code": 0,
+  "wall_s": 13.391,
+  "killed": false,
+  "requests": 5,
+  "root": "/tmp/multi-llm-junie-1-proc.5806521-4026533260-okfe_tom",
+  "workspace_writes": [],
+  "usage": {
+   "input_tokens": 600,
+   "output_tokens": 150,
+   "cached_input_tokens": 0,
+   "total_tokens": 750
+  },
+  "argv": [
+   "junie",
+   "--skip-update-check",
+   "--share-anonymous-statistics",
+   "false",
+   "--mcp-default-locations",
+   "false",
+   "--skill-default-locations",
+   "false",
+   "--command-default-location",
+   "false",
+   "--agent-default-location",
+   "false",
+   "--config-default-locations",
+   "false",
+   "--model-default-locations",
+   "false",
+   "--model",
+   "custom:multi-llm",
+   "--allowed-tools",
+   "open,open_entire_file,scroll_down,scroll_up,glob_search,grep_search,submit",
+   "--output-format",
+   "json",
+   "--max-steps",
+   "60"
+  ],
+  "log_summary": [
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "tools": [],
+    "tool_results": 0,
+    "reasoning_effort": "high"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "tools": [
+     "open",
+     "open_entire_file",
+     "scroll_down",
+     "scroll_up",
+     "glob_search",
+     "grep_search",
+     "submit"
+    ],
+    "tool_results": 0,
+    "reasoning_effort": "high"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "tools": [],
+    "tool_results": 0,
+    "reasoning_effort": "high"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "tools": [
+     "open",
+     "open_entire_file",
+     "scroll_down",
+     "scroll_up",
+     "glob_search",
+     "grep_search",
+     "submit"
+    ],
+    "tool_results": 1,
+    "reasoning_effort": "high"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "tools": [],
+    "tool_results": 0,
+    "reasoning_effort": "high"
+   }
+  ]
+ },
+ {
+  "row": "empty",
+  "server": "script",
+  "exit_code": 1,
+  "wall_s": 15.384,
+  "killed": false,
+  "requests": 8,
+  "root": "/tmp/multi-llm-junie-1-proc.5806521-4026533260-1rfdlkdy",
+  "workspace_writes": [],
+  "usage": {
+   "input_tokens": 960,
+   "output_tokens": 240,
+   "cached_input_tokens": 0,
+   "total_tokens": 1200
+  },
+  "argv": [
+   "junie",
+   "--skip-update-check",
+   "--share-anonymous-statistics",
+   "false",
+   "--mcp-default-locations",
+   "false",
+   "--skill-default-locations",
+   "false",
+   "--command-default-location",
+   "false",
+   "--agent-default-location",
+   "false",
+   "--config-default-locations",
+   "false",
+   "--model-default-locations",
+   "false",
+   "--model",
+   "custom:multi-llm",
+   "--allowed-tools",
+   "open,open_entire_file,scroll_down,scroll_up,glob_search,grep_search,submit",
+   "--output-format",
+   "json",
+   "--max-steps",
+   "60"
+  ],
+  "log_summary": [
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "tools": [],
+    "tool_results": 0,
+    "reasoning_effort": "high"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "tools": [
+     "open",
+     "open_entire_file",
+     "scroll_down",
+     "scroll_up",
+     "glob_search",
+     "grep_search",
+     "submit"
+    ],
+    "tool_results": 0,
+    "reasoning_effort": "high"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "tools": [
+     "open",
+     "open_entire_file",
+     "scroll_down",
+     "scroll_up",
+     "glob_search",
+     "grep_search",
+     "submit"
+    ],
+    "tool_results": 1,
+    "reasoning_effort": "high"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "tools": [
+     "open",
+     "open_entire_file",
+     "scroll_down",
+     "scroll_up",
+     "glob_search",
+     "grep_search",
+     "submit"
+    ],
+    "tool_results": 1,
+    "reasoning_effort": "high"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "tools": [
+     "open",
+     "open_entire_file",
+     "scroll_down",
+     "scroll_up",
+     "glob_search",
+     "grep_search",
+     "submit"
+    ],
+    "tool_results": 1,
+    "reasoning_effort": "high"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "tools": [
+     "open",
+     "open_entire_file",
+     "scroll_down",
+     "scroll_up",
+     "glob_search",
+     "grep_search",
+     "submit"
+    ],
+    "tool_results": 2,
+    "reasoning_effort": "high"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "tools": [
+     "open",
+     "open_entire_file",
+     "scroll_down",
+     "scroll_up",
+     "glob_search",
+     "grep_search",
+     "submit"
+    ],
+    "tool_results": 3,
+    "reasoning_effort": "high"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "tools": [
+     "open",
+     "open_entire_file",
+     "scroll_down",
+     "scroll_up",
+     "glob_search",
+     "grep_search",
+     "submit"
+    ],
+    "tool_results": 4,
+    "reasoning_effort": "high"
+   }
+  ]
+ },
+ {
+  "row": "stdout-error",
+  "server": "script",
+  "exit_code": 1,
+  "wall_s": 16.884,
+  "killed": false,
+  "requests": 7,
+  "root": "/tmp/multi-llm-junie-1-proc.5806521-4026533260-3qoqohyz",
+  "workspace_writes": [],
+  "usage": {
+   "input_tokens": 840,
+   "output_tokens": 210,
+   "cached_input_tokens": 0,
+   "total_tokens": 1050
+  },
+  "argv": [
+   "junie",
+   "--skip-update-check",
+   "--share-anonymous-statistics",
+   "false",
+   "--mcp-default-locations",
+   "false",
+   "--skill-default-locations",
+   "false",
+   "--command-default-location",
+   "false",
+   "--agent-default-location",
+   "false",
+   "--config-default-locations",
+   "false",
+   "--model-default-locations",
+   "false",
+   "--model",
+   "custom:multi-llm",
+   "--allowed-tools",
+   "open,open_entire_file,scroll_down,scroll_up,glob_search,grep_search,submit",
+   "--output-format",
+   "json",
+   "--max-steps",
+   "60"
+  ],
+  "log_summary": [
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "tools": [],
+    "tool_results": 0,
+    "reasoning_effort": "high"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "tools": [
+     "open",
+     "open_entire_file",
+     "scroll_down",
+     "scroll_up",
+     "glob_search",
+     "grep_search",
+     "submit"
+    ],
+    "tool_results": 0,
+    "reasoning_effort": "high"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "tools": [
+     "open",
+     "open_entire_file",
+     "scroll_down",
+     "scroll_up",
+     "glob_search",
+     "grep_search",
+     "submit"
+    ],
+    "tool_results": 0,
+    "reasoning_effort": "high"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "tools": [
+     "open",
+     "open_entire_file",
+     "scroll_down",
+     "scroll_up",
+     "glob_search",
+     "grep_search",
+     "submit"
+    ],
+    "tool_results": 0,
+    "reasoning_effort": "high"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "tools": [
+     "open",
+     "open_entire_file",
+     "scroll_down",
+     "scroll_up",
+     "glob_search",
+     "grep_search",
+     "submit"
+    ],
+    "tool_results": 0,
+    "reasoning_effort": "high"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "tools": [
+     "open",
+     "open_entire_file",
+     "scroll_down",
+     "scroll_up",
+     "glob_search",
+     "grep_search",
+     "submit"
+    ],
+    "tool_results": 0,
+    "reasoning_effort": "high"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "tools": [
+     "open",
+     "open_entire_file",
+     "scroll_down",
+     "scroll_up",
+     "glob_search",
+     "grep_search",
+     "submit"
+    ],
+    "tool_results": 0,
+    "reasoning_effort": "high"
+   }
+  ]
+ },
+ {
+  "row": "exit-zero-failure",
+  "server": "script",
+  "exit_code": 0,
+  "wall_s": 28.569,
+  "killed": false,
+  "requests": 62,
+  "root": "/tmp/multi-llm-junie-1-proc.5806521-4026533260-snj3g3b4",
+  "workspace_writes": [],
+  "usage": {
+   "input_tokens": 7440,
+   "output_tokens": 1860,
+   "cached_input_tokens": 0,
+   "total_tokens": 9300
+  },
+  "argv": [
+   "junie",
+   "--skip-update-check",
+   "--share-anonymous-statistics",
+   "false",
+   "--mcp-default-locations",
+   "false",
+   "--skill-default-locations",
+   "false",
+   "--command-default-location",
+   "false",
+   "--agent-default-location",
+   "false",
+   "--config-default-locations",
+   "false",
+   "--model-default-locations",
+   "false",
+   "--model",
+   "custom:multi-llm",
+   "--allowed-tools",
+   "open,open_entire_file,scroll_down,scroll_up,glob_search,grep_search,submit",
+   "--output-format",
+   "json",
+   "--max-steps",
+   "60"
+  ],
+  "log_summary": [
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "tools": [],
+    "tool_results": 0,
+    "reasoning_effort": "high"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "tools": [
+     "open",
+     "open_entire_file",
+     "scroll_down",
+     "scroll_up",
+     "glob_search",
+     "grep_search",
+     "submit"
+    ],
+    "tool_results": 0,
+    "reasoning_effort": "high"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "tools": [
+     "open",
+     "open_entire_file",
+     "scroll_down",
+     "scroll_up",
+     "glob_search",
+     "grep_search",
+     "submit"
+    ],
+    "tool_results": 1,
+    "reasoning_effort": "high"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "tools": [
+     "open",
+     "open_entire_file",
+     "scroll_down",
+     "scroll_up",
+     "glob_search",
+     "grep_search",
+     "submit"
+    ],
+    "tool_results": 2,
+    "reasoning_effort": "high"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "tools": [
+     "open",
+     "open_entire_file",
+     "scroll_down",
+     "scroll_up",
+     "glob_search",
+     "grep_search",
+     "submit"
+    ],
+    "tool_results": 3,
+    "reasoning_effort": "high"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "tools": [
+     "open",
+     "open_entire_file",
+     "scroll_down",
+     "scroll_up",
+     "glob_search",
+     "grep_search",
+     "submit"
+    ],
+    "tool_results": 4,
+    "reasoning_effort": "high"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "tools": [
+     "open",
+     "open_entire_file",
+     "scroll_down",
+     "scroll_up",
+     "glob_search",
+     "grep_search",
+     "submit"
+    ],
+    "tool_results": 5,
+    "reasoning_effort": "high"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "tools": [
+     "open",
+     "open_entire_file",
+     "scroll_down",
+     "scroll_up",
+     "glob_search",
+     "grep_search",
+     "submit"
+    ],
+    "tool_results": 6,
+    "reasoning_effort": "high"
+   }
+  ]
+ },
+ {
+  "row": "ephemeral-only",
+  "server": "script",
+  "exit_code": 143,
+  "wall_s": 9.894,
+  "killed": false,
+  "requests": 0,
+  "root": "/tmp/multi-llm-junie-1-proc.5806521-4026533260-voxvyds4",
+  "workspace_writes": [],
+  "usage": null,
+  "argv": [
+   "junie",
+   "--skip-update-check",
+   "--share-anonymous-statistics",
+   "false",
+   "--mcp-default-locations",
+   "false",
+   "--skill-default-locations",
+   "false",
+   "--command-default-location",
+   "false",
+   "--agent-default-location",
+   "false",
+   "--config-default-locations",
+   "false",
+   "--model-default-locations",
+   "false",
+   "--model",
+   "custom:multi-llm",
+   "--allowed-tools",
+   "open,open_entire_file,scroll_down,scroll_up,glob_search,grep_search,submit",
+   "--output-format",
+   "json",
+   "--max-steps",
+   "60"
+  ],
+  "log_summary": []
+ },
+ {
+  "row": "missing-key",
+  "server": "script",
+  "exit_code": 1,
+  "wall_s": 10.492,
+  "killed": false,
+  "requests": 0,
+  "root": "/tmp/multi-llm-junie-1-proc.5806521-4026533260-o9lxtw8r",
+  "workspace_writes": [],
+  "usage": null,
+  "argv": [
+   "junie",
+   "--skip-update-check",
+   "--share-anonymous-statistics",
+   "false",
+   "--mcp-default-locations",
+   "false",
+   "--skill-default-locations",
+   "false",
+   "--command-default-location",
+   "false",
+   "--agent-default-location",
+   "false",
+   "--config-default-locations",
+   "false",
+   "--model-default-locations",
+   "false",
+   "--model",
+   "custom:multi-llm",
+   "--allowed-tools",
+   "open,open_entire_file,scroll_down,scroll_up,glob_search,grep_search,submit",
+   "--output-format",
+   "json",
+   "--max-steps",
+   "60"
+  ],
+  "log_summary": []
+ },
+ {
+  "row": "truncated",
+  "server": "trunc",
+  "exit_code": 1,
+  "wall_s": 20.291,
+  "killed": false,
+  "requests": 2,
+  "root": "/tmp/multi-llm-junie-1-proc.5806521-4026533260-9107m_mk",
+  "workspace_writes": [],
+  "usage": null,
+  "argv": [
+   "junie",
+   "--skip-update-check",
+   "--share-anonymous-statistics",
+   "false",
+   "--mcp-default-locations",
+   "false",
+   "--skill-default-locations",
+   "false",
+   "--command-default-location",
+   "false",
+   "--agent-default-location",
+   "false",
+   "--config-default-locations",
+   "false",
+   "--model-default-locations",
+   "false",
+   "--model",
+   "custom:multi-llm",
+   "--allowed-tools",
+   "open,open_entire_file,scroll_down,scroll_up,glob_search,grep_search,submit",
+   "--output-format",
+   "json",
+   "--max-steps",
+   "60"
+  ],
+  "log_summary": [
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "trunc"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "trunc"
+   }
+  ]
+ },
+ {
+  "row": "error-envelope",
+  "server": "errbody",
+  "exit_code": 1,
+  "wall_s": 21.085,
+  "killed": false,
+  "requests": 2,
+  "root": "/tmp/multi-llm-junie-1-proc.5806521-4026533260-hx2eq6b_",
+  "workspace_writes": [],
+  "usage": null,
+  "argv": [
+   "junie",
+   "--skip-update-check",
+   "--share-anonymous-statistics",
+   "false",
+   "--mcp-default-locations",
+   "false",
+   "--skill-default-locations",
+   "false",
+   "--command-default-location",
+   "false",
+   "--agent-default-location",
+   "false",
+   "--config-default-locations",
+   "false",
+   "--model-default-locations",
+   "false",
+   "--model",
+   "custom:multi-llm",
+   "--allowed-tools",
+   "open,open_entire_file,scroll_down,scroll_up,glob_search,grep_search,submit",
+   "--output-format",
+   "json",
+   "--max-steps",
+   "60"
+  ],
+  "log_summary": [
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "errbody"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "errbody"
+   }
+  ]
+ },
+ {
+  "row": "auth-error",
+  "server": "401",
+  "exit_code": 1,
+  "wall_s": 20.896,
+  "killed": false,
+  "requests": 6,
+  "root": "/tmp/multi-llm-junie-1-proc.5806521-4026533260-6nbhk2hb",
+  "workspace_writes": [],
+  "usage": null,
+  "argv": [
+   "junie",
+   "--skip-update-check",
+   "--share-anonymous-statistics",
+   "false",
+   "--mcp-default-locations",
+   "false",
+   "--skill-default-locations",
+   "false",
+   "--command-default-location",
+   "false",
+   "--agent-default-location",
+   "false",
+   "--config-default-locations",
+   "false",
+   "--model-default-locations",
+   "false",
+   "--model",
+   "custom:multi-llm",
+   "--allowed-tools",
+   "open,open_entire_file,scroll_down,scroll_up,glob_search,grep_search,submit",
+   "--output-format",
+   "json",
+   "--max-steps",
+   "60"
+  ],
+  "log_summary": [
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "401"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "401"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "401"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "401"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "401"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "401"
+   }
+  ]
+ },
+ {
+  "row": "invalid-model",
+  "server": "404",
+  "exit_code": 1,
+  "wall_s": 19.694,
+  "killed": false,
+  "requests": 2,
+  "root": "/tmp/multi-llm-junie-1-proc.5806521-4026533260-37sbx62a",
+  "workspace_writes": [],
+  "usage": null,
+  "argv": [
+   "junie",
+   "--skip-update-check",
+   "--share-anonymous-statistics",
+   "false",
+   "--mcp-default-locations",
+   "false",
+   "--skill-default-locations",
+   "false",
+   "--command-default-location",
+   "false",
+   "--agent-default-location",
+   "false",
+   "--config-default-locations",
+   "false",
+   "--model-default-locations",
+   "false",
+   "--model",
+   "custom:multi-llm",
+   "--allowed-tools",
+   "open,open_entire_file,scroll_down,scroll_up,glob_search,grep_search,submit",
+   "--output-format",
+   "json",
+   "--max-steps",
+   "60"
+  ],
+  "log_summary": [
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "404"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "404"
+   }
+  ]
+ },
+ {
+  "row": "context-overflow",
+  "server": "ctx",
+  "exit_code": 1,
+  "wall_s": 19.816,
+  "killed": false,
+  "requests": 2,
+  "root": "/tmp/multi-llm-junie-1-proc.5806521-4026533260-rj9ttwdj",
+  "workspace_writes": [],
+  "usage": null,
+  "argv": [
+   "junie",
+   "--skip-update-check",
+   "--share-anonymous-statistics",
+   "false",
+   "--mcp-default-locations",
+   "false",
+   "--skill-default-locations",
+   "false",
+   "--command-default-location",
+   "false",
+   "--agent-default-location",
+   "false",
+   "--config-default-locations",
+   "false",
+   "--model-default-locations",
+   "false",
+   "--model",
+   "custom:multi-llm",
+   "--allowed-tools",
+   "open,open_entire_file,scroll_down,scroll_up,glob_search,grep_search,submit",
+   "--output-format",
+   "json",
+   "--max-steps",
+   "60"
+  ],
+  "log_summary": [
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "ctx"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "ctx"
+   }
+  ]
+ },
+ {
+  "row": "zero-body",
+  "server": "empty",
+  "exit_code": 1,
+  "wall_s": 156.844,
+  "killed": false,
+  "requests": 48,
+  "root": "/tmp/multi-llm-junie-1-proc.5806521-4026533260-iwvbz34t",
+  "workspace_writes": [],
+  "usage": null,
+  "argv": [
+   "junie",
+   "--skip-update-check",
+   "--share-anonymous-statistics",
+   "false",
+   "--mcp-default-locations",
+   "false",
+   "--skill-default-locations",
+   "false",
+   "--command-default-location",
+   "false",
+   "--agent-default-location",
+   "false",
+   "--config-default-locations",
+   "false",
+   "--model-default-locations",
+   "false",
+   "--model",
+   "custom:multi-llm",
+   "--allowed-tools",
+   "open,open_entire_file,scroll_down,scroll_up,glob_search,grep_search,submit",
+   "--output-format",
+   "json",
+   "--max-steps",
+   "60"
+  ],
+  "log_summary": [
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "empty"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "empty"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "empty"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "empty"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "empty"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "empty"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "empty"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "empty"
+   }
+  ]
+ },
+ {
+  "row": "server-error",
+  "server": "500",
+  "exit_code": 1,
+  "wall_s": 155.174,
+  "killed": false,
+  "requests": 47,
+  "root": "/tmp/multi-llm-junie-1-proc.5806521-4026533260-531xtbs0",
+  "workspace_writes": [],
+  "usage": null,
+  "argv": [
+   "junie",
+   "--skip-update-check",
+   "--share-anonymous-statistics",
+   "false",
+   "--mcp-default-locations",
+   "false",
+   "--skill-default-locations",
+   "false",
+   "--command-default-location",
+   "false",
+   "--agent-default-location",
+   "false",
+   "--config-default-locations",
+   "false",
+   "--model-default-locations",
+   "false",
+   "--model",
+   "custom:multi-llm",
+   "--allowed-tools",
+   "open,open_entire_file,scroll_down,scroll_up,glob_search,grep_search,submit",
+   "--output-format",
+   "json",
+   "--max-steps",
+   "60"
+  ],
+  "log_summary": [
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "500"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "500"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "500"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "500"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "500"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "500"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "500"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "500"
+   }
+  ]
+ },
+ {
+  "row": "rate-limit",
+  "server": "429",
+  "exit_code": 1,
+  "wall_s": 336.218,
+  "killed": false,
+  "requests": 34,
+  "root": "/tmp/multi-llm-junie-1-proc.5806521-4026533260-khyhguga",
+  "workspace_writes": [],
+  "usage": null,
+  "argv": [
+   "junie",
+   "--skip-update-check",
+   "--share-anonymous-statistics",
+   "false",
+   "--mcp-default-locations",
+   "false",
+   "--skill-default-locations",
+   "false",
+   "--command-default-location",
+   "false",
+   "--agent-default-location",
+   "false",
+   "--config-default-locations",
+   "false",
+   "--model-default-locations",
+   "false",
+   "--model",
+   "custom:multi-llm",
+   "--allowed-tools",
+   "open,open_entire_file,scroll_down,scroll_up,glob_search,grep_search,submit",
+   "--output-format",
+   "json",
+   "--max-steps",
+   "60"
+  ],
+  "log_summary": [
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "429"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "429"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "429"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "429"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "429"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "429"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "429"
+   },
+   {
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "mode": "429"
+   }
+  ]
+ }
+]

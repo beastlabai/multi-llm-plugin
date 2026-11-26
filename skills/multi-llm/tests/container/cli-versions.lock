@@ -66,6 +66,11 @@ artifacts:
     sha256: "78c155d59fa59e42fd56d93037fd75041868c9c67865e8c7f0ca6dcdfac23e75"
     releases_url: "https://api.github.com/repos/vercel-labs/fx/releases/latest"
     member: "fx"
+  junie:
+    version: "26.11.3"
+    url: "https://github.com/JetBrains/junie/releases/download/4171.6/junie-release-4171.6-linux-amd64.zip"
+    sha256: "57b15c990a9f7f350e40ff1d1967fbd3470ea6f966e4296a11eda511c298ea52"
+    releases_url: "https://raw.githubusercontent.com/jetbrains-junie/junie/main/update-info.jsonl"
   uv:
     version: "0.13.5"
     url: "https://github.com/astral-sh/uv/releases/download/0.13.5/uv-x86_64-unknown-linux-gnu.tar.gz"
@@ -315,6 +320,21 @@ clis:
       vercel-labs/fx, not the unrelated npm JSON viewer. Identity is asserted
       separately with ask --help and all required flags in the install layer.
       FX_AUTO_UPGRADE=0 is repeated in the wrapper's redirect environment.
+
+  - id: junie
+    binary: junie
+    install: archive
+    artifact: junie
+    version: "26.11.3"
+    verify:
+      command: ["junie", "--version"]
+      pattern: "^Junie version: (?P<version>\\d+\\.\\d+\\.\\d+) \\("
+    note: >-
+      JetBrains Junie, a proprietary jpackage app (c) JetBrains, unpacked from a
+      release zip into /opt/mllm/junie-app with the launcher linked as
+      /opt/mllm/real/junie. Build 4171.6 is marketing version 26.11.3. The JVM
+      ignores $HOME, so every call sets JUNIE_HOME and JAVA_TOOL_OPTIONS
+      (-Duser.home); verify_versions.py does so for the version call.
 
   - id: codex
     binary: codex

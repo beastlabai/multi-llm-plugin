@@ -1,0 +1,3 @@
+Picked up JAVA_TOOL_OPTIONS: -Duser.home=/tmp/multi-llm-junie-1-proc.5806521-4026533260-1rfdlkdy
+Junie 26.11.3 (4171.6) (pid=97): log file: /tmp/multi-llm-junie-1-proc.5806521-4026533260-1rfdlkdy/.junie/logs/log-2026-11-26_104825-pid-97.log
+Junie failed with the message: Failed to build 'issue.md.junie_standalone'

@@ -440,6 +440,10 @@ ENV_ALLOWLIST_PROFILES: Dict[str, RunnerEnvProfile] = {
     # optional there.
     "goose": RunnerEnvProfile(CA_FAMILY_NATIVE, ("GOOSE_",), ()),
     "grok": RunnerEnvProfile(CA_FAMILY_NATIVE, ("GROK_",), ("GROK_HOME",)),
+    # Junie is a JVM launcher with a bundled JRE that uses its own truststore,
+    # so neither CA family is load-bearing; the cell is a label only. The JVM
+    # resolves its home from user.home, hence JAVA_TOOL_OPTIONS beside JUNIE_HOME.
+    "junie": RunnerEnvProfile(CA_FAMILY_NATIVE, ("JUNIE_",), ("JUNIE_HOME", "JAVA_TOOL_OPTIONS")),
     "kilocode": RunnerEnvProfile(CA_FAMILY_NODE, ("KILO_",), ("KILO_CONFIG_DIR",)),
     "kimi": RunnerEnvProfile(CA_FAMILY_NODE, ("KIMI_",), ("KIMI_CODE_HOME",)),
     # muse is XDG-only too, but its launcher reads a MUSE_* family and

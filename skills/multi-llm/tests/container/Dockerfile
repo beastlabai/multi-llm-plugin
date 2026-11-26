@@ -127,6 +127,14 @@ ARG OMP_SHA256=04e9490f9394da6d6804474cc2e41eb3d18f8e26215df4b34bdd4ad4c0d8a401
 ARG FX_VERSION=0.0.17
 ARG FX_URL=https://github.com/vercel-labs/fx/releases/download/v0.0.17/fx-linux-x86_64.tar.gz
 ARG FX_SHA256=78c155d59fa59e42fd56d93037fd75041868c9c67865e8c7f0ca6dcdfac23e75
+# JetBrains Junie CLI: a jpackage app (launcher + bundled JRE) in a release zip.
+# PROPRIETARY (c) JetBrains, use subject to the JetBrains AI Service Terms; the
+# image holds it for test runs only. The sha256 is upstream's own, from the
+# `update-info.jsonl` index the release channel publishes. The version is the
+# marketing one `--version` prints; the build number (4171.6) names the release.
+ARG JUNIE_VERSION=26.11.3
+ARG JUNIE_URL=https://github.com/JetBrains/junie/releases/download/4171.6/junie-release-4171.6-linux-amd64.zip
+ARG JUNIE_SHA256=57b15c990a9f7f350e40ff1d1967fbd3470ea6f966e4296a11eda511c298ea52
 # vibe's interpreter, NOT the product's. `mistral-vibe` declares
 # `requires_python >=3.12` and bookworm-slim ships 3.11.2 -- and this file sets
 # `UV_PYTHON_DOWNLOADS=never`, so `uv venv --python 3.12` cannot fetch one
@@ -659,6 +667,36 @@ RUN if [ "${MLLM_PIN_MODE}" = "latest" ]; then \
  && rm -f /tmp/fx.tar.gz /tmp/fx /tmp/fx-help
 
 # --------------------------------------------------------------------------- #
+# Junie: a zip holding a jpackage tree, so the whole tree is installed under
+# /opt/mllm/junie-app and /opt/mllm/real/junie links to its launcher, which
+# finds lib/ from its own resolved path. The JVM ignores $HOME: Junie's state
+# goes to $JUNIE_HOME and `user.home`, so every call here sets both to a scratch
+# directory, or it would write ~/.junie/logs under the build user's real home.
+# python3 unpacks the zip (the image has no unzip) and restores the mode bits.
+RUN if [ "${MLLM_PIN_MODE}" = "latest" ]; then \
+        junie_row="$(curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/jetbrains-junie/junie/main/update-info.jsonl | python3 -c 'import json,sys; rows=[json.loads(l) for l in sys.stdin if l.strip()]; r=max((r for r in rows if r["platform"]=="linux-amd64" and r.get("marketing")), key=lambda r: tuple(int(p) for p in r["version"].split("."))); print(r["downloadUrl"], r["marketing"])')"; \
+        junie_url="${junie_row%% *}"; junie_version="${junie_row#* }"; \
+    else \
+        junie_version="${JUNIE_VERSION}"; junie_url="${JUNIE_URL}"; \
+    fi \
+ && curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 \
+         -o /tmp/junie.zip "${junie_url}" \
+ && if [ "${MLLM_PIN_MODE}" = "pinned" ]; then \
+        echo "${JUNIE_SHA256}  /tmp/junie.zip" | sha256sum --check --strict -; \
+    else \
+        echo "unpinned junie archive sha256: $(sha256sum /tmp/junie.zip)"; \
+    fi \
+ && python3 -I -c 'import os, sys, zipfile; z = zipfile.ZipFile(sys.argv[1]); z.extractall(sys.argv[2]); [os.chmod(os.path.join(sys.argv[2], i.filename), (i.external_attr >> 16) & 0o7777) for i in z.infolist() if not i.is_dir() and i.external_attr >> 16]' /tmp/junie.zip /tmp/junie-unpacked \
+ && mv /tmp/junie-unpacked/junie-app /opt/mllm/junie-app \
+ && ln -s /opt/mllm/junie-app/bin/junie /opt/mllm/real/junie \
+ && mkdir -p /tmp/junie-state \
+ && JUNIE_HOME=/tmp/junie-state/.junie JAVA_TOOL_OPTIONS=-Duser.home=/tmp/junie-state \
+        /opt/mllm/real/junie --version --skip-update-check > /tmp/junie-version 2>/dev/null \
+ && grep -Eq '^Junie version: [0-9]+\.[0-9]+\.[0-9]+ \([0-9]+\.[0-9]+\)$' /tmp/junie-version \
+ && if [ -n "${junie_version}" ]; then grep -Fq "Junie version: ${junie_version} (" /tmp/junie-version; fi \
+ && rm -rf /tmp/junie.zip /tmp/junie-unpacked /tmp/junie-state /tmp/junie-version
+
+# --------------------------------------------------------------------------- #
 # 8. The rig, and the wrapper tree it is the source of (C2).
 #
 #     /opt/mllm/real/<cli>   the genuine binary, untouched
@@ -709,7 +747,7 @@ COPY skills/multi-llm/tests/container/*.yaml            /opt/mllm/rig/
 COPY skills/multi-llm/tests/container/home_seed         /opt/mllm/rig/home_seed
 
 RUN chmod 0755 /opt/mllm/rig/*.py \
- && for b in codex claude gemini opencode cline kilocode kimi pi qwen copilot aider vibe goose grok muse cursor-agent agy omp fx uv; do \
+ && for b in codex claude gemini opencode cline kilocode kimi pi qwen copilot aider vibe goose grok muse cursor-agent agy omp fx junie uv; do \
         ln -sf /opt/mllm/rig/wrapper.py "/opt/mllm/bin/$b"; \
     done \
  && /usr/bin/python3 -m compileall -q /opt/mllm/rig >/dev/null

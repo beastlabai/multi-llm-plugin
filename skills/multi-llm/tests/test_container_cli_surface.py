@@ -101,7 +101,10 @@ def _row_env(cli: str) -> dict:
         (harness.HERE / "redirect.yaml").read_text(encoding="utf-8")) or {}
     for row in data.get("clis") or []:
         if row.get("cli") == cli:
-            return {str(k): str(v) for k, v in (row.get("env_extra") or {}).items()}
+            # `{home}` is wrapper.py's per-invocation root token; the probe's
+            # $HOME is the tmpfs `_in_image` mounts.
+            return {str(k): str(v).replace("{home}", "/home/e2e")
+                    for k, v in (row.get("env_extra") or {}).items()}
     return {}
 
 

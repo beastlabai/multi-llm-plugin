@@ -179,11 +179,13 @@ _FIXTURE_ANSWER: Dict[str, Callable[[str], str]] = {
     "cline": lambda s: _last(_lines(s), "type", "run_result")["text"],
     "kimi": lambda s: _last(_lines(s), "role", "assistant")["content"],
     "qwen-code": lambda s: _last(json.loads(s), "type", "result")["result"],
+    "junie": lambda s: json.loads(s)["result"],
 }
 
 #: provider -> (model spec, committed success capture).
 _CAPTURED: Dict[str, Tuple[str, str]] = {
     "fx": ("fx:test/model", "fx/success.stdout.txt"),
+    "junie": ("junie:openai/gpt-6-luna", "junie/success.stdout.txt"),
     "pi": ("pi:openrouter/deepseek/deepseek-v4.1-flash", "pi/success.stdout.txt"),
     "omp": ("omp:stub/stub-model", "omp/success.stdout.txt"),
     "codex": ("codex:gpt-5", "codex/gpt5_sol_single_message.jsonl"),

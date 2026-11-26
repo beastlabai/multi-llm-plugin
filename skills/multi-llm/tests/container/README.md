@@ -139,6 +139,7 @@ the HTTP footprint):
 | `vibe` | a seeded `config.toml` `[[providers]]` block (no env var exists) | chat | 1 | not timed |
 | `omp` | `~/.omp/agent/models.yml` provider block (no env var exists) — and the **prompt arrives on stdin** | chat | 1 | not timed |
 | `fx` | wrapper-owned `~/.fx/settings.json` OpenRouter connection + fake `OPENROUTER_API_KEY`; stdin prompt | chat | 1 | not timed |
+| `junie` | `$JUNIE_MODEL_LOCATIONS/multi-llm.json` custom profile + fake `OPENROUTER_API_KEY`; the JVM needs `-Duser.home` as well as `$JUNIE_HOME`; stdin prompt | chat (**non-streaming**, answered through its `submit` tool) | 2 | not timed |
 
 **The last five rows are later arrivals, and the table says so in one column.**
 Their mechanism, surface and turn count are measured like the others,
@@ -156,6 +157,16 @@ pinned `mllm-e2e:fx-verified` build (32 passed, 3 inapplicable checks skipped).
 All seven live-provider checks also passed on that image with
 `fx:openai/gpt-5.6-luna`; the observed DNS destination was `openrouter.ai`.
 The assigned host fan-out has not been executed.
+
+Junie 26.11.3 (4171.6) is a proprietary JetBrains jpackage app installed from its
+checksummed release zip. Junie accepts an answer only through its `submit` tool, so
+`stub_server.py` answers a chat request that advertises `submit` with a
+`solution_summary` parameter with one `submit` call, and answers its tool-less
+title request and any request carrying the call's result with text. Junie sends
+`Accept: text/event-stream` with `stream: false` and parses one JSON object, so for
+its `junie-cli` user agent the body decides. Its isolated provider row, all eight
+chain phases and a second run against its seeded golden passed offline; the host
+fan-out assignment (the codex host) has not been executed.
 
 Not one of Phase 1's `documented` guesses turned out to be wrong, and both of its
 surprises went our way: `pi` (the one `unknown` row) and `grok` (predicted

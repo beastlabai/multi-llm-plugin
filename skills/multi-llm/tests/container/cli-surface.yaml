@@ -197,6 +197,33 @@ clis:
     subcommands: [ask]
     options: ["--auto", "--json", "--model", "--no-save"]
 
+  # Captured from the checksummed JetBrains 26.11.3 (4171.6) launcher. The help
+  # runs with the row's JAVA_TOOL_OPTIONS (`{home}` is the probe's $HOME): the JVM
+  # ignores $HOME, so without it Junie would write its log under the real home.
+  - cli: junie
+    binary: junie
+    version: "Junie version: 26.11.3 (4171.6)"
+    probe: ok
+    help_invocation: "junie --help"
+    help_sha256: 75f1f5ded52c9bf76aa8f925463cfd3728be1807cb8a65b9117581174357070f
+    help_bytes: 7796
+    profiles: [generate]
+    subcommands: []
+    options:
+      - "--agent-default-location"
+      - "--allowed-tools"
+      - "--command-default-location"
+      - "--config-default-locations"
+      - "--max-steps"
+      - "--mcp-default-locations"
+      - "--model"
+      - "--model-default-locations"
+      - "--output-format"
+      - "--share-anonymous-statistics"
+      - "--skill-default-locations"
+      - "--skip-update-check"
+      - "--task"
+
 
   # THE ROW WITH NO OTHER COVERAGE AT ALL, and the reason `surface_probe` exists.
   # agy reaches no stub -- its auth resolves BEFORE the first RPC, and

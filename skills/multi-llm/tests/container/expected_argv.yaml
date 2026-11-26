@@ -74,6 +74,30 @@ entries:
     prompt: stdin
     min_records: 1
 
+  # Hand-added: junie's default transport. The slug travels in the model profile,
+  # so `--model` carries the profile id; the prompt is on stdin.
+  - provider: junie
+    profile: generate
+    transport: stdin
+    binary: junie
+    subcommands: []
+    options:
+      "--agent-default-location": "false"
+      "--allowed-tools": "open,open_entire_file,scroll_down,scroll_up,glob_search,grep_search,submit"
+      "--config-default-locations": "false"
+      "--command-default-location": "false"
+      "--max-steps": "60"
+      "--mcp-default-locations": "false"
+      "--model": "<model>"
+      "--model-default-locations": "false"
+      "--output-format": "json"
+      "--share-anonymous-statistics": "false"
+      "--skill-default-locations": "false"
+      "--skip-update-check": null
+    tail: []
+    prompt: stdin
+    min_records: 1
+
   - provider: aider
     profile: generate
     transport: argv

@@ -192,6 +192,9 @@ def main(argv: list[str] | None = None) -> int:
         env["XDG_CONFIG_HOME"] = str(home / ".config")
         env["XDG_CACHE_HOME"] = str(home / ".cache")
         env["XDG_DATA_HOME"] = str(home / ".local" / "share")
+        # Junie's JVM ignores $HOME: its state goes to JUNIE_HOME and `user.home`.
+        env["JUNIE_HOME"] = str(home / ".junie")
+        env["JAVA_TOOL_OPTIONS"] = f"-Duser.home={home}"
 
     toolchain = list(lock.get("toolchain") or [])
     clis = list(lock.get("clis") or [])

@@ -226,7 +226,7 @@ def test_every_download_verifies_a_checksum(instructions):
 
 @pytest.mark.parametrize(
     "artifact",
-    ["uv", "goose", "grok", "muse", "cursor-agent", "agy", "omp", "fx", "python312"])
+    ["uv", "goose", "grok", "muse", "cursor-agent", "agy", "omp", "fx", "junie", "python312"])
 def test_artifact_args_match_the_lock(artifact, build_args, lock):
     """Two copies of a checksum that can disagree are worse than one."""
     entry = lock["artifacts"][artifact]
@@ -265,6 +265,21 @@ def test_fx_checks_identity_and_version_before_discarding_the_archive(instructio
     assert artifact["url"].count(artifact["version"]) == 1
     [row] = [row for row in lock["clis"] if row["id"] == "fx"]
     assert row["install"] == "archive"
+
+
+def test_junie_is_verified_before_the_zip_is_discarded(instructions, lock):
+    [layer] = [line for line in instructions
+               if line.startswith("RUN ") and "/opt/mllm/junie-app" in line
+               and "/tmp/junie.zip" in line]
+    assert layer.index("sha256sum --check --strict") < layer.index("zipfile")
+    # The JVM ignores $HOME: both variables, on the one call that runs the binary.
+    call = layer[layer.index("JUNIE_HOME="):layer.index("--version")]
+    assert "JAVA_TOOL_OPTIONS=-Duser.home=" in call
+    assert "ln -s /opt/mllm/junie-app/bin/junie /opt/mllm/real/junie" in layer
+    [row] = [row for row in lock["clis"] if row["id"] == "junie"]
+    assert row["install"] == "archive"
+    assert lock["artifacts"]["junie"]["url"].startswith(
+        "https://github.com/JetBrains/junie/releases/download/")
 
 
 # --------------------------------------------------------------------------- #

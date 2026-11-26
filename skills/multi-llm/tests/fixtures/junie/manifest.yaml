@@ -1,0 +1,310 @@
+schema_version: 1
+provider: junie
+cli_version: 26.11.3
+captured: '2026-11-26'
+method: Junie 26.11.3 (build 4171.6, the checksummed linux-amd64 release zip, the image's pin) mounted
+  into the mllm-e2e image, --network none, uid 10001, read-only root, dummy key. capture_probe.py imports
+  the production adapter and builds argv and env exactly as a dispatch does (stdin transport, resolve_env,
+  build_child_env); only the profile's baseUrl points at 127.0.0.1. Success-shaped rows use the probe's
+  scripted chat server, which answers through Junie's submit tool; failure rows use tests/container/failserver.py.
+  captures.json holds each row's exit code, wall time, request count and request summary. No paid calls.
+rows:
+  success:
+    stdout: success.stdout.txt
+    stderr: success.stderr.txt
+    exit_code: 0
+    expect:
+      lane_status:
+        lane_a: ok
+        lane_b: ok
+      success: true
+      classify_failure: null
+      salvage: answer
+      data:
+      - id: S001
+        title: Bound the retry ladder
+        severity: high
+      - id: S002
+        title: Strip the vendor token
+        severity: medium
+    wall_s: 13.543
+    requests: 3
+    notes: The stub answers through Junie's submit tool, as a model must; the tool-less requests before
+      and after the turn are Junie's task-title and closing helpers.
+  truncated:
+    stdout: truncated.stdout.txt
+    stderr: truncated.stderr.txt
+    exit_code: 1
+    expect:
+      lane_status:
+        lane_a: runner_error
+        lane_b: unparseable_result
+      success: false
+      classify_failure: null
+      salvage: none
+      error_contains:
+      - 'OpenAI: The model response could not be read. Try again.'
+    wall_s: 20.291
+    requests: 2
+    notes: 'failserver trunc: a cut chat stream. Junie retries once and reports ''The model response could
+      not be read''.'
+  ephemeral-only:
+    stdout: ephemeral-only.stdout.txt
+    stderr: ephemeral-only.stderr.txt
+    exit_code: 143
+    expect:
+      lane_status:
+        lane_a: runner_error
+        lane_b: runner_error
+      success: false
+      classify_failure: null
+      salvage: none
+      error_contains:
+      - junie printed nothing on stdout
+    wall_s: 9.894
+    requests: 0
+    notes: 'SIGTERM 8 s into a turn the stub never answers: exit 143, nothing on stdout. Junie prints
+      no per-event stream in json mode.'
+  multi-assistant:
+    stdout: multi-assistant.stdout.txt
+    stderr: multi-assistant.stderr.txt
+    exit_code: 0
+    expect:
+      lane_status:
+        lane_a: ok
+        lane_b: ok
+      success: true
+      classify_failure: null
+      salvage: answer
+      data:
+      - id: S001
+        title: Bound the retry ladder
+        severity: high
+      - id: S002
+        title: Strip the vendor token
+        severity: medium
+    wall_s: 13.391
+    requests: 5
+    notes: Turn one carries decoy text plus an open call; turn two submits. Only the submitted text is
+      the result.
+  error-envelope:
+    stdout: error-envelope.stdout.txt
+    stderr: error-envelope.stderr.txt
+    exit_code: 1
+    expect:
+      lane_status:
+        lane_a: runner_error
+        lane_b: unparseable_result
+      success: false
+      classify_failure: null
+      salvage: none
+      error_contains:
+      - 'OpenAI: The model response could not be read. Try again.'
+    wall_s: 21.085
+    requests: 2
+    notes: 'failserver errbody: an HTTP 200 carrying an error object; Junie reads it as an unreadable
+      response.'
+  exit-zero-failure:
+    stdout: exit-zero-failure.stdout.txt
+    stderr: exit-zero-failure.stderr.txt
+    exit_code: 0
+    expect:
+      lane_status:
+        lane_a: runner_error
+        lane_b: unparseable_result
+      success: false
+      classify_failure: null
+      salvage: none
+      error_contains:
+      - The run reached its step limit (60 steps) before finishing t
+    wall_s: 28.569
+    requests: 62
+    notes: The stub calls grep_search with a new pattern every turn until --max-steps 60 is reached. Junie
+      exits 0 with errors and an empty result.
+  stdout-error:
+    stdout: stdout-error.stdout.txt
+    stderr: stdout-error.stderr.txt
+    exit_code: 1
+    expect:
+      lane_status:
+        lane_a: runner_error
+        lane_b: unparseable_result
+      success: false
+      classify_failure: null
+      salvage: none
+      error_contains:
+      - Failed to pass user review after 6 attempts
+    wall_s: 16.884
+    requests: 7
+    notes: The stub answers in text and never calls submit. Junie re-prompts six times, then reports the
+      failure in errors on stdout and exits 1.
+  empty:
+    stdout: empty.stdout.txt
+    stderr: empty.stderr.txt
+    exit_code: 1
+    expect:
+      lane_status:
+        lane_a: runner_error
+        lane_b: unparseable_result
+      success: false
+      classify_failure: null
+      salvage: none
+      error_contains:
+      - Failed to pass user review after 6 attempts
+    wall_s: 15.384
+    requests: 8
+    notes: The stub submits an empty solution_summary. Junie rejects it, re-prompts, and fails after six
+      attempts; an empty answer never reaches result.
+  auth-error:
+    stdout: auth-error.stdout.txt
+    stderr: auth-error.stderr.txt
+    exit_code: 1
+    expect:
+      lane_status:
+        lane_a: auth_failed
+        lane_b: auth_failed
+      success: false
+      classify_failure: auth_failed
+      salvage: none
+      error_contains:
+      - 'OpenAI: Incorrect API key provided: sk-stub***. You can find'
+    wall_s: 20.896
+    requests: 6
+    notes: failserver 401. Junie relays the endpoint's message after an 'OpenAI:' prefix (it retried the
+      401 several times).
+  rate-limit:
+    stdout: rate-limit.stdout.txt
+    stderr: rate-limit.stderr.txt
+    exit_code: 1
+    expect:
+      lane_status:
+        lane_a: rate_limited
+        lane_b: rate_limited
+      success: false
+      classify_failure: rate_limited
+      salvage: none
+      error_contains:
+      - 'The model provider is not available right now: it is overloa'
+    wall_s: 336.218
+    requests: 34
+    notes: 'failserver 429 forever: Junie retried 34 times over 336 s, then gave up with its own overloaded
+      message plus the endpoint''s.'
+  invalid-model:
+    stdout: invalid-model.stdout.txt
+    stderr: invalid-model.stderr.txt
+    exit_code: 1
+    expect:
+      lane_status:
+        lane_a: invalid_model
+        lane_b: invalid_model
+      success: false
+      classify_failure: invalid_model
+      salvage: none
+      error_contains:
+      - 'OpenAI: The model `openai/gpt-6-luna` does not exist or you '
+    wall_s: 19.694
+    requests: 2
+    notes: failserver 404 naming the model.
+  context-overflow:
+    stdout: context-overflow.stdout.txt
+    stderr: context-overflow.stderr.txt
+    exit_code: 1
+    expect:
+      lane_status:
+        lane_a: context_length_exceeded
+        lane_b: context_length_exceeded
+      success: false
+      classify_failure: context_length_exceeded
+      salvage: none
+      error_contains:
+      - 'OpenAI: This model''s maximum context length is 8192 tokens. '
+    wall_s: 19.816
+    requests: 2
+    notes: 'failserver ctx: HTTP 400 context_length_exceeded.'
+  missing-key:
+    stdout: missing-key.stdout.txt
+    stderr: missing-key.stderr.txt
+    exit_code: 1
+    expect:
+      lane_status:
+        lane_a: auth_failed
+        lane_b: auth_failed
+      success: false
+      classify_failure: auth_failed
+      salvage: none
+      error_contains:
+      - 'Environment variable ''OPENROUTER_API_KEY'' referenced in the '
+    wall_s: 10.492
+    requests: 0
+    notes: 'OPENROUTER_API_KEY unset: Junie refuses to load the profile before any request; the message
+      is on stderr only.'
+  zero-body:
+    stdout: zero-body.stdout.txt
+    stderr: zero-body.stderr.txt
+    exit_code: 1
+    expect:
+      lane_status:
+        lane_a: runner_error
+        lane_b: unparseable_result
+      success: false
+      classify_failure: null
+      salvage: none
+      error_contains:
+      - 'OpenAI: A network error interrupted the request to the model'
+    wall_s: 156.844
+    requests: 48
+    notes: 'failserver empty: the request is closed with zero bytes, 48 times over 157 s.'
+  server-error:
+    stdout: server-error.stdout.txt
+    stderr: server-error.stderr.txt
+    exit_code: 1
+    expect:
+      lane_status:
+        lane_a: runner_error
+        lane_b: unparseable_result
+      success: false
+      classify_failure: server_error
+      salvage: none
+      error_contains:
+      - 'OpenAI: The server had an error while processing your reques'
+    wall_s: 155.174
+    requests: 47
+    notes: 'failserver 500 forever: 47 requests over 155 s.'
+  auth-error-openrouter:
+    stdout: auth-error-openrouter.stdout.txt
+    stderr: auth-error-openrouter.stderr.txt
+    exit_code: 1
+    expect:
+      lane_status:
+        lane_a: auth_failed
+        lane_b: auth_failed
+      success: false
+      classify_failure: auth_failed
+      salvage: none
+      error_contains:
+      - 'OpenAI: User not found.'
+    notes: 'A real call to openrouter.ai with a made-up key: OpenRouter''s 401 is relayed as ''OpenAI:
+      User not found.''. Not billed.'
+    synthesized: true
+    provenance: Captured on the host (junie 26.11.3, the same release zip) against openrouter.ai; the
+      host paths in stderr (the private root and log file) were replaced with /tmp/junie-root. stdout
+      is byte for byte.
+  invalid-model-openrouter:
+    stdout: invalid-model-openrouter.stdout.txt
+    stderr: invalid-model-openrouter.stderr.txt
+    exit_code: 1
+    expect:
+      lane_status:
+        lane_a: invalid_model
+        lane_b: invalid_model
+      success: false
+      classify_failure: invalid_model
+      salvage: none
+      error_contains:
+      - 'OpenAI: nosuchvendor/no-such-model-xyz is not a valid model '
+    notes: 'A real call to openrouter.ai with the e2e key and a slug that does not exist: ''is not a valid
+      model ID''. Not billed.'
+    synthesized: true
+    provenance: Captured on the host (junie 26.11.3, the same release zip) against openrouter.ai; the
+      host paths in stderr (the private root and log file) were replaced with /tmp/junie-root. stdout
+      is byte for byte.

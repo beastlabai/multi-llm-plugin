@@ -78,6 +78,7 @@ PRE_L5_ARGV_MODELS = {
     "goose": "openrouter/z-ai/glm-5.2",
     "grok": "grok-4",
     "fx": "openai/gpt-5.6-luna",
+    "junie": "openai/gpt-6-luna",
     "kilocode": "openai-native/gpt-5.5",
     "kimi": "moonshotai/kimi-k2-thinking",
     "muse": "muse-spark-1.2",
@@ -168,6 +169,19 @@ PRE_L5_ARGV = {
     "fx": [
         "fx", "ask", "--json", "--no-save", "--auto", "--model",
         "openai/gpt-5.6-luna", "--", PRE_L5_ARGV_PROMPT,
+    ],
+    # The slug is not on argv: it rides the per-spawn profile that
+    # `--model custom:multi-llm` names.
+    "junie": [
+        "junie", "--skip-update-check", "--share-anonymous-statistics", "false",
+        "--mcp-default-locations", "false", "--skill-default-locations", "false",
+        "--command-default-location", "false", "--agent-default-location", "false",
+        "--config-default-locations", "false", "--model-default-locations", "false",
+        "--model", "custom:multi-llm",
+        "--allowed-tools",
+        "open,open_entire_file,scroll_down,scroll_up,glob_search,grep_search,submit",
+        "--output-format", "json", "--max-steps", "60",
+        "--task", PRE_L5_ARGV_PROMPT,
     ],
     "kilocode": [
         "kilocode", "run", "--auto", "-m", "openai-native/gpt-5.5",

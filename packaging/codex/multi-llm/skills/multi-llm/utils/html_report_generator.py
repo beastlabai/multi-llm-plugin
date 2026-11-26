@@ -143,6 +143,8 @@ _ICON_DEFS: Dict[str, tuple] = {
     # Orca's catalog has no mark for muse either — letter icon is the outcome,
     # not a placeholder waiting on a fetch.
     "muse":       (None, "M", "#7C3AED"),
+    # JetBrains' mark is not redistributed here — letter icon only.
+    "junie":      (None, "J", "#E11D74"),
 }
 
 
@@ -174,6 +176,7 @@ _PROVIDER_ICON_KEYS: Dict[str, str] = {
     # across model families, so a borrowed mark would mislabel the CLI as one
     # of them — the same reason "antigravity" above is not "google".
     "omp":          "omp",
+    "junie":        "junie",
 }
 
 

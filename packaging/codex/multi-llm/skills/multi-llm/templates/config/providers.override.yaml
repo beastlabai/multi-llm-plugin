@@ -317,6 +317,13 @@
 #       - openrouter/moonshotai/kimi-k3.1-pro
 #       - openrouter/openai/gpt-6.2-astra
 
+#   junie:
+#     default_timeout: 1200
+#     max_concurrent: 2
+#     models:
+#       - openai/gpt-6-luna
+#       - deepseek/deepseek-v4.1-flash
+
 ## --- default_provider -------------------------------------------------------
 ## Provider used when a model spec has no `provider:` prefix (e.g. bare `opus`).
 ## `--init` sets it to the first detected provider; left commented when nothing

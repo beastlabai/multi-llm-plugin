@@ -413,3 +413,37 @@ class TestTheCallLogCapturesTheBlock:
 
     def test_the_capture_allowlist_names_it(self):
         assert "OPENCODE_CONFIG_CONTENT" in wrapper_module.ENV_CAPTURE_ALLOW
+
+
+class TestJunieRowRendersTheAdapterProfile:
+    """The row supplies what the adapter's get_env would, because the wrapper
+    rebuilds the child environment and drops the adapter's."""
+
+    def test_env_and_profile_match_the_adapter(self, monkeypatch, tmp_path):
+        from utils.providers.junie import (
+            CREDENTIAL_ENV, PROFILE_NAME, JunieProvider, cleanup_home_dirs,
+            render_profile)
+
+        monkeypatch.setattr(wrapper_module, "REDIRECT_YAML", REDIRECT_YAML)
+        homes = tmp_path / "homes"
+        homes.mkdir()
+        monkeypatch.setattr(wrapper_module, "HOMES_ROOT", homes)
+        url = "http://127.0.0.1:18881/s/abc123/v1"
+        monkeypatch.setenv("MLLM_STUB_BASE_URL", url)
+        monkeypatch.setenv("JAVA_TOOL_OPTIONS", "-Duser.home=/real-user")
+        row = wrapper_module.load_row("junie")
+        root = tmp_path / "invocation"
+        env = wrapper_module.build_child_env("junie", "abc123", row, root)
+        assert env["JAVA_TOOL_OPTIONS"] == f"-Duser.home={root}"
+        assert env["JUNIE_HOME"] == str(root / ".junie")
+        assert env["JUNIE_MODEL_LOCATIONS"] == str(root / "models")
+        assert env[CREDENTIAL_ENV] == "mllm-stub-abc123"
+        wrapper_module.seed_invocation_root("junie", root, row)
+        profile = json.loads((root / "models" / f"{PROFILE_NAME}.json").read_text())
+        assert profile == render_profile("stub-model", base_url=url + "/chat/completions")
+        provider_env = JunieProvider().get_env("stub-model")
+        try:
+            assert set(provider_env) == {
+                "JUNIE_HOME", "JUNIE_MODEL_LOCATIONS", "JAVA_TOOL_OPTIONS"}
+        finally:
+            cleanup_home_dirs()

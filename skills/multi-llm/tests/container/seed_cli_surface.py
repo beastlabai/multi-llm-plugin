@@ -220,7 +220,9 @@ def _probe_env(env_extra: dict | None) -> dict:
     "the contract" is measuring the harness.
     """
     child = dict(os.environ)
-    child.update({str(k): str(v) for k, v in (env_extra or {}).items()})
+    # `{home}` is wrapper.py's per-invocation root token; here it is $HOME.
+    child.update({str(k): str(v).replace("{home}", child.get("HOME", ""))
+                  for k, v in (env_extra or {}).items()})
     return child
 
 

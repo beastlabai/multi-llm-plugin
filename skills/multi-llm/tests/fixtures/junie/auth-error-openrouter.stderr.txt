@@ -1,0 +1,3 @@
+Picked up JAVA_TOOL_OPTIONS: -Duser.home=/tmp/junie-root
+Junie 26.11.3 (4171.6) (pid=2594206): log file: /tmp/junie-root
+Junie failed with the message: Failed to build 'issue.md.junie_standalone'

@@ -847,12 +847,17 @@ class TestTheCredentialReceiptIsFalsifiable:
         assert harness.live_credential_leaks([record]) == [
             ("fx", "ANTHROPIC_AUTH_TOKEN")]
 
-    def test_only_fx_declares_a_live_name_as_its_stub_credential(self):
-        """A second row joining it widens the grader; make that a reviewed edit."""
+    def test_only_fx_and_junie_declare_a_live_name_as_their_stub_credential(self):
+        """A row joining them widens the grader; make that a reviewed edit.
+
+        junie's custom model profile names its key as `${OPENROUTER_API_KEY}`,
+        so its row sets that name to the stub key exactly as fx's does.
+        """
         declaring = {cli for cli, names in harness.stub_credential_vars().items()
                      if names & set(harness.LIVE_CREDENTIAL_NAMES)}
-        assert declaring == {"fx"}
-        assert "OPENROUTER_API_KEY" in harness.stub_credential_vars()["fx"]
+        assert declaring == {"fx", "junie"}
+        for cli in declaring:
+            assert "OPENROUTER_API_KEY" in harness.stub_credential_vars()[cli]
 
     def test_the_real_wrapper_receipt_grades_clean_and_a_carried_key_is_caught(
             self, monkeypatch, tmp_path):

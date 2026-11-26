@@ -120,11 +120,13 @@ class _Stub:
             tmp, str(type(self)._count), scenario)
         self.base = f"http://127.0.0.1:{self.port}"
 
-    def post(self, path: str, body: dict, stream: bool) -> tuple[int, str]:
+    def post(self, path: str, body: dict, stream: bool,
+             headers: dict | None = None) -> tuple[int, str]:
         body = dict(body, stream=stream)
         request = urllib.request.Request(
             self.base + path, data=json.dumps(body).encode(),
-            headers={"Content-Type": "application/json"}, method="POST")
+            headers={"Content-Type": "application/json", **(headers or {})},
+            method="POST")
         try:
             with urllib.request.urlopen(request, timeout=10) as response:
                 return response.status, response.read().decode()
@@ -823,6 +825,78 @@ class TestExplicitCompletion:
             assert not calls
         entry = _last_entry(server, "chat")
         assert bool(entry.get("completion_tool")) == advertised
+
+
+class TestJunieSubmit:
+    """Junie accepts an answer only through its `submit` tool."""
+
+    SUBMIT = {"type": "function", "function": {
+        "name": "submit", "parameters": {
+            "type": "object",
+            "properties": {"solution_summary": {"type": "string"}},
+            "required": ["solution_summary"]}}}
+
+    @staticmethod
+    def _call(text: str, stream: bool):
+        if stream:
+            content, calls, finish = _chat_stream_result(text)
+            return content, calls, finish
+        choice = json.loads(text)["choices"][0]
+        return (choice["message"]["content"],
+                choice["message"].get("tool_calls", []), choice["finish_reason"])
+
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_the_answer_is_one_submit_call_then_plain_text(
+            self, stub, tmp_path, stream):
+        server = stub(_chat_scenario(tmp_path))
+        _status, text = server.post(
+            "/v1/chat/completions", _chat_request(tools=[self.SUBMIT]), stream)
+        content, calls, finish = self._call(text, stream)
+        assert finish == "tool_calls" and len(calls) == 1
+        assert calls[0]["function"]["name"] == "submit"
+        assert json.loads(calls[0]["function"]["arguments"]) == {
+            "solution_summary": "OK"}
+        assert not content
+        assert _last_entry(server, "chat")["completion_tool"] == "submit"
+        # The request carrying our call's result, and a tool-less helper
+        # request, take the text path and are not flagged unmatched.
+        follow = _chat_request(tools=[self.SUBMIT], extra_messages=[
+            {"role": "assistant", "content": None, "tool_calls": [
+                {"id": calls[0]["id"], "type": "function",
+                 "function": calls[0]["function"]}]},
+            {"role": "tool", "tool_call_id": calls[0]["id"], "content": "done"}])
+        for body in (follow, _chat_request()):
+            _status, text = server.post("/v1/chat/completions", body, stream)
+            content, calls, finish = self._call(text, stream)
+            assert content == "OK" and not calls and finish == "stop"
+            entry = _last_entry(server, "chat")
+            assert not entry["unmatched"] and "completion_tool" not in entry
+
+    def test_junie_gets_json_when_its_body_says_stream_false(self, stub, tmp_path):
+        """Junie asks `Accept: text/event-stream` and parses one JSON object."""
+        junie = {"Accept": "text/event-stream", "User-Agent": "junie-cli-batch:26.11.3"}
+        server = stub(_chat_scenario(tmp_path))
+        for body in (_chat_request(tools=[self.SUBMIT]), _chat_request()):
+            _status, text = server.post("/v1/chat/completions", body, False, junie)
+            assert json.loads(text)["choices"]
+            assert _last_entry(server, "chat")["stream"] is False
+        # Any other client keeps the Accept-header rule.
+        _status, text = server.post(
+            "/v1/chat/completions", _chat_request(), False,
+            {"Accept": "text/event-stream"})
+        assert text.startswith("data: ")
+
+    def test_a_submit_tool_without_solution_summary_is_left_alone(
+            self, stub, tmp_path):
+        other = {"type": "function", "function": {
+            "name": "submit", "parameters": {
+                "type": "object", "properties": {"text": {"type": "string"}}}}}
+        server = stub(_chat_scenario(tmp_path))
+        _status, text = server.post(
+            "/v1/chat/completions", _chat_request(tools=[other]), False)
+        choice = json.loads(text)["choices"][0]
+        assert choice["message"]["content"] == "OK"
+        assert not choice["message"].get("tool_calls")
 
 
 class TestPortFile:

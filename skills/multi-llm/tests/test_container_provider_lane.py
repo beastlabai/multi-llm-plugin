@@ -299,11 +299,13 @@ class TestTheEvidenceSurvivedTheContainer:
             leaked = {n for n in names
                       if n.endswith(("_API_KEY", "_AUTH_TOKEN"))
                       and not n.startswith(("STUB_", "MLLM_"))}
-            # Only fx declares this name as its fake per-exec credential.
-            # test_wrapper_env_contract pins replacement of an inherited real key.
-            fx_credentials = {"OPENROUTER_API_KEY"} if record["cli"] == "fx" else set()
+            # Only fx and junie declare this name as their fake per-exec
+            # credential. test_wrapper_env_contract pins replacement of an
+            # inherited real key.
+            fx_credentials = ({"OPENROUTER_API_KEY"}
+                              if record["cli"] in ("fx", "junie") else set())
             if fx_credentials:
-                fx_row = next(row for row in VERIFIED if row["cli"] == "fx")
+                fx_row = next(row for row in VERIFIED if row["cli"] == record["cli"])
                 assert fx_credentials <= set(fx_row["credential_vars"])
                 assert fx_credentials <= names
             assert "OPENROUTER_API_KEY" not in (names - fx_credentials), (

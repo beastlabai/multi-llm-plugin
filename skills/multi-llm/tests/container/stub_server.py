@@ -694,6 +694,34 @@ def fx_permission_review(body: dict, script: ScriptedToolCall) -> str | None:
     return script.fx_permission_decision
 
 
+#: The call id the stub gives Junie's `submit` call, so the request that carries
+#: its result can be recognised by `tool_call_id`.
+JUNIE_SUBMIT_CALL_ID = "call_stub_junie_submit"
+
+
+def _junie_submit_owed(body: dict) -> bool:
+    """True for a chat request that advertises Junie's ``submit`` tool and whose
+    history does not yet hold the result of our ``submit`` call.
+
+    ``submit`` is matched by name AND by a ``solution_summary`` parameter, so a
+    host that merely has a tool called ``submit`` is never handed this call.
+    """
+    for tool in body.get("tools") or []:
+        function = tool.get("function") if isinstance(tool, dict) else None
+        if not isinstance(function, dict) or function.get("name") != "submit":
+            continue
+        parameters = function.get("parameters")
+        properties = parameters.get("properties") if isinstance(parameters, dict) else None
+        if isinstance(properties, dict) and "solution_summary" in properties:
+            break
+    else:
+        return False
+    return not any(
+        isinstance(message, dict) and message.get("role") == "tool"
+        and message.get("tool_call_id") == JUNIE_SUBMIT_CALL_ID
+        for message in body.get("messages") or [])
+
+
 def chat_call_body(model: str, script: ScriptedToolCall) -> dict:
     """The chat-completions message carrying the ONE scripted tool call."""
     return {
@@ -864,6 +892,12 @@ class Handler(BaseHTTPRequestHandler):
         # a stub that only returns one JSON body gets rejected or hung.
         streamed = bool(body.get("stream")) or \
             "text/event-stream" in (self.headers.get("accept") or "")
+        # Junie sends `Accept: text/event-stream` on requests whose body says
+        # `stream: false` and parses the answer as one JSON object, so for its
+        # user agent the body decides.
+        if body.get("stream") is False and \
+                (self.headers.get("user-agent") or "").startswith("junie-cli"):
+            streamed = False
 
         entry = {
             "method": method, "path": path, "raw_path": raw_path,
@@ -1139,6 +1173,22 @@ class Handler(BaseHTTPRequestHandler):
                     "call_id": "call_stub_submit",
                 })
                 entry["completion_tool"] = "submit_and_exit"
+                if streamed:
+                    include_usage = bool((body.get("stream_options") or {}).get("include_usage"))
+                    return self._send_sse(chat_call_stream(model, submission, include_usage))
+                return self._send_json(chat_call_body(model, submission))
+            # Junie accepts an answer only through its `submit` tool. Keyed on
+            # that tool's declaration (a `solution_summary` parameter) and on
+            # our call's result not yet being in the history, so its tool-less
+            # title requests and the request carrying the result take the text
+            # path above like any other chat request.
+            if surface == "chat" and _junie_submit_owed(body):
+                submission = ScriptedToolCall({
+                    "name": "submit", "surfaces": ["chat"],
+                    "arguments": {"solution_summary": answer},
+                    "call_id": JUNIE_SUBMIT_CALL_ID,
+                })
+                entry["completion_tool"] = "submit"
                 if streamed:
                     include_usage = bool((body.get("stream_options") or {}).get("include_usage"))
                     return self._send_sse(chat_call_stream(model, submission, include_usage))

@@ -30,6 +30,7 @@ from utils.providers.grok import GrokProvider
 from utils.providers.kilocode import KiloCodeProvider
 from utils.providers.kimi import KimiProvider
 from utils.providers.muse import MuseProvider
+from utils.providers.junie import JunieProvider
 from utils.providers.omp import OmpProvider
 from utils.providers.opencode import OpenCodeProvider
 from utils.providers.pi import PiProvider
@@ -152,9 +153,10 @@ class TestInternalRetryEnvelopeDeclarations:
             return
 
         if envelope.max_requests is None:
-            # fx retries without a cap; kilocode's measured chain is per model
-            # turn, and a run makes several (its declaration's comment).
-            assert name in ("fx", "kilocode"), (
+            # fx retries without a cap; kilocode's and junie's measured chains
+            # are per model turn, and a run makes several (each declaration's
+            # comment).
+            assert name in ("fx", "junie", "kilocode"), (
                 f"{name} has an unexplained unbounded retry declaration"
             )
             assert envelope.max_wall_s is None
@@ -171,7 +173,7 @@ class TestInternalRetryEnvelopeDeclarations:
         [
             n for n in _envelope_sweep_names()
             if n not in ("claude-code", "cline", "codex", "copilot", "gemini",
-                         "goose", "grok", "kilocode", "kimi",
+                         "goose", "grok", "junie", "kilocode", "kimi",
                          "muse", "omp", "pi", "qwen-code", "vibe", "fx")
         ],
     )
@@ -386,6 +388,9 @@ TRANSPORT_CASES = [
     (KimiProvider, "argv", "moonshotai/kimi-k2-thinking"),
     (GooseProvider, "argv", "openrouter/z-ai/glm-5.2"),
     (GrokProvider, "argv", "grok-4"),
+    # junie's fan-out default is stdin; the argv form renders `--task <prompt>`
+    # last, and the stdin form drops that pair.
+    (JunieProvider, "stdin", "openai/gpt-6-luna"),
     (KiloCodeProvider, "argv", "openai-native/gpt-5.5"),
     (MuseProvider, "argv", "muse-spark-1.2"),
     # The one `stdin` row, and the first adapter whose fan-out default is not
@@ -683,7 +688,7 @@ class TestDeclaredOutputChannel:
     #: `supports_file_edits` stays True (the agent-write profile really edits,
     #: and the sandbox probe that gates it is D6 step 3).
     CANNOT_WRITE_FILES = {"aider", "codex", "copilot", "cursor-agent", "gemini",
-                          "qwen-code", "vibe"}
+                          "junie", "qwen-code", "vibe"}
 
     @pytest.mark.parametrize("name", sorted(_registered_provider_names()))
     def test_every_adapter_declares_a_bool(self, name):
@@ -839,6 +844,7 @@ class TestDeclaredGenerateShellAndReadScope:
     #:   qwen-code    False  `--max-tool-calls 0` aborts before any tool runs
     #:   gemini       False  no `run_shell_command` under this argv (0.25.2)
     #:   fx           True   production 0.0.14 --auto probe; shell-reviewed fixtures
+    #:   junie        False  `--allowed-tools` omits `bash`; a forced call was refused
     SHELL_IN_GENERATE = {
         "pi": True,
         "omp": True,
@@ -848,6 +854,7 @@ class TestDeclaredGenerateShellAndReadScope:
         "qwen-code": False,
         "gemini": False,
         "fx": True,
+        "junie": False,
     }
     #: The adapters whose read scope is measured away from the `"cwd"` default.
     #: cursor-agent declares `"cwd"` explicitly (measured, and equal to the

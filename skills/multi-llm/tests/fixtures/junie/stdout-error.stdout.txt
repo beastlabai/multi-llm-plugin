@@ -1,0 +1,1 @@
+{"sessionId":"session-261126-104828-12dz","errors":["Failed to pass user review after 6 attempts","Failed to build 'issue.md.junie_standalone'"],"taskName":"Review the plan","llmUsage":[{"model":"openai/gpt-6-luna","calls":7,"cost":0.0,"inputTokens":840,"cacheInputTokens":0,"cacheCreateTokens":0,"outputTokens":210}]}

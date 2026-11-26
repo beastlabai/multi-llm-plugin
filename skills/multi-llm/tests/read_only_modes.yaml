@@ -152,6 +152,18 @@ read_only_modes:
     # no OS sandbox is supplied by the adapter.
     mechanism: null
     probed: null
+  junie:
+    # The read tools and `submit` only; every write, shell and subagent tool is
+    # absent from the request and a forced call is refused.
+    mechanism:
+      - --allowed-tools
+      - open,open_entire_file,scroll_down,scroll_up,glob_search,grep_search,submit
+    probed: >-
+      junie 26.11.3 against a localhost stub: with the flag the chat request
+      advertised only those 7 tools, and stub-forced `create`, `bash`,
+      `search_replace` and `spawn_subagent` calls each came back `ERROR: Tool
+      "<name>" is not available` with the working tree unchanged. Reads outside
+      the working directory (/etc/hostname) were allowed.
   kilocode:
     mechanism: null
     probed: null

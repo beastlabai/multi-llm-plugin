@@ -3708,6 +3708,9 @@ hosts:
                      # raw.githubusercontent.com and needs COLUMNS=10000.
       - copilot      # `chat`, `stub-model`; needs its pre-warmed XDG_CACHE_HOME.
       - kimi         # `chat`, `stub-model`; needs the retry pin in (5).
+      - junie        # `chat`, `stub-model`; answers only through its `submit` tool,
+                     # which the stub serves; needs the wrapper-owned JAVA_TOOL_OPTIONS.
+                     # Assignment unmeasured on this host.
     fan_out_provenance: unmeasured   # T3 — authored 2026-09-22, never executed
     fan_out_reason: >
       T3, and the same words as the claude-code host's cell apply: today every

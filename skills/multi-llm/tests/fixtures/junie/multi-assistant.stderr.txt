@@ -1,0 +1,2 @@
+Picked up JAVA_TOOL_OPTIONS: -Duser.home=/tmp/multi-llm-junie-1-proc.5806521-4026533260-okfe_tom
+Junie 26.11.3 (4171.6) (pid=47): log file: /tmp/multi-llm-junie-1-proc.5806521-4026533260-okfe_tom/.junie/logs/log-2026-11-26_104825-pid-47.log

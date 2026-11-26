@@ -196,6 +196,7 @@ COMPLETE = {
     "gemini": lambda p: _envelope("gemini", "success.stdout.txt", ["response"], p),
     "goose": lambda p: _swap_answer("goose", _success("goose"), p),
     "grok": lambda p: _envelope("grok", "success.stdout.txt", ["text"], p),
+    "junie": lambda p: _envelope("junie", "success.stdout.txt", ["result"], p),
     "kilocode": lambda p: p,
     "kimi": _kimi,
     "muse": lambda p: _swap_answer("muse", _success("muse"), p),
@@ -227,6 +228,11 @@ FLAGGED = {
         error={"type": "INVALID_STREAM", "message": "The stream ended early."},
     ),
     "grok": lambda p: _envelope("grok", "success.stdout.txt", ["text"], p, stopReason="max_tokens"),
+    # junie's step-limit shape (tests/fixtures/junie/exit-zero-failure), the answer left in.
+    "junie": lambda p: _envelope(
+        "junie", "success.stdout.txt", ["result"], p,
+        errors=["The run reached its step limit (60 steps) before finishing the task"],
+    ),
 }
 
 
@@ -557,7 +563,7 @@ JSON_ANSWER = json.dumps([
 #: around the answer. kilocode's stdout is the answer itself, not an envelope.
 SINGLE_DOCUMENT = (
     "agy", "claude-code", "cursor-agent", "fx", "gemini", "goose", "grok",
-    "qwen-code", "vibe",
+    "junie", "qwen-code", "vibe",
 )
 
 

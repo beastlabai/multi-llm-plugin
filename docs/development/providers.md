@@ -1174,11 +1174,14 @@ the test interpreter from `python3`/`python` shims in
 
 ## Private config roots
 
-copilot, kimi, qwen-code and vibe write CLI state (sessions, caches, logs) under the user's home,
-so each spawn gets a fresh `0700` root instead (`providers.private_home.PrivateHomes`), handed to
-the CLI through its own variable (`COPILOT_HOME`, `KIMI_CODE_HOME`, `QWEN_HOME`, `VIBE_HOME`). Two
-concurrent slots never share one writable root. A root the user pinned through that variable is
-used as it is and never removed.
+copilot, junie, kimi, qwen-code and vibe write CLI state (sessions, caches, logs) under the user's
+home, so each spawn gets a fresh `0700` root instead (`providers.private_home.PrivateHomes`), handed
+to the CLI through its own variable (`COPILOT_HOME`, `JUNIE_HOME`, `KIMI_CODE_HOME`, `QWEN_HOME`,
+`VIBE_HOME`). Two concurrent slots never share one writable root. A root the user pinned through
+that variable is used as it is and never removed, except junie's: its root also holds the
+per-spawn model profile, so the adapter always makes its own, replaces an inherited `JUNIE_HOME`
+and strips every other `JUNIE_*` setting. The JVM resolves its home from `user.home`, not `$HOME`, so
+junie's root is also passed as `JAVA_TOOL_OPTIONS=-Duser.home=<root>`.
 
 - **A root lives as long as its dispatch, and its CLI.** Both spawn sites enter
   `llm_client.provider_dispatch_context`, which is also a `private_home.dispatch_homes` scope (a

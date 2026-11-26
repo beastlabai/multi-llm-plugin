@@ -90,6 +90,8 @@ ROUTES: Dict[str, Route] = {
     "qwen-code": Route("openrouter", _verbatim),
     "copilot": Route("openrouter", _verbatim),
     "fx": Route("openrouter", _verbatim),
+    # The profile's `id` is an OpenRouter slug, the same ids fx sends.
+    "junie": Route("openrouter", _verbatim),
 }
 
 _LOGGED_IN = "needs a logged-in capture"
