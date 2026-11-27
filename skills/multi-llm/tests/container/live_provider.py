@@ -74,6 +74,17 @@ LIVE_CREDENTIAL_ENV = "OPENROUTER_API_KEY"
 #: `redact` scrubs it from every artifact by value with no extra machinery.
 CREDENTIAL_MATERIAL_ENV = "MLLM_LIVE_CREDENTIAL_MATERIAL"
 
+#: Adapters whose ``hermetic_dispatch`` creates the run's home (and seeds it):
+#: the runner enters it before anything else and uses its HOME. fx owns HOME and
+#: ``.fx/settings.json``; hermes owns HERMES_HOME, writes the key into its
+#: ``.env`` (the gateway daemon scrubs its environment, so that is the only way
+#: the key reaches the turn) and runs ``hermes gateway stop --yes`` on exit.
+MANAGED_HOME_CLIS = ("fx", "hermes")
+
+#: Managed-home rows whose adapter spawns its binary a second time BY NAME, so
+#: the real binary must come before the /opt/mllm/bin stub wrapper on PATH.
+REAL_BINARY_FIRST = ("hermes",)
+
 #: A control could not be applied — the host driver turns this into a SKIP with
 #: the reason, per §7.4's skip policy. Distinct from any CLI exit code, and
 #: distinct from a real failure, because a lane that quietly downgrades its own
@@ -114,7 +125,7 @@ ENV_CAPTURE_PREFIXES = (
     "AIDER_", "ANTHROPIC_", "CLAUDE_", "CLINE_", "CODEX_", "COPILOT_",
     "CURSOR_", "DEEPSEEK_", "DSH_", "GEMINI_", "GOOGLE_", "GOOSE_", "GROK_",
     "KILO_", "KILOCODE_", "KIMI_", "MISTRAL_", "OPENAI_", "OPENCODE_",
-    "OPENROUTER_", "PI_", "QWEN_", "VIBE_", "XAI_", "FX_",
+    "OPENROUTER_", "PI_", "QWEN_", "VIBE_", "XAI_", "FX_", "HERMES_", "JUNIE_",
 )
 
 #: The image-wide opt-outs from the Dockerfile's step-8 ENV block, which carry no
@@ -124,6 +135,8 @@ ENV_CAPTURE_NAMES = (
     # claude-code's switch against the claude.ai connectors proxy: unprefixed
     # (it begins ENABLE_), set by this lane's LIVE_ENV_OVERRIDES, graded by OPT_OUTS.
     "ENABLE_CLAUDEAI_MCP_SERVERS",
+    # junie's JVM reads its home from -Duser.home, which the adapter appends here.
+    "JAVA_TOOL_OPTIONS",
 )
 
 
@@ -333,6 +346,35 @@ def seed_guards(home: Path, base_url: str,
     if require_base_url and not saw_base_url:
         problems.append(f"no seeded file names the live endpoint {base_url}")
     return problems
+
+
+def daemon_leftovers(hermes_home: str, settle_s: float = 10.0) -> dict:
+    """What a managed home's daemon left behind once its dispatch closed.
+
+    hermes' gateway daemon outlives the client, and the adapter's dispatch stops
+    it on the way out. Polled for ``settle_s`` because the stop returns as soon as
+    it has signalled. Evidence of a stop that went through the stub wrapper is
+    the wrapper's own root under /tmp/mllm-inv.
+    """
+    deadline = time.time() + settle_s
+    while True:
+        pid_file = bool(hermes_home) and Path(hermes_home, "gateway.pid").exists()
+        processes = []
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                raw = (entry / "cmdline").read_bytes()
+            except OSError:
+                continue
+            command = raw.replace(b"\0", b" ").decode("utf-8", "replace").strip()
+            if "gateway run" in command or "gateway.run" in command:
+                processes.append(" ".join(command.split()[:6]))
+        wrapper_roots = sorted(str(p) for p in Path("/tmp/mllm-inv").glob("hermes-*"))
+        if not (pid_file or processes) or time.time() >= deadline:
+            return {"gateway_pid_file": pid_file, "processes": processes,
+                    "wrapper_roots": wrapper_roots}
+        time.sleep(0.5)
 
 
 def main() -> int:
@@ -548,14 +590,26 @@ def main() -> int:
         home = workdir / "home"
         workdir.mkdir(parents=True, exist_ok=True)
         home.mkdir(parents=True, exist_ok=True)
-        if args.cli == "fx":
+        managed = args.cli in MANAGED_HOME_CLIS
+        if managed:
             from utils.provider_registry import get_provider
 
-            fx = get_provider("fx")
-            if fx is None:
-                return bail("no built-in fx adapter", EXIT_CONTROL_UNAVAILABLE)
-            dispatches.enter_context(fx.hermetic_dispatch("generate", args.model))
-            home = Path(fx.get_env(args.model)["HOME"])
+            if args.cli in REAL_BINARY_FIRST:
+                # Before the dispatch opens: the adapter's own second spawn of
+                # the binary (hermes' `gateway stop`, and the flag gate's help
+                # probe) resolves it by name, and /opt/mllm/bin is the stub
+                # wrapper, which would re-root HERMES_HOME and stop nothing.
+                os.environ["PATH"] = os.pathsep.join(
+                    ["/opt/mllm/real", os.environ.get("PATH", "")])
+            adapter = get_provider(args.cli)
+            if adapter is None:
+                return bail(f"no built-in {args.cli} adapter",
+                            EXIT_CONTROL_UNAVAILABLE)
+            refusal = dispatches.enter_context(
+                adapter.hermetic_dispatch("generate", args.model))
+            if refusal:
+                return bail(str(refusal), EXIT_CONTROL_UNAVAILABLE)
+            home = Path(adapter.get_env(args.model)["HOME"])
             evidence["managed_home"] = str(home)
 
         # The row's `seed_links`, before anything else touches HOME: a config
@@ -588,7 +642,11 @@ def main() -> int:
         # adapter mutating a shared one -- §3.3 rule 1 binds adapters, and the
         # rule exists so one slot cannot re-point another's spawn.
         config_roots: dict[str, str] = {}
-        for spec in args.config_root:
+        # A managed home's roots are the adapter's own, set by its dispatch and
+        # returned by get_env; the row's `config_roots` describe the WRAPPER's
+        # layout, and exporting them here would only plant paths the adapter's
+        # env then overrides.
+        for spec in ([] if managed else args.config_root):
             var, _, rel = spec.partition("=")
             if var and rel:
                 target = home / rel
@@ -875,6 +933,9 @@ def main() -> int:
         ]
     finally:
         dispatches.close()
+        if args.cli in REAL_BINARY_FIRST:
+            evidence["daemon_leftovers"] = daemon_leftovers(
+                evidence.get("env", {}).get("HERMES_HOME", ""))
         udp.shutdown()
         tcp.shutdown()
 

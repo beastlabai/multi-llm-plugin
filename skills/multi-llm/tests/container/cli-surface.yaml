@@ -244,13 +244,15 @@ clis:
   # Captured from the checksummed JetBrains 26.11.3 (4171.6) launcher. The help
   # runs with the row's JAVA_TOOL_OPTIONS (`{home}` is the probe's $HOME): the JVM
   # ignores $HOME, so without it Junie would write its log under the real home.
+  # The digest skips the launcher's first line (its timestamped log file name;
+  # seed_cli_surface.VOLATILE_HELP_LINES), reseeded 2026-11-26.
   - cli: junie
     binary: junie
     version: "Junie version: 26.11.3 (4171.6)"
     probe: ok
     help_invocation: "junie --help"
-    help_sha256: 75f1f5ded52c9bf76aa8f925463cfd3728be1807cb8a65b9117581174357070f
-    help_bytes: 7796
+    help_sha256: 58bb2d7c272e66b99faff2d8976d50d90f07f8249b9ef162169ef7ff418815d6
+    help_bytes: 7696
     profiles: [generate]
     subcommands: []
     options:

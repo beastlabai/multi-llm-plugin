@@ -43,7 +43,9 @@ from .container import harness
 # a whole-token match, never `opt in help_text`: `-m` is a substring of almost
 # any help text, so a substring probe would make this assertion vacuous for
 # every short option — green whatever upstream did to it.
-from .container.seed_cli_surface import missing_options, option_is_documented
+from .container.seed_cli_surface import (
+    missing_options, option_is_documented, stable_help_text,
+)
 
 pytestmark = [pytest.mark.container, requires_docker()]
 
@@ -77,7 +79,12 @@ def _in_image(argv: list[str], timeout: int = 180,
     for name, value in (env_extra or {}).items():
         env_argv += ["-e", f"{name}={value}"]
     return subprocess.run(
-        ["docker", "run", "--rm", "--network", "none",
+        # `--init`: the probed binary must not be PID 1. hermes prints a
+        # one-line "this process is PID 1 with no init above it" warning ahead
+        # of its help when it is, which seed_cli_surface.py (a child process)
+        # never sees, so every run reported a help-digest drift that was the
+        # harness, not upstream.
+        ["docker", "run", "--rm", "--init", "--network", "none",
          "--user", "10001:10001", "--cap-drop", "ALL",
          "--security-opt", "no-new-privileges",
          "--tmpfs", "/home/e2e:rw,mode=0700,uid=10001,gid=10001",
@@ -204,7 +211,8 @@ class _Drift:
     @classmethod
     def record_probe(cls, cli: str, row: dict, help_text: str) -> dict:
         """Compare one row's help text against the contract and file the result."""
-        digest = hashlib.sha256(help_text.encode("utf-8", "replace")).hexdigest()
+        stable = stable_help_text(help_text)
+        digest = hashlib.sha256(stable.encode("utf-8", "replace")).hexdigest()
         expected = str(row.get("help_sha256") or "")
         entry = {
             "cli": cli,
@@ -214,7 +222,7 @@ class _Drift:
             "expected_help_sha256": expected,
             "observed_help_sha256": digest,
             "expected_help_bytes": row.get("help_bytes"),
-            "observed_help_bytes": len(help_text),
+            "observed_help_bytes": len(stable),
         }
         # What the image really installed, never what the lockfile asked for —
         # the same distinction the run records make, and the column that turns

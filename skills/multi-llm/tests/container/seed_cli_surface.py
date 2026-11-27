@@ -226,6 +226,21 @@ def _probe_env(env_extra: dict | None) -> dict:
     return child
 
 
+#: Help-output lines that change on every run, dropped before the digest by
+#: both this seeder and test_container_cli_surface.py. Junie's launcher opens
+#: with its log file's name, which carries a timestamp and a pid.
+VOLATILE_HELP_LINES = (
+    re.compile(r"^Junie \S+ \(\S+\) \(pid=\d+\): log file: .*$"),
+)
+
+
+def stable_help_text(text: str) -> str:
+    """``text`` without the :data:`VOLATILE_HELP_LINES`, for the help digest."""
+    return "".join(
+        line for line in text.splitlines(keepends=True)
+        if not any(pattern.match(line.rstrip("\r\n")) for pattern in VOLATILE_HELP_LINES))
+
+
 def run_help(binary: str, invocation: str, env_extra: dict | None = None) -> tuple[str, int]:
     """Run the recorded help invocation against the REAL binary, offline."""
     parts = invocation.split()
@@ -270,8 +285,9 @@ def main(argv=None) -> int:
             entry,
             probe="ok",
             version=version_of(binary, env_extra),
-            help_sha256=hashlib.sha256(help_text.encode("utf-8", "replace")).hexdigest(),
-            help_bytes=len(help_text),
+            help_sha256=hashlib.sha256(
+                stable_help_text(help_text).encode("utf-8", "replace")).hexdigest(),
+            help_bytes=len(stable_help_text(help_text)),
             missing_options=missing,
         )
     Path(args.out).write_text(json.dumps(report, indent=2, sort_keys=True),

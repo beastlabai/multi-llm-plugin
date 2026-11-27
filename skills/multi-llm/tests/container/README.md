@@ -31,19 +31,20 @@ actually run; roster updated 2026-10-22:
 
 | lane | marker | model backend | CLIs exercised | phases per row | write phase |
 | --- | --- | --- | --- | --- | --- |
-| provider, single-phase (`test_container_provider_lane.py`) | `container` | stub, `--network none` | 17 | 1 | none |
-| provider, chain (`test_container_full_chain.py`) | `container` | stub, `--network none` | 17 | 8 | 4, graded as no-op |
-| host (`test_container_host_lane.py`) | `container`, `live` on the credentialed tiers | host = real OpenRouter; **fan-out = real CLIs redirected at the stub** | **17 assigned or carved out** across three hosts, disjoint — **unmeasured**; 1 (codex) is what has run | 1, or 8 on the two `full` rows | 4 on `full`, 1 on each apply row |
-| live provider (`test_container_live_provider.py`) | `container and live_provider` | real vendor endpoints | 17 | 1 smoke `generate` | none |
+| provider, single-phase (`test_container_provider_lane.py`) | `container` | stub, `--network none` | 20 | 1 | none |
+| provider, chain (`test_container_full_chain.py`) | `container` | stub, `--network none` | 20 | 8 | 4, graded as no-op |
+| host (`test_container_host_lane.py`) | `container`, `live` on the credentialed tiers | host = real OpenRouter; **fan-out = real CLIs redirected at the stub** | **20 assigned or carved out** across three hosts, disjoint — **unmeasured** except the opencode host's six, verified on its two file-route rows (2026-11-26); codex ran before the widening | 1, or 8 on the two `full` rows | 4 on `full`, 1 on each apply row |
+| live provider (`test_container_live_provider.py`) | `container and live_provider` | real vendor endpoints | 19 | 1 smoke `generate` | none |
 
 **The host lane's roster is declared, with a named carve-out; it is not measured.**
 The fan-out and the write runner are matrix keys as of 2026-09-22:
 `harness.host_fan_out` and `harness.host_runner_cli` read `fan_out:` and
 `runner:` out of `host_matrix.yaml`, and `harness.provider_spec` builds each slug
 from that CLI's own `model_arg` in `redirect.yaml` rather than from a literal.
-The three hosts assign 16 stub-capable provider CLIs — 6 on the claude-code
-host, 5 on the codex host, 5 on the opencode host (including fx) — and name
-`grok` as a measured egress carve-out, accounting for all 17 provider rows.
+The three hosts assign 19 stub-capable provider CLIs — 6 on the claude-code
+host, 7 on the codex host (including junie and dsh), 6 on the opencode host
+(including fx and hermes) — and name `grok` as a measured egress carve-out,
+accounting for all 20 provider rows.
 `test_redirect_matrix_claims.py` holds that shape in plain CI: every host
 declares a list, the lists do not overlap, their union plus named carve-outs
 is exactly the `lane: provider` roster, and no row's effective list may name
@@ -59,9 +60,14 @@ yet *exercised* by it. T3's one-row two-spec spike — widen one `ask` row, then
 count the distinct provider invocations, stub sessions and result files in that
 row's receipts from the host-start watermark — is what turns the declaration
 into coverage. Read the cell as "16 assigned, 1 carved out, 1 proven" until it does.
+**The opencode host has since done it** (2026-11-26, `opencode-ask` and
+`opencode-review-plan`): all six of its members (claude-code, omp, qwen-code,
+fx, hermes, vibe) produced an invocation, a stub session and an answer file, so
+its cell reads `verified` for the file route; the package rows and the other two
+hosts' lists remain unmeasured.
 
-The live-provider lane's 17 is 16 of the provider lane's rows — every one but
-`muse` — plus `cursor-agent`, which joins through an explicit `live_lane` opt-in
+The live-provider lane's 19 is 18 of the provider lane's 20 rows — every one but
+`muse` and `dsh` (not yet added) — plus `cursor-agent`, which joins through an explicit `live_lane` opt-in
 rather than by being moved off `lane: fake` and losing its fake-lane coverage.
 
 The first three lanes divide into **two postures**, and that split is what the

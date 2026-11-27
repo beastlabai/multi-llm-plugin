@@ -4793,13 +4793,21 @@ hosts:
                      # OPENROUTER_API_KEY. Assignment unmeasured on this host.
       - hermes       # `chat`, `stub-model`; seeded $HERMES_HOME/.env, a root
                      # shared by `chat` and the adapter's `gateway stop`.
-                     # Assignment unmeasured on this host.
+                     # Measured 2026-11-26 (runs/20261126T170022Z): one chat,
+                     # its stop, no root or daemon left, on both rows.
       - vibe         # `chat`, `openai/gpt-5.6-luna` — the one spelling in the
                      # whole partition that no other CLI shares, and therefore
                      # the strongest argument for building specs from
                      # `model_arg` rather than typing them here.
-    fan_out_provenance: unmeasured   # T3 — authored 2026-09-22, never executed
+    fan_out_provenance: verified   # runs/20261126T170022Z, file route only
     fan_out_reason: >
+      MEASURED 2026-11-26, FILE ROUTE: `opencode-ask` and `opencode-review-plan`
+      (runs/20261126T170022Z, $0.043 and $0.037 of host spend on the pinned
+      image) each fanned out to all six members, and the per-provider
+      correlation found an invocation, a stub session and an answer file for
+      every one of them. The four package-route rows and the write rows have
+      not run with this list, so read the cell as verified for those two rows.
+      The history below is from before the run.
       T3, on the same terms as the other two hosts: today every row here fans out
       to exactly one provider (`codex:stub-model`, hard-coded at
       `test_container_host_lane.py:530`), so nothing about this list has been

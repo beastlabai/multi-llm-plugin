@@ -82,9 +82,14 @@ RECORD = harness.HERE / "records" / "live-provider.jsonl"
 #: (for four of them) a model this lane's key can actually buy. The wiring is a
 #: port of the HOST lane's own `entrypoint.py::wire_credentials`, which has been
 #: proving the same three surfaces reach OpenRouter since 2026-08-14.
+#: junie and hermes (2026-11-26) joined with their adapters, like fx before them:
+#: both route through OpenRouter from their own `models[0]`, junie through the
+#: model profile its `get_env` writes and hermes through the `.env` its
+#: `hermetic_dispatch` seeds (live_provider.MANAGED_HOME_CLIS).
 LANE_CLIS = ("copilot", "kimi", "qwen-code", "vibe", "cursor-agent",
              "aider", "goose", "pi", "cline", "kilocode",
-             "codex", "opencode", "claude-code", "grok", "gemini", "omp", "fx")
+             "codex", "opencode", "claude-code", "grok", "gemini", "omp", "fx",
+             "junie", "hermes")
 
 #: The slug a row is pinned to ON THIS LANE, where `providers.yaml`'s `models[0]`
 #: is not servable by the endpoint this lane holds a key for — with the reason,
@@ -530,6 +535,16 @@ _OMP_PROVIDER_PROBE = (
 )
 
 REFUSED_EGRESS: dict[str, dict[str, str]] = {
+    "junie": {
+        "resources.jetbrains.com": (
+            "MEASURED on the first live junie row (2026-11-26, 26.11.3, "
+            "openai/gpt-6-luna): queried twice per run, NXDOMAIN here, and the "
+            "run still exited 0 in 14 s with the right answer through the "
+            "custom OpenRouter profile. No JetBrains account is involved; "
+            "whether a setting stops the lookup is unmeasured, so the DNS "
+            "allowlist is the control, and an ALLOW decision here still fails "
+            "a5."),
+    },
     "fx": {
         "ai-gateway.vercel.sh": "custom OpenRouter profile must not fall back to the Gateway",
         "releases.fx.sh": "FX_AUTO_UPGRADE=0 disables release checks",
@@ -779,6 +794,16 @@ STUB_ONLY_SEED: dict[str, str] = {
         "it to `/api/v1/chat/completions` (read off the binary at 18.2.2) — "
         "where the seeded block would render `\"provider\":\"stub\"` with "
         "`\"api\":\"openai-completions\"`."
+    ),
+    "hermes": (
+        "home_seed/hermes/ is the stub's `.env` (OPENROUTER_BASE_URL "
+        "{{base_url}}, OPENROUTER_API_KEY {{stub_session_key}}) and a copy of "
+        "hermes.HERMES_CONFIG. On this lane the adapter's own "
+        "`hermetic_dispatch` makes the private HERMES_HOME and writes both "
+        "files itself, with the live endpoint and the key from the "
+        "environment, which is what production does; the runner uses that "
+        "home (live_provider.MANAGED_HOME_CLIS), so the stub tree has nothing "
+        "to configure and its key token is unrenderable."
     ),
     "kilocode": (
         ".config/kilo/kilo.jsonc declares provider `stub` "
@@ -2091,3 +2116,21 @@ class TestTheSmokeReachedTheRealEndpoint:
                 f"{evidence.get('channel_path')} — it can write files after all, "
                 f"or it is ignoring the read-only mode the declaration rests on. "
                 f"Either way the declaration and the binary disagree.")
+
+
+class TestTheManagedDaemonWasStopped:
+    """hermes' gateway daemon outlives `hermes chat`; the adapter stops it.
+
+    The runner calls the adapter's `hermetic_dispatch`, whose exit runs
+    `hermes gateway stop --yes`, then records what was left (live_provider
+    .daemon_leftovers). A stop resolved through the /opt/mllm/bin stub wrapper
+    would re-root HERMES_HOME and stop nothing, and leaves a wrapper root.
+    """
+
+    def test_no_daemon_outlived_the_dispatch(self, smoke):
+        if smoke["cli"] != "hermes":
+            pytest.skip(f"{smoke['cli']} starts no daemon")
+        leftovers = smoke["evidence"].get("daemon_leftovers")
+        assert leftovers is not None, "the runner recorded no daemon_leftovers"
+        assert leftovers == {"gateway_pid_file": False, "processes": [],
+                             "wrapper_roots": []}, leftovers
