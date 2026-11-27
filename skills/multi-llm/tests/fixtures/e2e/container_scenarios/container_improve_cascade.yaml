@@ -41,17 +41,17 @@ description: "The chain's turns, with a later cascade stage's ledger-bearing rev
 on_unmatched: fail
 
 prompts:
-  # Vendor-owned capability query, distinct from every workflow prompt.
-  - pattern: "^What is 17 times 23\\? Answer with only the number\\.\\s*$"
-    fixture: "../responses/omp_probe/thinking.txt"
-    description: "omp thinking capability probe"
-
   # ------------------------------------------------- review-plan, a later stage
   # The reviewer prompt of cascade stage 2 or later: the plan review's opening
   # line, then the ledger heading the earlier stages' archive renders.
   - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*You are reviewing an implementation plan for completeness, correctness, and clarity\\..*\\n## Earlier review rounds\\n"
     fixture: "../container_scenarios/../responses/review_plan/raw_suggestions.json"
     description: "review-plan fan-out of a cascade stage after the first (its prompt carries the forward ledger)"
+
+  # Vendor-owned capability query, distinct from every workflow prompt.
+  - pattern: "^What is 17 times 23\\? Answer with only the number\\.\\s*$"
+    fixture: "../responses/omp_probe/thinking.txt"
+    description: "omp thinking capability probe"
 
   # ---------------------------------------------------------------- side turns
   # Not product turns: the CLI's own session-title generator. Answered with a

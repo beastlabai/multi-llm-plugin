@@ -199,9 +199,9 @@ def _benign_corpus():
     responses = sorted(
         p for p in (SKILL_DIR / "tests/fixtures/e2e/responses").rglob("*") if p.is_file()
     )
-    assert len(turns) == 13, f"expected 13 container turns, found {len(turns)}"
+    assert len(turns) == 14, f"expected 14 container turns, found {len(turns)}"
     assert len(side) == 7, f"expected 7 side turns, found {len(side)}"
-    assert len(responses) == 34, f"expected 34 e2e response fixtures, found {len(responses)}"
+    assert len(responses) == 35, f"expected 35 e2e response fixtures, found {len(responses)}"
     return [
         (str(p.relative_to(SKILL_DIR)), p) for p in [*turns, *side, *responses]
     ]
@@ -784,7 +784,12 @@ class TestNoFalsePositivesOnBenignCorpora:
     #: provider_registry already names: ``GIT_CREDENTIAL_HELPER =
     #: "MULTI_LLM_GIT_CREDENTIAL_HELPER"`` in ``utils/env_vars.py``. A name,
     #: never a value; not a pattern that got looser.
-    KNOWN_SOURCE_HITS = 9
+    #:
+    #: Three more (2026-11-26) are the same shape as fx's: the credential-name
+    #: constant ``DSH_CREDENTIAL_ENV`` in ``providers/dsh.py`` and
+    #: ``CREDENTIAL_ENV`` in ``providers/hermes.py`` and ``providers/junie.py``,
+    #: each set to the name ``"OPENROUTER_API_KEY"``. Names, never values.
+    KNOWN_SOURCE_HITS = 12
 
 
     def test_utils_source_tree_is_a_diagnostic_not_a_gate(self):
@@ -802,7 +807,9 @@ class TestNoFalsePositivesOnBenignCorpora:
             "`ENV_GIT_CREDENTIAL_HELPER_VAR` in provider_registry.py and its inventory row "
             "`GIT_CREDENTIAL_HELPER` in env_vars.py, `nested_exec_credentials` in "
             "runner_preflight.py, `OMP_CREDENTIAL_ENV` + `credential_helper=credential_helper` "
-            "in providers/omp.py, and `FX_CREDENTIAL_ENV` in providers/fx.py). This corpus is a "
+            "in providers/omp.py, `FX_CREDENTIAL_ENV` in providers/fx.py, `DSH_CREDENTIAL_ENV` in "
+            "providers/dsh.py, and `CREDENTIAL_ENV` in providers/hermes.py and providers/junie.py). "
+            "This corpus is a "
             "diagnostic rather than a gate, but a count that moved means a pattern got "
             "looser — investigate before shipping:\n  " + "\n  ".join(hits)
         )
